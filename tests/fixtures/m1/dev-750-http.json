@@ -1,0 +1,838 @@
+{
+ "system": "DEV",
+ "release": "750",
+ "backend": "http",
+ "facts": {
+  "inactive_when_none": 200,
+  "check_valid": 200,
+  "check_invalid": 200,
+  "check_left_active_unchanged": true,
+  "inactive_after_checks": [
+   200,
+   true
+  ],
+  "deploy_v2_active": true,
+  "bad_active_unchanged": true,
+  "inactive_when_present": [
+   200,
+   true
+  ],
+  "deleted_get_status": 404
+ },
+ "exchanges": [
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs",
+    "headers": {
+     "Content-Type": "application/*",
+     "Accept": "application/*"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><program:abapProgram xmlns:program=\"http://www.sap.com/adt/programs/programs\" xmlns:adtcore=\"http://www.sap.com/adt/core\" adtcore:description=\"ABAPReach M1 probe\" adtcore:name=\"YTEST_ABAPREACH01\" adtcore:type=\"PROG/P\" adtcore:language=\"EN\" adtcore:masterLanguage=\"EN\" adtcore:responsible=\"DEVUSER\"><adtcore:packageRef adtcore:name=\"$TMP\"/></program:abapProgram>"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "125912.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=LOCK&accessMode=MODIFY",
+    "headers": {
+     "Accept": "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/vnd.sap.as+xml; charset=utf-8; dataname=com.sap.adt.lock.Result",
+     "content-length": "294",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "26332.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><asx:abap version=\"1.0\" xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA><LOCK_HANDLE>kJkXjFlH3LV5QoEdkUVR3YqvXkA=</LOCK_HANDLE><CORRNR/><CORRUSER/><CORRTEXT/><IS_LOCAL>X</IS_LOCAL><IS_LINK_UP/><MODIFICATION_SUPPORT/></DATA></asx:values></asx:abap>"
+   }
+  },
+  {
+   "request": {
+    "method": "PUT",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
+    "headers": {
+     "Content-Type": "text/plain; charset=utf-8"
+    },
+    "body": "REPORT ytest_abapreach01.\n\nWRITE / 'v1'.\n"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "last-modified": "Sat, 31 Oct 2026 22:18:05 GMT",
+     "etag": "202610312218050001",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "67950.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=UNLOCK&lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
+    "headers": {},
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "5400.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/activation?method=activate&preauditRequested=true",
+    "headers": {
+     "Content-Type": "application/xml",
+     "Accept": "application/xml"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:objectReference adtcore:uri=\"/sap/bc/adt/programs/programs/ytest_abapreach01\" adtcore:name=\"YTEST_ABAPREACH01\"/></adtcore:objectReferences>"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "157908.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "content-length": "42",
+     "last-modified": "Sat, 31 Oct 2026 22:18:05 GMT",
+     "etag": "202610312218050011",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "14890.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v1'."
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "content-length": "42",
+     "last-modified": "Sat, 31 Oct 2026 22:18:05 GMT",
+     "etag": "202610312218050011",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "11500.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v1'."
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=LOCK&accessMode=MODIFY",
+    "headers": {
+     "Accept": "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/vnd.sap.as+xml; charset=utf-8; dataname=com.sap.adt.lock.Result",
+     "content-length": "294",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "14599.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><asx:abap version=\"1.0\" xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA><LOCK_HANDLE>kJkXjFlH3LV5QoEdkUVR3YqvXkA=</LOCK_HANDLE><CORRNR/><CORRUSER/><CORRTEXT/><IS_LOCAL>X</IS_LOCAL><IS_LINK_UP/><MODIFICATION_SUPPORT/></DATA></asx:values></asx:abap>"
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/checkruns?reporters=abapCheckRun",
+    "headers": {
+     "Content-Type": "application/*",
+     "Accept": "application/*"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><chkrun:checkObjectList xmlns:chkrun=\"http://www.sap.com/adt/checkrun\" xmlns:adtcore=\"http://www.sap.com/adt/core\"><chkrun:checkObject adtcore:uri=\"/sap/bc/adt/programs/programs/ytest_abapreach01\" chkrun:version=\"active\"><chkrun:artifacts><chkrun:artifact chkrun:contentType=\"text/plain; charset=utf-8\" chkrun:uri=\"/sap/bc/adt/programs/programs/ytest_abapreach01/source/main\"><chkrun:content>UkVQT1JUIHl0ZXN0X2FiYXByZWFjaDAxLgoKV1JJVEUgLyAndjInLgo=</chkrun:content></chkrun:artifact></chkrun:artifacts></chkrun:checkObject></chkrun:checkObjectList>"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/vnd.sap.adt.checkmessages+xml; charset=utf-8",
+     "content-length": "345",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "13746.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><chkrun:checkRunReports xmlns:chkrun=\"http://www.sap.com/adt/checkrun\"><chkrun:checkReport chkrun:reporter=\"abapCheckRun\" chkrun:triggeringUri=\"/sap/bc/adt/programs/programs/ytest_abapreach01\" chkrun:status=\"processed\" chkrun:statusText=\"Object YTEST_ABAPREACH01 has been checked\"/></chkrun:checkRunReports>"
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=UNLOCK&lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
+    "headers": {},
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "5012.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "content-length": "42",
+     "last-modified": "Sat, 31 Oct 2026 22:18:05 GMT",
+     "etag": "202610312218050011",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "10373.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v1'."
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=LOCK&accessMode=MODIFY",
+    "headers": {
+     "Accept": "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/vnd.sap.as+xml; charset=utf-8; dataname=com.sap.adt.lock.Result",
+     "content-length": "294",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "17358.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><asx:abap version=\"1.0\" xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA><LOCK_HANDLE>kJkXjFlH3LV5QoEdkUVR3YqvXkA=</LOCK_HANDLE><CORRNR/><CORRUSER/><CORRTEXT/><IS_LOCAL>X</IS_LOCAL><IS_LINK_UP/><MODIFICATION_SUPPORT/></DATA></asx:values></asx:abap>"
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/checkruns?reporters=abapCheckRun",
+    "headers": {
+     "Content-Type": "application/*",
+     "Accept": "application/*"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><chkrun:checkObjectList xmlns:chkrun=\"http://www.sap.com/adt/checkrun\" xmlns:adtcore=\"http://www.sap.com/adt/core\"><chkrun:checkObject adtcore:uri=\"/sap/bc/adt/programs/programs/ytest_abapreach01\" chkrun:version=\"active\"><chkrun:artifacts><chkrun:artifact chkrun:contentType=\"text/plain; charset=utf-8\" chkrun:uri=\"/sap/bc/adt/programs/programs/ytest_abapreach01/source/main\"><chkrun:content>UkVQT1JUIHl0ZXN0X2FiYXByZWFjaDAxLgoKV1JJVEUgLyBub19zdWNoX3Zhci4K</chkrun:content></chkrun:artifact></chkrun:artifacts></chkrun:checkObject></chkrun:checkObjectList>"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/vnd.sap.adt.checkmessages+xml; charset=utf-8",
+     "content-length": "745",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "15447.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><chkrun:checkRunReports xmlns:chkrun=\"http://www.sap.com/adt/checkrun\"><chkrun:checkReport chkrun:reporter=\"abapCheckRun\" chkrun:triggeringUri=\"/sap/bc/adt/programs/programs/ytest_abapreach01\" chkrun:status=\"processed\" chkrun:statusText=\"Object YTEST_ABAPREACH01 has been checked\"><chkrun:checkMessageList><chkrun:checkMessage chkrun:uri=\"/sap/bc/adt/programs/programs/ytest_abapreach01/source/main#start=3,8\" chkrun:type=\"E\" chkrun:shortText=\"Field &quot;NO_SUCH_VAR&quot; is unknown.\"><atom:link href=\"art.syntax:GTU\" rel=\"http://www.sap.com/adt/categories/quickfixes\" xmlns:atom=\"http://www.w3.org/2005/Atom\"/></chkrun:checkMessage></chkrun:checkMessageList></chkrun:checkReport></chkrun:checkRunReports>"
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=UNLOCK&lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
+    "headers": {},
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "5341.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "content-length": "42",
+     "last-modified": "Sat, 31 Oct 2026 22:18:05 GMT",
+     "etag": "202610312218050011",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "10836.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v1'."
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "content-length": "42",
+     "last-modified": "Sat, 31 Oct 2026 22:18:05 GMT",
+     "etag": "202610312218050011",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "13405.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v1'."
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=LOCK&accessMode=MODIFY",
+    "headers": {
+     "Accept": "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/vnd.sap.as+xml; charset=utf-8; dataname=com.sap.adt.lock.Result",
+     "content-length": "294",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "15537.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><asx:abap version=\"1.0\" xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA><LOCK_HANDLE>kJkXjFlH3LV5QoEdkUVR3YqvXkA=</LOCK_HANDLE><CORRNR/><CORRUSER/><CORRTEXT/><IS_LOCAL>X</IS_LOCAL><IS_LINK_UP/><MODIFICATION_SUPPORT/></DATA></asx:values></asx:abap>"
+   }
+  },
+  {
+   "request": {
+    "method": "PUT",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
+    "headers": {
+     "Content-Type": "text/plain; charset=utf-8"
+    },
+    "body": "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "last-modified": "Sat, 31 Oct 2026 22:18:07 GMT",
+     "etag": "202610312218070001",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "63739.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=UNLOCK&lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
+    "headers": {},
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "5939.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/activation?method=activate&preauditRequested=true",
+    "headers": {
+     "Content-Type": "application/xml",
+     "Accept": "application/xml"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:objectReference adtcore:uri=\"/sap/bc/adt/programs/programs/ytest_abapreach01\" adtcore:name=\"YTEST_ABAPREACH01\"/></adtcore:objectReferences>"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "114209.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "content-length": "42",
+     "last-modified": "Sat, 31 Oct 2026 22:18:07 GMT",
+     "etag": "202610312218070011",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "13082.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v2'."
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=LOCK&accessMode=MODIFY",
+    "headers": {
+     "Accept": "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/vnd.sap.as+xml; charset=utf-8; dataname=com.sap.adt.lock.Result",
+     "content-length": "294",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "16153.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><asx:abap version=\"1.0\" xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA><LOCK_HANDLE>kJkXjFlH3LV5QoEdkUVR3YqvXkA=</LOCK_HANDLE><CORRNR/><CORRUSER/><CORRTEXT/><IS_LOCAL>X</IS_LOCAL><IS_LINK_UP/><MODIFICATION_SUPPORT/></DATA></asx:values></asx:abap>"
+   }
+  },
+  {
+   "request": {
+    "method": "PUT",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
+    "headers": {
+     "Content-Type": "text/plain; charset=utf-8"
+    },
+    "body": "REPORT ytest_abapreach01.\n\nWRITE / no_such_var.\n"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "last-modified": "Sat, 31 Oct 2026 22:18:07 GMT",
+     "etag": "202610312218070001",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "61546.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=UNLOCK&lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
+    "headers": {},
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "6023.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/activation?method=activate&preauditRequested=true",
+    "headers": {
+     "Content-Type": "application/xml",
+     "Accept": "application/xml"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:objectReference adtcore:uri=\"/sap/bc/adt/programs/programs/ytest_abapreach01\" adtcore:name=\"YTEST_ABAPREACH01\"/></adtcore:objectReferences>"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/xml; charset=utf-8",
+     "content-length": "475",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "24454.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><chkl:messages xmlns:chkl=\"http://www.sap.com/abapxml/checklist\"><msg objDescr=\"Program YTEST_ABAPREACH01\" type=\"E\" line=\"1\" href=\"/sap/bc/adt/programs/programs/ytest_abapreach01/source/main#start=3,8\" forceSupported=\"true\"><shortText><txt>Field \"NO_SUCH_VAR\" is unknown.</txt></shortText><atom:link href=\"art.syntax:GTU\" rel=\"http://www.sap.com/adt/categories/quickfixes\" xmlns:atom=\"http://www.w3.org/2005/Atom\"/></msg></chkl:messages>"
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "content-length": "42",
+     "last-modified": "Sat, 31 Oct 2026 22:18:07 GMT",
+     "etag": "202610312218070011",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "12547.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v2'."
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "content-length": "49",
+     "last-modified": "Sat, 31 Oct 2026 22:18:07 GMT",
+     "etag": "202610312218070001",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "9783.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "REPORT ytest_abapreach01.\r\n\r\nWRITE / no_such_var."
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?_action=LOCK&accessMode=MODIFY",
+    "headers": {
+     "Accept": "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/vnd.sap.as+xml; charset=utf-8; dataname=com.sap.adt.lock.Result",
+     "content-length": "294",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "15864.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><asx:abap version=\"1.0\" xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA><LOCK_HANDLE>kJkXjFlH3LV5QoEdkUVR3YqvXkA=</LOCK_HANDLE><CORRNR/><CORRUSER/><CORRTEXT/><IS_LOCAL>X</IS_LOCAL><IS_LINK_UP/><MODIFICATION_SUPPORT/></DATA></asx:values></asx:abap>"
+   }
+  },
+  {
+   "request": {
+    "method": "DELETE",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01?lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
+    "headers": {},
+    "body": ""
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-length": "0",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "43337.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": ""
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 404,
+    "reason": "Not Found",
+    "headers": {
+     "content-type": "application/xml",
+     "content-length": "397",
+     "sap-cache-control": "+0",
+     "sap-isc-uagent": "0",
+     "sap-perf-fesrec": "9507.000000",
+     "access-control-allow-origin": "*",
+     "access-control-allow-credentials": "true",
+     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+     "access-control-allow-headers": "X-Csrf-Token, x-csrf-token, x-sap-cid, Content-Type, Authorization",
+     "access-control-expose-headers": "x-csrf-token"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><exc:exception xmlns:exc=\"http://www.sap.com/abapxml/types/communicationframework\"><namespace id=\"com.sap.adt\"/><type id=\"ExceptionResourceNotFound\"/><message lang=\"EN\">YTEST_ABAPREACH01 does not have any inactive version</message><localizedMessage lang=\"EN\">YTEST_ABAPREACH01 does not have any inactive version</localizedMessage><properties/></exc:exception>"
+   }
+  }
+ ]
+}
