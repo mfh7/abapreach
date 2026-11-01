@@ -1,4 +1,5 @@
 mod common;
+mod replay;
 
 use abapreach::backend::{BackendKind, Failure, Selection, SelectionReason};
 use abapreach::domain::Status;
@@ -6,6 +7,7 @@ use abapreach::hash::source_hash;
 use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg};
 use abapreach::transport::http::HttpTransport;
 use abapreach::transport::{Response, SadtTransport};
+use replay::NO_INACTIVE_FEED;
 
 const LIVE: &str = "REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v1'.";
 const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
@@ -71,6 +73,7 @@ fn locks(transport: &HttpTransport) -> bool {
 fn a_session_with_the_context_cookie_locks_and_simulates() {
     let mut transport = deployment(vec![
         live_with_context(),
+        Response::text(200, NO_INACTIVE_FEED),
         Response::text(200, LOCK_BODY),
         live_with_context(),
         Response::empty(200),
@@ -83,7 +86,7 @@ fn a_session_with_the_context_cookie_locks_and_simulates() {
     assert_eq!(outcome.status, Some(Status::SimulatedOk));
     assert_eq!(outcome.exit, 0);
     assert!(locks(&transport));
-    assert_eq!(transport.recorded().len(), 6);
+    assert_eq!(transport.recorded().len(), 7);
 }
 
 #[test]

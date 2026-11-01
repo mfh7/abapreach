@@ -1,6 +1,9 @@
 use quick_xml::escape::resolve_predefined_entity;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
+
+/// The `atom:id` of the inactive version in the version list of an object.
+pub const INACTIVE_VERSION_ID: &str = "99999";
 
 /// The ADT URI of a program: the name is lowercased and every namespace `/` becomes `%2f`.
 pub fn prog_uri(name: &str) -> String {
@@ -8,6 +11,86 @@ pub fn prog_uri(name: &str) -> String {
         "/sap/bc/adt/programs/programs/{}",
         name.to_ascii_lowercase().replace('/', "%2f")
     )
+}
+
+/// The ADT URI of the source version list of a program: `GET <source>/versions`. The version
+/// list of the program resource itself does not exist on 7.40 and 7.50.
+pub fn versions_uri(program_uri: &str) -> String {
+    format!("{program_uri}/source/main/versions")
+}
+
+/// One entry of `GET <source>/versions`: the version number and the user who wrote it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VersionEntry {
+    pub id: String,
+    pub author: String,
+}
+
+impl VersionEntry {
+    pub fn is_inactive(&self) -> bool {
+        self.id == INACTIVE_VERSION_ID
+    }
+
+    fn push(&mut self, field: Field, text: &str) {
+        let target = match field {
+            Field::Id => &mut self.id,
+            Field::Author => &mut self.author,
+        };
+
+        target.push_str(text);
+    }
+}
+
+/// The `atom:entry` elements of a version list by local name: `atom:id` and
+/// `atom:author/atom:name`. A body that is not XML is an error, never an empty list.
+pub fn parse_versions(xml: &str) -> Result<Vec<VersionEntry>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut entries = Vec::new();
+    let mut open: Option<VersionEntry> = None;
+    let mut field: Option<Field> = None;
+    let mut in_author = false;
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) => match local_name(&element) {
+                "entry" => {
+                    open = Some(VersionEntry::default());
+                    field = None;
+                    in_author = false;
+                }
+                "id" if open.is_some() => field = Some(Field::Id),
+                "author" => in_author = open.is_some(),
+                "name" if in_author => field = Some(Field::Author),
+                _ => {}
+            },
+            Event::Text(text) => {
+                if let (Some(entry), Some(field)) = (open.as_mut(), field) {
+                    entry.push(field, &text.xml_content(XmlVersion::Implicit1_0));
+                }
+            }
+            Event::GeneralRef(reference) => {
+                if let (Some(entry), Some(field)) = (open.as_mut(), field) {
+                    entry.push(field, &reference_text(&reference)?);
+                }
+            }
+            Event::End(element) => match element.local_name().into_inner() {
+                "id" | "name" => field = None,
+                "author" => in_author = false,
+                "entry" => entries.extend(open.take()),
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(entries)
+}
+
+#[derive(Clone, Copy)]
+enum Field {
+    Id,
+    Author,
 }
 
 /// One checkrun or activation message, printed as `TYPE row N: MSG`.
@@ -56,12 +139,7 @@ pub fn parse_messages(xml: &str) -> Result<Vec<AdtMessage>, String> {
                 }
             }
             Event::GeneralRef(reference) if in_text => {
-                let resolved = match reference.resolve_char_ref().map_err(|e| e.to_string())? {
-                    Some(character) => character.to_string(),
-                    None => resolve_predefined_entity(&reference)
-                        .ok_or_else(|| format!("unknown entity &{};", &*reference))?
-                        .to_owned(),
-                };
+                let resolved = reference_text(&reference)?;
 
                 if let Some(message) = open.as_mut() {
                     message.text.push_str(&resolved);
@@ -92,6 +170,21 @@ pub fn format_messages(xml: &str) -> Vec<String> {
 
 fn local_name<'a>(element: &'a BytesStart<'_>) -> &'a str {
     element.local_name().into_inner()
+}
+
+/// Text of a `&name;` or `&#nnn;` reference inside element text.
+fn reference_text(reference: &BytesRef<'_>) -> Result<String, String> {
+    let resolved = match reference
+        .resolve_char_ref()
+        .map_err(|error| error.to_string())?
+    {
+        Some(character) => character.to_string(),
+        None => resolve_predefined_entity(reference)
+            .ok_or_else(|| format!("unknown entity &{};", &**reference))?
+            .to_owned(),
+    };
+
+    Ok(resolved)
 }
 
 fn message_from(

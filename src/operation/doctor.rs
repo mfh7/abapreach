@@ -37,6 +37,10 @@ impl Doctor {
         let mut lines = vec![
             format!("connection {}: configuration available", connection.id),
             "credential available".to_owned(),
+            format!(
+                "policy foreign inactive: {}",
+                connection.policies.foreign_inactive
+            ),
         ];
 
         match &connection.adt {

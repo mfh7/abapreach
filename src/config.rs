@@ -1,3 +1,4 @@
+use crate::policy::{Policies, PolicyDocument};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -43,6 +44,8 @@ pub struct Connection {
     /// `None` for an RFC-only server: the config has no `host`/`port` ADT endpoint.
     pub adt: Option<AdtConfig>,
     pub rfc: RfcConfig,
+    /// The effective write-guard policies of this connection.
+    pub policies: Policies,
 }
 
 impl Connection {
@@ -67,6 +70,7 @@ impl Connection {
                 sysnr: "00".to_owned(),
                 saprouter: None,
             },
+            policies: Policies::default(),
         }
     }
 }
@@ -92,6 +96,8 @@ pub struct RfcConfig {
 pub struct Config {
     servers: Vec<Server>,
     local: BTreeMap<String, String>,
+    /// The top-level `policies`; a `servers[].policies` block overrides single keys of it.
+    policies: Policies,
 }
 
 impl Config {
@@ -115,6 +121,7 @@ impl Config {
         };
 
         Ok(Self {
+            policies: policies_of(&connections.policies),
             servers: connections.servers,
             local,
         })
@@ -144,6 +151,10 @@ impl Config {
         }
         let (user, password) = Self::credentials(&system_id, &client, env, &self.local)?;
         let adt = Self::adt_endpoint(&system_id, server)?;
+        let policies = server.policies.as_ref().map_or_else(
+            || self.policies.clone(),
+            |document| document.apply(&self.policies),
+        );
 
         Ok(Connection {
             id: format!("{system_id}_{client}"),
@@ -154,6 +165,7 @@ impl Config {
             lang: server.lang.clone().unwrap_or_else(|| "EN".to_owned()),
             adt,
             rfc,
+            policies,
         })
     }
 
@@ -240,6 +252,8 @@ pub fn tls_warning(connection: &Connection) -> Option<String> {
 struct ConfigFile {
     #[serde(default)]
     servers: Vec<Server>,
+    #[serde(default)]
+    policies: Option<PolicyDocument>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,6 +273,8 @@ struct Server {
     adt: AdtSettings,
     #[serde(default)]
     lang: Option<String>,
+    #[serde(default)]
+    policies: Option<PolicyDocument>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -294,6 +310,14 @@ fn credential(
         .or_else(|| local.get(&key).filter(|value| !value.is_empty()))
         .cloned()
         .ok_or_else(|| format!("missing {key}"))
+}
+
+fn policies_of(document: &Option<PolicyDocument>) -> Policies {
+    document
+        .as_ref()
+        .map_or_else(Policies::default, |document| {
+            document.apply(&Policies::default())
+        })
 }
 
 fn default_scheme() -> String {

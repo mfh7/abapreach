@@ -21,7 +21,10 @@ and `doctor` reports it, while `read` is unaffected.
 `--conn` is mandatory. `read` refuses to overwrite `OUT_FILE` without `--force` and prints the
 line count and the content hash. `deploy` always prints a unified diff (`--- live` / `+++ file`)
 and the `live hash`; `--simulate` runs everything up to a syntax check without saving and then
-releases the lock. `--base` stops the run when the live source no longer has that hash.
+releases the lock. `--base` stops the run when the live source no longer has that hash. Both start
+with a report line that names the backend, why it was chosen, the guards that hold on that path
+(including the `foreign_inactive` policy) and the guards of the Python tooling that do not apply
+there.
 
 ## Doctor
 
@@ -60,6 +63,37 @@ from `connections.local.json`. Passwords are never printed.
 TLS is verified by default. `http://` and `insecure` exist only as per-connection settings in
 the configuration file, never as command line flags, and every output and `doctor` then
 prints a warning.
+
+### Policies
+
+`policies` is an optional object that holds the write guards of every server;
+`servers[].policies` overrides single keys of it:
+
+    {
+      "policies": {"foreign_inactive": "reject"},
+      "servers": [
+        {"systemId": "DEV", "host": "example.com", "port": 443, "clients": ["100"],
+         "rfc": {"ashost": "example.com", "sysnr": "00"},
+         "policies": {"foreign_inactive": "ask"}}
+      ]
+    }
+
+`foreign_inactive` decides what `deploy` does when the inactive version of the program belongs
+to another user: before the lock, `deploy` (and `deploy --simulate`) reads `GET
+<source>/versions` and compares the author of the inactive version (`99999`) with the logon
+user. ADT allows such an overwrite, the function module of the Python tooling does not, so
+`abapreach` enforces it on both backends itself.
+
+| Value | Behavior |
+| --- | --- |
+| `reject` (default) | `REJECTED: inactive version of another user exists: <OWNER>` and exit 1; no lock is sent |
+| `allow` | writes anyway and prints `W: overwriting the inactive version of <OWNER> (policy allow)` |
+| `ask` | asks `Overwrite the inactive version of <OWNER>? [y/N]` on stderr; only `y`/`yes` continues, and without a terminal it behaves as `reject` (`(policy ask needs a terminal)`) |
+
+An inactive version of the logon user is no obstacle. A version list that cannot be read or
+parsed fails closed (`REJECTED`, exit 1) under `reject` and `ask`; only `allow` continues, with a
+warning. An unknown guard name or policy value stops the run at load time with exit 2. `doctor`
+prints the effective policy of the connection.
 
 ## RFC dependency
 

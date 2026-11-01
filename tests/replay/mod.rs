@@ -12,6 +12,51 @@ pub enum Step {
     ReplyTo(usize, Result<Response, TransportError>),
     /// Accept any request and answer with a scripted result.
     Any(Result<Response, TransportError>),
+    /// Expect the version-list GET of the `foreign_inactive` guard and answer with it.
+    Versions(Result<Response, TransportError>),
+}
+
+/// The program every m1 fixture deploys.
+pub const PROGRAM_URI: &str = "/sap/bc/adt/programs/programs/ytest_abapreach01";
+
+/// The source version list of the `foreign_inactive` guard.
+pub fn versions_uri() -> String {
+    format!("{PROGRAM_URI}/source/main/versions")
+}
+
+/// The version list of a program with an inactive version of another user and one active version
+/// of `DEVUSER`, as `GET <source>/versions` returns it.
+pub const FOREIGN_INACTIVE_FEED: &str = concat!(
+    r#"<atom:feed xmlns:atom="http://www.w3.org/2005/Atom">"#,
+    r#"<atom:entry><atom:author><atom:name>OTHERUSER</atom:name></atom:author>"#,
+    r#"<atom:id>99999</atom:id></atom:entry>"#,
+    r#"<atom:entry><atom:author><atom:name>DEVUSER</atom:name></atom:author>"#,
+    r#"<atom:id>00001</atom:id></atom:entry></atom:feed>"#,
+);
+
+/// The version list of a program without an inactive version.
+pub const NO_INACTIVE_FEED: &str = concat!(
+    r#"<atom:feed xmlns:atom="http://www.w3.org/2005/Atom">"#,
+    r#"<atom:entry><atom:author><atom:name>DEVUSER</atom:name></atom:author>"#,
+    r#"<atom:id>00001</atom:id></atom:entry></atom:feed>"#,
+);
+
+/// The version list of a program whose inactive version is the one `DEVUSER` wrote.
+pub const OWN_INACTIVE_FEED: &str = concat!(
+    r#"<atom:feed xmlns:atom="http://www.w3.org/2005/Atom">"#,
+    r#"<atom:entry><atom:author><atom:name>DEVUSER</atom:name></atom:author>"#,
+    r#"<atom:id>99999</atom:id></atom:entry>"#,
+    r#"<atom:entry><atom:author><atom:name>DEVUSER</atom:name></atom:author>"#,
+    r#"<atom:id>00001</atom:id></atom:entry></atom:feed>"#,
+);
+
+/// The version list answer of a program without an inactive version.
+pub fn no_inactive() -> Step {
+    feed(NO_INACTIVE_FEED)
+}
+
+pub fn feed(body: &str) -> Step {
+    Step::Versions(Ok(Response::text(200, body)))
 }
 
 /// Expect and answer with the same fixture exchange.
@@ -105,6 +150,15 @@ impl SadtTransport for Replay {
                 result
             }
             Step::Any(result) => result,
+            Step::Versions(result) => {
+                assert_eq!(request.method, "GET", "version list method");
+                assert_eq!(request.uri, versions_uri(), "version list uri");
+                assert_eq!(
+                    request.headers.get("Accept").map(String::as_str),
+                    Some("application/atom+xml;type=feed")
+                );
+                result
+            }
         }
     }
 

@@ -243,3 +243,85 @@ fn stops_for_bad_ids_missing_credentials_and_bad_default_paths() {
         PathBuf::from("/tmp/home/connections.local.json")
     );
 }
+
+/// A config of two servers (`DEV_100`, `QAS_100`) with an optional `policies` object at the top
+/// level and one per server; the resolve of `dev_100` then shows the effective policy.
+fn policies_of(top: &str, server: &str) -> Result<String, String> {
+    let directory = tempfile::tempdir().unwrap();
+    let connections = directory.path().join("connections.json");
+
+    fs::write(
+        &connections,
+        format!(
+            concat!(
+                r#"{{"servers":[{{"systemId":"DEV","host":"example.com","port":443,"#,
+                r#""clients":["100"],"rfc":{{"ashost":"example.com","sysnr":"00"}}{server}}}]{top}}}"#,
+            ),
+            server = server,
+            top = top
+        ),
+    )
+    .unwrap();
+    let env = BTreeMap::from([
+        ("DEV_100_USER".to_owned(), "user".to_owned()),
+        ("DEV_100_PASS".to_owned(), "password".to_owned()),
+    ]);
+    let connection = Config::load(
+        ConfigPaths {
+            connections,
+            local: directory.path().join("connections.local.json"),
+        },
+        &env,
+    )?
+    .resolve("dev_100", &env)?;
+
+    Ok(connection.policies.foreign_inactive.token().to_owned())
+}
+
+#[test]
+fn the_foreign_inactive_policy_defaults_to_reject_without_a_policies_block() {
+    assert_eq!(policies_of("", "").unwrap(), "reject");
+    assert_eq!(policies_of(r#","policies":{}"#, "").unwrap(), "reject");
+}
+
+#[test]
+fn the_top_level_policy_applies_and_a_server_policy_overrides_it() {
+    assert_eq!(
+        policies_of(r#","policies":{"foreign_inactive":"allow"}"#, "").unwrap(),
+        "allow"
+    );
+    assert_eq!(
+        policies_of(
+            r#","policies":{"foreign_inactive":"allow"}"#,
+            r#","policies":{"foreign_inactive":"ask"}"#
+        )
+        .unwrap(),
+        "ask"
+    );
+    assert_eq!(
+        policies_of(
+            r#","policies":{"foreign_inactive":"ask"}"#,
+            r#","policies":{}"#
+        )
+        .unwrap(),
+        "ask"
+    );
+}
+
+#[test]
+fn an_unknown_policy_name_or_value_stops_at_load() {
+    let unknown_value = policies_of(r#","policies":{"foreign_inactive":"maybe"}"#, "").unwrap_err();
+    let unknown_name = policies_of(r#","policies":{"other_guard":"reject"}"#, "").unwrap_err();
+    let unknown_server_name =
+        policies_of("", r#","policies":{"other_guard":"reject"}"#).unwrap_err();
+
+    for message in [unknown_value, unknown_name, unknown_server_name] {
+        assert!(message.starts_with("cannot parse"), "{message}");
+    }
+
+    assert!(
+        policies_of(r#","policies":{"foreign_inactive":"maybe"}"#, "")
+            .unwrap_err()
+            .contains("unknown variant `maybe`")
+    );
+}

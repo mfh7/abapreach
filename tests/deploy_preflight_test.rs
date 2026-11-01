@@ -7,7 +7,7 @@ use abapreach::domain::Status;
 use abapreach::hash::source_hash;
 use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, encode_lock_handle};
 use abapreach::transport::{Response, TransportError};
-use replay::{Step, fx, replay};
+use replay::{Step, fx, no_inactive, replay};
 
 const FIXTURE: &str = "dev-750-rfc.json";
 const V1_HASH: &str = "63886692bf652fa419147f746d6b7760d6c991606fa9603d8ade3caf08ac7c64";
@@ -71,7 +71,10 @@ fn initial_base_mismatch_stops_before_lock() {
 
 #[test]
 fn diff_and_live_hash_precede_locked_reread_and_unlock() {
-    let mut transport = replay(FIXTURE, vec![fx(6), fx(7), changed_reread(), fx(9)]);
+    let mut transport = replay(
+        FIXTURE,
+        vec![fx(6), no_inactive(), fx(7), changed_reread(), fx(9)],
+    );
     let outcome = DeployProg::run(&mut transport, v2(), None);
     let position = |needle: &str| outcome.stdout.find(needle).unwrap();
 
@@ -93,6 +96,7 @@ fn diff_and_live_hash_precede_locked_reread_and_unlock() {
             .collect::<Vec<_>>(),
         vec![
             "GET /sap/bc/adt/programs/programs/ytest_abapreach01/source/main",
+            "GET /sap/bc/adt/programs/programs/ytest_abapreach01/source/main/versions",
             "POST /sap/bc/adt/programs/programs/ytest_abapreach01",
             "GET /sap/bc/adt/programs/programs/ytest_abapreach01/source/main",
             "POST /sap/bc/adt/programs/programs/ytest_abapreach01",
@@ -104,7 +108,7 @@ fn diff_and_live_hash_precede_locked_reread_and_unlock() {
 
 #[test]
 fn cancel_after_lock_unlocks_and_closes() {
-    let mut transport = replay(FIXTURE, vec![fx(6), fx(7), fx(9)]);
+    let mut transport = replay(FIXTURE, vec![fx(6), no_inactive(), fx(7), fx(9)]);
     let cancel = CancelFlag::new();
 
     cancel.set();
@@ -157,7 +161,7 @@ fn failure_class_and_fallback_permission_follow_the_failing_request() {
             .starts_with("ERROR: pre-send connectivity failure")
     );
 
-    let later = run(vec![fx(6), Step::Any(pre_send())]);
+    let later = run(vec![fx(6), no_inactive(), Step::Any(pre_send())]);
 
     assert_eq!(later.failure, Some(Failure::PreSendConnectivity));
     assert!(!later.fallback_allowed);
@@ -184,7 +188,10 @@ fn failure_class_and_fallback_permission_follow_the_failing_request() {
 
 #[test]
 fn rejected_lock_is_reported_without_unlock() {
-    let mut transport = replay(FIXTURE, vec![fx(6), Step::Any(Ok(Response::empty(423)))]);
+    let mut transport = replay(
+        FIXTURE,
+        vec![fx(6), no_inactive(), Step::Any(Ok(Response::empty(423)))],
+    );
     let result = DeployProg::run_classified(&mut transport, v2(), None, &CancelFlag::new());
 
     assert_eq!(result.outcome.status, Some(Status::Rejected));
@@ -196,11 +203,15 @@ fn rejected_lock_is_reported_without_unlock() {
             .ends_with("REJECTED: lock failed: HTTP 423")
     );
     assert_eq!(result.failure, Some(Failure::Conflict));
-    assert_eq!(transport.calls.len(), 2);
+    assert_eq!(transport.calls.len(), 3);
 
     let mut transport = replay(
         FIXTURE,
-        vec![fx(6), Step::Any(Ok(Response::text(200, "<DATA/>")))],
+        vec![
+            fx(6),
+            no_inactive(),
+            Step::Any(Ok(Response::text(200, "<DATA/>"))),
+        ],
     );
     let outcome = DeployProg::run(&mut transport, v2(), None);
 
@@ -215,14 +226,18 @@ fn rejected_lock_is_reported_without_unlock() {
             .stderr
             .contains("the lock on YTEST_ABAPREACH01 may remain")
     );
-    assert_eq!(transport.calls.len(), 2);
+    assert_eq!(transport.calls.len(), 3);
 }
 
 #[test]
 fn an_unreadable_lock_reply_never_claims_the_lock_was_released() {
     let mut transport = replay(
         FIXTURE,
-        vec![fx(6), Step::Any(Ok(Response::text(200, "<DATA/>")))],
+        vec![
+            fx(6),
+            no_inactive(),
+            Step::Any(Ok(Response::text(200, "<DATA/>"))),
+        ],
     )
     .failing_close(TransportError::PostSendUncertain("gone".to_owned()));
     let outcome = DeployProg::run(&mut transport, v2(), None);
@@ -255,7 +270,13 @@ fn failed_or_uncertain_unlock_forces_exit_1() {
     for (reply, note) in failures {
         let mut transport = replay(
             FIXTURE,
-            vec![fx(6), fx(7), changed_reread(), Step::ReplyTo(9, reply)],
+            vec![
+                fx(6),
+                no_inactive(),
+                fx(7),
+                changed_reread(),
+                Step::ReplyTo(9, reply),
+            ],
         );
         let outcome = DeployProg::run(&mut transport, v2(), None);
 

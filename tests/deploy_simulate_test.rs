@@ -8,7 +8,7 @@ use abapreach::operation::deploy::{
 };
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use common::Fixture;
-use replay::{Replay, Step, fx, replay};
+use replay::{Replay, Step, fx, no_inactive, replay};
 use std::fs;
 
 const FIXTURES: [&str; 3] = ["dev-750-rfc.json", "dev-750-http.json", "dv2-740-rfc.json"];
@@ -83,7 +83,10 @@ impl SadtTransport for FailingClose {
 #[test]
 fn a_failed_session_end_after_the_unlock_is_only_a_warning() {
     let mut transport = FailingClose {
-        inner: replay(FIXTURE, vec![fx(6), fx(7), fx(6), fx(8), fx(9)]),
+        inner: replay(
+            FIXTURE,
+            vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)],
+        ),
         failure: TransportError::PostSendUncertain("gone".to_owned()),
     };
     let outcome = DeployProg::run(&mut transport, valid(), None);
@@ -106,6 +109,7 @@ fn a_failed_unlock_keeps_its_stop_without_a_session_warning() {
             FIXTURE,
             vec![
                 fx(6),
+                no_inactive(),
                 fx(7),
                 fx(6),
                 fx(8),
@@ -132,7 +136,7 @@ fn a_failed_unlock_keeps_its_stop_without_a_session_warning() {
 #[test]
 fn recorded_valid_check_leaves_the_object_alone_on_every_release() {
     for name in FIXTURES {
-        let mut transport = replay(name, vec![fx(6), fx(7), fx(6), fx(8), fx(9)]);
+        let mut transport = replay(name, vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)]);
         let outcome = DeployProg::run(&mut transport, valid(), None);
 
         assert_eq!(outcome.status, Some(Status::SimulatedOk), "{name}");
@@ -155,7 +159,10 @@ fn recorded_valid_check_leaves_the_object_alone_on_every_release() {
 #[test]
 fn recorded_invalid_check_is_rejected_with_the_message_and_unlocks() {
     for name in FIXTURES {
-        let mut transport = replay(name, vec![fx(10), fx(11), fx(10), fx(12), fx(13)]);
+        let mut transport = replay(
+            name,
+            vec![fx(10), no_inactive(), fx(11), fx(10), fx(12), fx(13)],
+        );
         let outcome = DeployProg::run(&mut transport, invalid(), None);
 
         assert_eq!(outcome.status, Some(Status::Rejected), "{name}");
@@ -185,6 +192,7 @@ fn recorded_invalid_check_is_rejected_with_the_message_and_unlocks() {
 fn warnings_are_printed_and_do_not_reject() {
     let steps = vec![
         fx(6),
+        no_inactive(),
         fx(7),
         fx(6),
         Step::ReplyTo(8, Ok(Response::text(200, VALID_CHECK_BODY))),
@@ -214,7 +222,14 @@ fn an_unavailable_or_unreadable_check_stops_and_never_saves() {
     for (reply, stop) in cases {
         let mut transport = replay(
             FIXTURE,
-            vec![fx(6), fx(7), fx(6), Step::ReplyTo(8, reply), fx(9)],
+            vec![
+                fx(6),
+                no_inactive(),
+                fx(7),
+                fx(6),
+                Step::ReplyTo(8, reply),
+                fx(9),
+            ],
         );
         let outcome = DeployProg::run(&mut transport, valid(), None);
 
@@ -236,7 +251,14 @@ fn an_unavailable_or_unreadable_check_stops_and_never_saves() {
 #[test]
 fn a_lost_check_response_is_classified_and_still_unlocks() {
     let lost = Err(TransportError::PostSendUncertain("reset".to_owned()));
-    let steps = vec![fx(6), fx(7), fx(6), Step::ReplyTo(8, lost), fx(9)];
+    let steps = vec![
+        fx(6),
+        no_inactive(),
+        fx(7),
+        fx(6),
+        Step::ReplyTo(8, lost),
+        fx(9),
+    ];
     let mut transport = replay(FIXTURE, steps);
     let result = DeployProg::run_classified(&mut transport, valid(), None, &CancelFlag::new());
 
@@ -256,7 +278,10 @@ fn a_lost_check_response_is_classified_and_still_unlocks() {
 #[test]
 fn cancel_during_the_check_unlocks_without_a_write() {
     let mut transport = CancelOnCheck {
-        inner: replay(FIXTURE, vec![fx(6), fx(7), fx(6), fx(8), fx(9)]),
+        inner: replay(
+            FIXTURE,
+            vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)],
+        ),
         cancel: CancelFlag::new(),
     };
     let cancel = transport.cancel.clone();
@@ -288,6 +313,7 @@ fn cancel_during_the_check_unlocks_without_a_write() {
 fn simulate_with_a_failed_unlock_is_partial() {
     let steps = vec![
         fx(6),
+        no_inactive(),
         fx(7),
         fx(6),
         fx(8),

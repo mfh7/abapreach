@@ -7,7 +7,7 @@ use abapreach::transport::http::HttpTransport;
 use abapreach::transport::{Response, SadtTransport, TransportError};
 use abapreach::{Exit, Factories, RfcLibraryInfo, run};
 use common::ScriptedTransport;
-use replay::{Step, fx, replay};
+use replay::{Step, fx, no_inactive, replay};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -125,6 +125,20 @@ fn env(directory: &Path) -> BTreeMap<String, String> {
     ])
 }
 
+/// An environment whose config file is `config`, for the tests that need a `policies` block.
+fn env_with(directory: &Path, config: &str) -> BTreeMap<String, String> {
+    fs::write(directory.join("connections.json"), config).unwrap();
+
+    BTreeMap::from([
+        (
+            "ABAP_CONNECTIONS".to_owned(),
+            directory.join("connections.json").display().to_string(),
+        ),
+        ("DEV_100_USER".to_owned(), "user".to_owned()),
+        ("DEV_100_PASS".to_owned(), "secret-pw".to_owned()),
+    ])
+}
+
 fn go(args: &[&str], directory: &Path, fake: &mut Fake) -> Exit {
     run(
         args.iter().map(|arg| (*arg).to_owned()).collect(),
@@ -161,9 +175,10 @@ fn rfc_only_simulate_args<'a>(file: &'a Path, extra: &[&'a str]) -> Vec<&'a str>
     args
 }
 
-/// The recorded simulate of v2 over v1: live read, lock, locked re-read, check, unlock.
+/// The recorded simulate of v2 over v1: live read, version list, lock, locked re-read, check,
+/// unlock.
 fn simulate_steps() -> Vec<Step> {
-    vec![fx(6), fx(7), fx(6), fx(8), fx(9)]
+    vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)]
 }
 
 fn simulate_replay() -> Opened {
@@ -176,9 +191,9 @@ fn assert_report(stdout: &str, backend: &str, reason: &str) {
         concat!(
             "backend: {}\n",
             "reason: {}\n",
-            "guards: SAP lock/CSRF/transport/authorization, base hash\n",
-            "not applied (FM guards): Z/Y name, productive client, system change option, ",
-            "SE06, inactive owned by another user\n",
+            "guards: SAP lock/CSRF/transport/authorization, base hash, ",
+            "foreign inactive (policy reject)\n",
+            "not applied (FM guards): Z/Y name, productive client, system change option, SE06\n",
         ),
         backend, reason
     );
@@ -630,6 +645,80 @@ fn local_problems_stop_with_exit_2_before_any_connection() {
 }
 
 #[test]
+fn an_invalid_policy_stops_at_load() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = concat!(
+        r#"{"policies":{"foreign_inactive":"maybe"},"servers":[{"systemId":"DEV","#,
+        r#""host":"example.com","port":443,"clients":["100"],"#,
+        r#""rfc":{"ashost":"example.com","sysnr":"00"}}]}"#,
+    );
+
+    let mut fake = Fake::default();
+    let exit = run(
+        ["abapreach", "doctor", "--conn", "dev_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        env_with(directory.path(), config),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2);
+    assert!(
+        exit.stderr.starts_with("STOP: cannot parse"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+#[test]
+fn the_configured_policy_reaches_the_deploy_guard() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+    let config = concat!(
+        r#"{"policies":{"foreign_inactive":"allow"},"servers":[{"systemId":"DEV","#,
+        r#""host":"example.com","port":443,"clients":["100"],"#,
+        r#""rfc":{"ashost":"example.com","sysnr":"00"}}]}"#,
+    );
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(
+        shared(replay(
+            "dev-750-rfc.json",
+            vec![
+                fx(6),
+                replay::feed(replay::FOREIGN_INACTIVE_FEED),
+                fx(7),
+                fx(6),
+                fx(8),
+                fx(9),
+            ],
+        ))
+        .1,
+    );
+
+    let exit = run(
+        simulate_args(&file, &[])
+            .iter()
+            .map(|arg| (*arg).to_owned())
+            .collect(),
+        env_with(directory.path(), config),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(exit.stdout.ends_with("SIMULATED_OK"));
+    assert!(exit.stdout.contains("foreign inactive (policy allow)"));
+    assert_eq!(
+        exit.stderr,
+        "W: overwriting the inactive version of OTHERUSER (policy allow)"
+    );
+}
+
+#[test]
 fn a_name_outside_the_program_grammar_stops_the_read_before_any_connection() {
     let directory = tempfile::tempdir().unwrap();
     let out = directory.path().join("out.abap");
@@ -859,7 +948,10 @@ fn the_cancel_flag_of_the_factories_reaches_the_deploy() {
     let file = directory.path().join("src.abap");
     fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
     let mut fake = Fake::default();
-    let (cell, opened) = shared(replay("dev-750-rfc.json", vec![fx(6), fx(7), fx(9)]));
+    let (cell, opened) = shared(replay(
+        "dev-750-rfc.json",
+        vec![fx(6), no_inactive(), fx(7), fx(9)],
+    ));
 
     fake.adt.push_back(opened);
     fake.cancel.set();

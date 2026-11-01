@@ -1,8 +1,9 @@
-use crate::adt::{AdtMessage, parse_messages, prog_uri};
+use crate::adt::{AdtMessage, parse_messages, parse_versions, prog_uri, versions_uri};
 use crate::backend::{Failure, Selection, SelectionReason};
 use crate::config::{Connection, tls_warning};
 use crate::domain::{Outcome, Status};
 use crate::hash::{normalize, source_hash, validate_prog};
+use crate::policy::{Confirmer, Decision, InactiveVersion, Policies, Terminal};
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
@@ -17,6 +18,7 @@ pub use crate::adt::format_messages;
 
 const LOCK_ACCEPT: &str =
     "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result";
+const VERSIONS_ACCEPT: &str = "application/atom+xml;type=feed";
 const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET without a version returns it; restore only by deploying the base source again on your order";
 const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
 
@@ -128,7 +130,18 @@ impl DeployProg {
         connection: Option<&Connection>,
         cancel: &CancelFlag,
     ) -> DeployResult {
-        Self::run_with(transport, input, None, connection, cancel)
+        Self::run_with(transport, input, None, connection, cancel, &Terminal)
+    }
+
+    /// Like `run_classified`, but with a replacement for the terminal the `ask` policy prompts on.
+    pub fn run_classified_with(
+        transport: &mut dyn SadtTransport,
+        input: DeployInput,
+        connection: Option<&Connection>,
+        cancel: &CancelFlag,
+        confirmer: &dyn Confirmer,
+    ) -> DeployResult {
+        Self::run_with(transport, input, None, connection, cancel, confirmer)
     }
 
     /// Like `run_classified`, but prints the routing decision first; the CLI always has one.
@@ -139,7 +152,14 @@ impl DeployProg {
         connection: Option<&Connection>,
         cancel: &CancelFlag,
     ) -> DeployResult {
-        Self::run_with(transport, input, Some(selection), connection, cancel)
+        Self::run_with(
+            transport,
+            input,
+            Some(selection),
+            connection,
+            cancel,
+            &Terminal,
+        )
     }
 
     fn run_with(
@@ -148,12 +168,25 @@ impl DeployProg {
         selection: Option<&Selection>,
         connection: Option<&Connection>,
         cancel: &CancelFlag,
+        confirmer: &dyn Confirmer,
     ) -> DeployResult {
+        let policies = connection
+            .map(|connection| connection.policies.clone())
+            .unwrap_or_default();
         let mut run = Run {
             transport,
             name: input.name.clone(),
             uri: prog_uri(&input.name),
-            stdout: selection.map(selection_report).unwrap_or_default(),
+            stdout: selection
+                .map(|selection| selection_report(selection, &policies))
+                .unwrap_or_default(),
+            warnings: Vec::new(),
+            policies,
+            // Without a connection there is no logon user, so no inactive version can match it.
+            user: connection
+                .map(|connection| connection.user.clone())
+                .unwrap_or_default(),
+            confirmer,
             sent: 0,
         };
         // `--base` and an explicit `--backend` bind the run to the backend that was picked.
@@ -169,6 +202,8 @@ impl DeployProg {
         {
             finish.close_failed(&error.to_string());
         }
+
+        run.prepend_warnings(&mut finish);
 
         if let Some(warning) = connection.and_then(tls_warning) {
             run.stdout.insert(0, warning);
@@ -394,10 +429,31 @@ struct Run<'a> {
     name: String,
     uri: String,
     stdout: Vec<String>,
+    /// `W:` lines of the guard policies, kept until the verdict is known.
+    warnings: Vec<String>,
+    policies: Policies,
+    /// The logon user of the connection, compared with the owner of the inactive version.
+    user: String,
+    confirmer: &'a dyn Confirmer,
     sent: usize,
 }
 
 impl Run<'_> {
+    /// The guard warnings come first, so they stay above the notes of a later failure.
+    fn prepend_warnings(&self, finish: &mut Finish) {
+        if self.warnings.is_empty() {
+            return;
+        }
+
+        let mut lines = self.warnings.clone();
+
+        if let Some(existing) = finish.stderr.take().filter(|text| !text.is_empty()) {
+            lines.push(existing);
+        }
+
+        finish.stderr = Some(lines.join("\n"));
+    }
+
     fn call(&mut self, request: Request) -> Result<Response, TransportError> {
         self.sent += 1;
         self.transport.request(request)
@@ -455,6 +511,9 @@ impl Run<'_> {
                 Finish::stateful_unavailable()
             });
         }
+
+        // Still read-only: a refused guard leaves no lock behind and writes nothing.
+        self.foreign_inactive()?;
 
         let _lock_scope = cancel.hold_lock();
         // Ctrl-C is deferred while the LOCK request is in flight too: its 2xx reply may already
@@ -520,6 +579,62 @@ impl Run<'_> {
             .map_err(|error| Finish::stop(format!("cannot {what}: not UTF-8: {error}")))?;
 
         Ok(text.split('\n').map(str::to_owned).collect())
+    }
+
+    /// The `foreign_inactive` guard: the version list says whether the inactive version belongs
+    /// to another user, whose work the next deploy would overwrite. Read-only, before the lock.
+    fn foreign_inactive(&mut self) -> Result<(), Finish> {
+        let read = self.inactive_owner();
+        let state = match &read {
+            Ok(Some(owner)) => InactiveVersion::Owned { owner },
+            Ok(None) => InactiveVersion::Absent,
+            Err(reason) => InactiveVersion::Unknown { reason },
+        };
+
+        match self
+            .policies
+            .inactive_version(state, &self.user, self.confirmer)
+        {
+            Decision::Continue(None) => Ok(()),
+            Decision::Continue(Some(warning)) => {
+                self.warnings.push(warning);
+
+                Ok(())
+            }
+            Decision::Refuse(reason) => Err(Finish::status(
+                Status::Rejected,
+                format!("REJECTED: {reason}"),
+            )),
+        }
+    }
+
+    /// The owner of the inactive version, or why the version list could not tell.
+    fn inactive_owner(&mut self) -> Result<Option<String>, String> {
+        let mut request = Request::get(versions_uri(&self.uri));
+        request
+            .headers
+            .insert("Accept".to_owned(), VERSIONS_ACCEPT.to_owned());
+        let response = self
+            .call(request)
+            .map_err(|error| format!("version list unavailable: {error}"))?;
+
+        if response.status != 200 {
+            return Err(format!(
+                "version list unavailable: HTTP {}",
+                response.status
+            ));
+        }
+
+        let entries = parse_versions(&String::from_utf8_lossy(&response.body))
+            .map_err(|error| format!("cannot parse the version list: {error}"))?;
+
+        match entries.iter().find(|entry| entry.is_inactive()) {
+            Some(entry) if entry.author.is_empty() => {
+                Err("the version list names no owner of the inactive version".to_owned())
+            }
+            Some(entry) => Ok(Some(entry.author.clone())),
+            None => Ok(None),
+        }
     }
 
     fn lock(&mut self) -> Result<LockInfo, Finish> {
@@ -897,25 +1012,22 @@ fn base64(bytes: &[u8]) -> String {
 
 const RETRY: &str = "check with read before retrying";
 
-const GUARD_REPORT: [&str; 2] = [
-    "guards: SAP lock/CSRF/transport/authorization, base hash",
-    concat!(
-        "not applied (FM guards): Z/Y name, productive client, system change option, ",
-        "SE06, inactive owned by another user",
-    ),
-];
+/// FM guards that only the Python fallback implements; they never hold on this path.
+const UNSUPPORTED_GUARDS: &str =
+    "not applied (FM guards): Z/Y name, productive client, system change option, SE06";
 
 /// Lines printed before the diff of every simulate and deploy: the backend that runs, why it
 /// was chosen, and which guards hold there.
-pub fn selection_report(selection: &Selection) -> Vec<String> {
-    let mut lines = vec![
+pub fn selection_report(selection: &Selection, policies: &Policies) -> Vec<String> {
+    vec![
         format!("backend: {}", selection.backend.token()),
         format!("reason: {}", selection.reason),
-    ];
-
-    lines.extend(GUARD_REPORT.iter().map(|line| (*line).to_owned()));
-
-    lines
+        format!(
+            "guards: SAP lock/CSRF/transport/authorization, base hash, foreign inactive (policy {})",
+            policies.foreign_inactive
+        ),
+        UNSUPPORTED_GUARDS.to_owned(),
+    ]
 }
 
 /// What the read-only `?version=inactive` answered during reconciliation.

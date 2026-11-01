@@ -7,7 +7,7 @@ use abapreach::hash::source_hash;
 use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, activation_status};
 use abapreach::transport::rfc::{RfcPhase, classify_rfc_error};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
-use replay::{Replay, Step, fx, replay};
+use replay::{Replay, Step, fx, no_inactive, replay};
 
 const FIXTURES: [&str; 3] = ["dev-750-rfc.json", "dev-750-http.json", "dv2-740-rfc.json"];
 const FIXTURE: &str = "dev-750-rfc.json";
@@ -55,7 +55,7 @@ fn ok() -> Step {
 
 /// The recorded deploy of v2 over v1 up to and including the PUT, with the locked re-read.
 fn through_put() -> Vec<Step> {
-    vec![fx(6), fx(7), fx(6), fx(8), fx(17)]
+    vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(17)]
 }
 
 fn then(mut steps: Vec<Step>, rest: Vec<Step>) -> Vec<Step> {
@@ -96,9 +96,9 @@ fn recorded_deploy_activates_and_reports_the_new_hash() {
             outcome.stdout.ends_with(&format!("ACTIVE\nhash {hash}")),
             "{name}"
         );
-        assert_eq!(transport.calls[4].method, "PUT");
-        assert!(transport.calls[5].uri.contains("_action=UNLOCK"));
-        assert!(transport.calls[6].uri.contains("activation"));
+        assert_eq!(transport.calls[5].method, "PUT");
+        assert!(transport.calls[6].uri.contains("_action=UNLOCK"));
+        assert!(transport.calls[7].uri.contains("activation"));
         assert_eq!(transport.closes, 1);
         transport.assert_finished();
     }
@@ -130,7 +130,7 @@ fn transport_request_rules_apply_right_after_the_lock_in_simulate_and_deploy() {
 
     for (local, corrnr, tr, stop) in cases {
         for simulate in [true, false] {
-            let steps = vec![fx(6), lock_body(corrnr, local), ok()];
+            let steps = vec![fx(6), no_inactive(), lock_body(corrnr, local), ok()];
             let mut transport = replay(FIXTURE, steps);
             let outcome =
                 DeployProg::run(&mut transport, input("WRITE / 'v2'.", simulate, tr), None);
@@ -138,9 +138,9 @@ fn transport_request_rules_apply_right_after_the_lock_in_simulate_and_deploy() {
             assert_eq!(outcome.exit, 2, "{stop}");
             assert!(outcome.stderr.starts_with("STOP: "), "{}", outcome.stderr);
             assert!(outcome.stderr.contains(stop), "{}", outcome.stderr);
-            assert_eq!(transport.calls.len(), 3);
+            assert_eq!(transport.calls.len(), 4);
             assert!(
-                transport.calls[2]
+                transport.calls[3]
                     .uri
                     .ends_with("_action=UNLOCK&lockHandle=h%2B1%2F%3D")
             );
@@ -155,6 +155,7 @@ fn the_put_carries_the_encoded_handle_and_the_transport_request_of_the_lock() {
     for tr in [None, Some("devk000001")] {
         let steps = vec![
             fx(6),
+            no_inactive(),
             lock_body("DEVK000001", false),
             fx(6),
             fx(8),
@@ -165,7 +166,7 @@ fn the_put_carries_the_encoded_handle_and_the_transport_request_of_the_lock() {
         ];
         let mut transport = replay(FIXTURE, steps);
         let outcome = DeployProg::run(&mut transport, v2(tr), None);
-        let put = &transport.calls[4];
+        let put = &transport.calls[5];
 
         assert_eq!(outcome.status, Some(Status::Active));
         assert!(outcome.stdout.contains("\ntransport request DEVK000001\n"));
@@ -179,6 +180,7 @@ fn the_put_carries_the_encoded_handle_and_the_transport_request_of_the_lock() {
 
     let steps = vec![
         fx(6),
+        no_inactive(),
         lock_body("", true),
         fx(6),
         fx(8),
@@ -192,7 +194,7 @@ fn the_put_carries_the_encoded_handle_and_the_transport_request_of_the_lock() {
 
     assert_eq!(outcome.status, Some(Status::Active));
     assert_eq!(
-        transport.calls[4].uri,
+        transport.calls[5].uri,
         format!("{PROGRAM}/source/main?lockHandle=h%2B1%2F%3D")
     );
     assert!(!outcome.stdout.contains("transport request"));
@@ -200,7 +202,14 @@ fn the_put_carries_the_encoded_handle_and_the_transport_request_of_the_lock() {
 
 #[test]
 fn simulate_prints_the_transport_request_and_never_writes() {
-    let steps = vec![fx(6), lock_body("DEVK000001", false), fx(6), fx(8), ok()];
+    let steps = vec![
+        fx(6),
+        no_inactive(),
+        lock_body("DEVK000001", false),
+        fx(6),
+        fx(8),
+        ok(),
+    ];
     let mut transport = replay(FIXTURE, steps);
     let outcome = DeployProg::run(&mut transport, input("WRITE / 'v2'.", true, None), None);
 
@@ -214,6 +223,7 @@ fn recorded_activation_errors_are_inactive_without_a_read_back() {
     let invalid = input("WRITE / no_such_var.", false, None);
     let steps = vec![
         fx(20),
+        no_inactive(),
         fx(21),
         fx(20),
         Step::Pair(12, 8),
@@ -323,7 +333,7 @@ fn activation_status_maps_the_answer_alone() {
 #[test]
 fn a_rejected_or_failed_put_unlocks_and_never_activates() {
     let rejected = then(
-        vec![fx(6), fx(7), fx(6), fx(8)],
+        vec![fx(6), no_inactive(), fx(7), fx(6), fx(8)],
         vec![Step::ReplyTo(17, Ok(Response::empty(403))), fx(18)],
     );
     let mut transport = replay(FIXTURE, rejected);
@@ -343,6 +353,7 @@ fn a_rejected_or_failed_put_unlocks_and_never_activates() {
     let unsent = Err(TransportError::PreSendConnectivity("no route".to_owned()));
     let steps = vec![
         fx(6),
+        no_inactive(),
         fx(7),
         fx(6),
         fx(8),
@@ -369,6 +380,7 @@ fn rfc_invoke_failures_during_put_reconcile_before_retrying() {
         let error = classify_rfc_error(RfcPhase::Invoke, code, message);
         let steps = vec![
             fx(6),
+            no_inactive(),
             fx(7),
             fx(6),
             fx(8),
@@ -485,13 +497,23 @@ fn the_lock_response_is_read_with_entities_and_pretty_printing() {
             "   <IS_LOCAL></IS_LOCAL>\n  </DATA>\n </asx:values>\n</asx:abap>\n",
         ),
     )));
-    let steps = vec![fx(6), pretty, fx(6), fx(8), ok(), ok(), fx(19), fx(20)];
+    let steps = vec![
+        fx(6),
+        no_inactive(),
+        pretty,
+        fx(6),
+        fx(8),
+        ok(),
+        ok(),
+        fx(19),
+        fx(20),
+    ];
     let mut transport = replay(FIXTURE, steps);
     let outcome = DeployProg::run(&mut transport, v2(None), None);
 
     assert_eq!(outcome.status, Some(Status::Active));
     assert_eq!(
-        transport.calls[4].uri,
+        transport.calls[5].uri,
         format!("{PROGRAM}/source/main?lockHandle=a%26b&corrNr=DEVK000001")
     );
 }

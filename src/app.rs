@@ -298,8 +298,13 @@ fn execute(command: Command, connection: &Connection, factories: &mut dyn Factor
                 connection,
                 factories,
                 |transport, selection, cancel| {
-                    let result =
-                        DeployProg::run_selected(transport, input.clone(), selection, None, cancel);
+                    let result = DeployProg::run_selected(
+                        transport,
+                        input.clone(),
+                        selection,
+                        Some(connection),
+                        cancel,
+                    );
 
                     Attempt {
                         outcome: result.outcome,

@@ -6,7 +6,7 @@ use abapreach::domain::Status;
 use abapreach::hash::source_hash;
 use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, InactiveRead, reconcile};
 use abapreach::transport::{Response, TransportError};
-use replay::{Replay, Step, fx, replay};
+use replay::{Replay, Step, fx, no_inactive, replay};
 
 const FIXTURE: &str = "dev-750-rfc.json";
 const RETRY: &str = "check with read before retrying";
@@ -55,12 +55,12 @@ fn input(last_line: &str) -> DeployInput {
 
 /// v2 over the recorded v1: lock, locked re-read, check, then the recorded PUT of v2.
 fn v2_until_put() -> Vec<Step> {
-    vec![fx(6), fx(7), fx(6), fx(8)]
+    vec![fx(6), no_inactive(), fx(7), fx(6), fx(8)]
 }
 
 /// The invalid source over the recorded v2: the check is answered as valid so the PUT happens.
 fn invalid_until_put() -> Vec<Step> {
-    vec![fx(20), fx(21), fx(20), Step::Pair(12, 8)]
+    vec![fx(20), no_inactive(), fx(21), fx(20), Step::Pair(12, 8)]
 }
 
 fn run(transport: &mut Replay, deploy: DeployInput) -> abapreach::operation::deploy::DeployResult {
@@ -309,8 +309,8 @@ fn a_lost_put_unlocks_first_and_then_reconciles_by_content() {
 
     assert_eq!(result.outcome.status, Some(Status::Inactive));
     assert_eq!(result.outcome.exit, 1);
-    assert!(order[5].contains("_action=UNLOCK"));
-    assert!(order[6].ends_with("version=active") && order[7].ends_with("version=inactive"));
+    assert!(order[6].contains("_action=UNLOCK"));
+    assert!(order[7].ends_with("version=active") && order[8].ends_with("version=inactive"));
     assert_eq!(count(&transport, "activation"), 0);
     assert_eq!(
         transport

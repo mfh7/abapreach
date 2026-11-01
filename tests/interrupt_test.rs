@@ -6,7 +6,7 @@ use abapreach::operation::deploy::{
     CancelFlag, DeployInput, DeployProg, INTERRUPT_EXIT_CODE, InterruptAction,
 };
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
-use replay::{Replay, fx, replay};
+use replay::{Replay, fx, no_inactive, replay};
 
 const FIXTURE: &str = "dev-750-rfc.json";
 
@@ -100,7 +100,10 @@ fn ctrl_c_exits_at_once_without_a_lock_and_is_deferred_inside_one() {
 fn the_lock_is_held_from_the_lock_request_until_the_unlock() {
     let cancel = CancelFlag::new();
     let mut transport = Watch::new(
-        replay(FIXTURE, vec![fx(6), fx(7), fx(6), fx(8), fx(9)]),
+        replay(
+            FIXTURE,
+            vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)],
+        ),
         &cancel,
         None,
     );
@@ -109,7 +112,7 @@ fn the_lock_is_held_from_the_lock_request_until_the_unlock() {
 
     assert_eq!(outcome.status, Some(Status::SimulatedOk));
     assert_eq!(outcome.exit, 0);
-    assert_eq!(transport.held(), vec![false, true, true, true, true]);
+    assert_eq!(transport.held(), vec![false, false, true, true, true, true]);
     assert!(!transport.closed_with_lock_held);
     assert!(!cancel.lock_held());
     assert!(transport.interrupts.is_empty());
@@ -118,7 +121,11 @@ fn the_lock_is_held_from_the_lock_request_until_the_unlock() {
 #[test]
 fn an_interrupt_during_the_lock_request_is_deferred_and_unlocks() {
     let cancel = CancelFlag::new();
-    let mut transport = Watch::new(replay(FIXTURE, vec![fx(6), fx(7), fx(9)]), &cancel, Some(1));
+    let mut transport = Watch::new(
+        replay(FIXTURE, vec![fx(6), no_inactive(), fx(7), fx(9)]),
+        &cancel,
+        Some(2),
+    );
 
     let outcome = DeployProg::run_with_cancel(&mut transport, changed(), &cancel);
 
@@ -143,9 +150,12 @@ fn a_deferred_interrupt_still_unlocks_and_never_reports_success() {
     let cancel = CancelFlag::new();
     // The checkrun is the request during which the interrupt arrives.
     let mut transport = Watch::new(
-        replay(FIXTURE, vec![fx(6), fx(7), fx(6), fx(8), fx(9)]),
+        replay(
+            FIXTURE,
+            vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)],
+        ),
         &cancel,
-        Some(3),
+        Some(4),
     );
 
     let outcome = DeployProg::run_with_cancel(&mut transport, changed(), &cancel);

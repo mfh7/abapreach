@@ -98,6 +98,7 @@ fn allow_list_accepts_only_the_m1_program_requests() {
         Request::get("/sap/bc/adt/discovery"),
         Request::get(format!("{program}/source/main?version=active")),
         Request::get(format!("{program}/source/main?version=inactive")),
+        Request::get(format!("{program}/source/main/versions")),
         Request::post(
             format!("{program}?_action=LOCK&accessMode=MODIFY"),
             Vec::new(),
@@ -123,6 +124,9 @@ fn allow_list_accepts_only_the_m1_program_requests() {
     let denied = [
         Request::get("/sap/bc/adt/repository/nodestructure"),
         Request::get(format!("{program}/source/main?version=workingArea")),
+        Request::get(format!("{program}/versions")),
+        Request::get(format!("{program}/versions/99999")),
+        Request::get(format!("{program}/source/main/versions/99999")),
         Request::get("/sap/bc/adt/programs/programs/a/b/source/main?version=active"),
         Request::post(
             format!("{program}?_action=LOCK&accessMode=READ"),

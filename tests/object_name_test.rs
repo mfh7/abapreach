@@ -1,4 +1,4 @@
-use abapreach::adt::prog_uri;
+use abapreach::adt::{prog_uri, versions_uri};
 use abapreach::hash::validate_prog;
 use abapreach::operation::deploy::{activation_request_xml, checkrun_xml};
 
@@ -73,6 +73,14 @@ fn uri_lowercases_the_name_and_percent_encodes_the_namespace_slashes() {
     assert_eq!(
         prog_uri("/abc/zprog"),
         "/sap/bc/adt/programs/programs/%2fabc%2fzprog"
+    );
+}
+
+#[test]
+fn the_version_list_uri_is_the_source_version_list() {
+    assert_eq!(
+        versions_uri(&prog_uri("YTEST_ABAPREACH01")),
+        "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main/versions"
     );
 }
 

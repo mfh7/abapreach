@@ -8,6 +8,12 @@ the internal repository where that implementation was developed.
 
 ## [Unreleased]
 
+### Fixed
+- The `foreign_inactive` guard reads the source version list `GET <source>/versions`
+  (`/sap/bc/adt/programs/programs/<name>/source/main/versions`, Accept
+  `application/atom+xml;type=feed`). The program level `/versions` URI answered HTTP 404 on a
+  live 7.50 and 7.40 system.
+
 ## [0.11.0] - 2026-11-01
 
 First release of the Rust implementation (milestone 1, partial scope).
@@ -26,6 +32,12 @@ First release of the Rust implementation (milestone 1, partial scope).
 - Reconciliation of uncertain writes by comparing active and inactive source content.
 - Connection configuration compatible with the Python tooling (`connections.json`,
   `connections.local.json`, `<SID>_<CLIENT>_USER|PASS`), including RFC-only servers.
+- `foreign_inactive` guard: before the lock, `deploy` and `deploy --simulate` read
+  `GET <source>/versions` and refuse to overwrite the inactive version of another user
+  (`REJECTED`, exit 1, nothing locked). The policy lives in the optional `policies` object of
+  `connections.json` (`servers[].policies` overrides single keys): `reject` (default), `allow` or
+  `ask`; an unreadable version list fails closed unless the policy is `allow`. `doctor` prints the
+  effective policy.
 
 ## [0.10.0] - 2026-10-31
 Python implementation: review fixes; all messages and documentation in English.

@@ -894,6 +894,7 @@ fn is_allowed(request: &Request) -> bool {
             request.uri == "/sap/bc/adt/discovery"
                 || is_source_uri(&request.uri, "version=active")
                 || is_source_uri(&request.uri, "version=inactive")
+                || is_versions_uri(&request.uri)
         }
         "POST" => {
             is_lock_uri(&request.uri)
@@ -933,6 +934,19 @@ fn is_source_uri(uri: &str, expected_query: &str) -> bool {
     };
 
     query == expected_query
+}
+
+/// `GET <program>/source/main/versions`: the source version list the `foreign_inactive` guard
+/// reads.
+fn is_versions_uri(uri: &str) -> bool {
+    let Some(program) = uri
+        .strip_prefix(PROGRAM_URI_PREFIX)
+        .and_then(|rest| rest.strip_suffix("/source/main/versions"))
+    else {
+        return false;
+    };
+
+    !program.is_empty() && !program.contains('/')
 }
 
 fn is_lock_uri(uri: &str) -> bool {

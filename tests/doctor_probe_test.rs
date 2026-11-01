@@ -162,6 +162,7 @@ fn doctor_probes_both_backends_with_one_logon_each() {
         [
             "connection DEV_100: configuration available",
             "credential available",
+            "policy foreign inactive: reject",
             "ADT HTTP configured: https://example.com:443",
             "RFC SADT configured: example.com system 00",
             "ADT HTTP probe: ok (HTTP 200)",
@@ -217,6 +218,7 @@ fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
         [
             "connection QAS_100: configuration available",
             "credential available",
+            "policy foreign inactive: reject",
             "ADT HTTP: not configured",
             "RFC SADT configured: example.com system 02",
             "ADT HTTP probe: not run (ADT not configured)",
