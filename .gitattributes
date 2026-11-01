@@ -1,0 +1,2 @@
+# Shell scripts run on Windows runners under Git Bash, which cannot execute CRLF.
+*.sh text eol=lf

@@ -41,8 +41,12 @@ SAP GUI.
 ### Release files
 
 Each release lists one archive per target, named `abapreach-<version>-<target>`:
-a `.zip` for Windows and a `.tar.gz` for macOS and Linux. Each archive has a SHA256
-value on the release page. Check it before you run the binary:
+a `.zip` for Windows and a `.tar.gz` for macOS and Linux. The archive holds the single
+executable (`abapreach`, or `abapreach.exe` on Windows). `<target>` is one of
+`aarch64-apple-darwin` (macOS arm64), `x86_64-pc-windows-msvc` (Windows x64),
+`x86_64-unknown-linux-gnu` (Linux x64) and `aarch64-unknown-linux-gnu` (Linux arm64).
+Each archive has a SHA256 value on the release page and in a `.sha256` file next to
+it. Check it before you run the binary:
 
 ```sh
 shasum -a 256 abapreach-<version>-<target>.tar.gz
