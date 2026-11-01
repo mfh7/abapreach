@@ -211,11 +211,28 @@ pub trait RfcApi {
 pub struct RfcTransport<A> {
     api: A,
     opened: bool,
+    /// Test-only: the write whose reply is discarded after SAP executed it.
+    #[cfg(feature = "fault-injection")]
+    fault: Option<crate::fault::Fault>,
 }
 
 impl<A> RfcTransport<A> {
     pub fn new(api: A) -> Self {
-        Self { api, opened: false }
+        Self {
+            api,
+            opened: false,
+            #[cfg(feature = "fault-injection")]
+            fault: crate::fault::Fault::from_env(),
+        }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub fn with_fault(api: A, fault: Option<crate::fault::Fault>) -> Self {
+        Self {
+            api,
+            opened: false,
+            fault,
+        }
     }
 
     pub fn api(&self) -> &A {
@@ -244,6 +261,11 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
         }
 
         self.ensure_open()?;
+        // Decided before the request is consumed by the call.
+        #[cfg(feature = "fault-injection")]
+        let dropped = self
+            .fault
+            .and_then(|fault| fault.drop_reply(is_fault_target(fault.target(), &request)));
         let response = self.api.invoke(RfcEndpointRequest {
             function: SADT_REST_RFC_ENDPOINT,
             method: request.method,
@@ -252,6 +274,12 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
             headers: request.headers,
             body: request.body,
         })?;
+
+        // The RFC call has run and SAP has executed the write; only the reply is discarded.
+        #[cfg(feature = "fault-injection")]
+        if let Some(error) = dropped {
+            return Err(error);
+        }
 
         Ok(Response {
             status: response.status,
@@ -904,6 +932,15 @@ fn is_allowed(request: &Request) -> bool {
         }
         "PUT" => is_put_uri(&request.uri),
         _ => false,
+    }
+}
+
+/// Whether the request is the write a fault targets: the source `PUT` or the activation.
+#[cfg(feature = "fault-injection")]
+fn is_fault_target(target: crate::fault::Target, request: &Request) -> bool {
+    match target {
+        crate::fault::Target::Put => request.method == "PUT" && is_put_uri(&request.uri),
+        crate::fault::Target::Activate => request.method == "POST" && request.uri == ACTIVATION_URI,
     }
 }
 

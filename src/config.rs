@@ -44,11 +44,31 @@ pub struct Connection {
     /// `None` for an RFC-only server: the config has no `host`/`port` ADT endpoint.
     pub adt: Option<AdtConfig>,
     pub rfc: RfcConfig,
+    /// Where the route in `rfc.saprouter` came from; `None` when no route is configured.
+    pub saprouter_source: Option<SaprouterSource>,
     /// The effective write-guard policies of this connection.
     pub policies: Policies,
 }
 
 impl Connection {
+    /// Values that must never be printed: the password and the route, including its sensitive
+    /// fragments when an RFC library reports only part of a route.
+    pub fn secrets(&self) -> Vec<String> {
+        let mut secrets = vec![self.password.clone()];
+
+        if let Some(route) = &self.rfc.saprouter {
+            secrets.push(route.clone());
+            for pair in route.split('/').collect::<Vec<_>>().windows(2) {
+                if matches!(pair[0], "H" | "W") && pair[1].len() >= 3 {
+                    secrets.push(pair[1].to_owned());
+                }
+            }
+        }
+
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        secrets
+    }
+
     #[cfg(feature = "test-support")]
     pub fn test_insecure() -> Self {
         Self {
@@ -70,6 +90,7 @@ impl Connection {
                 sysnr: "00".to_owned(),
                 saprouter: None,
             },
+            saprouter_source: None,
             policies: Policies::default(),
         }
     }
@@ -90,6 +111,28 @@ pub struct RfcConfig {
     pub sysnr: String,
     #[serde(default)]
     pub saprouter: Option<String>,
+}
+
+/// Where the effective `SAPROUTER` value of a connection came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaprouterSource {
+    /// `<SID>_SAPROUTER` in the process environment.
+    Environment,
+    /// `<SID>_SAPROUTER` in `connections.local.json`.
+    LocalFile,
+    /// `servers[].rfc.saprouter` in `connections.json`.
+    ConfigFile,
+}
+
+impl SaprouterSource {
+    /// How reports name the source; the route itself is never printed.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Environment => "environment",
+            Self::LocalFile => "connections.local.json",
+            Self::ConfigFile => "connections.json",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -150,6 +193,7 @@ impl Config {
             return Err(format!("client {client} not configured for {system_id}"));
         }
         let (user, password) = Self::credentials(&system_id, &client, env, &self.local)?;
+        let (rfc, saprouter_source) = Self::saprouter(&system_id, rfc, env, &self.local);
         let adt = Self::adt_endpoint(&system_id, server)?;
         let policies = server.policies.as_ref().map_or_else(
             || self.policies.clone(),
@@ -165,8 +209,36 @@ impl Config {
             lang: server.lang.clone().unwrap_or_else(|| "EN".to_owned()),
             adt,
             rfc,
+            saprouter_source,
             policies,
         })
+    }
+
+    /// `servers[].rfc.saprouter` is per system, so `<SID>_SAPROUTER` replaces it for every client
+    /// of that system: environment first, then `connections.local.json`, then the config file.
+    /// The key exists because a route string may carry a `/W/<password>`.
+    fn saprouter(
+        system_id: &str,
+        mut rfc: RfcConfig,
+        env: &BTreeMap<String, String>,
+        local: &BTreeMap<String, String>,
+    ) -> (RfcConfig, Option<SaprouterSource>) {
+        let key = format!("{system_id}_SAPROUTER");
+
+        if let Some(route) = non_empty(env, &key) {
+            rfc.saprouter = Some(route);
+
+            return (rfc, Some(SaprouterSource::Environment));
+        }
+        if let Some(route) = non_empty(local, &key) {
+            rfc.saprouter = Some(route);
+
+            return (rfc, Some(SaprouterSource::LocalFile));
+        }
+        rfc.saprouter = rfc.saprouter.clone().filter(|route| !route.is_empty());
+        let source = rfc.saprouter.as_ref().map(|_| SaprouterSource::ConfigFile);
+
+        (rfc, source)
     }
 
     /// `host` and `port` form the ADT endpoint together; a server with neither is RFC-only,
@@ -310,6 +382,11 @@ fn credential(
         .or_else(|| local.get(&key).filter(|value| !value.is_empty()))
         .cloned()
         .ok_or_else(|| format!("missing {key}"))
+}
+
+/// A key-map value; an empty value counts as absent, like the credential keys.
+fn non_empty(map: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    map.get(key).filter(|value| !value.is_empty()).cloned()
 }
 
 fn policies_of(document: &Option<PolicyDocument>) -> Policies {

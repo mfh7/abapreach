@@ -56,6 +56,11 @@ impl Doctor {
             connection.rfc.ashost, connection.rfc.sysnr
         ));
 
+        // The route may carry a `/W/<password>`, so only its source is ever printed.
+        if let Some(source) = connection.saprouter_source {
+            lines.push(format!("SAProuter: configured (from {})", source.label()));
+        }
+
         let mut passed = true;
         let mut adt_passed = false;
         let mut rfc_passed = false;

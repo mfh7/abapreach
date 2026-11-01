@@ -341,6 +341,30 @@ fn an_unanswered_lock_and_failed_session_end_warn_that_the_lock_may_remain() {
 }
 
 #[test]
+fn a_refused_lock_and_failed_session_end_do_not_warn_about_a_lock() {
+    let mut transport = replay(
+        FIXTURE,
+        vec![fx(6), no_inactive(), Step::Any(Ok(Response::empty(423)))],
+    )
+    .failing_close(TransportError::PostSendUncertain("close lost".to_owned()));
+    let outcome = DeployProg::run(&mut transport, v2(), None);
+
+    // A refused LOCK creates no lock, so the session-end note must not mention one.
+    assert_eq!(outcome.exit, 1);
+    assert!(
+        outcome.stdout.ends_with("REJECTED: lock failed: HTTP 423"),
+        "{}",
+        outcome.stdout
+    );
+    assert_eq!(
+        outcome.stderr,
+        "W: session close failed: post-send outcome uncertain: close lost"
+    );
+    assert_eq!(transport.closes, 1);
+    transport.assert_finished();
+}
+
+#[test]
 fn failed_or_uncertain_unlock_forces_exit_1() {
     let failures = [
         (Ok(Response::empty(500)), "UNLOCK FAILED (HTTP 500)"),

@@ -361,9 +361,28 @@ fn the_ask_policy_prompts_and_continues_on_yes() {
     );
     assert_eq!(
         result.outcome.stderr,
-        format!("W: overwriting the inactive version of {OTHER} (policy allow)")
+        format!("W: overwriting the inactive version of {OTHER} (confirmed at the prompt)")
     );
     assert_eq!(locks(&transport.calls), 1);
+    transport.assert_finished();
+}
+
+#[test]
+fn the_ask_policy_reports_confirmation_in_the_warning() {
+    let mut transport = replay(FIXTURE, simulate_steps(FOREIGN_INACTIVE_FEED));
+    let terminal = FakeTerminal::answering(true);
+    let result = DeployProg::run_classified_with(
+        &mut transport,
+        input(true),
+        Some(&connection(ForeignInactive::Ask)),
+        &CancelFlag::new(),
+        &terminal,
+    );
+
+    assert_eq!(
+        result.outcome.stderr,
+        format!("W: overwriting the inactive version of {OTHER} (confirmed at the prompt)")
+    );
     transport.assert_finished();
 }
 

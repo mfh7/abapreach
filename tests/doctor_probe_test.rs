@@ -470,3 +470,55 @@ fn a_missing_rfc_library_skips_the_ping_and_fails_the_doctor() {
         (1, 1, 0)
     );
 }
+
+/// A route with a route password lives in the environment, never in the shared config file.
+#[test]
+fn doctor_names_the_route_source_and_never_prints_the_route() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let route = "/H/router.example.com/S/3299/W/route-secret";
+
+    fake.adt.push_back(discovery());
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let mut env = env(directory.path());
+    env.insert("DEV_SAPROUTER".to_owned(), route.to_owned());
+
+    let exit = run(
+        ["abapreach", "doctor", "--conn", "dev_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        env,
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0);
+    assert!(
+        exit.stdout
+            .lines()
+            .any(|line| line == "SAProuter: configured (from environment)"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        !exit.stdout.contains("router.example.com"),
+        "{}",
+        exit.stdout
+    );
+    assert!(!exit.stdout.contains("route-secret"), "{}", exit.stdout);
+}
+
+#[test]
+fn doctor_without_a_configured_route_prints_no_saprouter_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(discovery());
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert!(!exit.stdout.contains("SAProuter"), "{}", exit.stdout);
+}

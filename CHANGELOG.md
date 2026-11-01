@@ -8,6 +8,14 @@ the internal repository where that implementation was developed.
 
 ## [Unreleased]
 
+### Added
+- `<SID>_SAPROUTER` gives the SAProuter route of a system a home outside the shared config file.
+  Lookup follows the credential keys (environment, then `connections.local.json`, then
+  `servers[].rfc.saprouter` in `connections.json`); a route found there replaces the config value
+  for every client of that system. A route may carry a `/W/<password>`, so it is never printed:
+  `doctor` reports `SAProuter: configured (from <environment|connections.local.json|connections.json>)`
+  and the route is scrubbed from command output like a password.
+
 ### Fixed
 - A read-only GET without reply falls back like a connection failure.
 - Doctor capability lines list only probed-ok backends.

@@ -496,7 +496,8 @@ struct Run<'a> {
     confirmer: &'a dyn Confirmer,
     /// A completed mutating request closes the routing window, even when later reads fail.
     write_sent: bool,
-    /// Set immediately before sending LOCK, including a request whose reply is lost.
+    /// Whether a lock may exist: a LOCK reply that was a 2xx, or a LOCK request whose reply was
+    /// lost. A refused LOCK leaves no lock, so a later session-end failure stays quiet about it.
     lock_sent: bool,
 }
 
@@ -766,7 +767,12 @@ impl Run<'_> {
             .insert("Accept".to_owned(), LOCK_ACCEPT.to_owned());
         let before_write = !self.write_sent;
         let response = self.call(request);
-        self.lock_sent = response.is_ok() || response.as_ref().is_err_and(TransportError::was_sent);
+        // A refused LOCK creates no lock, so only a 2xx reply, or a reply that never arrived, can
+        // leave one behind.
+        self.lock_sent = match &response {
+            Ok(response) => (200..300).contains(&response.status),
+            Err(error) => error.was_sent(),
+        };
         let response = response.map_err(|error| {
             let finish = Finish::error(&error, before_write);
 

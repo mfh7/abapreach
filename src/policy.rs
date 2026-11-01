@@ -191,7 +191,9 @@ fn ask(owner: &str, prompt: Option<Prompt<'_>>, confirmer: &dyn Confirmer) -> De
     }
 
     if confirmer.confirm(&prompt.summary(owner)) {
-        return Decision::Continue(Some(overwrite(owner)));
+        return Decision::Continue(Some(format!(
+            "W: overwriting the inactive version of {owner} (confirmed at the prompt)"
+        )));
     }
 
     Decision::Refuse(format!("{} (declined at the prompt)", exists(owner)))

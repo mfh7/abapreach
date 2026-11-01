@@ -1,7 +1,7 @@
-use abapreach::config::{Config, ConfigPaths, Connection, scrub, tls_warning};
+use abapreach::config::{Config, ConfigPaths, Connection, SaprouterSource, scrub, tls_warning};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn resolves_config_env_credentials_and_defaults() {
@@ -324,4 +324,95 @@ fn an_unknown_policy_name_or_value_stops_at_load() {
             .unwrap_err()
             .contains("unknown variant `maybe`")
     );
+}
+
+/// One config of two systems: `DEV` has a plain route in `rfc.saprouter` and two clients, `QAS`
+/// has no route at all. Both systems have a credentials entry for client `100`.
+fn saprouter_config(directory: &Path) -> (ConfigPaths, BTreeMap<String, String>) {
+    let connections = directory.join("connections.json");
+    let local = directory.join("connections.local.json");
+    let config = r#"{"servers":[
+        {"systemId":"DEV","host":"example.com","port":443,"clients":["100","200"],
+         "rfc":{"ashost":"example.com","sysnr":"00","saprouter":"/H/config.example.com/S/3299"}},
+        {"systemId":"QAS","clients":["100"],"rfc":{"ashost":"example.com","sysnr":"02"}}]}"#;
+    fs::write(&connections, config).unwrap();
+    let env = BTreeMap::from([
+        ("DEV_100_USER".to_owned(), "dev-user".to_owned()),
+        ("DEV_100_PASS".to_owned(), "dev-password".to_owned()),
+        ("DEV_200_USER".to_owned(), "dev-user".to_owned()),
+        ("DEV_200_PASS".to_owned(), "dev-password".to_owned()),
+        ("QAS_100_USER".to_owned(), "qas-user".to_owned()),
+        ("QAS_100_PASS".to_owned(), "qas-password".to_owned()),
+    ]);
+
+    (ConfigPaths { connections, local }, env)
+}
+
+fn resolve_route(
+    paths: ConfigPaths,
+    env: &BTreeMap<String, String>,
+    connection_id: &str,
+) -> (Option<String>, Option<SaprouterSource>) {
+    let connection = Config::load(paths, env)
+        .unwrap()
+        .resolve(connection_id, env)
+        .unwrap();
+
+    (connection.rfc.saprouter, connection.saprouter_source)
+}
+
+#[test]
+fn the_system_route_comes_from_env_then_local_then_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let (paths, mut env) = saprouter_config(directory.path());
+
+    fs::write(
+        &paths.local,
+        concat!(
+            r#"{"DEV_SAPROUTER":"/H/local.example.com/S/3299/W/local-secret","#,
+            r#""QAS_SAPROUTER":"/H/qas-local.example.com/S/3299"}"#,
+        ),
+    )
+    .unwrap();
+    env.insert(
+        "DEV_SAPROUTER".to_owned(),
+        "/H/env.example.com/S/3299/W/env-secret".to_owned(),
+    );
+
+    for client in ["dev_100", "dev_200"] {
+        assert_eq!(
+            resolve_route(paths.clone(), &env, client),
+            (
+                Some("/H/env.example.com/S/3299/W/env-secret".to_owned()),
+                Some(SaprouterSource::Environment)
+            ),
+            "{client}"
+        );
+    }
+
+    env.remove("DEV_SAPROUTER");
+    assert_eq!(
+        resolve_route(paths.clone(), &env, "dev_200"),
+        (
+            Some("/H/local.example.com/S/3299/W/local-secret".to_owned()),
+            Some(SaprouterSource::LocalFile)
+        )
+    );
+    assert_eq!(
+        resolve_route(paths.clone(), &env, "qas_100"),
+        (
+            Some("/H/qas-local.example.com/S/3299".to_owned()),
+            Some(SaprouterSource::LocalFile)
+        )
+    );
+
+    fs::write(&paths.local, "{}").unwrap();
+    assert_eq!(
+        resolve_route(paths.clone(), &env, "dev_100"),
+        (
+            Some("/H/config.example.com/S/3299".to_owned()),
+            Some(SaprouterSource::ConfigFile)
+        )
+    );
+    assert_eq!(resolve_route(paths, &env, "qas_100"), (None, None));
 }

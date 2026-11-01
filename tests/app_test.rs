@@ -1337,3 +1337,101 @@ fn the_cancel_flag_of_the_factories_reaches_the_deploy() {
     );
     assert_eq!(cell.borrow().calls[0].uri, SOURCE_URI);
 }
+
+/// `QAS_100` is RFC-only with a route from `connections.local.json`; a route that reaches a
+/// report line is scrubbed like a password.
+#[test]
+fn the_route_never_reaches_an_error_message() {
+    const ROUTE: &str = "/H/router.example.com/S/3299/W/route-secret";
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("out.abap");
+    let mut fake = Fake::default();
+
+    fs::write(
+        directory.path().join("connections.local.json"),
+        format!(r#"{{"QAS_SAPROUTER":"{ROUTE}"}}"#),
+    )
+    .unwrap();
+    fake.rfc
+        .push_back(Err(TransportError::PreSendConnectivity(format!(
+            "cannot reach {ROUTE}: connection refused"
+        ))));
+
+    let exit = go(
+        &read_args(out.to_str().unwrap(), "qas_100"),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1);
+    assert!(
+        exit.stderr.contains("connection refused"),
+        "{}",
+        exit.stderr
+    );
+    assert!(!exit.stderr.contains("route-secret"), "{}", exit.stderr);
+    assert!(
+        !exit.stderr.contains("router.example.com"),
+        "{}",
+        exit.stderr
+    );
+}
+
+/// RFC libraries can report a masked route or a single hop rather than the configured route.
+#[test]
+fn partial_or_masked_router_routes_are_scrubbed() {
+    const ROUTE: &str = "/H/edge.example.com/S/3299/W/route-secret/H/core.example.com/S/3299";
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("out.abap");
+    let mut fake = Fake::default();
+
+    fs::write(
+        directory.path().join("connections.local.json"),
+        format!(r#"{{"QAS_SAPROUTER":"{ROUTE}"}}"#),
+    )
+    .unwrap();
+    fake.rfc
+        .push_back(Err(TransportError::PreSendConnectivity(
+            "cannot reach /H/edge.example.com/S/3299/W/*** via /H/core.example.com/S/3299 (route-secret)"
+                .to_owned(),
+        )));
+
+    let exit = go(
+        &read_args(out.to_str().unwrap(), "qas_100"),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1);
+    for secret in ["route-secret", "edge.example.com", "core.example.com"] {
+        assert!(!exit.stderr.contains(secret), "{}", exit.stderr);
+    }
+}
+
+#[test]
+fn router_hosts_without_a_route_password_are_scrubbed() {
+    const ROUTE: &str = "/H/edge.example.com/S/3299/H/core.example.com/S/3299";
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("out.abap");
+    let mut fake = Fake::default();
+
+    fs::write(
+        directory.path().join("connections.local.json"),
+        format!(r#"{{"QAS_SAPROUTER":"{ROUTE}"}}"#),
+    )
+    .unwrap();
+    fake.rfc.push_back(Err(TransportError::PreSendConnectivity(
+        "cannot reach /H/core.example.com/S/3299 after /H/edge.example.com/S/3299".to_owned(),
+    )));
+
+    let exit = go(
+        &read_args(out.to_str().unwrap(), "qas_100"),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1);
+    for host in ["edge.example.com", "core.example.com"] {
+        assert!(!exit.stderr.contains(host), "{}", exit.stderr);
+    }
+}
