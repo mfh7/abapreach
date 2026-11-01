@@ -6,6 +6,20 @@ is dropped. Each milestone ships as a minor release (0.12.0, 0.13.0, ...); 1.0.0
 every feature below is released and the [release gate](#release-gate) passes. Shipped work
 moves to the [changelog](../CHANGELOG.md).
 
+## Milestones
+
+| Version | Scope |
+| :--- | :--- |
+| 0.11.0 | Programs: read and deploy over ADT HTTP and RFC, `doctor` (released) |
+| 0.11.1 | Fixes from the three-path live test, remaining live tests of 0.11.0 |
+| 0.12.0 | Windows and Linux: RFC library lookup per platform, live tests on every path, CI builds |
+| 0.13.0 | Function modules, classes, interfaces |
+| 0.14.0 | MCP server |
+| later | The remaining features below, one milestone at a time |
+
+Platforms come before new features, so every feature after 0.12.0 is built and tested on
+macOS, Windows and Linux from the start.
+
 ## How a feature reaches SAP
 
 Each feature runs on at least one of three paths. Where more than one fits, ADT HTTP is tried
@@ -98,16 +112,23 @@ runs. The Python server offered `read_source`, `read_table`, `simulate`, `deploy
 
 ## Platforms and distribution
 
-| Platform | Status |
-| :--- | :--- |
-| macOS arm64 | **0.11.0**, tested live |
-| Windows x64 | planned |
-| Linux x64 | planned |
-| CI release binaries | planned |
+Each platform is tested on every path it offers. A path SAP does not ship for a platform is
+listed as not available.
 
-macOS arm64 was tested with the RFC library of SAP GUI for Java. Windows uses the SAP GUI
-library; Linux uses the SAP GUI for Java library or the NW RFC SDK. A platform whose RFC path
-fails its live test is released as ADT HTTP only and documented that way.
+| Platform | ADT HTTP | RFC, SAP GUI library | RFC, NW RFC SDK | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| macOS arm64 | yes | yes | yes | **0.11.0**, tested live |
+| Windows x64 | yes | yes | yes | 0.12.0 |
+| Linux x64 | yes | yes | yes | 0.12.0 |
+| Linux arm64 | yes | not available ¹ | yes | 0.12.0 |
+
+¹ SAP GUI for Java for Linux is built for x86_64 only.
+
+SAP GUI for Windows and its RFC library are x64 only, so the Windows build is x64; on
+Windows on ARM it runs under x64 emulation together with SAP GUI. macOS on Intel is not
+planned: SAP GUI for Java 8.10 is the last release for Intel Macs. CI builds and tests every
+platform above and attaches the binaries to each release. A platform whose RFC path fails its
+live test is released as ADT HTTP only and documented that way.
 
 ## Release gate
 

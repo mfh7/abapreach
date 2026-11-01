@@ -284,7 +284,7 @@ and passes a live test.
     <td align="left">planned</td>
   </tr>
   <tr>
-    <td align="left">Windows and Linux binaries</td>
+    <td align="left">Windows x64, Linux x64 and arm64 binaries</td>
     <td align="left">planned</td>
   </tr>
 </table>
