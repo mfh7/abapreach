@@ -421,10 +421,10 @@ impl Run<'_> {
         self.stdout.push(diff.trim_end().to_owned());
         self.stdout.push(format!("live hash {live_hash}"));
 
-        let lock = self.lock()?;
-        // From here on the lock belongs to this run: Ctrl-C sets the flag instead of exiting, so
-        // every path below still unlocks before it reports.
         let _lock_scope = cancel.hold_lock();
+        // Ctrl-C is deferred while the LOCK request is in flight too: its 2xx reply may already
+        // have created the lock, so every path from that request onward must clean it up.
+        let lock = self.lock()?;
 
         match self.locked(&lock, input, &file, &live_hash, cancel) {
             Locked::Finished(finish) => Ok(self.release(&lock, &input.name, finish)),

@@ -189,20 +189,14 @@ impl HttpTransport {
         #[cfg(not(feature = "test-support"))]
         let response = self.send_real(prepared);
 
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                if stateful {
-                    self.session_open = false;
-                }
-                return Err(error);
-            }
-        };
+        let response = response?;
 
-        if stateful {
-            self.session_open = !matches!(response.status, 401 | 403)
-                && ((200..300).contains(&response.status)
-                    || Self::header(&response.headers, "set-cookie").is_some());
+        if stateful
+            && !matches!(response.status, 401 | 403)
+            && ((200..300).contains(&response.status)
+                || Self::header(&response.headers, "set-cookie").is_some())
+        {
+            self.session_open = true;
         }
 
         Ok(response)

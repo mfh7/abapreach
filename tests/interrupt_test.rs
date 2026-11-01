@@ -109,10 +109,33 @@ fn the_lock_is_held_from_the_lock_request_until_the_unlock() {
 
     assert_eq!(outcome.status, Some(Status::SimulatedOk));
     assert_eq!(outcome.exit, 0);
-    assert_eq!(transport.held(), vec![false, false, true, true, true]);
+    assert_eq!(transport.held(), vec![false, true, true, true, true]);
     assert!(!transport.closed_with_lock_held);
     assert!(!cancel.lock_held());
     assert!(transport.interrupts.is_empty());
+}
+
+#[test]
+fn an_interrupt_during_the_lock_request_is_deferred_and_unlocks() {
+    let cancel = CancelFlag::new();
+    let mut transport = Watch::new(replay(FIXTURE, vec![fx(6), fx(7), fx(9)]), &cancel, Some(1));
+
+    let outcome = DeployProg::run_with_cancel(&mut transport, changed(), &cancel);
+
+    assert_eq!(transport.interrupts, vec![InterruptAction::Deferred]);
+    assert_eq!(outcome.exit, 1);
+    assert!(outcome.stderr.starts_with("CANCELED"), "{}", outcome.stderr);
+    assert!(
+        transport
+            .watched
+            .last()
+            .unwrap()
+            .0
+            .contains("_action=UNLOCK")
+    );
+    assert_eq!(transport.inner.closes, 1);
+    assert!(!cancel.lock_held());
+    transport.inner.assert_finished();
 }
 
 #[test]

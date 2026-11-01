@@ -117,6 +117,49 @@ fn stateful() {
 }
 
 #[test]
+fn a_forbidden_unlock_still_ends_an_open_session() {
+    let mut transport = HttpTransport::for_test(vec![
+        Ok(Response::empty(200)),
+        Ok(Response::empty(403)),
+        Ok(Response::empty(200)),
+    ]);
+
+    transport
+        .request(Request::post("/lock", Vec::new()))
+        .unwrap();
+    assert_eq!(
+        transport
+            .request(Request::post("/unlock", Vec::new()))
+            .unwrap()
+            .status,
+        403
+    );
+    transport.close().unwrap();
+
+    assert_eq!(transport.recorded().len(), 3);
+    assert_eq!(
+        transport.recorded()[2].headers["X-sap-adt-sessiontype"],
+        "stateless"
+    );
+}
+
+#[test]
+fn a_first_request_unauthorized_does_not_end_a_session() {
+    let mut transport = HttpTransport::for_test(vec![Ok(Response::empty(401))]);
+
+    assert_eq!(
+        transport
+            .request(Request::get("/discovery"))
+            .unwrap()
+            .status,
+        401
+    );
+    transport.close().unwrap();
+
+    assert_eq!(transport.recorded().len(), 1);
+}
+
+#[test]
 fn a_failed_session_end_is_reported_and_not_retried() {
     let failure = TransportError::PostSendUncertain("HTTP timeout after request send".to_owned());
     let mut transport =
