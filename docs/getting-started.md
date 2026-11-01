@@ -1,6 +1,6 @@
 # Getting started
 
-ABAPReach 0.11.0 is a macOS arm64-tested CLI for reading and deploying the active
+ABAPReach 0.11.1 is a macOS arm64-tested CLI for reading and deploying the active
 source of **existing ABAP programs** (`PROG`). You need a Rust toolchain that
 supports edition 2024, an SAP user allowed to access the relevant ADT or RFC
 services, and a reachable SAP system. Deploy also needs the SAP-side permissions
@@ -214,14 +214,14 @@ response. Deploy can leave an inactive version after failed activation. Read
 [Deploy safety](deploy-safety.md) and [Behavior differences](behavior-differences.md)
 before the first write.
 
-ABAPReach 0.11.0 has no MCP server yet; it is part of 1.0.0 (see the
+ABAPReach 0.11.1 has no MCP server yet; it is part of 1.0.0 (see the
 [roadmap](roadmap.md#mcp-server)). An AI tool may invoke the CLI as part of a
 user-controlled workflow, but the CLI does not grant the AI any SAP
 permissions of its own.
 
 ## Tested environment
 
-ABAPReach 0.11.0 was tested live on three paths: ADT HTTP, RFC with the
+ABAPReach 0.11.1 was tested live on three paths: ADT HTTP, RFC with the
 library from SAP GUI, and RFC with the NW RFC SDK. Each path ran `doctor`,
 `read`, `deploy --simulate`, `deploy`, an unchanged deploy, a base hash
 mismatch, a syntax error, a wrong password, and (on 7.50) another user's

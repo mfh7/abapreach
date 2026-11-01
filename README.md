@@ -5,7 +5,7 @@
 **Read and deploy ABAP source from the command line, over ADT HTTP or RFC, including
 systems you can only reach through SAProuter.**
 
-![version](https://img.shields.io/badge/version-0.11.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows-not_tested_yet-lightgrey) ![Linux](https://img.shields.io/badge/Linux-not_tested_yet-lightgrey) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
+![version](https://img.shields.io/badge/version-0.11.1-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows-not_tested_yet-lightgrey) ![Linux](https://img.shields.io/badge/Linux-not_tested_yet-lightgrey) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
 
 ```text
 $ abapreach deploy PROG ZDEMO ZDEMO.abap --base 63886692bf65... --conn A4H_001
@@ -38,7 +38,7 @@ ACTIVE
 - **Same commands on both backends.** ADT HTTP is tried first. ABAPReach moves to RFC only
   when nothing has been sent yet, and never after an authorization error.
 
-Version 0.11.0 covers existing programs (`PROG`). Every other feature of the earlier Python
+Version 0.11.1 covers existing programs (`PROG`). Every other feature of the earlier Python
 tooling is scheduled for 1.0.0; see the [roadmap](#roadmap).
 
 ## Quick start
