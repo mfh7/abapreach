@@ -95,5 +95,6 @@ impl TransportError {
 pub trait SadtTransport {
     fn request(&mut self, request: Request) -> Result<Response, TransportError>;
 
-    fn close(&mut self);
+    /// Ends the session; a failure is reported, never turned into a different verdict.
+    fn close(&mut self) -> Result<(), TransportError>;
 }

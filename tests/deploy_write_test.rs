@@ -75,8 +75,8 @@ impl SadtTransport for CancelOnPut {
         self.inner.request(request)
     }
 
-    fn close(&mut self) {
-        self.inner.close();
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
     }
 }
 

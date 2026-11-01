@@ -118,7 +118,9 @@ impl SadtTransport for ScriptedTransport {
             .expect("request without a scripted response")
     }
 
-    fn close(&mut self) {
+    fn close(&mut self) -> Result<(), TransportError> {
         self.closes += 1;
+
+        Ok(())
     }
 }

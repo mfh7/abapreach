@@ -98,6 +98,18 @@ impl RfcLibrary {
         &self.path
     }
 
+    /// The SDK version reported by `RfcGetVersion`; no connection is opened for it.
+    pub fn version(&self) -> Result<(u32, u32, u32), String> {
+        let get_version: RfcGetVersion = load_symbol(self.library(), b"RfcGetVersion\0")?;
+        let (mut major, mut minor, mut patch) = (0, 0, 0);
+
+        unsafe {
+            get_version(&mut major, &mut minor, &mut patch);
+        }
+
+        Ok((major, minor, patch))
+    }
+
     pub fn library(&self) -> &Library {
         &self.library
     }
@@ -199,11 +211,13 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
         })
     }
 
-    fn close(&mut self) {
+    fn close(&mut self) -> Result<(), TransportError> {
         if self.opened {
             self.api.close();
             self.opened = false;
         }
+
+        Ok(())
     }
 }
 

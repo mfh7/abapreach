@@ -21,6 +21,15 @@ line count and the content hash. `deploy` always prints a unified diff (`--- liv
 and the `live hash`; `--simulate` runs everything up to a syntax check without saving and then
 releases the lock. `--base` stops the run when the live source no longer has that hash.
 
+## Doctor
+
+`doctor` is read-only and checks one connection per backend: the configuration and the
+credentials are checked locally (their values are never printed), ADT gets one
+`GET /sap/bc/adt/discovery`, the RFC library is looked up and asked for its `RfcGetVersion`,
+and RFC gets one `RfcPing`, its only logon. Every probe is reported even when an earlier one
+failed; a missing RFC library skips the ping instead of failing it. Exit 0 only when every
+probe passed, 1 otherwise.
+
 ## Statuses and exit codes
 
 | Result | Exit |
@@ -31,9 +40,11 @@ releases the lock. `--base` stops the run when the live source no longer has tha
 
 After a write whose outcome is unknown (timeout or lost connection after the PUT or the
 activation was sent) the tool only reads: it compares the active and the inactive source with
-the file and reports `ACTIVE (reconciled)`, `INACTIVE`, `PARTIAL: outcome unknown` or
-`PARTIAL: unexpected state`, always with exit 1 and `check with read before retrying`. It never
-retries and never switches backend.
+the file and reports `ACTIVE (reconciled)`, `INACTIVE`, `PARTIAL: outcome unknown`,
+`PARTIAL: unexpected state` or `PARTIAL: reconciliation incomplete, inactive source unreadable
+(<reason>)` when the inactive source cannot be read (HTTP status, timeout, bad UTF-8); every
+result exits 1 with `check with read before retrying`. It never retries and never switches
+backend.
 
 ## Configuration
 

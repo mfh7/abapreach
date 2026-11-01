@@ -16,6 +16,51 @@ impl fmt::Display for BackendKind {
     }
 }
 
+impl BackendKind {
+    /// Short token used by the report that simulate and deploy print.
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::AdtHttp => "adt",
+            Self::RfcSadt => "rfc",
+        }
+    }
+}
+
+/// Why the router picked the backend an operation runs on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SelectionReason {
+    /// `--backend` named it.
+    ExplicitBackend,
+    /// No `--backend`: ADT is tried first.
+    DefaultAdt,
+    /// The first backend failed before it sent anything; the string is that failure.
+    Fallback(String),
+}
+
+impl fmt::Display for SelectionReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExplicitBackend => write!(formatter, "explicit --backend"),
+            Self::DefaultAdt => write!(formatter, "default ADT"),
+            Self::Fallback(failure) => write!(formatter, "fallback to RFC: {failure}"),
+        }
+    }
+}
+
+/// The router's decision: the backend that runs the operation and why it was chosen.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Selection {
+    pub backend: BackendKind,
+    pub reason: SelectionReason,
+}
+
+impl Selection {
+    pub fn new(backend: BackendKind, reason: SelectionReason) -> Self {
+        Self { backend, reason }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationKind {
     ReadProg,

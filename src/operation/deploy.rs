@@ -1,10 +1,10 @@
 use crate::adt::{AdtMessage, parse_messages, prog_uri};
-use crate::backend::Failure;
+use crate::backend::{Failure, Selection};
 use crate::config::{Connection, tls_warning};
 use crate::domain::{Outcome, Status};
 use crate::hash::{normalize, source_hash, validate_prog};
 use crate::transport::{Request, Response, SadtTransport, TransportError};
-use quick_xml::escape::resolve_predefined_entity;
+use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
 use similar::TextDiff;
@@ -52,6 +52,8 @@ pub struct DeployResult {
     pub outcome: Outcome,
     pub failure: Option<Failure>,
     pub fallback_allowed: bool,
+    /// The message of the failing request, quoted as the reason of a fallback.
+    pub detail: Option<String>,
 }
 
 pub struct DeployProg;
@@ -79,18 +81,43 @@ impl DeployProg {
         connection: Option<&Connection>,
         cancel: &CancelFlag,
     ) -> DeployResult {
+        Self::run_with(transport, input, None, connection, cancel)
+    }
+
+    /// Like `run_classified`, but prints the routing decision first; the CLI always has one.
+    pub fn run_selected(
+        transport: &mut dyn SadtTransport,
+        input: DeployInput,
+        selection: &Selection,
+        connection: Option<&Connection>,
+        cancel: &CancelFlag,
+    ) -> DeployResult {
+        Self::run_with(transport, input, Some(selection), connection, cancel)
+    }
+
+    fn run_with(
+        transport: &mut dyn SadtTransport,
+        input: DeployInput,
+        selection: Option<&Selection>,
+        connection: Option<&Connection>,
+        cancel: &CancelFlag,
+    ) -> DeployResult {
         let mut run = Run {
             transport,
             name: input.name.clone(),
             uri: prog_uri(&input.name),
-            stdout: Vec::new(),
+            stdout: selection.map(selection_report).unwrap_or_default(),
             sent: 0,
         };
-        let finish = match run.flow(&input, cancel) {
+        let mut finish = match run.flow(&input, cancel) {
             Ok(finish) | Err(finish) => finish,
         };
 
-        run.transport.close();
+        if let Err(error) = run.transport.close()
+            && !finish.lock_unreleased
+        {
+            finish.close_failed(&error.to_string());
+        }
 
         if let Some(warning) = connection.and_then(tls_warning) {
             run.stdout.insert(0, warning);
@@ -107,6 +134,7 @@ impl DeployProg {
             },
             failure: finish.failure,
             fallback_allowed: finish.fallback_allowed,
+            detail: finish.detail,
         }
     }
 }
@@ -119,6 +147,9 @@ struct Finish {
     stderr: Option<String>,
     failure: Option<Failure>,
     fallback_allowed: bool,
+    detail: Option<String>,
+    /// Set once the unlock failed: the run already reported a lock that may remain.
+    lock_unreleased: bool,
 }
 
 impl Finish {
@@ -130,6 +161,8 @@ impl Finish {
             stderr: None,
             failure: None,
             fallback_allowed: false,
+            detail: None,
+            lock_unreleased: false,
         }
     }
 
@@ -161,6 +194,7 @@ impl Finish {
             stderr: Some(format!("ERROR: {error}")),
             failure: Some(failure),
             fallback_allowed: first_request && failure == Failure::PreSendConnectivity,
+            detail: Some(error.to_string()),
             ..Self::new(None, 1)
         }
     }
@@ -221,11 +255,22 @@ impl Finish {
         let note = format!("UNLOCK FAILED ({reason}); the lock on {name} may remain");
 
         self.exit = 1;
+        self.lock_unreleased = true;
         self.stderr = Some(match self.stderr {
             Some(existing) => format!("{existing}\n{note}"),
             None => note,
         });
         self
+    }
+
+    /// The work is done and the lock is gone, so a failed session end is a warning only.
+    fn close_failed(&mut self, reason: &str) {
+        let note = format!("W: session close failed: {reason} (lock was released)");
+
+        self.stderr = Some(match self.stderr.take() {
+            Some(existing) => format!("{existing}\n{note}"),
+            None => note,
+        });
     }
 }
 
@@ -506,17 +551,7 @@ impl Run<'_> {
 
     /// Runs after the unlock; the verdict is the active content, not the activation status.
     fn activate(&mut self, name: &str, live_hash: &str, file: &[String]) -> Finish {
-        let uri = &self.uri;
-        let body = format!(
-            concat!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>"#,
-                r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">"#,
-                r#"<adtcore:objectReference adtcore:uri="{uri}" adtcore:name="{name}"/>"#,
-                r#"</adtcore:objectReferences>"#,
-            ),
-            uri = uri,
-            name = name.to_ascii_uppercase()
-        );
+        let body = activation_request_xml(name, &self.uri);
         let mut request = Request::post(
             "/sap/bc/adt/activation?method=activate&preauditRequested=true",
             body.into_bytes(),
@@ -580,30 +615,35 @@ impl Run<'_> {
             Ok(active) => active,
             Err(finish) => return finish.unreadable(),
         };
-        let inactive = if source_hash(&active) == source_hash(file) {
-            None
-        } else {
-            self.read_inactive()
-        };
-        let (status, message) = reconcile(&active, inactive.as_deref(), live_hash, file);
+        let inactive = self.read_inactive();
+        let (status, message) = reconcile(&active, &inactive, live_hash, file);
 
         Finish::status(status, message).exit_one()
     }
 
-    fn read_inactive(&mut self) -> Option<Vec<String>> {
+    /// The inactive source, or why it cannot be read: a failed read is never "no inactive".
+    fn read_inactive(&mut self) -> InactiveRead {
         let mut request = Request::get(format!("{}/source/main?version=inactive", self.uri));
         request
             .headers
             .insert("Accept".to_owned(), "text/plain".to_owned());
-        let response = self.call(request).ok()?;
+        let response = match self.call(request) {
+            Ok(response) => response,
+            Err(error) => return InactiveRead::Unreadable(error.to_string()),
+        };
 
-        if response.status != 200 {
-            return None;
+        if response.status == 404 {
+            return InactiveRead::Absent;
         }
 
-        let text = String::from_utf8(response.body).ok()?;
+        if response.status != 200 {
+            return InactiveRead::Unreadable(format!("HTTP {}", response.status));
+        }
 
-        Some(text.split('\n').map(str::to_owned).collect())
+        match String::from_utf8(response.body) {
+            Ok(text) => InactiveRead::Read(text.split('\n').map(str::to_owned).collect()),
+            Err(error) => InactiveRead::Unreadable(format!("not UTF-8: {error}")),
+        }
     }
 
     /// Syntax check without saving: the source travels as the checkrun artifact content.
@@ -670,7 +710,7 @@ impl Run<'_> {
 
 /// Request body of `POST /sap/bc/adt/checkruns`; `file` is the normalized source.
 pub fn checkrun_xml(name: &str, file: &[String]) -> String {
-    let uri = prog_uri(name);
+    let uri = escape(prog_uri(name));
     let content = base64(join(file).as_bytes());
 
     format!(
@@ -686,6 +726,20 @@ pub fn checkrun_xml(name: &str, file: &[String]) -> String {
         ),
         uri = uri,
         content = content
+    )
+}
+
+/// Request body of `POST /sap/bc/adt/activation`; name and uri are XML-escaped values.
+pub fn activation_request_xml(name: &str, uri: &str) -> String {
+    format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+            r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">"#,
+            r#"<adtcore:objectReference adtcore:uri="{uri}" adtcore:name="{name}"/>"#,
+            r#"</adtcore:objectReferences>"#,
+        ),
+        uri = escape(uri),
+        name = escape(name.to_ascii_uppercase())
     )
 }
 
@@ -714,22 +768,64 @@ fn base64(bytes: &[u8]) -> String {
 
 const RETRY: &str = "check with read before retrying";
 
-/// Classifies an unknown write outcome by content: `active` and `inactive` are the lines read
+const GUARD_REPORT: [&str; 2] = [
+    "guards: SAP lock/CSRF/transport/authorization, base hash",
+    concat!(
+        "not applied (FM guards): Z/Y name, productive client, system change option, ",
+        "SE06, inactive owned by another user",
+    ),
+];
+
+/// Lines printed before the diff of every simulate and deploy: the backend that runs, why it
+/// was chosen, and which guards hold there.
+pub fn selection_report(selection: &Selection) -> Vec<String> {
+    let mut lines = vec![
+        format!("backend: {}", selection.backend.token()),
+        format!("reason: {}", selection.reason),
+    ];
+
+    lines.extend(GUARD_REPORT.iter().map(|line| (*line).to_owned()));
+
+    lines
+}
+
+/// What the read-only `?version=inactive` answered during reconciliation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InactiveRead {
+    /// The inactive source to compare against the file and the live hash.
+    Read(Vec<String>),
+    /// SAP answered that there is no inactive version.
+    Absent,
+    /// The read failed (HTTP status, timeout, bad UTF-8), so the inactive state is unknown.
+    Unreadable(String),
+}
+
+/// Classifies an unknown write outcome by content: `active` and `inactive` are what was read
 /// afterwards, `live_hash` the hash before the write and `file` the source being deployed.
 /// Every result is reported with exit 1 by the caller; the message always says to read first.
 pub fn reconcile(
     active: &[String],
-    inactive: Option<&[String]>,
+    inactive: &InactiveRead,
     live_hash: &str,
     file: &[String],
 ) -> (Status, String) {
     let active_hash = source_hash(active);
+    let file_hash = source_hash(file);
 
-    if active_hash == source_hash(file) {
-        return (
-            Status::Active,
-            format!("ACTIVE (reconciled): the active source equals the file; {RETRY}"),
-        );
+    if active_hash == file_hash {
+        return match inactive {
+            InactiveRead::Unreadable(reason) => (
+                Status::Active,
+                format!(
+                    "ACTIVE (reconciled), inactive state unknown: the active source equals \
+                     the file but the inactive source cannot be read ({reason}); {RETRY}"
+                ),
+            ),
+            _ => (
+                Status::Active,
+                format!("ACTIVE (reconciled): the active source equals the file; {RETRY}"),
+            ),
+        };
     }
 
     if active_hash != live_hash {
@@ -739,22 +835,33 @@ pub fn reconcile(
         );
     }
 
-    match inactive.map(source_hash) {
-        Some(hash) if hash == source_hash(file) => (
+    match inactive {
+        InactiveRead::Read(lines) if source_hash(lines) == file_hash => (
             Status::Inactive,
             format!("INACTIVE: the PUT reached SAP but the activation did not; {RETRY}"),
         ),
-        None => (
+        InactiveRead::Absent => (
             Status::Partial,
             format!("PARTIAL: outcome unknown; {RETRY}"),
         ),
-        Some(hash) if hash == live_hash || hash == source_hash(&[]) => (
-            Status::Partial,
-            format!("PARTIAL: outcome unknown; {RETRY}"),
-        ),
-        Some(_) => (
+        InactiveRead::Read(lines)
+            if source_hash(lines) == live_hash || source_hash(lines) == source_hash(&[]) =>
+        {
+            (
+                Status::Partial,
+                format!("PARTIAL: outcome unknown; {RETRY}"),
+            )
+        }
+        InactiveRead::Read(_) => (
             Status::Partial,
             format!("PARTIAL: unexpected state; {RETRY}"),
+        ),
+        InactiveRead::Unreadable(reason) => (
+            Status::Partial,
+            format!(
+                "PARTIAL: reconciliation incomplete, inactive source unreadable ({reason}); \
+                 {RETRY}"
+            ),
         ),
     }
 }

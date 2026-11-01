@@ -103,8 +103,8 @@ fn stateful() {
         transport.request(Request::get(uri)).unwrap();
     }
 
-    transport.close();
-    transport.close();
+    transport.close().unwrap();
+    transport.close().unwrap();
 
     let recorded = transport.recorded();
 
@@ -114,6 +114,19 @@ fn stateful() {
         assert_eq!(request.headers["Cookie"], "sid=test");
     }
     assert_eq!(recorded[3].headers["X-sap-adt-sessiontype"], "stateless");
+}
+
+#[test]
+fn a_failed_session_end_is_reported_and_not_retried() {
+    let failure = TransportError::PostSendUncertain("HTTP timeout after request send".to_owned());
+    let mut transport =
+        HttpTransport::for_test(vec![Ok(Response::empty(200)), Err(failure.clone())]);
+
+    transport.request(Request::get("/lock")).unwrap();
+
+    assert_eq!(transport.close(), Err(failure));
+    assert_eq!(transport.close(), Ok(()));
+    assert_eq!(transport.recorded().len(), 2);
 }
 
 #[test]
@@ -132,8 +145,8 @@ fn cookie_store_keeps_every_set_cookie_and_close_ends_the_session() {
         .request(Request::get("/sap/bc/adt/discovery"))
         .unwrap();
     transport.request(Request::get("/lock")).unwrap();
-    transport.close();
-    transport.close();
+    transport.close().unwrap();
+    transport.close().unwrap();
 
     let heads = server
         .join()

@@ -23,7 +23,7 @@ fn reuse() {
             .unwrap();
     }
 
-    transport.close();
+    transport.close().unwrap();
 
     assert_eq!(transport.api().counts(), (1, 1, 4));
 }

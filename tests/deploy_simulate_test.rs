@@ -57,9 +57,76 @@ impl SadtTransport for CancelOnCheck {
         self.inner.request(request)
     }
 
-    fn close(&mut self) {
-        self.inner.close();
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
     }
+}
+
+/// A transport whose session end always fails, with the failure the caller must report.
+struct FailingClose {
+    inner: Replay,
+    failure: TransportError,
+}
+
+impl SadtTransport for FailingClose {
+    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        let _ = self.inner.close();
+
+        Err(self.failure.clone())
+    }
+}
+
+#[test]
+fn a_failed_session_end_after_the_unlock_is_only_a_warning() {
+    let mut transport = FailingClose {
+        inner: replay(FIXTURE, vec![fx(6), fx(7), fx(6), fx(8), fx(9)]),
+        failure: TransportError::PostSendUncertain("gone".to_owned()),
+    };
+    let outcome = DeployProg::run(&mut transport, valid(), None);
+
+    assert_eq!(outcome.status, Some(Status::SimulatedOk));
+    assert_eq!(outcome.exit, 0);
+    assert!(outcome.stdout.ends_with("SIMULATED_OK"));
+    assert_eq!(
+        outcome.stderr,
+        "W: session close failed: post-send outcome uncertain: gone (lock was released)"
+    );
+    assert_eq!(transport.inner.closes, 1);
+    transport.inner.assert_finished();
+}
+
+#[test]
+fn a_failed_unlock_keeps_its_stop_without_a_session_warning() {
+    let mut transport = FailingClose {
+        inner: replay(
+            FIXTURE,
+            vec![
+                fx(6),
+                fx(7),
+                fx(6),
+                fx(8),
+                Step::ReplyTo(9, Ok(Response::empty(500))),
+            ],
+        ),
+        failure: TransportError::PostSendUncertain("gone".to_owned()),
+    };
+    let outcome = DeployProg::run(&mut transport, valid(), None);
+
+    assert_eq!(outcome.status, Some(Status::Partial));
+    assert_eq!(outcome.exit, 1);
+    assert!(
+        outcome
+            .stdout
+            .ends_with("PARTIAL: the check passed but the lock was not released")
+    );
+    assert_eq!(
+        outcome.stderr,
+        "UNLOCK FAILED (HTTP 500); the lock on YTEST_ABAPREACH01 may remain"
+    );
 }
 
 #[test]

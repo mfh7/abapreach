@@ -8,4 +8,4 @@ pub mod hash;
 pub mod operation;
 pub mod transport;
 
-pub use app::{Exit, Factories, Opened, RealFactories, run};
+pub use app::{Exit, Factories, Opened, RealFactories, RfcLibraryInfo, run};

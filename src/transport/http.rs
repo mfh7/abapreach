@@ -268,14 +268,16 @@ impl SadtTransport for HttpTransport {
         Ok(retry)
     }
 
-    /// Ends the stateful ADT session with one stateless request; errors are ignored.
-    fn close(&mut self) {
+    /// Ends the stateful ADT session with one stateless request; the caller reports a failure.
+    fn close(&mut self) -> Result<(), TransportError> {
         if !self.session_open {
-            return;
+            return Ok(());
         }
 
+        // The session stays closed locally even when the request fails: no second attempt.
         self.session_open = false;
         self.csrf_token = None;
-        let _ = self.send_once(&Request::get(DISCOVERY_URI), false);
+        self.send_once(&Request::get(DISCOVERY_URI), false)
+            .map(|_| ())
     }
 }

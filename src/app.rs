@@ -1,13 +1,15 @@
-use crate::backend::{BackendKind, Failure, OperationKind, Router};
+use crate::backend::{BackendKind, Failure, OperationKind, Router, Selection, SelectionReason};
 use crate::cli::{Backend, Cli, Command};
 use crate::config::{Config, ConfigPaths, Connection, scrub, tls_warning};
 use crate::domain::Outcome;
-use crate::hash::validate_prog;
+use crate::hash::{validate_name, validate_prog};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg};
 use crate::operation::doctor::Doctor;
 use crate::operation::read::ReadProg;
 use crate::transport::http::{HttpConfig, HttpTransport};
-use crate::transport::rfc::{DynamicRfcApi, Env, RfcLibrary, RfcTransport, connection_parameters};
+use crate::transport::rfc::{
+    DynamicRfcApi, Env, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
+};
 use crate::transport::{SadtTransport, TransportError};
 use clap::Parser;
 use std::collections::BTreeMap;
@@ -26,12 +28,25 @@ pub struct Exit {
 
 pub type Opened = Result<Box<dyn SadtTransport>, TransportError>;
 
+/// The RFC library a probe found: where it came from and the version it reports.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RfcLibraryInfo {
+    pub path: String,
+    pub version: String,
+}
+
 /// Opens the transports; tests replace it so no network is touched. A failed open must be a
 /// pre-send failure (nothing was sent yet).
 pub trait Factories {
     fn adt(&mut self, connection: &Connection) -> Opened;
 
     fn rfc(&mut self, connection: &Connection) -> Opened;
+
+    /// Loads the RFC library without opening a connection; used by the doctor probe.
+    fn rfc_library(&mut self, connection: &Connection) -> Result<RfcLibraryInfo, String>;
+
+    /// One `RfcPing`: the only logon the doctor probe makes on RFC.
+    fn rfc_ping(&mut self, connection: &Connection) -> Result<(), TransportError>;
 
     fn cancel(&self) -> CancelFlag {
         CancelFlag::new()
@@ -45,6 +60,12 @@ pub struct RealFactories {
 impl RealFactories {
     pub fn new(cancel: CancelFlag) -> Self {
         Self { cancel }
+    }
+
+    fn rfc_api(connection: &Connection) -> Result<DynamicRfcApi, TransportError> {
+        RfcLibrary::load(&Env::current())
+            .and_then(|library| DynamicRfcApi::load(library, connection_parameters(connection)))
+            .map_err(TransportError::PreSendConnectivity)
     }
 }
 
@@ -65,11 +86,27 @@ impl Factories for RealFactories {
     }
 
     fn rfc(&mut self, connection: &Connection) -> Opened {
-        let api = RfcLibrary::load(&Env::current())
-            .and_then(|library| DynamicRfcApi::load(library, connection_parameters(connection)))
-            .map_err(TransportError::PreSendConnectivity)?;
+        let api = Self::rfc_api(connection)?;
 
         Ok(Box::new(RfcTransport::new(api)))
+    }
+
+    fn rfc_library(&mut self, _: &Connection) -> Result<RfcLibraryInfo, String> {
+        let library = RfcLibrary::load(&Env::current())?;
+        let (major, minor, patch) = library.version()?;
+
+        Ok(RfcLibraryInfo {
+            path: library.path().display().to_string(),
+            version: format!("{major}.{minor}.{patch}"),
+        })
+    }
+
+    fn rfc_ping(&mut self, connection: &Connection) -> Result<(), TransportError> {
+        let mut api = Self::rfc_api(connection)?;
+        let result = api.ping();
+
+        api.close();
+        result
     }
 
     fn cancel(&self) -> CancelFlag {
@@ -148,6 +185,8 @@ struct Attempt {
     outcome: Outcome,
     failure: Option<Failure>,
     fallback_allowed: bool,
+    /// The failure message, quoted as the reason when the next backend is a fallback.
+    detail: Option<String>,
 }
 
 impl Attempt {
@@ -165,20 +204,29 @@ impl Attempt {
             },
             failure: Some(failure),
             fallback_allowed: failure == Failure::PreSendConnectivity,
+            detail: Some(message),
         }
     }
 }
 
 fn execute(command: Command, connection: &Connection, factories: &mut dyn Factories) -> Exit {
     match command {
-        Command::Doctor { .. } => Exit {
-            code: 0,
-            stdout: Doctor::offline_report(connection).render(),
-            stderr: String::new(),
-        },
+        Command::Doctor { .. } => {
+            let report = Doctor::probe(connection, factories);
+
+            Exit {
+                code: report.exit(),
+                stdout: report.render(),
+                stderr: String::new(),
+            }
+        }
         Command::Read {
             name, out, force, ..
         } => {
+            if let Err(message) = validate_name(&name) {
+                return stop(message);
+            }
+
             if out.exists() && !force {
                 return stop(format!(
                     "{} already exists; use --force to overwrite",
@@ -192,16 +240,18 @@ fn execute(command: Command, connection: &Connection, factories: &mut dyn Factor
                 false,
                 connection,
                 factories,
-                |transport, _| {
+                |transport, _, _| {
                     let read = ReadProg::run_classified(transport, &name, &out, force, None);
 
-                    transport.close();
+                    // A read holds no lock, so a failed session end changes nothing here.
+                    let _ = transport.close();
 
                     match read {
                         Ok(outcome) => Attempt {
                             outcome,
                             failure: None,
                             fallback_allowed: false,
+                            detail: None,
                         },
                         Err(error) => Attempt::failed(error.message, error.failure),
                     }
@@ -242,13 +292,15 @@ fn execute(command: Command, connection: &Connection, factories: &mut dyn Factor
                 base_given,
                 connection,
                 factories,
-                |transport, cancel| {
-                    let result = DeployProg::run_classified(transport, input.clone(), None, cancel);
+                |transport, selection, cancel| {
+                    let result =
+                        DeployProg::run_selected(transport, input.clone(), selection, None, cancel);
 
                     Attempt {
                         outcome: result.outcome,
                         failure: result.failure,
                         fallback_allowed: result.fallback_allowed,
+                        detail: result.detail,
                     }
                 },
             )
@@ -271,12 +323,16 @@ fn route(
     base_given: bool,
     connection: &Connection,
     factories: &mut dyn Factories,
-    mut attempt: impl FnMut(&mut dyn SadtTransport, &CancelFlag) -> Attempt,
+    mut attempt: impl FnMut(&mut dyn SadtTransport, &Selection, &CancelFlag) -> Attempt,
 ) -> Exit {
     let router = Router::both();
     let cancel = factories.cancel();
     let mut failure = Failure::Initial;
     let mut earlier: Vec<String> = Vec::new();
+    let mut reason = match explicit {
+        Some(_) => SelectionReason::ExplicitBackend,
+        None => SelectionReason::DefaultAdt,
+    };
 
     loop {
         let backend = match router.select(operation, explicit, base_given, failure) {
@@ -296,12 +352,13 @@ fn route(
                 );
             }
         };
+        let selection = Selection::new(backend, reason);
         let opened = match backend {
             BackendKind::AdtHttp => factories.adt(connection),
             BackendKind::RfcSadt => factories.rfc(connection),
         };
         let done = match opened {
-            Ok(mut transport) => attempt(&mut *transport, &cancel),
+            Ok(mut transport) => attempt(&mut *transport, &selection, &cancel),
             Err(error) => Attempt::from_error(&error),
         };
 
@@ -310,6 +367,7 @@ fn route(
         }
 
         failure = done.failure.unwrap_or(Failure::Initial);
+        reason = SelectionReason::Fallback(done.detail.unwrap_or_else(|| failure.to_string()));
         earlier.push(done.outcome.stderr);
         earlier.push(format!(
             "NOTE: {backend} failed before anything was sent; falling back to RFC SADT"

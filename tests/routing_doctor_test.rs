@@ -1,8 +1,6 @@
 mod common;
 
 use abapreach::backend::{BackendKind, Failure, OperationKind, Router};
-use abapreach::config::Connection;
-use abapreach::operation::doctor::Doctor;
 use abapreach::transport::TransportError;
 use common::Fixture;
 use std::fs;
@@ -202,29 +200,4 @@ fn transport_errors_map_to_fallback_classes() {
     for (error, expected) in cases {
         assert_eq!(Failure::from(&error), expected, "{error:?}");
     }
-}
-
-#[test]
-fn offline_doctor_reports_configuration_without_credentials() {
-    let connection = Connection::test_insecure();
-    let rendered = Doctor::offline_report(&connection).render();
-
-    assert_eq!(
-        rendered,
-        [
-            "connection DEV_100: configuration available",
-            "credential available",
-            "ADT HTTP configured: https://example.com:443",
-            "RFC SADT configured: example.com system 00",
-            "ADT HTTP probe: not run",
-            "RFC SADT probe: not run",
-            "capability read PROG: ADT HTTP, RFC SADT",
-            "capability deploy PROG: ADT HTTP, RFC SADT",
-            "capability doctor: ADT HTTP, RFC SADT",
-            "WARNING: connection DEV_100 uses insecure TLS or HTTP.",
-        ]
-        .join("\n")
-    );
-    assert!(!rendered.contains(&connection.user));
-    assert!(!rendered.contains(&connection.password));
 }

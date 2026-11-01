@@ -2,10 +2,11 @@ use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
+/// The ADT URI of a program: the name is lowercased and every namespace `/` becomes `%2f`.
 pub fn prog_uri(name: &str) -> String {
     format!(
         "/sap/bc/adt/programs/programs/{}",
-        name.to_ascii_lowercase()
+        name.to_ascii_lowercase().replace('/', "%2f")
     )
 }
 

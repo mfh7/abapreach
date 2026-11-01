@@ -4,7 +4,7 @@ mod replay;
 use abapreach::backend::Failure;
 use abapreach::domain::Status;
 use abapreach::hash::source_hash;
-use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, reconcile};
+use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, InactiveRead, reconcile};
 use abapreach::transport::{Response, TransportError};
 use replay::{Replay, Step, fx, replay};
 
@@ -19,6 +19,24 @@ fn lost() -> Result<Response, TransportError> {
     Err(TransportError::PostSendUncertain(
         "connection reset".to_owned(),
     ))
+}
+
+/// Every way the read-only inactive GET can fail, with the exact reason it reports.
+fn inactive_failures() -> Vec<(Result<Response, TransportError>, String)> {
+    let mut not_utf8 = Response::text(200, "");
+    not_utf8.body = vec![0xff, 0xfe];
+    let utf8 = String::from_utf8(not_utf8.body.clone()).unwrap_err();
+
+    vec![
+        (Ok(Response::empty(401)), "HTTP 401".to_owned()),
+        (Ok(Response::empty(403)), "HTTP 403".to_owned()),
+        (Ok(Response::empty(500)), "HTTP 500".to_owned()),
+        (
+            lost(),
+            "post-send outcome uncertain: connection reset".to_owned(),
+        ),
+        (Ok(not_utf8), format!("not UTF-8: {utf8}")),
+    ]
 }
 
 fn input(last_line: &str) -> DeployInput {
@@ -64,7 +82,7 @@ fn count(transport: &Replay, needle: &str) -> usize {
 
 #[test]
 fn active_equal_to_the_file_is_reconciled_as_active_with_exit_1() {
-    let (status, message) = reconcile(&lines("file"), None, "h", &lines("file"));
+    let (status, message) = reconcile(&lines("file"), &InactiveRead::Absent, "h", &lines("file"));
 
     assert_eq!(status, Status::Active);
     assert_eq!(
@@ -76,7 +94,12 @@ fn active_equal_to_the_file_is_reconciled_as_active_with_exit_1() {
 #[test]
 fn active_unchanged_with_the_file_inactive_means_the_put_arrived() {
     let live = source_hash(&lines("live"));
-    let (status, message) = reconcile(&lines("live"), Some(&lines("file")), &live, &lines("file"));
+    let (status, message) = reconcile(
+        &lines("live"),
+        &InactiveRead::Read(lines("file")),
+        &live,
+        &lines("file"),
+    );
 
     assert_eq!(status, Status::Inactive);
     assert_eq!(
@@ -89,12 +112,15 @@ fn active_unchanged_with_the_file_inactive_means_the_put_arrived() {
 fn active_unchanged_without_a_usable_inactive_is_outcome_unknown() {
     let live = source_hash(&lines("live"));
     let unknown = format!("PARTIAL: outcome unknown; {RETRY}");
-    let cases: [Option<Vec<String>>; 4] =
-        [None, Some(lines("live")), Some(lines("")), Some(Vec::new())];
+    let cases = [
+        InactiveRead::Absent,
+        InactiveRead::Read(lines("live")),
+        InactiveRead::Read(lines("")),
+        InactiveRead::Read(Vec::new()),
+    ];
 
     for inactive in cases {
-        let (status, message) =
-            reconcile(&lines("live"), inactive.as_deref(), &live, &lines("file"));
+        let (status, message) = reconcile(&lines("live"), &inactive, &live, &lines("file"));
 
         assert_eq!(
             (status, message),
@@ -108,15 +134,30 @@ fn active_unchanged_without_a_usable_inactive_is_outcome_unknown() {
 fn anything_else_is_an_unexpected_state() {
     let live = source_hash(&lines("live"));
     let unexpected = format!("PARTIAL: unexpected state; {RETRY}");
-    let (status, message) = reconcile(&lines("live"), Some(&lines("other")), &live, &lines("file"));
+    let (status, message) = reconcile(
+        &lines("live"),
+        &InactiveRead::Read(lines("other")),
+        &live,
+        &lines("file"),
+    );
 
     assert_eq!((status, message), (Status::Partial, unexpected.clone()));
 
-    let (status, message) = reconcile(&lines("other"), None, &live, &lines("file"));
+    let (status, message) = reconcile(
+        &lines("other"),
+        &InactiveRead::Absent,
+        &live,
+        &lines("file"),
+    );
 
     assert_eq!((status, message), (Status::Partial, unexpected.clone()));
 
-    let (status, message) = reconcile(&lines("other"), Some(&lines("file")), &live, &lines("file"));
+    let (status, message) = reconcile(
+        &lines("other"),
+        &InactiveRead::Read(lines("file")),
+        &live,
+        &lines("file"),
+    );
 
     assert_eq!((status, message), (Status::Partial, unexpected));
 }
@@ -124,14 +165,62 @@ fn anything_else_is_an_unexpected_state() {
 #[test]
 fn crlf_and_trailing_blanks_do_not_change_the_classification() {
     let live = source_hash(&lines("live"));
-    let (status, _) = reconcile(&lines("file  \r\n\n"), None, &live, &lines("file"));
+    let (status, _) = reconcile(
+        &lines("file  \r\n\n"),
+        &InactiveRead::Absent,
+        &live,
+        &lines("file"),
+    );
 
     assert_eq!(status, Status::Active);
 }
 
 #[test]
+fn an_unreadable_inactive_source_while_the_active_is_unchanged_is_reconciliation_incomplete() {
+    let live = source_hash(&lines("live"));
+    let (status, message) = reconcile(
+        &lines("live"),
+        &InactiveRead::Unreadable("HTTP 500".to_owned()),
+        &live,
+        &lines("file"),
+    );
+
+    assert_eq!(
+        (status, message),
+        (
+            Status::Partial,
+            format!(
+                "PARTIAL: reconciliation incomplete, inactive source unreadable (HTTP 500); {RETRY}"
+            )
+        )
+    );
+}
+
+#[test]
+fn an_unreadable_inactive_source_with_the_file_active_says_the_inactive_state_is_unknown() {
+    let reason = "not UTF-8: invalid utf-8 sequence of 1 bytes from index 0";
+    let (status, message) = reconcile(
+        &lines("file"),
+        &InactiveRead::Unreadable(reason.to_owned()),
+        "h",
+        &lines("file"),
+    );
+
+    assert_eq!(status, Status::Active);
+    assert!(message.starts_with("ACTIVE (reconciled), inactive state unknown"));
+    assert!(message.contains(reason));
+    assert!(message.ends_with(RETRY));
+}
+
+#[test]
 fn a_lost_activation_with_the_file_active_is_active_reconciled_and_never_retried() {
-    let tail = vec![fx(17), fx(18), Step::ReplyTo(19, lost()), fx(20)];
+    let tail = vec![
+        fx(17),
+        fx(18),
+        Step::ReplyTo(19, lost()),
+        fx(20),
+        Step::Pair(26, 26),
+    ];
     let mut transport = replay(FIXTURE, steps(v2_until_put(), tail));
     let result = run(&mut transport, input("WRITE / 'v2'."));
 
@@ -140,6 +229,7 @@ fn a_lost_activation_with_the_file_active_is_active_reconciled_and_never_retried
     assert!(result.outcome.stdout.ends_with(&format!(
         "ACTIVE (reconciled): the active source equals the file; {RETRY}"
     )));
+    assert_eq!(count(&transport, "version=inactive"), 1);
     assert!(!result.fallback_allowed);
     assert_eq!(count(&transport, "activation"), 1);
     assert_eq!(
@@ -260,7 +350,14 @@ fn a_lost_put_with_a_failed_unlock_still_reconciles_and_names_the_lock() {
 
 #[test]
 fn a_lost_read_back_after_activation_is_reconciled() {
-    let tail = vec![fx(17), fx(18), fx(19), Step::ReplyTo(20, lost()), fx(20)];
+    let tail = vec![
+        fx(17),
+        fx(18),
+        fx(19),
+        Step::ReplyTo(20, lost()),
+        fx(20),
+        fx(26),
+    ];
     let mut transport = replay(FIXTURE, steps(v2_until_put(), tail));
     let result = run(&mut transport, input("WRITE / 'v2'."));
 
@@ -268,6 +365,63 @@ fn a_lost_read_back_after_activation_is_reconciled() {
     assert_eq!(result.outcome.exit, 1);
     assert!(result.outcome.stdout.contains("ACTIVE (reconciled)"));
     transport.assert_finished();
+}
+
+#[test]
+fn a_failed_inactive_read_while_the_active_is_unchanged_is_reconciliation_incomplete() {
+    for (reply, reason) in inactive_failures() {
+        let tail = vec![
+            fx(22),
+            fx(23),
+            Step::ReplyTo(24, lost()),
+            fx(25),
+            Step::ReplyTo(26, reply),
+        ];
+        let mut transport = replay(FIXTURE, steps(invalid_until_put(), tail));
+        let result = run(&mut transport, input("WRITE / no_such_var."));
+
+        assert_eq!(result.outcome.status, Some(Status::Partial), "{reason}");
+        assert_eq!(result.outcome.exit, 1, "{reason}");
+        assert!(
+            result.outcome.stdout.contains(&format!(
+                "PARTIAL: reconciliation incomplete, inactive source unreadable ({reason})"
+            )),
+            "{reason}: {}",
+            result.outcome.stdout
+        );
+        assert!(result.outcome.stdout.ends_with(RETRY), "{reason}");
+        assert_eq!(count(&transport, "activation"), 1, "{reason}");
+        transport.assert_finished();
+    }
+}
+
+#[test]
+fn a_failed_inactive_read_with_the_file_active_is_active_reconciled_and_unknown() {
+    for (reply, reason) in inactive_failures() {
+        let tail = vec![
+            fx(17),
+            fx(18),
+            Step::ReplyTo(19, lost()),
+            fx(20),
+            Step::ReplyTo(26, reply),
+        ];
+        let mut transport = replay(FIXTURE, steps(v2_until_put(), tail));
+        let result = run(&mut transport, input("WRITE / 'v2'."));
+
+        assert_eq!(result.outcome.status, Some(Status::Active), "{reason}");
+        assert_eq!(result.outcome.exit, 1, "{reason}");
+        assert!(
+            result
+                .outcome
+                .stdout
+                .contains("ACTIVE (reconciled), inactive state unknown"),
+            "{reason}: {}",
+            result.outcome.stdout
+        );
+        assert!(result.outcome.stdout.contains(&reason), "{reason}");
+        assert!(result.outcome.stdout.ends_with(RETRY), "{reason}");
+        transport.assert_finished();
+    }
 }
 
 #[test]

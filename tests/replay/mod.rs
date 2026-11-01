@@ -22,6 +22,8 @@ pub fn fx(index: usize) -> Step {
 pub struct Replay {
     pub calls: Vec<Request>,
     pub closes: usize,
+    /// `Some` when the session end is scripted to fail with this error.
+    close_failure: Option<TransportError>,
     fixture: Fixture,
     steps: VecDeque<Step>,
 }
@@ -32,12 +34,17 @@ pub fn replay(fixture: &str, steps: Vec<Step>) -> Replay {
     Replay {
         calls: Vec::new(),
         closes: 0,
+        close_failure: None,
         fixture: serde_json::from_str(&text).unwrap(),
         steps: steps.into(),
     }
 }
 
 impl Replay {
+    pub fn failing_close(mut self, error: TransportError) -> Self {
+        self.close_failure = Some(error);
+        self
+    }
     pub fn assert_finished(&self) {
         assert!(
             self.steps.is_empty(),
@@ -101,7 +108,12 @@ impl SadtTransport for Replay {
         }
     }
 
-    fn close(&mut self) {
+    fn close(&mut self) -> Result<(), TransportError> {
         self.closes += 1;
+
+        match &self.close_failure {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 }
