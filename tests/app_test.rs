@@ -15,6 +15,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 const WARNING: &str = "WARNING: connection DEV_100 uses insecure TLS or HTTP.";
+const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
 const SOURCE_URI: &str =
     "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=active";
 
@@ -327,10 +328,57 @@ fn a_stateful_session_the_server_does_not_keep_falls_back_to_rfc_for_deploy() {
     assert_eq!(exit.code, 0);
     assert!(exit.stdout.ends_with("SIMULATED_OK"));
     assert!(exit.stderr.contains("falling back to RFC SADT"));
+    assert!(
+        exit.stderr
+            .lines()
+            .any(|line| line == format!("NOTE: {NO_STATEFUL_SESSION}")),
+        "a fallback that worked reports its cause as a note: {}",
+        exit.stderr
+    );
+    assert!(!exit.stderr.contains("ERROR: "), "{}", exit.stderr);
     assert_report(
         &exit.stdout,
         "rfc",
-        "fallback to RFC: ADT HTTP stateful session unavailable (no sap-contextid)",
+        &format!("fallback to RFC: {NO_STATEFUL_SESSION}"),
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert!(
+        cell.borrow()
+            .recorded()
+            .iter()
+            .all(|call| !call.uri.contains("_action=LOCK")),
+        "the LOCK must not be sent"
+    );
+}
+
+#[test]
+fn a_stateful_fallback_that_then_fails_keeps_the_error_prefix() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+    let (cell, opened) = shared(HttpTransport::for_test(vec![
+        Ok(Response::text(
+            200,
+            "REPORT ytest_abapreach01.\n\nWRITE / 'v1'.",
+        )),
+        Ok(Response::empty(200)),
+    ]));
+
+    fake.adt.push_back(opened);
+    fake.rfc.push_back(scripted(vec![pre_send()]));
+
+    let exit = go(&simulate_args(&file, &[]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(
+        exit.stderr
+            .lines()
+            .any(|line| line == format!("ERROR: {NO_STATEFUL_SESSION}")),
+        "a fallback that failed keeps the error: {}",
+        exit.stderr
     );
     assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
     assert!(

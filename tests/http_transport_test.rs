@@ -227,6 +227,57 @@ fn the_context_cookie_decides_whether_the_stateful_session_is_supported() {
 }
 
 #[test]
+fn a_context_cookie_seen_later_keeps_the_stateful_session_supported() {
+    let mut with_cookie = Response::empty(200);
+    with_cookie.headers.insert(
+        "Set-Cookie".to_owned(),
+        "SAP_SESSIONID_DEV_100=s1; path=/; sap-contextid=ctx".to_owned(),
+    );
+    let mut transport = HttpTransport::for_test(vec![
+        Ok(Response::empty(200)),
+        Ok(with_cookie),
+        Ok(Response::empty(200)),
+    ]);
+
+    transport
+        .request(Request::get(
+            "/sap/bc/adt/programs/programs/ZTEST/source/main?version=active",
+        ))
+        .unwrap();
+    assert_eq!(transport.stateful_supported(), Some(false));
+
+    transport
+        .request(Request::get("/sap/bc/adt/checkruns"))
+        .unwrap();
+    assert_eq!(transport.stateful_supported(), Some(true));
+
+    transport
+        .request(Request::get("/sap/bc/adt/activation"))
+        .unwrap();
+    assert_eq!(
+        transport.stateful_supported(),
+        Some(true),
+        "a cookie seen once is never taken back"
+    );
+}
+
+#[test]
+fn a_context_cookie_on_a_non_2xx_reply_also_counts() {
+    let mut not_found = Response::empty(404);
+    not_found.headers.insert(
+        "Set-Cookie".to_owned(),
+        "SAP_SESSIONID_DEV_100=s1; path=/; sap-contextid=ctx".to_owned(),
+    );
+    let mut transport = HttpTransport::for_test(vec![Ok(not_found)]);
+
+    assert_eq!(transport.stateful_supported(), None);
+    transport
+        .request(Request::get("/sap/bc/adt/discovery"))
+        .unwrap();
+    assert_eq!(transport.stateful_supported(), Some(true));
+}
+
+#[test]
 fn a_stateless_request_says_nothing_about_the_stateful_session() {
     let mut transport = HttpTransport::for_test(vec![Ok(Response::empty(200))]);
 

@@ -390,9 +390,22 @@ fn exit_of(mut stderr: Vec<String>, outcome: Outcome) -> Exit {
     stderr.push(outcome.stderr);
     stderr.retain(|line| !line.is_empty());
 
+    // A backend that was abandoned before it sent anything broke the run only when the backend
+    // that replaced it failed too; a fallback that worked reports its cause as a note.
+    if outcome.exit == 0 {
+        stderr = stderr.into_iter().map(as_note).collect();
+    }
+
     Exit {
         code: outcome.exit,
         stdout: outcome.stdout,
         stderr: stderr.join("\n"),
+    }
+}
+
+fn as_note(block: String) -> String {
+    match block.strip_prefix("ERROR: ") {
+        Some(rest) => format!("NOTE: {rest}"),
+        None => block,
     }
 }

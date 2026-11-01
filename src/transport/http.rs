@@ -30,7 +30,7 @@ pub struct HttpTransport {
     password: String,
     csrf_token: Option<String>,
     session_open: bool,
-    /// `None` until the first stateful answer; then whether the server set the context cookie.
+    /// `None` until a stateful reply is seen; then whether any reply set the context cookie.
     stateful_supported: Option<bool>,
     #[cfg(feature = "test-support")]
     replies: Option<VecDeque<Result<Response, TransportError>>>,
@@ -213,12 +213,25 @@ impl HttpTransport {
             self.session_open = true;
         }
 
-        // Asked once per session: the answer decides whether a lock can survive to the PUT.
-        if stateful && self.stateful_supported.is_none() && (200..300).contains(&response.status) {
-            self.stateful_supported = Some(Self::has_context_cookie(&response.headers));
+        // A cookie on any reply settles the capability; a later reply that leaves it out
+        // never takes it back.
+        if stateful {
+            self.note_context_cookie(&response);
         }
 
         Ok(response)
+    }
+
+    /// Whether a lock can survive to the PUT. Sticky: one stateful reply that sets the context
+    /// cookie is proof for the rest of the session, whatever status it carried. A reply without
+    /// it only answers while nothing has been seen yet, so a server that never sets it is still
+    /// found out before the LOCK.
+    fn note_context_cookie(&mut self, response: &Response) {
+        if Self::has_context_cookie(&response.headers) {
+            self.stateful_supported = Some(true);
+        } else if self.stateful_supported.is_none() && (200..300).contains(&response.status) {
+            self.stateful_supported = Some(false);
+        }
     }
 
     fn send_real(&self, prepared: Request) -> Result<Response, TransportError> {
@@ -304,7 +317,7 @@ impl SadtTransport for HttpTransport {
         Ok(retry)
     }
 
-    /// Whether the server keeps the stateful session; `None` until the first stateful answer.
+    /// Whether the server keeps the stateful session; `None` until a stateful reply arrives.
     fn stateful_supported(&self) -> Option<bool> {
         self.stateful_supported
     }
