@@ -112,7 +112,11 @@ impl Factories for RealFactories {
 
     fn rfc_library(&mut self, _: &Connection) -> Result<RfcLibraryInfo, String> {
         let env = Env::current();
-        let identity = RfcLibrary::load(&env)?.identity()?;
+        let library = RfcLibrary::load(&env)?;
+        let identity = library.identity()?;
+        let mut notes = env.notes().to_vec();
+
+        notes.push(library.trace_target().label());
 
         Ok(RfcLibraryInfo {
             identity: RfcLibraryIdentity {
@@ -122,7 +126,7 @@ impl Factories for RealFactories {
                 family: identity.family().label().to_owned(),
                 source: identity.source().label().to_owned(),
             },
-            notes: env.notes().to_vec(),
+            notes,
         })
     }
 

@@ -227,6 +227,22 @@ fn trace_symbol_missing_leaves_the_environment_in_charge() {
 }
 
 #[test]
+fn trace_target_labels_are_stable_doctor_text() {
+    assert_eq!(
+        TraceTarget::Symbol.label(),
+        "RFC trace directory: RfcSetTraceDir exported, set"
+    );
+    assert_eq!(
+        TraceTarget::Environment.label(),
+        "RFC trace directory: RfcSetTraceDir not exported, environment only"
+    );
+    assert_eq!(
+        TraceTarget::Rejected(20).label(),
+        "RFC trace directory: RfcSetTraceDir exported, returned rc 20, environment only"
+    );
+}
+
+#[test]
 fn trace_symbol_returned_error_is_reported_with_its_code() {
     let _guard = TRACE_LOCK.lock().unwrap();
     *TRACE_CALLS.lock().unwrap() = None;

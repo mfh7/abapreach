@@ -3,6 +3,7 @@ mod common;
 use abapreach::config::Connection;
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::transport::http::HttpTransport;
+use abapreach::transport::rfc::TraceTarget;
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use abapreach::{Exit, Factories, Opened, RfcLibraryIdentity, RfcLibraryInfo, run};
 use common::ScriptedTransport;
@@ -750,6 +751,29 @@ fn doctor_library_line_names_path_version_architecture_family_and_source() {
         "missing {expected:?} in {}",
         exit.stdout
     );
+}
+
+#[test]
+fn doctor_prints_the_trace_directory_line_right_after_the_library_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let label = TraceTarget::Rejected(20).label();
+
+    fake.adt.push_back(discovery());
+    fake.library.push_back(Ok(RfcLibraryInfo {
+        identity: sdk_identity(),
+        notes: vec![label.clone()],
+    }));
+    fake.ping.push_back(Ok(()));
+
+    let exit = doctor(directory.path(), &mut fake);
+    let lines: Vec<&str> = exit.stdout.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("RFC library: "))
+        .unwrap();
+
+    assert_eq!(lines[at + 1], label, "{}", exit.stdout);
 }
 
 #[test]

@@ -643,6 +643,21 @@ pub enum TraceTarget {
     Rejected(c_int),
 }
 
+impl TraceTarget {
+    /// The stable doctor line that records the outcome per library; the live matrix reads it.
+    pub fn label(self) -> String {
+        match self {
+            Self::Symbol => "RFC trace directory: RfcSetTraceDir exported, set".to_owned(),
+            Self::Environment => {
+                "RFC trace directory: RfcSetTraceDir not exported, environment only".to_owned()
+            }
+            Self::Rejected(result) => format!(
+                "RFC trace directory: RfcSetTraceDir exported, returned rc {result}, environment only"
+            ),
+        }
+    }
+}
+
 pub struct RfcSymbols {
     open_connection: RfcOpenConnection,
     ping: RfcPing,

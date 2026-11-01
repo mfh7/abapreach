@@ -488,7 +488,7 @@ fn cancel_after_the_put_unlocks_and_does_not_activate() {
     let outcome = DeployProg::run_with_cancel(&mut transport, v2(None), &cancel);
 
     assert_eq!(outcome.status, Some(Status::Partial));
-    assert_eq!(outcome.exit, 1);
+    assert_eq!(outcome.exit, 130);
     assert!(outcome.stderr.starts_with("CANCELED"));
     assert!(
         transport

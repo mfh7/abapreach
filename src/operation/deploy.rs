@@ -31,7 +31,8 @@ pub struct DeployInput {
     pub tr: Option<String>,
 }
 
-/// Exit code of an interrupt that arrives while no lock is held: 128 + SIGINT.
+/// Exit code of an interrupt (128 + SIGINT): at once when no lock is held, after the unlock
+/// when one is.
 pub const INTERRUPT_EXIT_CODE: i32 = 130;
 
 /// What a SIGINT means right now: leave at once, or let the lock holder unlock first.
@@ -324,7 +325,7 @@ impl Finish {
     fn cancelled() -> Self {
         Self {
             stderr: Some("CANCELED: interrupted while the lock was held".to_owned()),
-            ..Self::new(None, 1)
+            ..Self::new(None, INTERRUPT_EXIT_CODE)
         }
     }
 
@@ -639,6 +640,7 @@ impl Run<'_> {
                 if cancel.is_set() {
                     return Ok(Finish {
                         stderr: Some("CANCELED: interrupted before the activation".to_owned()),
+                        exit: INTERRUPT_EXIT_CODE,
                         ..Finish::status(
                             Status::Partial,
                             "PARTIAL: the new source is saved inactive and nothing was activated",

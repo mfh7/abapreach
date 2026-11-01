@@ -1352,7 +1352,7 @@ fn the_cancel_flag_of_the_factories_reaches_the_deploy() {
     ];
     let exit = go(&args, directory.path(), &mut fake);
 
-    assert_eq!(exit.code, 1);
+    assert_eq!(exit.code, 130);
     assert!(exit.stderr.starts_with("CANCELED"));
     assert_eq!(cell.borrow().closes, 1);
     assert!(

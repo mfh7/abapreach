@@ -141,7 +141,7 @@ fn an_interrupt_during_the_lock_request_is_deferred_and_unlocks() {
     let outcome = DeployProg::run_with_cancel(&mut transport, changed(), &cancel);
 
     assert_eq!(transport.interrupts, vec![InterruptAction::Deferred]);
-    assert_eq!(outcome.exit, 1);
+    assert_eq!(outcome.exit, INTERRUPT_EXIT_CODE);
     assert!(outcome.stderr.starts_with("CANCELED"), "{}", outcome.stderr);
     assert!(
         transport
@@ -182,7 +182,7 @@ fn a_deferred_interrupt_still_unlocks_and_never_reports_success() {
     assert_eq!(transport.interrupts, vec![InterruptAction::Deferred]);
     assert!(cancel.is_set());
     assert_ne!(outcome.status, Some(Status::SimulatedOk));
-    assert_eq!(outcome.exit, 1);
+    assert_eq!(outcome.exit, INTERRUPT_EXIT_CODE);
     assert!(outcome.stderr.starts_with("CANCELED"), "{}", outcome.stderr);
     assert!(
         transport
