@@ -59,9 +59,11 @@ For an RFC-only system, use the same server entry without `host` and `port`.
 
 ### Connect through SAProuter
 
-Many systems are reachable only through a SAProuter. Add the route to the
-router as `saprouter` inside `rfc`, and keep the application server in
-`ashost` as the router sees it:
+Many systems are reachable only through a SAProuter. Keep the application
+server in `ashost` as the router sees it, and give the route once per system.
+
+A route without a password may stay in the server entry as `saprouter` inside
+`rfc`:
 
 ```json
 {
@@ -89,12 +91,37 @@ For a chain of routers, repeat `/H/.../S/...` for each hop. Your SAP Basis team
 or the SAP Logon entry of the system (connection string) gives the exact route.
 ABAPReach passes the string unchanged to the RFC library as `SAPROUTER`.
 
+A route with `/W/` carries a password. Put such a route in
+`connections.local.json` (or the environment) under `<SID>_SAPROUTER` instead
+of in `connections.json`, so the password stays in the file you already keep
+out of version control:
+
+```json
+{
+  "A4H_001_USER": "your-user",
+  "A4H_001_PASS": "your-password",
+  "A4H_SAPROUTER": "/H/saprouter.example.com/S/3299/W/route-password"
+}
+```
+
+The key is per system, not per client: it has no client part, and one route
+serves every client of that system. Lookup follows the credentials keys, so an
+`A4H_SAPROUTER` environment variable wins over `connections.local.json`, which
+wins over `servers[].rfc.saprouter` in `connections.json`. A route set there
+replaces the config value for every client of the system; when neither holds a
+route, no `SAPROUTER` parameter is passed.
+
 ADT HTTP does not travel through a SAProuter, so this example has no `host`
 and `port`: the connection runs on RFC only. If the system is also reachable
 over HTTPS, add `host` and `port` and both backends are available.
 
-A route with `/W/` carries a password in `connections.json`. Keep that file
-out of version control and limit its permissions, like `connections.local.json`.
+ABAPReach never prints the route, because it may contain a route password.
+`doctor` reports only where the route came from, and the route is scrubbed from
+command output like a password:
+
+```text
+SAProuter: configured (from connections.local.json)
+```
 
 Credentials use the connection ID with `_USER` and `_PASS`. Provide
 `A4H_001_USER` and `A4H_001_PASS` in the environment, or put a flat
@@ -205,8 +232,8 @@ inactive version under the `reject` and `allow` policies.
 | Component | Version |
 | :--- | :--- |
 | Operating system | macOS 27.0.1, arm64 |
-| SAP GUI for Java | 8.10 revision 11 (bundle version `810.4.1100`), macOS aarch64 |
-| RFC library from SAP GUI | `libsapnwrfc.dylib` 7.53 patch level 1544, with ICU 50 |
+| SAP GUI for Java | 8.10 revision 15 (bundle version `810.4.1500`), macOS aarch64 |
+| RFC library from SAP GUI | `libsapnwrfc.dylib` 7.53 patch level 1629, with ICU 50 |
 | NW RFC SDK | `libsapnwrfc.dylib` 7.50 patch level 20, with ICU 57 |
 | Rust | 1.99.1 |
 
@@ -248,19 +275,33 @@ HTTP (132 to 162), 703 ms over RFC with SAP GUI (645 to 716), and 670 ms over
 RFC with the SDK (598 to 720). The two RFC libraries stay within each other's
 range.
 
+The same matrix passed with SAP GUI 8.10 revision 11 (RFC library patch level
+1544) before the upgrade to revision 15. The timing table comes from the
+revision 11 run.
+
+### Also tested on the RFC paths
+
+- A lost reply after a write, with the reply dropped by a test-only build
+  (`--features fault-injection`, `ABAPREACH_FAULT=drop-reply:PUT|ACTIVATE`): a
+  dropped PUT reply reports `INACTIVE`, a dropped activation reply reports
+  `ACTIVE (reconciled)`, both exit 1, on 7.40 and 7.50 with both RFC
+  libraries. The ADT HTTP path was tested the same way through a local proxy.
+- The `ask` prompt: `n` refuses (`REJECTED`, exit 1), `y` overwrites, with
+  both RFC libraries.
+- A deploy into a transportable package: the request comes from the lock,
+  `--tr` with that request deploys, a different `--tr` stops before the PUT,
+  with both RFC libraries.
+
 ### Not tested yet
 
 - Windows (SAP GUI for Windows) and Linux (SAP GUI for Java or the NW RFC SDK).
   SAP GUI for Java ships per platform, so the Linux package and the RFC
   library inside it are checked separately when Linux is tested; the macOS
   result does not carry over.
-- A lost connection after a write on the RFC paths. The ADT HTTP path was
-  tested by dropping the reply to the PUT and to the activation; the RFC paths
-  have no fault injection yet, so this case is covered by tests with recorded
-  responses only.
-- The `ask` policy prompt on every path. It was tested on one path; it runs
-  before the lock, after the same version read on every path.
-- A deploy into a transportable package with a transport request.
+- The `ask` prompt and a transportable deploy over ADT HTTP on 7.50: the ADT
+  HTTP endpoint of that system was unreachable during these runs.
+- `libsapnwrfccm.dylib`, a second RFC library that SAP GUI 8.10 revision 15
+  ships next to `libsapnwrfc.dylib`; ABAPReach loads `libsapnwrfc.dylib`.
 
 macOS on Intel is not supported: SAP GUI for Java 8.10 is the last release for
 Intel Macs.
