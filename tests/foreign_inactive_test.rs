@@ -8,14 +8,41 @@ use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg};
 use abapreach::policy::{Confirmer, ForeignInactive, Policies};
 use abapreach::transport::{Request, Response};
 use replay::{
-    FOREIGN_INACTIVE_FEED, NO_INACTIVE_FEED, OWN_INACTIVE_FEED, Step, feed, fx, no_inactive,
-    replay, versions_uri,
+    FOREIGN_INACTIVE_FEED, NO_INACTIVE_FEED, OWN_INACTIVE_FEED, Step, feed, fx, replay,
+    versions_uri,
 };
 use std::cell::RefCell;
 
 const FIXTURE: &str = "dev-750-rfc.json";
 const USER: &str = "DEVUSER";
 const OTHER: &str = "OTHERUSER";
+
+/// A version list as SAP pretty-prints it: the values carry the indentation of their elements.
+const PRETTY_FOREIGN_INACTIVE_FEED: &str = concat!(
+    "<atom:feed xmlns:atom=\"http://www.w3.org/2005/Atom\">\n",
+    "  <atom:entry>\n",
+    "    <atom:author>\n",
+    "      <atom:name>\n        OTHERUSER\n      </atom:name>\n",
+    "    </atom:author>\n",
+    "    <atom:id>\n      99999\n    </atom:id>\n",
+    "  </atom:entry>\n",
+    "  <atom:entry>\n",
+    "    <atom:author>\n",
+    "      <atom:name>\n        DEVUSER\n      </atom:name>\n",
+    "    </atom:author>\n",
+    "    <atom:id>\n      00001\n    </atom:id>\n",
+    "  </atom:entry>\n",
+    "</atom:feed>",
+);
+
+/// A version list whose values are wrapped in CDATA sections, as some gateways return them.
+const CDATA_FOREIGN_INACTIVE_FEED: &str = concat!(
+    "<atom:feed xmlns:atom=\"http://www.w3.org/2005/Atom\">",
+    "<atom:entry><atom:author><atom:name><![CDATA[OTHERUSER]]></atom:name></atom:author>",
+    "<atom:id><![CDATA[99999]]></atom:id></atom:entry>",
+    "<atom:entry><atom:author><atom:name>DEVUSER</atom:name></atom:author>",
+    "<atom:id>00001</atom:id></atom:entry></atom:feed>",
+);
 
 fn input(simulate: bool) -> DeployInput {
     DeployInput {
@@ -81,9 +108,18 @@ impl Confirmer for FakeTerminal {
     }
 }
 
-/// A simulate that passes the guard: live read, version list, lock, locked re-read, check, unlock.
-fn simulate_steps(versions: Step) -> Vec<Step> {
-    vec![fx(6), versions, fx(7), fx(6), fx(8), fx(9)]
+/// A simulate that passes the guard: live read, version list, lock, locked re-read, version list
+/// again, check, unlock.
+fn simulate_steps(versions: &str) -> Vec<Step> {
+    vec![
+        fx(6),
+        feed(versions),
+        fx(7),
+        fx(6),
+        feed(versions),
+        fx(8),
+        fx(9),
+    ]
 }
 
 fn locks(calls: &[Request]) -> usize {
@@ -91,6 +127,17 @@ fn locks(calls: &[Request]) -> usize {
         .iter()
         .filter(|call| call.uri.contains("_action=LOCK"))
         .count()
+}
+
+fn unlocks(calls: &[Request]) -> usize {
+    calls
+        .iter()
+        .filter(|call| call.uri.contains("_action=UNLOCK"))
+        .count()
+}
+
+fn puts(calls: &[Request]) -> usize {
+    calls.iter().filter(|call| call.method == "PUT").count()
 }
 
 /// The verdict line of a run: the last line of stdout.
@@ -125,9 +172,127 @@ fn a_foreign_inactive_version_is_rejected_before_the_lock_in_simulate_and_deploy
 }
 
 #[test]
+fn the_guard_reads_the_version_list_through_whitespace_and_cdata() {
+    for body in [PRETTY_FOREIGN_INACTIVE_FEED, CDATA_FOREIGN_INACTIVE_FEED] {
+        let mut transport = replay(FIXTURE, vec![fx(6), feed(body)]);
+        let outcome = DeployProg::run(
+            &mut transport,
+            input(true),
+            Some(&connection(ForeignInactive::Reject)),
+        );
+
+        assert_eq!(outcome.status, Some(Status::Rejected), "{body}");
+        assert_eq!(
+            verdict(&outcome),
+            format!("REJECTED: inactive version of another user exists: {OTHER}"),
+            "{body}"
+        );
+        assert_eq!(locks(&transport.calls), 0, "{body}");
+        transport.assert_finished();
+    }
+}
+
+#[test]
+fn an_inactive_version_that_appears_before_the_lock_is_rejected_after_it() {
+    for simulate in [true, false] {
+        let mut transport = replay(
+            FIXTURE,
+            vec![
+                fx(6),
+                feed(NO_INACTIVE_FEED),
+                fx(7),
+                fx(6),
+                feed(FOREIGN_INACTIVE_FEED),
+                fx(9),
+            ],
+        );
+        let outcome = DeployProg::run(
+            &mut transport,
+            input(simulate),
+            Some(&connection(ForeignInactive::Reject)),
+        );
+
+        assert_eq!(outcome.status, Some(Status::Rejected), "{simulate}");
+        assert_eq!(outcome.exit, 1, "{simulate}");
+        assert_eq!(
+            verdict(&outcome),
+            format!("REJECTED: inactive version of another user exists: {OTHER}"),
+            "{simulate}"
+        );
+        assert_eq!(locks(&transport.calls), 1, "{simulate}");
+        assert_eq!(unlocks(&transport.calls), 1, "{simulate}");
+        assert_eq!(puts(&transport.calls), 0, "{simulate}");
+        assert_eq!(transport.closes, 1);
+        transport.assert_finished();
+    }
+}
+
+#[test]
+fn an_unreadable_version_list_after_the_lock_is_rejected_and_unlocked() {
+    let mut transport = replay(
+        FIXTURE,
+        vec![
+            fx(6),
+            feed(NO_INACTIVE_FEED),
+            fx(7),
+            fx(6),
+            Step::Versions(Ok(Response::empty(500))),
+            fx(9),
+        ],
+    );
+    let outcome = DeployProg::run(
+        &mut transport,
+        input(false),
+        Some(&connection(ForeignInactive::Reject)),
+    );
+
+    assert_eq!(outcome.status, Some(Status::Rejected));
+    assert_eq!(
+        verdict(&outcome),
+        "REJECTED: version list unavailable: HTTP 500 (policy reject)"
+    );
+    assert_eq!(unlocks(&transport.calls), 1);
+    assert_eq!(puts(&transport.calls), 0);
+    transport.assert_finished();
+}
+
+#[test]
+fn the_ask_policy_does_not_prompt_while_the_lock_is_held() {
+    let mut transport = replay(
+        FIXTURE,
+        vec![
+            fx(6),
+            feed(NO_INACTIVE_FEED),
+            fx(7),
+            fx(6),
+            feed(FOREIGN_INACTIVE_FEED),
+            fx(9),
+        ],
+    );
+    let terminal = FakeTerminal::answering(true);
+    let result = DeployProg::run_classified_with(
+        &mut transport,
+        input(false),
+        Some(&connection(ForeignInactive::Ask)),
+        &CancelFlag::new(),
+        &terminal,
+    );
+
+    assert_eq!(result.outcome.status, Some(Status::Rejected));
+    assert_eq!(
+        verdict(&result.outcome),
+        format!("REJECTED: inactive version of another user exists: {OTHER}")
+    );
+    assert_eq!(terminal.prompts(), Vec::<String>::new());
+    assert_eq!(unlocks(&transport.calls), 1);
+    assert_eq!(puts(&transport.calls), 0);
+    transport.assert_finished();
+}
+
+#[test]
 fn the_policy_allow_overwrites_with_a_warning() {
     let cases = [
-        (true, simulate_steps(feed(FOREIGN_INACTIVE_FEED))),
+        (true, simulate_steps(FOREIGN_INACTIVE_FEED)),
         (
             false,
             vec![
@@ -135,6 +300,7 @@ fn the_policy_allow_overwrites_with_a_warning() {
                 feed(FOREIGN_INACTIVE_FEED),
                 fx(7),
                 fx(6),
+                feed(FOREIGN_INACTIVE_FEED),
                 fx(8),
                 fx(17),
                 fx(18),
@@ -174,7 +340,7 @@ fn the_policy_allow_overwrites_with_a_warning() {
 
 #[test]
 fn the_ask_policy_prompts_and_continues_on_yes() {
-    let mut transport = replay(FIXTURE, simulate_steps(feed(FOREIGN_INACTIVE_FEED)));
+    let mut transport = replay(FIXTURE, simulate_steps(FOREIGN_INACTIVE_FEED));
     let terminal = FakeTerminal::answering(true);
     let result = DeployProg::run_classified_with(
         &mut transport,
@@ -188,7 +354,10 @@ fn the_ask_policy_prompts_and_continues_on_yes() {
     assert_eq!(result.outcome.exit, 0);
     assert_eq!(
         terminal.prompts(),
-        vec![format!("Overwrite the inactive version of {OTHER}? [y/N] ")]
+        vec![format!(
+            "YTEST_ABAPREACH01: inactive version of {OTHER} would be overwritten \
+             (2 lines changed vs active). Overwrite? [y/N] "
+        )]
     );
     assert_eq!(
         result.outcome.stderr,
@@ -255,7 +424,7 @@ fn an_inactive_version_of_the_logon_user_is_no_obstacle() {
         ForeignInactive::Allow,
         ForeignInactive::Ask,
     ] {
-        let mut transport = replay(FIXTURE, simulate_steps(feed(OWN_INACTIVE_FEED)));
+        let mut transport = replay(FIXTURE, simulate_steps(OWN_INACTIVE_FEED));
         let outcome = DeployProg::run(&mut transport, input(true), Some(&connection(policy)));
 
         assert_eq!(outcome.status, Some(Status::SimulatedOk), "{policy}");
@@ -271,7 +440,7 @@ fn the_owner_comparison_ignores_case() {
 
     connection.user = OTHER.to_ascii_lowercase();
 
-    let mut transport = replay(FIXTURE, simulate_steps(feed(FOREIGN_INACTIVE_FEED)));
+    let mut transport = replay(FIXTURE, simulate_steps(FOREIGN_INACTIVE_FEED));
     let outcome = DeployProg::run(&mut transport, input(true), Some(&connection));
 
     assert_eq!(outcome.status, Some(Status::SimulatedOk));
@@ -281,7 +450,7 @@ fn the_owner_comparison_ignores_case() {
 
 #[test]
 fn a_version_list_without_an_inactive_version_is_no_obstacle() {
-    let mut transport = replay(FIXTURE, simulate_steps(feed(NO_INACTIVE_FEED)));
+    let mut transport = replay(FIXTURE, simulate_steps(NO_INACTIVE_FEED));
     let outcome = DeployProg::run(
         &mut transport,
         input(true),
@@ -319,6 +488,7 @@ fn an_unreadable_version_list_fails_closed_unless_allowed() {
             Step::Versions(Ok(Response::empty(500))),
             fx(7),
             fx(6),
+            Step::Versions(Ok(Response::empty(500))),
             fx(8),
             fx(9),
         ],
@@ -361,7 +531,7 @@ fn an_unparsable_version_list_fails_closed() {
 
 #[test]
 fn the_guard_report_names_the_policy() {
-    let mut transport = replay(FIXTURE, simulate_steps(no_inactive()));
+    let mut transport = replay(FIXTURE, simulate_steps(NO_INACTIVE_FEED));
     let selection = Selection::new(BackendKind::AdtHttp, SelectionReason::DefaultAdt);
     let result = DeployProg::run_selected(
         &mut transport,

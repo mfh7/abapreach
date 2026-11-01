@@ -85,7 +85,15 @@ fn a_failed_session_end_after_the_unlock_is_only_a_warning() {
     let mut transport = FailingClose {
         inner: replay(
             FIXTURE,
-            vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)],
+            vec![
+                fx(6),
+                no_inactive(),
+                fx(7),
+                fx(6),
+                no_inactive(),
+                fx(8),
+                fx(9),
+            ],
         ),
         failure: TransportError::PostSendUncertain("gone".to_owned()),
     };
@@ -112,6 +120,7 @@ fn a_failed_unlock_keeps_its_stop_without_a_session_warning() {
                 no_inactive(),
                 fx(7),
                 fx(6),
+                no_inactive(),
                 fx(8),
                 Step::ReplyTo(9, Ok(Response::empty(500))),
             ],
@@ -136,7 +145,18 @@ fn a_failed_unlock_keeps_its_stop_without_a_session_warning() {
 #[test]
 fn recorded_valid_check_leaves_the_object_alone_on_every_release() {
     for name in FIXTURES {
-        let mut transport = replay(name, vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)]);
+        let mut transport = replay(
+            name,
+            vec![
+                fx(6),
+                no_inactive(),
+                fx(7),
+                fx(6),
+                no_inactive(),
+                fx(8),
+                fx(9),
+            ],
+        );
         let outcome = DeployProg::run(&mut transport, valid(), None);
 
         assert_eq!(outcome.status, Some(Status::SimulatedOk), "{name}");
@@ -161,7 +181,15 @@ fn recorded_invalid_check_is_rejected_with_the_message_and_unlocks() {
     for name in FIXTURES {
         let mut transport = replay(
             name,
-            vec![fx(10), no_inactive(), fx(11), fx(10), fx(12), fx(13)],
+            vec![
+                fx(10),
+                no_inactive(),
+                fx(11),
+                fx(10),
+                no_inactive(),
+                fx(12),
+                fx(13),
+            ],
         );
         let outcome = DeployProg::run(&mut transport, invalid(), None);
 
@@ -195,6 +223,7 @@ fn warnings_are_printed_and_do_not_reject() {
         no_inactive(),
         fx(7),
         fx(6),
+        no_inactive(),
         Step::ReplyTo(8, Ok(Response::text(200, VALID_CHECK_BODY))),
         fx(9),
     ];
@@ -227,6 +256,7 @@ fn an_unavailable_or_unreadable_check_stops_and_never_saves() {
                 no_inactive(),
                 fx(7),
                 fx(6),
+                no_inactive(),
                 Step::ReplyTo(8, reply),
                 fx(9),
             ],
@@ -256,6 +286,7 @@ fn a_lost_check_response_is_classified_and_still_unlocks() {
         no_inactive(),
         fx(7),
         fx(6),
+        no_inactive(),
         Step::ReplyTo(8, lost),
         fx(9),
     ];
@@ -280,7 +311,15 @@ fn cancel_during_the_check_unlocks_without_a_write() {
     let mut transport = CancelOnCheck {
         inner: replay(
             FIXTURE,
-            vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)],
+            vec![
+                fx(6),
+                no_inactive(),
+                fx(7),
+                fx(6),
+                no_inactive(),
+                fx(8),
+                fx(9),
+            ],
         ),
         cancel: CancelFlag::new(),
     };
@@ -316,6 +355,7 @@ fn simulate_with_a_failed_unlock_is_partial() {
         no_inactive(),
         fx(7),
         fx(6),
+        no_inactive(),
         fx(8),
         Step::ReplyTo(9, Ok(Response::empty(500))),
     ];

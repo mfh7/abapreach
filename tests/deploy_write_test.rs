@@ -55,7 +55,15 @@ fn ok() -> Step {
 
 /// The recorded deploy of v2 over v1 up to and including the PUT, with the locked re-read.
 fn through_put() -> Vec<Step> {
-    vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(17)]
+    vec![
+        fx(6),
+        no_inactive(),
+        fx(7),
+        fx(6),
+        no_inactive(),
+        fx(8),
+        fx(17),
+    ]
 }
 
 fn then(mut steps: Vec<Step>, rest: Vec<Step>) -> Vec<Step> {
@@ -96,9 +104,9 @@ fn recorded_deploy_activates_and_reports_the_new_hash() {
             outcome.stdout.ends_with(&format!("ACTIVE\nhash {hash}")),
             "{name}"
         );
-        assert_eq!(transport.calls[5].method, "PUT");
-        assert!(transport.calls[6].uri.contains("_action=UNLOCK"));
-        assert!(transport.calls[7].uri.contains("activation"));
+        assert_eq!(transport.calls[6].method, "PUT");
+        assert!(transport.calls[7].uri.contains("_action=UNLOCK"));
+        assert!(transport.calls[8].uri.contains("activation"));
         assert_eq!(transport.closes, 1);
         transport.assert_finished();
     }
@@ -158,6 +166,7 @@ fn the_put_carries_the_encoded_handle_and_the_transport_request_of_the_lock() {
             no_inactive(),
             lock_body("DEVK000001", false),
             fx(6),
+            no_inactive(),
             fx(8),
             ok(),
             ok(),
@@ -166,7 +175,7 @@ fn the_put_carries_the_encoded_handle_and_the_transport_request_of_the_lock() {
         ];
         let mut transport = replay(FIXTURE, steps);
         let outcome = DeployProg::run(&mut transport, v2(tr), None);
-        let put = &transport.calls[5];
+        let put = &transport.calls[6];
 
         assert_eq!(outcome.status, Some(Status::Active));
         assert!(outcome.stdout.contains("\ntransport request DEVK000001\n"));
@@ -183,6 +192,7 @@ fn the_put_carries_the_encoded_handle_and_the_transport_request_of_the_lock() {
         no_inactive(),
         lock_body("", true),
         fx(6),
+        no_inactive(),
         fx(8),
         ok(),
         ok(),
@@ -194,7 +204,7 @@ fn the_put_carries_the_encoded_handle_and_the_transport_request_of_the_lock() {
 
     assert_eq!(outcome.status, Some(Status::Active));
     assert_eq!(
-        transport.calls[5].uri,
+        transport.calls[6].uri,
         format!("{PROGRAM}/source/main?lockHandle=h%2B1%2F%3D")
     );
     assert!(!outcome.stdout.contains("transport request"));
@@ -207,6 +217,7 @@ fn simulate_prints_the_transport_request_and_never_writes() {
         no_inactive(),
         lock_body("DEVK000001", false),
         fx(6),
+        no_inactive(),
         fx(8),
         ok(),
     ];
@@ -226,6 +237,7 @@ fn recorded_activation_errors_are_inactive_without_a_read_back() {
         no_inactive(),
         fx(21),
         fx(20),
+        no_inactive(),
         Step::Pair(12, 8),
         fx(22),
         fx(23),
@@ -333,7 +345,7 @@ fn activation_status_maps_the_answer_alone() {
 #[test]
 fn a_rejected_or_failed_put_unlocks_and_never_activates() {
     let rejected = then(
-        vec![fx(6), no_inactive(), fx(7), fx(6), fx(8)],
+        vec![fx(6), no_inactive(), fx(7), fx(6), no_inactive(), fx(8)],
         vec![Step::ReplyTo(17, Ok(Response::empty(403))), fx(18)],
     );
     let mut transport = replay(FIXTURE, rejected);
@@ -356,6 +368,7 @@ fn a_rejected_or_failed_put_unlocks_and_never_activates() {
         no_inactive(),
         fx(7),
         fx(6),
+        no_inactive(),
         fx(8),
         Step::ReplyTo(17, unsent),
         fx(18),
@@ -383,6 +396,7 @@ fn rfc_invoke_failures_during_put_reconcile_before_retrying() {
             no_inactive(),
             fx(7),
             fx(6),
+            no_inactive(),
             fx(8),
             Step::ReplyTo(17, Err(error)),
             fx(18),
@@ -502,6 +516,7 @@ fn the_lock_response_is_read_with_entities_and_pretty_printing() {
         no_inactive(),
         pretty,
         fx(6),
+        no_inactive(),
         fx(8),
         ok(),
         ok(),
@@ -513,7 +528,7 @@ fn the_lock_response_is_read_with_entities_and_pretty_printing() {
 
     assert_eq!(outcome.status, Some(Status::Active));
     assert_eq!(
-        transport.calls[5].uri,
+        transport.calls[6].uri,
         format!("{PROGRAM}/source/main?lockHandle=a%26b&corrNr=DEVK000001")
     );
 }

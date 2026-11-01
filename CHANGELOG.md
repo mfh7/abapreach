@@ -13,6 +13,15 @@ the internal repository where that implementation was developed.
   (`/sap/bc/adt/programs/programs/<name>/source/main/versions`, Accept
   `application/atom+xml;type=feed`). The program level `/versions` URI answered HTTP 404 on a
   live 7.50 and 7.40 system.
+- The guard reads the version list a second time right after the lock, so an inactive version
+  another user saves between the first check and the lock is still refused; the lock is released
+  and nothing is written. A prompt is never shown while the lock is held: `ask` then behaves as
+  `reject` for a version that appeared in between.
+- The version list parser trims the `atom:id` and author values and reads CDATA sections, so a
+  pretty-printed or CDATA-wrapped feed still names the inactive version and its owner.
+- The `ask` prompt carries a one-line summary (`<NAME>: inactive version of <OWNER> would be
+  overwritten (<n> lines changed vs active). Overwrite? [y/N] `) on stderr; stdout keeps the diff
+  buffered until the run ends, so the answer was given without seeing the change.
 
 ## [0.11.0] - 2026-11-01
 

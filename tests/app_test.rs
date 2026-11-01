@@ -175,10 +175,18 @@ fn rfc_only_simulate_args<'a>(file: &'a Path, extra: &[&'a str]) -> Vec<&'a str>
     args
 }
 
-/// The recorded simulate of v2 over v1: live read, version list, lock, locked re-read, check,
-/// unlock.
+/// The recorded simulate of v2 over v1: live read, version list, lock, locked re-read, version
+/// list again, check, unlock.
 fn simulate_steps() -> Vec<Step> {
-    vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)]
+    vec![
+        fx(6),
+        no_inactive(),
+        fx(7),
+        fx(6),
+        no_inactive(),
+        fx(8),
+        fx(9),
+    ]
 }
 
 fn simulate_replay() -> Opened {
@@ -693,6 +701,7 @@ fn the_configured_policy_reaches_the_deploy_guard() {
                 replay::feed(replay::FOREIGN_INACTIVE_FEED),
                 fx(7),
                 fx(6),
+                replay::feed(replay::FOREIGN_INACTIVE_FEED),
                 fx(8),
                 fx(9),
             ],

@@ -81,19 +81,22 @@ prints a warning.
 `foreign_inactive` decides what `deploy` does when the inactive version of the program belongs
 to another user: before the lock, `deploy` (and `deploy --simulate`) reads `GET
 <source>/versions` and compares the author of the inactive version (`99999`) with the logon
-user. ADT allows such an overwrite, the function module of the Python tooling does not, so
-`abapreach` enforces it on both backends itself.
+user, and it reads the same list again right after the lock, so a version another user saves in
+between is still seen. ADT allows such an overwrite, the function module of the Python tooling
+does not, so `abapreach` enforces it on both backends itself.
 
 | Value | Behavior |
 | --- | --- |
 | `reject` (default) | `REJECTED: inactive version of another user exists: <OWNER>` and exit 1; no lock is sent |
 | `allow` | writes anyway and prints `W: overwriting the inactive version of <OWNER> (policy allow)` |
-| `ask` | asks `Overwrite the inactive version of <OWNER>? [y/N]` on stderr; only `y`/`yes` continues, and without a terminal it behaves as `reject` (`(policy ask needs a terminal)`) |
+| `ask` | asks `<NAME>: inactive version of <OWNER> would be overwritten (<n> lines changed vs active). Overwrite? [y/N]` on stderr; only `y`/`yes` continues, and without a terminal it behaves as `reject` (`(policy ask needs a terminal)`) |
 
 An inactive version of the logon user is no obstacle. A version list that cannot be read or
 parsed fails closed (`REJECTED`, exit 1) under `reject` and `ask`; only `allow` continues, with a
-warning. An unknown guard name or policy value stops the run at load time with exit 2. `doctor`
-prints the effective policy of the connection.
+warning. A version that appears between the first check and the lock is refused after the lock
+and the lock is released; a prompt is never shown while the lock is held, so `ask` then behaves
+as `reject`. An unknown guard name or policy value stops the run at load time with exit 2.
+`doctor` prints the effective policy of the connection.
 
 ## RFC dependency
 

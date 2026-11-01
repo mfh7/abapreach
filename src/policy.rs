@@ -77,6 +77,27 @@ pub enum InactiveVersion<'a> {
     Unknown { reason: &'a str },
 }
 
+/// The summary the `ask` policy shows with its prompt: stdout keeps the diff until the process
+/// ends, so without it the user answers with the change still invisible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Prompt<'a> {
+    /// The object the deploy writes.
+    pub name: &'a str,
+    /// The lines the deploy changes against the active version.
+    pub changed: usize,
+}
+
+impl Prompt<'_> {
+    /// The one line the user answers on, naming the object, the owner and the size of the change.
+    fn summary(&self, owner: &str) -> String {
+        format!(
+            "{}: inactive version of {} would be overwritten ({} lines changed vs active). \
+             Overwrite? [y/N] ",
+            self.name, owner, self.changed
+        )
+    }
+}
+
 /// What one guard decided: continue the deploy, or refuse it before anything is locked.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Decision {
@@ -121,10 +142,15 @@ impl Policies {
     /// The `foreign_inactive` guard: another user's inactive version is overwritten by the next
     /// deploy, so the policy decides whether that happens, and an unreadable version list fails
     /// closed unless the policy is `allow`.
+    ///
+    /// `prompt` describes the deploy for the `ask` policy and is `None` when the guard runs while
+    /// the lock is held: an answer would come with the object locked, so `ask` then refuses like
+    /// `reject` instead of prompting.
     pub fn inactive_version(
         &self,
         state: InactiveVersion<'_>,
         user: &str,
+        prompt: Option<Prompt<'_>>,
         confirmer: &dyn Confirmer,
     ) -> Decision {
         let policy = self.foreign_inactive;
@@ -135,7 +161,7 @@ impl Policies {
             InactiveVersion::Owned { owner } => match policy {
                 ForeignInactive::Reject => Decision::Refuse(exists(owner)),
                 ForeignInactive::Allow => Decision::Continue(Some(overwrite(owner))),
-                ForeignInactive::Ask => ask(owner, confirmer),
+                ForeignInactive::Ask => ask(owner, prompt, confirmer),
             },
             InactiveVersion::Unknown { reason } => match policy {
                 ForeignInactive::Allow => {
@@ -155,14 +181,16 @@ fn overwrite(owner: &str) -> String {
     format!("W: overwriting the inactive version of {owner} (policy allow)")
 }
 
-fn ask(owner: &str, confirmer: &dyn Confirmer) -> Decision {
+fn ask(owner: &str, prompt: Option<Prompt<'_>>, confirmer: &dyn Confirmer) -> Decision {
+    let Some(prompt) = prompt else {
+        return Decision::Refuse(exists(owner));
+    };
+
     if !confirmer.interactive() {
         return Decision::Refuse(format!("{} (policy ask needs a terminal)", exists(owner)));
     }
 
-    if confirmer.confirm(&format!(
-        "Overwrite the inactive version of {owner}? [y/N] "
-    )) {
+    if confirmer.confirm(&prompt.summary(owner)) {
         return Decision::Continue(Some(overwrite(owner)));
     }
 

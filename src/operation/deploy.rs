@@ -3,12 +3,12 @@ use crate::backend::{Failure, Selection, SelectionReason};
 use crate::config::{Connection, tls_warning};
 use crate::domain::{Outcome, Status};
 use crate::hash::{normalize, source_hash, validate_prog};
-use crate::policy::{Confirmer, Decision, InactiveVersion, Policies, Terminal};
+use crate::policy::{Confirmer, Decision, InactiveVersion, Policies, Prompt, Terminal};
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
-use similar::TextDiff;
+use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::sync::Arc;
@@ -186,6 +186,7 @@ impl DeployProg {
             user: connection
                 .map(|connection| connection.user.clone())
                 .unwrap_or_default(),
+            seen: InactiveSeen::default(),
             confirmer,
             sent: 0,
         };
@@ -424,6 +425,38 @@ enum Locked {
     PutUncertain,
 }
 
+/// What the version list said about the inactive version, kept from the check before the lock so
+/// that the check after it acts only on a change.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum InactiveSeen {
+    /// There is no inactive version.
+    #[default]
+    Absent,
+    /// The inactive version belongs to this user.
+    Owned(String),
+    /// The version list could not be read.
+    Unknown,
+}
+
+impl InactiveSeen {
+    fn of(read: &Result<Option<String>, String>) -> Self {
+        match read {
+            Ok(Some(owner)) => Self::Owned(owner.clone()),
+            Ok(None) => Self::Absent,
+            Err(_) => Self::Unknown,
+        }
+    }
+
+    /// The same inactive version, with owners compared as SAP compares users.
+    fn unchanged(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Owned(owner), Self::Owned(other)) => owner.eq_ignore_ascii_case(other),
+            (Self::Absent, Self::Absent) | (Self::Unknown, Self::Unknown) => true,
+            _ => false,
+        }
+    }
+}
+
 struct Run<'a> {
     transport: &'a mut dyn SadtTransport,
     name: String,
@@ -434,6 +467,8 @@ struct Run<'a> {
     policies: Policies,
     /// The logon user of the connection, compared with the owner of the inactive version.
     user: String,
+    /// The inactive version as the check before the lock saw it.
+    seen: InactiveSeen,
     confirmer: &'a dyn Confirmer,
     sent: usize,
 }
@@ -490,7 +525,13 @@ impl Run<'_> {
             return Ok(Finish::plain("no changes"));
         }
 
-        let diff = TextDiff::from_lines(join(&live), join(&file))
+        let lines = TextDiff::from_lines(join(&live), join(&file));
+        // The prompt says how much is at stake, because stdout holds the diff until the run ends.
+        let changed = lines
+            .iter_all_changes()
+            .filter(|change| change.tag() != ChangeTag::Equal)
+            .count();
+        let diff = lines
             .unified_diff()
             .context_radius(3)
             .header("live", "file")
@@ -513,7 +554,7 @@ impl Run<'_> {
         }
 
         // Still read-only: a refused guard leaves no lock behind and writes nothing.
-        self.foreign_inactive()?;
+        self.foreign_inactive(Some(changed))?;
 
         let _lock_scope = cancel.hold_lock();
         // Ctrl-C is deferred while the LOCK request is in flight too: its 2xx reply may already
@@ -582,21 +623,39 @@ impl Run<'_> {
     }
 
     /// The `foreign_inactive` guard: the version list says whether the inactive version belongs
-    /// to another user, whose work the next deploy would overwrite. Read-only, before the lock.
-    fn foreign_inactive(&mut self) -> Result<(), Finish> {
+    /// to another user, whose work the next deploy would overwrite. Read-only; it runs before the
+    /// LOCK and again right after it. `changed` is the line count of the diff and enables the
+    /// prompt: the second check passes `None`, because the user would answer while the lock is
+    /// held. Only a version that appeared in between is new to that second check.
+    fn foreign_inactive(&mut self, changed: Option<usize>) -> Result<(), Finish> {
         let read = self.inactive_owner();
+        let seen = InactiveSeen::of(&read);
+
+        if changed.is_none() && self.seen.unchanged(&seen) {
+            return Ok(());
+        }
+
         let state = match &read {
             Ok(Some(owner)) => InactiveVersion::Owned { owner },
             Ok(None) => InactiveVersion::Absent,
             Err(reason) => InactiveVersion::Unknown { reason },
         };
+        let prompt = changed.map(|changed| Prompt {
+            name: &self.name,
+            changed,
+        });
 
         match self
             .policies
-            .inactive_version(state, &self.user, self.confirmer)
+            .inactive_version(state, &self.user, prompt, self.confirmer)
         {
-            Decision::Continue(None) => Ok(()),
+            Decision::Continue(None) => {
+                self.seen = seen;
+
+                Ok(())
+            }
             Decision::Continue(Some(warning)) => {
+                self.seen = seen;
                 self.warnings.push(warning);
 
                 Ok(())
@@ -686,6 +745,12 @@ impl Run<'_> {
             return Locked::Finished(Finish::stop(format!(
                 "live changed since initial read: live hash {reread} != {live_hash}"
             )));
+        }
+
+        // Another user may have saved an inactive version between the version list and the LOCK,
+        // so the guard runs again: a refusal unlocks and writes nothing.
+        if let Err(finish) = self.foreign_inactive(None) {
+            return Locked::Finished(finish);
         }
 
         if let Err(finish) = self.check(file) {

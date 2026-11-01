@@ -31,6 +31,13 @@ impl VersionEntry {
         self.id == INACTIVE_VERSION_ID
     }
 
+    fn trimmed(mut self) -> Self {
+        self.id = self.id.trim().to_owned();
+        self.author = self.author.trim().to_owned();
+
+        self
+    }
+
     fn push(&mut self, field: Field, text: &str) {
         let target = match field {
             Field::Id => &mut self.id,
@@ -42,7 +49,8 @@ impl VersionEntry {
 }
 
 /// The `atom:entry` elements of a version list by local name: `atom:id` and
-/// `atom:author/atom:name`. A body that is not XML is an error, never an empty list.
+/// `atom:author/atom:name`. A body that is not XML is an error, never an empty list. The values
+/// are trimmed, because a pretty-printed feed puts the indentation of the element in the text.
 pub fn parse_versions(xml: &str) -> Result<Vec<VersionEntry>, String> {
     let mut reader = Reader::from_str(xml);
     let mut entries = Vec::new();
@@ -68,6 +76,11 @@ pub fn parse_versions(xml: &str) -> Result<Vec<VersionEntry>, String> {
                     entry.push(field, &text.xml_content(XmlVersion::Implicit1_0));
                 }
             }
+            Event::CData(text) => {
+                if let (Some(entry), Some(field)) = (open.as_mut(), field) {
+                    entry.push(field, &text.into_inner());
+                }
+            }
             Event::GeneralRef(reference) => {
                 if let (Some(entry), Some(field)) = (open.as_mut(), field) {
                     entry.push(field, &reference_text(&reference)?);
@@ -76,7 +89,7 @@ pub fn parse_versions(xml: &str) -> Result<Vec<VersionEntry>, String> {
             Event::End(element) => match element.local_name().into_inner() {
                 "id" | "name" => field = None,
                 "author" => in_author = false,
-                "entry" => entries.extend(open.take()),
+                "entry" => entries.extend(open.take().map(VersionEntry::trimmed)),
                 _ => {}
             },
             Event::Eof => break,

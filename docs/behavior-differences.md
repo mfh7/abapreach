@@ -35,8 +35,10 @@ it a request on the SAP side (or pass a request the lock reports) and run the de
 - An inactive version of another user: with the default policy `foreign_inactive: reject`
   `abapreach` refuses the deploy before the lock (`REJECTED: inactive version of another user
   exists: <OWNER>`, exit 1) and writes nothing, which is the verdict of the Python function
-  module ("Inactive version of another user exists"). The policies `allow` and `ask` exist only
-  in `abapreach`, so the default stays at parity with Python.
+  module ("Inactive version of another user exists"). The same list is read again after the
+  lock, so a version that appears in between is refused there too and the lock is released. The
+  policies `allow` and `ask` exist only in `abapreach`, so the default stays at parity with
+  Python.
 - `deploy --simulate` writes nothing in both tools (a syntax check only); the active hash, the
   inactive entries and the enqueue table are equal after a simulate.
 - `--base` is the plain content hash of `GET <source>?version=active`, computed the same way

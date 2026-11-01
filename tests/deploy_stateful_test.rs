@@ -76,6 +76,7 @@ fn a_session_with_the_context_cookie_locks_and_simulates() {
         Response::text(200, NO_INACTIVE_FEED),
         Response::text(200, LOCK_BODY),
         live_with_context(),
+        Response::text(200, NO_INACTIVE_FEED),
         Response::empty(200),
         Response::empty(200),
         Response::empty(200),
@@ -86,7 +87,7 @@ fn a_session_with_the_context_cookie_locks_and_simulates() {
     assert_eq!(outcome.status, Some(Status::SimulatedOk));
     assert_eq!(outcome.exit, 0);
     assert!(locks(&transport));
-    assert_eq!(transport.recorded().len(), 7);
+    assert_eq!(transport.recorded().len(), 8);
 }
 
 #[test]

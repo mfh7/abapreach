@@ -102,7 +102,15 @@ fn the_lock_is_held_from_the_lock_request_until_the_unlock() {
     let mut transport = Watch::new(
         replay(
             FIXTURE,
-            vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)],
+            vec![
+                fx(6),
+                no_inactive(),
+                fx(7),
+                fx(6),
+                no_inactive(),
+                fx(8),
+                fx(9),
+            ],
         ),
         &cancel,
         None,
@@ -112,7 +120,10 @@ fn the_lock_is_held_from_the_lock_request_until_the_unlock() {
 
     assert_eq!(outcome.status, Some(Status::SimulatedOk));
     assert_eq!(outcome.exit, 0);
-    assert_eq!(transport.held(), vec![false, false, true, true, true, true]);
+    assert_eq!(
+        transport.held(),
+        vec![false, false, true, true, true, true, true]
+    );
     assert!(!transport.closed_with_lock_held);
     assert!(!cancel.lock_held());
     assert!(transport.interrupts.is_empty());
@@ -152,7 +163,15 @@ fn a_deferred_interrupt_still_unlocks_and_never_reports_success() {
     let mut transport = Watch::new(
         replay(
             FIXTURE,
-            vec![fx(6), no_inactive(), fx(7), fx(6), fx(8), fx(9)],
+            vec![
+                fx(6),
+                no_inactive(),
+                fx(7),
+                fx(6),
+                no_inactive(),
+                fx(8),
+                fx(9),
+            ],
         ),
         &cancel,
         Some(4),
