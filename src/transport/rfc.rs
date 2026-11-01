@@ -4,6 +4,7 @@ use libloading::{Library, Symbol};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::fs;
+use std::io::Read;
 use std::mem::ManuallyDrop;
 use std::os::raw::{c_int, c_uint};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,29 @@ pub const RFC_TRACE_DIR_ENV: &str = "RFC_TRACE_DIR";
 
 const RFC_LIBRARY_OVERRIDE: &str = "ABAPREACH_RFC_LIBRARY";
 pub const MAX_GUI_SEARCH_DEPTH: usize = 4;
+/// How much of a candidate is read to decide its architecture; no library is mapped for it.
+const HEADER_BYTES: usize = 4096;
+/// The first four bytes of an ELF image.
+pub const ELF_MAGIC: [u8; 4] = *b"\x7fELF";
+/// The ELF header bytes the architecture check reads: `e_ident`, `e_type`, and `e_machine`.
+const ELF_HEADER_BYTES: usize = 20;
+const PE_SIGNATURE: [u8; 4] = *b"PE\0\0";
+/// The PE header bytes that hold `e_lfanew`, which points at the COFF machine word.
+pub const PE_OFFSET_END: usize = 0x40;
+/// The stored magic of a universal Mach-O image.
+const MACHO_UNIVERSAL: [u8; 4] = [0xca, 0xfe, 0xba, 0xbe];
+/// `MH_MAGIC_64` and `MH_MAGIC` as a big-endian image stores them.
+const MACHO_64_BE: [u8; 4] = [0xfe, 0xed, 0xfa, 0xcf];
+const MACHO_32_BE: [u8; 4] = [0xfe, 0xed, 0xfa, 0xce];
+/// `MH_CIGAM_64` and `MH_CIGAM` as a little-endian image stores them.
+const MACHO_64_LE: [u8; 4] = [0xcf, 0xfa, 0xed, 0xfe];
+const MACHO_32_LE: [u8; 4] = [0xce, 0xfa, 0xed, 0xfe];
+const MACHO_FAT_ARCH_BYTES: usize = 20;
+const MAX_MACHO_SLICES: usize = 32;
+const MACHO_X86: u32 = 0x0000_0007;
+const MACHO_X86_64: u32 = 0x0100_0007;
+const MACHO_ARM: u32 = 0x0000_000c;
+const MACHO_ARM64: u32 = 0x0100_000c;
 const MACOS_APPLICATIONS: &str = "/Applications";
 const UNIX_SDK_ROOT: &str = "/opt/sap/nwrfcsdk";
 const UNIX_LOCAL_SDK_ROOT: &str = "/usr/local/sap/nwrfcsdk";
@@ -101,39 +125,51 @@ pub struct RfcLibrary {
 
 impl RfcLibrary {
     pub fn candidate_paths(env: &Env) -> Vec<PathBuf> {
-        env.override_path
-            .iter()
-            .chain(env.gui_paths.iter())
-            .chain(env.sdk_paths.iter())
-            .cloned()
+        Self::candidates(env)
+            .into_iter()
+            .map(|candidate| candidate.path)
             .collect()
     }
 
+    /// Every candidate in load order, each with the origin that decides whether it may fall back.
+    pub fn candidates(env: &Env) -> Vec<Candidate> {
+        let named = |path: &PathBuf| Candidate {
+            path: path.clone(),
+            origin: Origin::Explicit,
+        };
+        let discovered = |path: &PathBuf| Candidate {
+            path: path.clone(),
+            origin: Origin::Discovered,
+        };
+
+        env.override_path
+            .iter()
+            .map(named)
+            .chain(env.gui_paths.iter().map(discovered))
+            .chain(env.sdk_paths.iter().map(discovered))
+            .collect()
+    }
+
+    /// Loads the first candidate whose header matches this binary; the decision never tries a
+    /// candidate after a failure on a path the user named.
     pub fn load(env: &Env) -> Result<Self, String> {
-        let candidates = Self::candidate_paths(env);
+        let candidates = Self::candidates(env);
 
         if candidates.is_empty() {
             return Err("RFC library not found; set ABAPREACH_RFC_LIBRARY".to_owned());
         }
 
         point_trace_at_temp_dir();
-        let mut errors = Vec::new();
 
-        for path in candidates {
-            match unsafe { Library::new(&path) } {
-                Ok(library) => {
-                    set_trace_directory(&library);
+        let (chosen, library) = decide(&candidates, |candidate| load_compatible(&candidate.path))
+            .map_err(|error| error.to_string())?;
 
-                    return Ok(Self {
-                        path,
-                        library: ManuallyDrop::new(library),
-                    });
-                }
-                Err(error) => errors.push(format!("{}: {error}", path.display())),
-            }
-        }
+        set_trace_directory(&library);
 
-        Err(format!("could not load RFC library: {}", errors.join("; ")))
+        Ok(Self {
+            path: candidates[chosen].path.clone(),
+            library: ManuallyDrop::new(library),
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -1058,6 +1094,295 @@ fn is_put_uri(uri: &str) -> bool {
     }
 }
 
+/// What one candidate attempt did: a library that can be used, or why it cannot be.
+pub type Attempt = Result<Library, String>;
+
+/// One candidate the loader may attempt, and where it came from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Candidate {
+    pub path: PathBuf,
+    pub origin: Origin,
+}
+
+/// Whether the user named the path or automatic discovery found it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Origin {
+    /// The user named the path, for example `ABAPREACH_RFC_LIBRARY` pointing at a SAP GUI or SDK
+    /// library; a failure stops the load instead of falling back.
+    Explicit,
+    /// Automatic discovery found the path; a failure moves on to the next candidate.
+    Discovered,
+}
+
+/// Why the candidate list produced no library.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LoadError {
+    /// A path the user named could not be used; nothing else is attempted.
+    Explicit { path: PathBuf, reason: String },
+    /// Every discovered candidate failed; each failure is reported with its path.
+    Exhausted(Vec<String>),
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Explicit { path, reason } => write!(
+                formatter,
+                "could not load RFC library {}: {reason}; an explicit path does not fall back to \
+                 another candidate",
+                path.display()
+            ),
+            Self::Exhausted(errors) => {
+                write!(
+                    formatter,
+                    "could not load RFC library: {}",
+                    errors.join("; ")
+                )
+            }
+        }
+    }
+}
+
+/// The loader decision, computed without mapping anything: the first candidate the attempt accepts
+/// wins, a failed discovered candidate is skipped, and a failed explicit path stops the load.
+/// `check` must inspect a candidate before it maps it, so a wrong architecture never reaches FFI
+/// loading; it returns the accepted candidate's own result, such as the mapped library.
+pub fn decide<T>(
+    candidates: &[Candidate],
+    mut check: impl FnMut(&Candidate) -> Result<T, String>,
+) -> Result<(usize, T), LoadError> {
+    let mut errors = Vec::new();
+
+    for (index, candidate) in candidates.iter().enumerate() {
+        let rejection = match check(candidate) {
+            Ok(accepted) => return Ok((index, accepted)),
+            Err(reason) => reason,
+        };
+
+        if candidate.origin == Origin::Explicit {
+            return Err(LoadError::Explicit {
+                path: candidate.path.clone(),
+                reason: rejection,
+            });
+        }
+
+        errors.push(format!("{}: {rejection}", candidate.path.display()));
+    }
+
+    Err(LoadError::Exhausted(errors))
+}
+
+/// The architecture a library image declares, which must match the binary that maps it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Arch {
+    X86,
+    X64,
+    Arm32,
+    Arm64,
+}
+
+impl Arch {
+    /// The architecture this binary was built for; `None` when it is not one of the four a
+    /// checked RFC library may target, so an unknown host fails closed instead of guessing.
+    pub fn current() -> Option<Self> {
+        Self::from_target(std::env::consts::ARCH)
+    }
+
+    /// The architecture of a Rust target name; the caller decides what an unknown name means.
+    pub fn from_target(name: &str) -> Option<Self> {
+        match name {
+            "x86" => Some(Self::X86),
+            "x86_64" => Some(Self::X64),
+            "arm" => Some(Self::Arm32),
+            "aarch64" => Some(Self::Arm64),
+            _ => None,
+        }
+    }
+
+    /// How a message names the architecture, so a rejection states both sides.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::X86 => "x86 (32-bit)",
+            Self::X64 => "x86-64",
+            Self::Arm32 => "arm (32-bit)",
+            Self::Arm64 => "arm64",
+        }
+    }
+}
+
+/// The architectures one library image declares: PE and thin Mach-O declare one, ELF one, and a
+/// universal Mach-O image more than one. A header this loader cannot read is an error rather than a
+/// guess, so an unreadable candidate is never mapped.
+pub fn declared_archs(header: &[u8]) -> Result<Vec<Arch>, String> {
+    if header.starts_with(&ELF_MAGIC) {
+        parse_elf(header).map(|arch| vec![arch])
+    } else if header.starts_with(b"MZ") {
+        parse_pe(header).map(|arch| vec![arch])
+    } else if let Some(image) = macho_magic(header) {
+        match image {
+            MachO::Thin(cpu_type) => macho_arch(cpu_type).map(|arch| vec![arch]),
+            MachO::Universal => parse_macho_universal(header),
+        }
+    } else {
+        Err(format!(
+            "unrecognized library header {:02x?}: expected a PE, ELF, or Mach-O image",
+            header.get(..4).unwrap_or(header)
+        ))
+    }
+}
+
+fn parse_elf(header: &[u8]) -> Result<Arch, String> {
+    let bytes = header.get(..ELF_HEADER_BYTES).ok_or_else(|| {
+        format!(
+            "truncated ELF header: {} of {ELF_HEADER_BYTES} bytes",
+            header.len()
+        )
+    })?;
+    let (class, encoding) = (bytes[4], bytes[5]);
+    let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+
+    if encoding != 1 {
+        return Err(format!("unsupported ELF data encoding {encoding}"));
+    }
+
+    match (class, machine) {
+        (1, 0x0003) => Ok(Arch::X86),
+        (1, 0x0028) => Ok(Arch::Arm32),
+        (2, 0x003e) => Ok(Arch::X64),
+        (2, 0x00b7) => Ok(Arch::Arm64),
+        _ => Err(format!(
+            "unsupported ELF image: class {class}, machine {machine:#06x}"
+        )),
+    }
+}
+
+fn parse_pe(header: &[u8]) -> Result<Arch, String> {
+    let offset = header.get(0x3c..PE_OFFSET_END).ok_or_else(|| {
+        format!(
+            "truncated PE header: {} of {PE_OFFSET_END} bytes",
+            header.len()
+        )
+    })?;
+    let pe_offset = u32::from_le_bytes([offset[0], offset[1], offset[2], offset[3]]) as usize;
+    let image = header.get(pe_offset..).ok_or_else(|| {
+        format!("PE header offset {pe_offset:#x} is outside the inspected region")
+    })?;
+    let image = image
+        .get(..6)
+        .ok_or_else(|| format!("truncated PE image at offset {pe_offset:#x}"))?;
+
+    if image[..4] != PE_SIGNATURE {
+        return Err(format!("no PE signature at offset {pe_offset:#x}"));
+    }
+
+    match u16::from_le_bytes([image[4], image[5]]) {
+        0x014c => Ok(Arch::X86),
+        0x01c4 => Ok(Arch::Arm32),
+        0x8664 => Ok(Arch::X64),
+        0xaa64 => Ok(Arch::Arm64),
+        machine => Err(format!("unsupported PE machine {machine:#06x}")),
+    }
+}
+
+/// A Mach-O image kind: a thin image declares one cpu type, a universal one lists its slices.
+enum MachO {
+    Thin(u32),
+    Universal,
+}
+
+/// Recognizes a Mach-O image from its stored magic; `None` when the header is not one. Thin
+/// images store the magic in either byte order and the cpu type in the same order.
+fn macho_magic(header: &[u8]) -> Option<MachO> {
+    let magic: [u8; 4] = header.get(..4)?.try_into().ok()?;
+    let cpu: [u8; 4] = header.get(4..8)?.try_into().ok()?;
+
+    match magic {
+        MACHO_UNIVERSAL => Some(MachO::Universal),
+        MACHO_64_BE | MACHO_32_BE => Some(MachO::Thin(u32::from_be_bytes(cpu))),
+        MACHO_64_LE | MACHO_32_LE => Some(MachO::Thin(u32::from_le_bytes(cpu))),
+        _ => None,
+    }
+}
+
+fn parse_macho_universal(header: &[u8]) -> Result<Vec<Arch>, String> {
+    let count = header
+        .get(4..8)
+        .map(|count| u32::from_be_bytes([count[0], count[1], count[2], count[3]]) as usize)
+        .ok_or_else(|| format!("truncated universal Mach-O header: {} bytes", header.len()))?;
+
+    if count == 0 || count > MAX_MACHO_SLICES {
+        return Err(format!(
+            "unsupported universal Mach-O header: {count} slices"
+        ));
+    }
+
+    let entries = header
+        .get(8..8 + count * MACHO_FAT_ARCH_BYTES)
+        .ok_or_else(|| format!("truncated universal Mach-O header for {count} slices"))?;
+
+    entries
+        .chunks(MACHO_FAT_ARCH_BYTES)
+        .map(|entry| macho_arch(u32::from_be_bytes([entry[0], entry[1], entry[2], entry[3]])))
+        .collect()
+}
+
+fn macho_arch(cpu_type: u32) -> Result<Arch, String> {
+    match cpu_type {
+        MACHO_X86 => Ok(Arch::X86),
+        MACHO_X86_64 => Ok(Arch::X64),
+        MACHO_ARM => Ok(Arch::Arm32),
+        MACHO_ARM64 => Ok(Arch::Arm64),
+        _ => Err(format!("unsupported Mach-O cpu type {cpu_type:#010x}")),
+    }
+}
+
+/// Refuses a library whose declared architectures do not include the one this binary was built
+/// for. The message names both sides, so a user can tell a 32-bit DLL from a foreign `.so`.
+pub fn compatible_arch(expected: Arch, header: &[u8]) -> Result<(), String> {
+    let declared = declared_archs(header)?;
+
+    if declared.contains(&expected) {
+        Ok(())
+    } else {
+        let found = declared
+            .iter()
+            .map(|arch| arch.label())
+            .collect::<Vec<_>>()
+            .join(" or ");
+
+        Err(format!(
+            "architecture mismatch: the library is {found} but this binary is {}",
+            expected.label()
+        ))
+    }
+}
+
+/// The default attempt: inspect the header first, then map the library. A candidate for another
+/// architecture is rejected before any FFI call, so a wrong image is never mapped.
+pub fn load_compatible(path: &Path) -> Attempt {
+    let expected = Arch::current().ok_or_else(|| {
+        format!(
+            "unsupported host architecture {}: this build cannot check an RFC library",
+            std::env::consts::ARCH
+        )
+    })?;
+    let header = read_header(path)?;
+
+    compatible_arch(expected, &header)?;
+    unsafe { Library::new(path) }.map_err(|error| error.to_string())
+}
+
+fn read_header(path: &Path) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut header = Vec::with_capacity(HEADER_BYTES);
+
+    file.take(HEADER_BYTES as u64)
+        .read_to_end(&mut header)
+        .map_err(|error| error.to_string())?;
+
+    Ok(header)
+}
+
 /// The platform whose library locations are used; tests drive every platform on any host.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Platform {
@@ -1086,7 +1411,9 @@ pub trait CandidateFs {
     fn child_directories(&self, path: &Path) -> Vec<PathBuf>;
 }
 
-struct SystemFs;
+/// The real file system behind `Env::current`; tests pair it with a temporary directory to prove
+/// the discovery code path against actual files.
+pub struct SystemFs;
 
 impl CandidateFs for SystemFs {
     fn is_file(&self, path: &Path) -> bool {
