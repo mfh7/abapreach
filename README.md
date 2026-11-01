@@ -1,116 +1,153 @@
-# abapreach
+# ABAPReach
 
-`abapreach` is a command line tool for ABAP source objects of an SAP system. Milestone 1
-supports three commands for programs (`PROG`) over two backends:
+**Let AI reach your ABAP code.**
 
-- ADT over HTTP(S): the ABAP Development Tools REST API of the system.
-- RFC/SADT: the same ADT requests tunnelled through the function module
-  `SADT_REST_RFC_ENDPOINT`, for systems that are reachable by RFC or SAProuter only.
+ABAPReach is a Rust CLI for working with ABAP source in SAP systems—through direct ABAP Development Tools (ADT) HTTP(S) access or an RFC connection when HTTP access is unavailable. It gives developers, scripts, and external AI tooling a consistent way to inspect and change ABAP code, with explicit safeguards around write operations.
 
-Both backends use the same operations, so a program behaves the same on either one. Some systems
-keep no stateful ADT HTTP session (seen on a 740 release); `deploy` then falls back to RFC/SADT
-and `doctor` reports it, while `read` is unaffected.
+> **Early preview · v0.11.0 (Milestone 1)**  
+> The current Rust release supports existing ABAP programs (`PROG`): read, deploy, simulate, and diagnostics. It is built and tested on **macOS arm64**. A native MCP server, additional ABAP object types, and custom function-module operations are **not implemented in this release**.
 
-## Commands
+## Why ABAPReach?
 
-    abapreach read PROG <NAME> <OUT_FILE> [--force] --conn <sid>_<client>
-    abapreach deploy PROG <NAME> <FILE> [--simulate] [--base <hash>] [--tr <request>]
-        [--backend adt|rfc] --conn <sid>_<client>
-    abapreach doctor --conn <sid>_<client>
+ABAP development environments are not always reachable over HTTP(S). Some SAP landscapes are accessible only through RFC or SAProuter, making it difficult to use the same workflow across systems.
 
-`--conn` is mandatory. `read` refuses to overwrite `OUT_FILE` without `--force` and prints the
-line count and the content hash. `deploy` always prints a unified diff (`--- live` / `+++ file`)
-and the `live hash`; `--simulate` runs everything up to a syntax check without saving and then
-releases the lock. `--base` stops the run when the live source no longer has that hash. Both start
-with a report line that names the backend, why it was chosen, the guards that hold on that path
-(including the `foreign_inactive` policy) and the guards of the Python tooling that do not apply
-there.
+ABAPReach focuses on three things:
 
-## Doctor
+- **Reach the system you have.** Prefer ADT over HTTP(S); use RFC/SADT where the SAP system can be reached through RFC instead.
+- **Use one consistent CLI.** Read, inspect changes, and deploy programs without maintaining separate scripts for each connection path.
+- **Make writes deliberate.** Review diffs, check source hashes, respect inactive versions owned by other users, and avoid blind retries when a write's outcome is uncertain.
 
-`doctor` is read-only and checks one connection per backend: the configuration and the
-credentials are checked locally (their values are never printed), ADT gets one
-`GET /sap/bc/adt/discovery`, the RFC library is looked up and asked for its `RfcGetVersion`,
-and RFC gets one `RfcPing`, its only logon. Every probe is reported even when an earlier one
-failed; a missing RFC library skips the ping instead of failing it. Exit 0 only when every
-probe passed, 1 otherwise.
+The CLI can be invoked by automation or an AI agent today. **Built-in MCP integration is not available yet.**
 
-## Statuses and exit codes
+## Available today
 
-| Result | Exit |
+| Capability | v0.11.0 |
 | --- | --- |
-| `ACTIVE`, `SIMULATED_OK`, `no changes` | 0 |
-| `INACTIVE`, `REJECTED`, `PARTIAL` | 1 |
-| `STOP: ...` on stderr (bad argument, configuration, `--base`, changed source) | 2 |
+| Read an existing ABAP program to a local file | Available |
+| Deploy changes to an existing program | Available |
+| Preview changes and run syntax checks without saving (`--simulate`) | Available |
+| Protect against source drift (`--base`) | Available |
+| Check configuration, connectivity, and RFC library (`doctor`) | Available |
+| Direct ADT HTTP(S) and RFC/SADT connectivity | Available, subject to system prerequisites |
+| Create ABAP objects or support object types beyond `PROG` | Not yet |
+| Built-in MCP server or native custom-FM fallback | Not yet |
 
-After a write whose outcome is unknown (timeout or lost connection after the PUT or the
-activation was sent) the tool only reads: it compares the active and the inactive source with
-the file and reports `ACTIVE (reconciled)`, `INACTIVE`, `PARTIAL: outcome unknown`,
-`PARTIAL: unexpected state` or `PARTIAL: reconciliation incomplete, inactive source unreadable
-(<reason>)` when the inactive source cannot be read (HTTP status, timeout, bad UTF-8); every
-result exits 1 with `check with read before retrying`. It never retries and never switches
-backend.
+## Quick start
 
-## Configuration
+### 1. Build the CLI
 
-The connections file is `$ABAP_CONNECTIONS` or `~/.config/abap-rfc/connections.json`; secrets
-live in `connections.local.json` next to it. Per server: `systemId`, `host`, `port` (the ADT
-endpoint), `clients`, `rfc` (`ashost`, `sysnr`, optional `saprouter`) and the optional `adt`
-block (`scheme`, `ca_file`, `insecure`). The connection id is `<sid>_<client>`. User and
-password come from `<SID>_<CLIENT>_USER` and `<SID>_<CLIENT>_PASS` in the environment, else
-from `connections.local.json`. Passwords are never printed.
+You need a Rust toolchain with Rust 2024 edition support and access to an SAP system with appropriate credentials and authorizations.
 
-TLS is verified by default. `http://` and `insecure` exist only as per-connection settings in
-the configuration file, never as command line flags, and every output and `doctor` then
-prints a warning.
+```bash
+git clone https://github.com/mfh7/abapreach.git
+cd abapreach
+cargo build --release
+./target/release/abapreach --help
+```
 
-### Policies
+The repository is currently private; the clone command requires repository access. No public binary distribution is documented at this stage.
 
-`policies` is an optional object that holds the write guards of every server;
-`servers[].policies` overrides single keys of it:
+### 2. Configure a connection
 
+Create `~/.config/abap-rfc/connections.json`:
+
+```json
+{
+  "servers": [
     {
-      "policies": {"foreign_inactive": "reject"},
-      "servers": [
-        {"systemId": "DEV", "host": "example.com", "port": 443, "clients": ["100"],
-         "rfc": {"ashost": "example.com", "sysnr": "00"},
-         "policies": {"foreign_inactive": "ask"}}
-      ]
+      "systemId": "DEV",
+      "host": "sap.example.com",
+      "port": 443,
+      "clients": ["100"],
+      "rfc": {
+        "ashost": "sap.example.com",
+        "sysnr": "00"
+      }
     }
+  ]
+}
+```
 
-`foreign_inactive` decides what `deploy` does when the inactive version of the program belongs
-to another user: before the lock, `deploy` (and `deploy --simulate`) reads `GET
-<source>/versions` and compares the author of the inactive version (`99999`) with the logon
-user, and it reads the same list again right after the lock, so a version another user saves in
-between is still seen. ADT allows such an overwrite, the function module of the Python tooling
-does not, so `abapreach` enforces it on both backends itself.
+`host` and `port` describe the ADT HTTP(S) endpoint. The `rfc` section describes the RFC endpoint; add `saprouter` there when needed. For an **RFC-only** system, omit `host` and `port`. The current implementation still requires the `rfc` configuration section even when you intend to use ADT only.
 
-| Value | Behavior |
+The default connection file path is retained for compatibility with the earlier Python tooling. Set `ABAP_CONNECTIONS` to use another location. Credentials are loaded from environment variables first, or from `connections.local.json` beside the connection file.
+
+For the example above, provide `DEV_100_USER` and `DEV_100_PASS` through your shell environment or a secret manager. **Do not put passwords in `connections.json` or commit secrets to Git.**
+
+### 3. Check access and read a program
+
+```bash
+./target/release/abapreach doctor --conn DEV_100
+./target/release/abapreach read PROG ZHELLO ./ZHELLO.abap --conn DEV_100
+```
+
+`read` refuses to overwrite an existing local file unless `--force` is supplied. It reports the line count and a content hash.
+
+**Doctor caveat (v0.11.0):** `doctor` tests both configured connectivity paths and returns exit code 1 if *any* probe fails, including a missing RFC library. That does not necessarily mean ADT operations are unavailable. Check the individual probe results rather than treating its aggregate exit status as an ADT-only readiness verdict.
+
+### 4. Preview, then deploy
+
+```bash
+./target/release/abapreach deploy PROG ZHELLO ./ZHELLO.abap --simulate --conn DEV_100
+
+# Writes to SAP; run only after reviewing the diff and safety report.
+./target/release/abapreach deploy PROG ZHELLO ./ZHELLO.abap --conn DEV_100
+```
+
+`--simulate` generates a diff and performs preflight checks, including syntax checking, without saving source changes. The tool acquires and releases locks when needed. For concurrency protection, supply `--base <hash>` using the live source hash from an earlier read or deploy report. Transportable objects may require `--tr <request>`, subject to the SAP-side transport and lock checks.
+
+## Connectivity and dependencies
+
+| Path | How it works | Requirements |
+| --- | --- | --- |
+| **ADT HTTP(S)** | Connects to the SAP ADT REST API | Reachable ADT endpoint; permitted user; stateful session for deploy |
+| **RFC/SADT** | Sends ADT requests via `SADT_REST_RFC_ENDPOINT` over RFC | Reachable RFC endpoint (direct or SAProuter), compatible SAP RFC library, required SAP-side function module |
+
+RFC/SADT is a transport for ADT semantics in this milestone, **not** a general-purpose native RFC feature backend. Support for an operation still depends on the target SAP system.
+
+The RFC library is **loaded at runtime and is not included** in ABAPReach. The loader checks `ABAPREACH_RFC_LIBRARY`, supported local SAP GUI library locations (macOS), `SAPNWRFC_HOME`, and SDK directories. Installing or licensing the SAP RFC runtime remains the user's responsibility.
+
+ABAPReach prefers direct ADT when configured. Automatic fallback to RFC is intentionally limited: it is allowed only where routing considers the alternative eligible and the previous attempt has not made an uncertain write. An explicit `--backend adt|rfc` or `--base` on deploy prevents automatic switching. Authorization, validation, and transport errors are not reasons to bypass safeguards by changing backends.
+
+TLS verification is on by default for ADT. Insecure TLS or plain HTTP must be explicitly configured per connection and produces a warning.
+
+## Safety by design
+
+- **Review before write:** deploy shows a unified diff and reports the selected backend and applicable guards.
+- **Drift protection:** `--base` checks that the live source still matches the expected hash, including after locking.
+- **Inactive-version protection:** the default `foreign_inactive: reject` policy refuses to overwrite another user's inactive version. The optional `ask` policy requires an interactive terminal; `allow` explicitly relaxes the guard.
+- **Controlled activation and transport:** syntax checks, locks, activation outcomes, and transport checks are part of deploy; a failed activation can leave an inactive version for inspection.
+- **No blind retry:** when a write may have reached SAP but its outcome is unknown, ABAPReach reads back state for reconciliation. It never blindly retries the write or silently switches backend.
+
+These safeguards do **not** replace SAP permissions, system configuration, change management, or a review of the actual source change.
+
+### Exit codes
+
+| Exit | Meaning |
 | --- | --- |
-| `reject` (default) | `REJECTED: inactive version of another user exists: <OWNER>` and exit 1; no lock is sent |
-| `allow` | writes anyway and prints `W: overwriting the inactive version of <OWNER> (policy allow)` |
-| `ask` | asks `<NAME>: inactive version of <OWNER> would be overwritten (<n> lines changed vs active). Overwrite? [y/N]` on stderr; only `y`/`yes` continues, and without a terminal it behaves as `reject` (`(policy ask needs a terminal)`) |
+| `0` | Successful operation, successful simulation, or no change |
+| `1` | Rejected, inactive, partial, or unsuccessful operation; also used for a failed `doctor` probe |
+| `2` | Argument, configuration, or failed precondition reported as `STOP` |
 
-An inactive version of the logon user is no obstacle. A version list that cannot be read or
-parsed fails closed (`REJECTED`, exit 1) under `reject` and `ask`; only `allow` continues, with a
-warning. A version that appears between the first check and the lock is refused after the lock
-and the lock is released; a prompt is never shown while the lock is held, so `ask` then behaves
-as `reject`. An unknown guard name or policy value stops the run at load time with exit 2.
-`doctor` prints the effective policy of the connection.
+After a partial or uncertain write, inspect the current SAP state before attempting another deployment.
 
-## RFC dependency
+## Scope and documentation
 
-The RFC backend loads the SAP NetWeaver RFC library at run time; nothing is linked or bundled.
-It looks for `ABAPREACH_RFC_LIBRARY`, then the library of an installed SAP GUI (macOS), then
-`SAPNWRFC_HOME` and the usual SDK folders. Without a library the RFC backend is unavailable and
-ADT over HTTP is used.
+**Milestone 1 is intentionally narrow.** It supports existing `PROG` objects on tested macOS arm64 setups. It does not yet create objects, cover other ABAP object types, expose an MCP server, or fall back to a custom deployment function module.
 
-## Limits of milestone 1
+For implementation details and known differences from the previous Python tooling, see:
 
-Only `PROG` objects that already exist; no object creation, no other object types, no MCP
-server and no function-module fallback. The tool is built and tested on macOS arm64.
+- [Behavior differences](docs/behavior-differences.md)
+- [Changelog](CHANGELOG.md)
 
-## Tests
+To run the test suite:
 
-Run `cargo test`; the fakes behind the `test-support` feature are enabled for tests by the
-dev-dependency, so no extra flag is needed (`cargo test --features test-support` also works).
+```bash
+cargo test
+```
+
+ABAPReach is under active development. Availability of a command in an earlier Python implementation does not imply that it is present in the current Rust binary.
+
+---
+
+*ABAP and SAP are trademarks of SAP SE or its affiliates. ABAPReach is an independent project and is not presented as an SAP product.*
