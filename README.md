@@ -168,7 +168,8 @@ before it locks and deploys over RFC instead.
 </table>
 
 RFC sends the ADT requests through `SADT_REST_RFC_ENDPOINT` and keeps lock, write and
-activation on one connection. Pick a backend with `--backend adt|rfc`; without it ADT HTTP runs
+activation on one connection. The RFC library is loaded at run time and is not included
+in ABAPReach; installing and licensing it is up to you. Pick a backend with `--backend adt|rfc`; without it ADT HTTP runs
 first, and a connection without `host` and `port` runs on RFC only.
 
 ## Safety
