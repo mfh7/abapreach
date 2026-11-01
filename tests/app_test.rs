@@ -3,6 +3,7 @@ mod replay;
 
 use abapreach::config::Connection;
 use abapreach::operation::deploy::CancelFlag;
+use abapreach::transport::http::HttpTransport;
 use abapreach::transport::{Response, SadtTransport, TransportError};
 use abapreach::{Exit, Factories, RfcLibraryInfo, run};
 use common::ScriptedTransport;
@@ -29,6 +30,10 @@ impl<T: SadtTransport> SadtTransport for Shared<T> {
 
     fn close(&mut self) -> Result<(), TransportError> {
         self.0.borrow_mut().close()
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        self.0.borrow().stateful_supported()
     }
 }
 
@@ -296,6 +301,45 @@ fn read_runs_on_adt_first_and_warns_for_an_insecure_connection() {
     assert_eq!(exit.stderr, "");
     assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
     assert_eq!(fs::read_to_string(out).unwrap(), "A\nB\n");
+}
+
+#[test]
+fn a_stateful_session_the_server_does_not_keep_falls_back_to_rfc_for_deploy() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+    let (cell, opened) = shared(HttpTransport::for_test(vec![
+        Ok(Response::text(
+            200,
+            "REPORT ytest_abapreach01.\n\nWRITE / 'v1'.",
+        )),
+        Ok(Response::empty(200)),
+    ]));
+
+    fake.adt.push_back(opened);
+    fake.rfc.push_back(simulate_replay());
+
+    let exit = go(&simulate_args(&file, &[]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0);
+    assert!(exit.stdout.ends_with("SIMULATED_OK"));
+    assert!(exit.stderr.contains("falling back to RFC SADT"));
+    assert_report(
+        &exit.stdout,
+        "rfc",
+        "fallback to RFC: ADT HTTP stateful session unavailable (no sap-contextid)",
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert!(
+        cell.borrow()
+            .recorded()
+            .iter()
+            .all(|call| !call.uri.contains("_action=LOCK")),
+        "the LOCK must not be sent"
+    );
 }
 
 #[test]

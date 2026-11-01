@@ -2,6 +2,7 @@ mod common;
 
 use abapreach::config::Connection;
 use abapreach::operation::deploy::CancelFlag;
+use abapreach::transport::http::HttpTransport;
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use abapreach::{Exit, Factories, Opened, RfcLibraryInfo, run};
 use common::ScriptedTransport;
@@ -31,6 +32,10 @@ impl<T: SadtTransport> SadtTransport for Shared<T> {
 
     fn close(&mut self) -> Result<(), TransportError> {
         self.0.borrow_mut().close()
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        self.0.borrow().stateful_supported()
     }
 }
 
@@ -259,6 +264,60 @@ fn a_failed_adt_probe_does_not_stop_the_rfc_probes() {
         (fake.adt_calls, fake.library_calls, fake.ping_calls),
         (1, 1, 1)
     );
+}
+
+#[test]
+fn doctor_reports_the_stateful_session_and_leaves_the_deploy_capability_with_rfc_when_absent() {
+    let mut kept = Response::text(200, "<app:service/>");
+    kept.headers
+        .insert("Set-Cookie".to_owned(), "sap-contextid=ctx".to_owned());
+
+    let cases = [
+        (
+            kept,
+            "ADT HTTP stateful session: ok",
+            "capability deploy PROG: ADT HTTP, RFC SADT",
+        ),
+        (
+            Response::text(200, "<app:service/>"),
+            "ADT HTTP stateful session: unavailable (no sap-contextid)",
+            "capability deploy PROG: RFC SADT",
+        ),
+    ];
+
+    for (discovery, stateful, deploy) in cases {
+        let directory = tempfile::tempdir().unwrap();
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(Ok(Box::new(HttpTransport::for_test(vec![
+            Ok(discovery),
+            Ok(Response::empty(200)),
+        ]))));
+        fake.library.push_back(library());
+        fake.ping.push_back(Ok(()));
+
+        let exit = doctor(directory.path(), &mut fake);
+
+        assert_eq!(exit.code, 0, "{stateful}");
+        assert!(
+            exit.stdout.contains("ADT HTTP probe: ok (HTTP 200)"),
+            "{}",
+            exit.stdout
+        );
+        assert!(exit.stdout.contains(stateful), "{}", exit.stdout);
+        assert!(exit.stdout.contains(deploy), "{}", exit.stdout);
+        assert!(
+            exit.stdout
+                .contains("capability read PROG: ADT HTTP, RFC SADT"),
+            "{}",
+            exit.stdout
+        );
+        assert_eq!(
+            (fake.adt_calls, fake.library_calls, fake.ping_calls),
+            (1, 1, 1),
+            "{stateful}"
+        );
+    }
 }
 
 #[test]

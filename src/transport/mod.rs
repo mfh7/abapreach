@@ -111,4 +111,9 @@ pub trait SadtTransport {
 
     /// Ends the session; a failure is reported, never turned into a different verdict.
     fn close(&mut self) -> Result<(), TransportError>;
+
+    /// Whether the backend keeps a stateful session; `None` when it cannot tell (RFC/SADT).
+    fn stateful_supported(&self) -> Option<bool> {
+        None
+    }
 }

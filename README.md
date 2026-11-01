@@ -7,7 +7,9 @@ supports three commands for programs (`PROG`) over two backends:
 - RFC/SADT: the same ADT requests tunnelled through the function module
   `SADT_REST_RFC_ENDPOINT`, for systems that are reachable by RFC or SAProuter only.
 
-Both backends use the same operations, so a program behaves the same on either one.
+Both backends use the same operations, so a program behaves the same on either one. Some systems
+keep no stateful ADT HTTP session (seen on a 740 release); `deploy` then falls back to RFC/SADT
+and `doctor` reports it, while `read` is unaffected.
 
 ## Commands
 

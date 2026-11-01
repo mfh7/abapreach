@@ -23,6 +23,13 @@ impl DoctorReport {
 
 pub struct Doctor;
 
+/// One ADT discovery probe: the HTTP status and, when the transport knows it, whether the
+/// server keeps the stateful session.
+struct AdtProbe {
+    status: u16,
+    stateful: Option<bool>,
+}
+
 impl Doctor {
     /// Read-only probes on one connection: every probe runs even when an earlier one failed, and
     /// each backend gets at most one logon (ADT discovery GET, RFC ping).
@@ -46,10 +53,22 @@ impl Doctor {
         ));
 
         let mut passed = true;
+        let mut stateful = None;
 
         match connection.adt {
             Some(_) => match adt_probe(connection, factories) {
-                Ok(status) => lines.push(format!("ADT HTTP probe: ok (HTTP {status})")),
+                Ok(probe) => {
+                    lines.push(format!("ADT HTTP probe: ok (HTTP {})", probe.status));
+
+                    if let Some(supported) = probe.stateful {
+                        stateful = Some(supported);
+                        lines.push(if supported {
+                            "ADT HTTP stateful session: ok".to_owned()
+                        } else {
+                            "ADT HTTP stateful session: unavailable (no sap-contextid)".to_owned()
+                        });
+                    }
+                }
                 Err(error) => {
                     passed = false;
                     lines.push(format!("ADT HTTP probe: failed: {error}"));
@@ -93,9 +112,15 @@ impl Doctor {
         } else {
             "RFC SADT"
         };
+        // Without a stateful session a LOCK cannot survive to the PUT, so only RFC can deploy.
+        let deploy_capabilities = if stateful == Some(false) {
+            "RFC SADT"
+        } else {
+            capabilities
+        };
         lines.extend([
             format!("capability read PROG: {capabilities}"),
-            format!("capability deploy PROG: {capabilities}"),
+            format!("capability deploy PROG: {deploy_capabilities}"),
             format!("capability doctor: {capabilities}"),
         ]);
 
@@ -109,11 +134,12 @@ impl Doctor {
 
 /// One discovery request on its own session; a read holds no lock, so a failed close changes
 /// nothing here.
-fn adt_probe(connection: &Connection, factories: &mut dyn Factories) -> Result<u16, String> {
+fn adt_probe(connection: &Connection, factories: &mut dyn Factories) -> Result<AdtProbe, String> {
     let mut transport = factories
         .adt(connection)
         .map_err(|error| error.to_string())?;
     let response = transport.request(Request::get(DISCOVERY_URI));
+    let stateful = transport.stateful_supported();
     let _ = transport.close();
     let response = response.map_err(|error| error.to_string())?;
 
@@ -121,5 +147,8 @@ fn adt_probe(connection: &Connection, factories: &mut dyn Factories) -> Result<u
         return Err(format!("HTTP {}", response.status));
     }
 
-    Ok(response.status)
+    Ok(AdtProbe {
+        status: response.status,
+        stateful,
+    })
 }

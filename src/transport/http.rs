@@ -10,6 +10,7 @@ use std::time::Duration;
 
 const SESSION_HEADER: &str = "X-sap-adt-sessiontype";
 const DISCOVERY_URI: &str = "/sap/bc/adt/discovery";
+const CONTEXT_COOKIE: &str = "sap-contextid";
 
 pub struct HttpConfig {
     pub base_url: String,
@@ -29,6 +30,8 @@ pub struct HttpTransport {
     password: String,
     csrf_token: Option<String>,
     session_open: bool,
+    /// `None` until the first stateful answer; then whether the server set the context cookie.
+    stateful_supported: Option<bool>,
     #[cfg(feature = "test-support")]
     replies: Option<VecDeque<Result<Response, TransportError>>>,
     #[cfg(feature = "test-support")]
@@ -68,6 +71,7 @@ impl HttpTransport {
             password: config.password,
             csrf_token: None,
             session_open: false,
+            stateful_supported: None,
             #[cfg(feature = "test-support")]
             replies: None,
             #[cfg(feature = "test-support")]
@@ -88,6 +92,7 @@ impl HttpTransport {
             password: "password".to_owned(),
             csrf_token: None,
             session_open: false,
+            stateful_supported: None,
             replies: Some(replies.into()),
             recorded: Vec::new(),
         }
@@ -131,6 +136,15 @@ impl HttpTransport {
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
+    }
+
+    /// Some servers (seen on a 740 release) never set the context cookie: they answer the LOCK
+    /// and then reject the following PUT with `423 ExceptionResourceInvalidLockHandle`.
+    fn has_context_cookie(headers: &BTreeMap<String, String>) -> bool {
+        headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("set-cookie"))
+            .any(|(_, value)| value.to_ascii_lowercase().contains(CONTEXT_COOKIE))
     }
 
     fn request_url(&self, uri: &str) -> Result<Url, TransportError> {
@@ -199,6 +213,11 @@ impl HttpTransport {
             self.session_open = true;
         }
 
+        // Asked once per session: the answer decides whether a lock can survive to the PUT.
+        if stateful && self.stateful_supported.is_none() && (200..300).contains(&response.status) {
+            self.stateful_supported = Some(Self::has_context_cookie(&response.headers));
+        }
+
         Ok(response)
     }
 
@@ -220,16 +239,19 @@ impl HttpTransport {
             .send()
             .map_err(|error| Self::classify_send_error(&error))?;
         let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .map(|(name, value)| {
-                (
-                    name.as_str().to_owned(),
-                    value.to_str().unwrap_or_default().to_owned(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut headers = BTreeMap::new();
+        // Every Set-Cookie arrives as its own header; joining them keeps the context cookie
+        // visible after the map has only one entry per name.
+        for (name, value) in response.headers() {
+            let value = value.to_str().unwrap_or_default();
+            headers
+                .entry(name.as_str().to_owned())
+                .and_modify(|existing: &mut String| {
+                    existing.push_str("; ");
+                    existing.push_str(value);
+                })
+                .or_insert_with(|| value.to_owned());
+        }
         let body = response
             .bytes()
             .map_err(|error| TransportError::PostSendUncertain(error.to_string()))?
@@ -280,6 +302,11 @@ impl SadtTransport for HttpTransport {
         }
 
         Ok(retry)
+    }
+
+    /// Whether the server keeps the stateful session; `None` until the first stateful answer.
+    fn stateful_supported(&self) -> Option<bool> {
+        self.stateful_supported
     }
 
     /// Ends the stateful ADT session with one stateless request; the caller reports a failure.

@@ -1,5 +1,5 @@
 use crate::adt::{AdtMessage, parse_messages, prog_uri};
-use crate::backend::{Failure, Selection};
+use crate::backend::{Failure, Selection, SelectionReason};
 use crate::config::{Connection, tls_warning};
 use crate::domain::{Outcome, Status};
 use crate::hash::{normalize, source_hash, validate_prog};
@@ -18,6 +18,7 @@ pub use crate::adt::format_messages;
 const LOCK_ACCEPT: &str =
     "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result";
 const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET without a version returns it; restore only by deploying the base source again on your order";
+const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
 
 #[derive(Clone, Debug)]
 pub struct DeployInput {
@@ -155,7 +156,11 @@ impl DeployProg {
             stdout: selection.map(selection_report).unwrap_or_default(),
             sent: 0,
         };
-        let mut finish = match run.flow(&input, cancel) {
+        // `--base` and an explicit `--backend` bind the run to the backend that was picked.
+        let pinned = input.base.is_some()
+            || selection
+                .is_some_and(|selection| selection.reason == SelectionReason::ExplicitBackend);
+        let mut finish = match run.flow(&input, pinned, cancel) {
             Ok(finish) | Err(finish) => finish,
         };
 
@@ -263,6 +268,18 @@ impl Finish {
         Self {
             failure: Some(Failure::from(&error)),
             ..Self::stop(format!("{message}: HTTP {code}"))
+        }
+    }
+
+    /// No stateful session, so no LOCK was sent and nothing was written: another backend may
+    /// still run the deploy.
+    fn stateful_unavailable() -> Self {
+        Self {
+            stderr: Some(format!("ERROR: {NO_STATEFUL_SESSION}")),
+            failure: Some(Failure::CapabilityUnavailable),
+            fallback_allowed: true,
+            detail: Some(NO_STATEFUL_SESSION.to_owned()),
+            ..Self::new(None, 1)
         }
     }
 
@@ -393,7 +410,12 @@ impl Run<'_> {
             .map_err(|error| Finish::error(&error, first))
     }
 
-    fn flow(&mut self, input: &DeployInput, cancel: &CancelFlag) -> Result<Finish, Finish> {
+    fn flow(
+        &mut self,
+        input: &DeployInput,
+        pinned: bool,
+        cancel: &CancelFlag,
+    ) -> Result<Finish, Finish> {
         validate_prog(&input.name, &input.source).map_err(Finish::stop)?;
 
         let file = normalize(input.source.clone());
@@ -420,6 +442,19 @@ impl Run<'_> {
 
         self.stdout.push(diff.trim_end().to_owned());
         self.stdout.push(format!("live hash {live_hash}"));
+
+        // The server would answer the LOCK and then reject the PUT (423, invalid lock handle),
+        // so the capability is checked before the first request that writes.
+        if self.transport.stateful_supported() == Some(false) {
+            return Err(if pinned {
+                Finish::stop(
+                    "ADT HTTP on this system keeps no stateful session (no sap-contextid); \
+                     use --backend rfc",
+                )
+            } else {
+                Finish::stateful_unavailable()
+            });
+        }
 
         let _lock_scope = cancel.hold_lock();
         // Ctrl-C is deferred while the LOCK request is in flight too: its 2xx reply may already

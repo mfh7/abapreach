@@ -196,6 +196,46 @@ fn unauthorized_doctor_read_and_deploy_requests_do_not_end_a_session() {
 }
 
 #[test]
+fn the_context_cookie_decides_whether_the_stateful_session_is_supported() {
+    let mut kept = Response::empty(200);
+    kept.headers.insert(
+        "Set-Cookie".to_owned(),
+        "SAP_SESSIONID_DEV_100=s1; path=/; sap-contextid=ctx".to_owned(),
+    );
+    let mut transport = HttpTransport::for_test(vec![Ok(kept)]);
+
+    assert_eq!(transport.stateful_supported(), None);
+    transport
+        .request(Request::get("/sap/bc/adt/discovery"))
+        .unwrap();
+    assert_eq!(transport.stateful_supported(), Some(true));
+
+    for reply in [Response::empty(200), {
+        let mut other = Response::empty(200);
+        other
+            .headers
+            .insert("Set-Cookie".to_owned(), "SAP_SESSIONID=1".to_owned());
+        other
+    }] {
+        let mut transport = HttpTransport::for_test(vec![Ok(reply)]);
+
+        transport
+            .request(Request::get("/sap/bc/adt/discovery"))
+            .unwrap();
+        assert_eq!(transport.stateful_supported(), Some(false));
+    }
+}
+
+#[test]
+fn a_stateless_request_says_nothing_about_the_stateful_session() {
+    let mut transport = HttpTransport::for_test(vec![Ok(Response::empty(200))]);
+
+    transport.close().unwrap();
+
+    assert_eq!(transport.stateful_supported(), None);
+}
+
+#[test]
 fn csrf_timeout() {
     assert!(HttpTransport::classify(403, Some("Required")).is_retryable_csrf());
     assert!(!HttpTransport::classify(401, None).is_retryable_csrf());
