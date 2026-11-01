@@ -9,6 +9,9 @@ the internal repository where that implementation was developed.
 ## [Unreleased]
 
 ### Fixed
+- A read-only GET without reply falls back like a connection failure.
+- Doctor capability lines list only probed-ok backends.
+- HTTP 401 is reported as `ERROR: authorization failed: HTTP 401`, exit 1, no fallback.
 - The `foreign_inactive` guard reads the source version list `GET <source>/versions`
   (`/sap/bc/adt/programs/programs/<name>/source/main/versions`, Accept
   `application/atom+xml;type=feed`). The program level `/versions` URI answered HTTP 404 on a

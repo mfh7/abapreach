@@ -57,11 +57,14 @@ impl Doctor {
         ));
 
         let mut passed = true;
+        let mut adt_passed = false;
+        let mut rfc_passed = false;
         let mut stateful = None;
 
         match connection.adt {
             Some(_) => match adt_probe(connection, factories) {
                 Ok(probe) => {
+                    adt_passed = true;
                     lines.push(format!("ADT HTTP probe: ok (HTTP {})", probe.status));
 
                     if let Some(supported) = probe.stateful {
@@ -101,7 +104,10 @@ impl Doctor {
 
         if library_found {
             match factories.rfc_ping(connection) {
-                Ok(()) => lines.push("RFC SADT probe: ok".to_owned()),
+                Ok(()) => {
+                    rfc_passed = true;
+                    lines.push("RFC SADT probe: ok".to_owned());
+                }
                 Err(error) => {
                     passed = false;
                     lines.push(format!("RFC SADT probe: failed: {error}"));
@@ -111,20 +117,15 @@ impl Doctor {
             lines.push("RFC SADT probe: not run (RFC library not found)".to_owned());
         }
 
-        let capabilities = if connection.adt.is_some() {
-            "ADT HTTP, RFC SADT"
-        } else {
-            "RFC SADT"
-        };
+        // A capability line names only the backends whose probe passed; nothing passed reads `none`.
+        let adt = adt_passed.then_some("ADT HTTP");
+        let rfc = rfc_passed.then_some("RFC SADT");
+        let capabilities = capability(&[adt, rfc]);
         // Without a stateful session a LOCK cannot survive to the PUT, so only RFC can deploy.
-        let deploy_capabilities = if stateful == Some(false) {
-            "RFC SADT"
-        } else {
-            capabilities
-        };
+        let deployed = capability(&[adt.filter(|_| stateful != Some(false)), rfc]);
         lines.extend([
             format!("capability read PROG: {capabilities}"),
-            format!("capability deploy PROG: {deploy_capabilities}"),
+            format!("capability deploy PROG: {deployed}"),
             format!("capability doctor: {capabilities}"),
         ]);
 
@@ -133,6 +134,17 @@ impl Doctor {
         }
 
         DoctorReport { lines, passed }
+    }
+}
+
+/// Renders the backends a capability line may list, in probe order.
+fn capability(backends: &[Option<&str>]) -> String {
+    let listed: Vec<&str> = backends.iter().flatten().copied().collect();
+
+    if listed.is_empty() {
+        "none".to_owned()
+    } else {
+        listed.join(", ")
     }
 }
 

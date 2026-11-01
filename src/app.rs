@@ -326,7 +326,7 @@ fn backend_kind(backend: Backend) -> BackendKind {
 }
 
 /// Runs the operation on the backend the router picks. A second backend is tried only when the
-/// first one failed before anything was sent and neither `--backend` nor `--base` pins it.
+/// first one failed before it sent a write request and neither `--backend` nor `--base` pins it.
 fn route(
     operation: OperationKind,
     explicit: Option<BackendKind>,
@@ -386,7 +386,7 @@ fn route(
         reason = SelectionReason::Fallback(done.detail.unwrap_or_else(|| failure.to_string()));
         earlier.push(done.outcome.stderr);
         fallback_note = Some(format!(
-            "NOTE: {backend} failed before anything was sent; falling back to RFC SADT"
+            "NOTE: {backend} failed before anything was written; falling back to RFC SADT"
         ));
     }
 }

@@ -95,7 +95,7 @@ impl Drop for LockScope<'_> {
 }
 
 /// An outcome plus what the wiring needs to route: the failure class and whether a backend
-/// switch is still safe (only when the very first request failed before it was sent).
+/// switch is still safe (only before the deploy sent a write request).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeployResult {
     pub outcome: Outcome,
@@ -188,7 +188,8 @@ impl DeployProg {
                 .unwrap_or_default(),
             seen: InactiveSeen::default(),
             confirmer,
-            sent: 0,
+            write_sent: false,
+            lock_sent: false,
         };
         // `--base` and an explicit `--backend` bind the run to the backend that was picked.
         let pinned = input.base.is_some()
@@ -198,10 +199,8 @@ impl DeployProg {
             Ok(finish) | Err(finish) => finish,
         };
 
-        if let Err(error) = run.transport.close()
-            && !finish.lock_unreleased
-        {
-            finish.close_failed(&error.to_string());
+        if let Err(error) = run.transport.close() {
+            finish.close_failed(&error.to_string(), &input.name, run.lock_sent);
         }
 
         run.prepend_warnings(&mut finish);
@@ -235,8 +234,10 @@ struct Finish {
     failure: Option<Failure>,
     fallback_allowed: bool,
     detail: Option<String>,
-    /// Set once the unlock failed: the run already reported a lock that may remain.
-    lock_unreleased: bool,
+    /// True only after this run received a successful reply to its UNLOCK request.
+    lock_released: bool,
+    /// The UNLOCK failure already warned that the lock may remain.
+    lock_unreleased_reported: bool,
 }
 
 impl Finish {
@@ -249,7 +250,8 @@ impl Finish {
             failure: None,
             fallback_allowed: false,
             detail: None,
-            lock_unreleased: false,
+            lock_released: false,
+            lock_unreleased_reported: false,
         }
     }
 
@@ -283,13 +285,13 @@ impl Finish {
         }
     }
 
-    fn error(error: &TransportError, first_request: bool) -> Self {
+    fn error(error: &TransportError, before_write: bool) -> Self {
         let failure = Failure::from(error);
 
         Self {
             stderr: Some(format!("ERROR: {error}")),
             failure: Some(failure),
-            fallback_allowed: first_request && failure == Failure::PreSendConnectivity,
+            fallback_allowed: before_write && failure == Failure::PreSendConnectivity,
             detail: Some(error.to_string()),
             ..Self::new(None, 1)
         }
@@ -364,7 +366,7 @@ impl Finish {
 
         self.warn(note);
         self.exit = 1;
-        self.lock_unreleased = true;
+        self.lock_unreleased_reported = true;
         self
     }
 
@@ -374,13 +376,35 @@ impl Finish {
         let note = format!("W: the lock on {name} may remain (the lock handle is unknown)");
 
         self.warn(note);
-        self.lock_unreleased = true;
         self
     }
 
-    /// The work is done and the lock is gone, so a failed session end is a warning only.
-    fn close_failed(&mut self, reason: &str) {
-        let note = format!("W: session close failed: {reason} (lock was released)");
+    fn lock_released(mut self) -> Self {
+        self.lock_released = true;
+        self
+    }
+
+    fn lock_request_unanswered(mut self, name: &str) -> Self {
+        self.warn(format!(
+            "W: the lock request got no reply; a lock on {name} may remain, check SM12"
+        ));
+        self
+    }
+
+    /// A session-end failure is informative only. The preceding UNLOCK reply is the only proof
+    /// that no lock remains.
+    fn close_failed(&mut self, reason: &str, name: &str, lock_sent: bool) {
+        if self.lock_unreleased_reported {
+            return;
+        }
+
+        let note = if !lock_sent {
+            format!("W: session close failed: {reason}")
+        } else if self.lock_released {
+            format!("W: session close failed: {reason} (lock was released)")
+        } else {
+            format!("W: session close failed: {reason}; a lock on {name} may remain, check SM12")
+        };
 
         self.warn(note);
     }
@@ -470,7 +494,15 @@ struct Run<'a> {
     /// The inactive version as the check before the lock saw it.
     seen: InactiveSeen,
     confirmer: &'a dyn Confirmer,
-    sent: usize,
+    /// A completed mutating request closes the routing window, even when later reads fail.
+    write_sent: bool,
+    /// Set immediately before sending LOCK, including a request whose reply is lost.
+    lock_sent: bool,
+}
+
+enum InactiveOwnerError {
+    Request(TransportError),
+    Unreadable(String),
 }
 
 impl Run<'_> {
@@ -490,15 +522,28 @@ impl Run<'_> {
     }
 
     fn call(&mut self, request: Request) -> Result<Response, TransportError> {
-        self.sent += 1;
-        self.transport.request(request)
+        let mutates = request.method != "GET" && !request.uri.contains("/checkruns");
+        let response = self.transport.request(request);
+
+        if mutates && (response.is_ok() || response.as_ref().is_err_and(TransportError::was_sent)) {
+            self.write_sent = true;
+        }
+
+        let response = response?;
+
+        // The logon was refused, whatever this request was: the run ends here, without a retry
+        // and without the other backend (a wrong password must not lock the SAP user).
+        match response.authorization_failure() {
+            Some(error) => Err(error),
+            None => Ok(response),
+        }
     }
 
     fn send(&mut self, request: Request) -> Result<Response, Finish> {
-        let first = self.sent == 0;
+        let before_write = !self.write_sent;
 
         self.call(request)
-            .map_err(|error| Finish::error(&error, first))
+            .map_err(|error| Finish::error(&error, before_write))
     }
 
     fn flow(
@@ -564,7 +609,7 @@ impl Run<'_> {
         match self.locked(&lock, input, &file, &live_hash, cancel) {
             Locked::Finished(finish) => Ok(self.release(&lock, &input.name, finish)),
             Locked::Checked => Ok(match self.unlock(&lock) {
-                Ok(()) => Finish::status(Status::SimulatedOk, "SIMULATED_OK"),
+                Ok(()) => Finish::status(Status::SimulatedOk, "SIMULATED_OK").lock_released(),
                 Err(reason) => Finish::status(
                     Status::Partial,
                     "PARTIAL: the check passed but the lock was not released",
@@ -576,7 +621,7 @@ impl Run<'_> {
                 let finish = self.reconcile(&live_hash, &file);
 
                 Ok(match unlocked {
-                    Ok(()) => finish,
+                    Ok(()) => finish.lock_released(),
                     Err(reason) => finish.unlock_failed(&reason, &input.name),
                 })
             }
@@ -600,7 +645,9 @@ impl Run<'_> {
                     });
                 }
 
-                Ok(self.activate(&input.name, &live_hash, &file))
+                Ok(self
+                    .activate(&input.name, &live_hash, &file)
+                    .lock_released())
             }
         }
     }
@@ -628,7 +675,13 @@ impl Run<'_> {
     /// prompt: the second check passes `None`, because the user would answer while the lock is
     /// held. Only a version that appeared in between is new to that second check.
     fn foreign_inactive(&mut self, changed: Option<usize>) -> Result<(), Finish> {
-        let read = self.inactive_owner();
+        let read = match self.inactive_owner() {
+            Ok(owner) => Ok(owner),
+            Err(InactiveOwnerError::Request(error)) => {
+                return Err(Finish::error(&error, !self.write_sent));
+            }
+            Err(InactiveOwnerError::Unreadable(reason)) => Err(reason),
+        };
         let seen = InactiveSeen::of(&read);
 
         if changed.is_none() && self.seen.unchanged(&seen) {
@@ -668,29 +721,36 @@ impl Run<'_> {
     }
 
     /// The owner of the inactive version, or why the version list could not tell.
-    fn inactive_owner(&mut self) -> Result<Option<String>, String> {
+    fn inactive_owner(&mut self) -> Result<Option<String>, InactiveOwnerError> {
         let mut request = Request::get(versions_uri(&self.uri));
         request
             .headers
             .insert("Accept".to_owned(), VERSIONS_ACCEPT.to_owned());
         let response = self
             .call(request)
-            .map_err(|error| format!("version list unavailable: {error}"))?;
+            .map_err(|error| match Failure::from(&error) {
+                Failure::PreSendConnectivity | Failure::Authorization => {
+                    InactiveOwnerError::Request(error)
+                }
+                _ => InactiveOwnerError::Unreadable(format!("version list unavailable: {error}")),
+            })?;
 
         if response.status != 200 {
-            return Err(format!(
+            return Err(InactiveOwnerError::Unreadable(format!(
                 "version list unavailable: HTTP {}",
                 response.status
-            ));
+            )));
         }
 
-        let entries = parse_versions(&String::from_utf8_lossy(&response.body))
-            .map_err(|error| format!("cannot parse the version list: {error}"))?;
+        let entries =
+            parse_versions(&String::from_utf8_lossy(&response.body)).map_err(|error| {
+                InactiveOwnerError::Unreadable(format!("cannot parse the version list: {error}"))
+            })?;
 
         match entries.iter().find(|entry| entry.is_inactive()) {
-            Some(entry) if entry.author.is_empty() => {
-                Err("the version list names no owner of the inactive version".to_owned())
-            }
+            Some(entry) if entry.author.is_empty() => Err(InactiveOwnerError::Unreadable(
+                "the version list names no owner of the inactive version".to_owned(),
+            )),
             Some(entry) => Ok(Some(entry.author.clone())),
             None => Ok(None),
         }
@@ -704,7 +764,18 @@ impl Run<'_> {
         request
             .headers
             .insert("Accept".to_owned(), LOCK_ACCEPT.to_owned());
-        let response = self.send(request)?;
+        let before_write = !self.write_sent;
+        let response = self.call(request);
+        self.lock_sent = response.is_ok() || response.as_ref().is_err_and(TransportError::was_sent);
+        let response = response.map_err(|error| {
+            let finish = Finish::error(&error, before_write);
+
+            if error.was_sent() {
+                finish.lock_request_unanswered(&self.name)
+            } else {
+                finish
+            }
+        })?;
 
         if !(200..300).contains(&response.status) {
             return Err(Finish::http(
@@ -994,7 +1065,7 @@ impl Run<'_> {
 
     fn release(&mut self, lock: &LockInfo, name: &str, finish: Finish) -> Finish {
         match self.unlock(lock) {
-            Ok(()) => finish,
+            Ok(()) => finish.lock_released(),
             Err(reason) => finish.unlock_failed(&reason, name),
         }
     }

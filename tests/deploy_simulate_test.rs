@@ -111,7 +111,7 @@ fn a_failed_session_end_after_the_unlock_is_only_a_warning() {
 }
 
 #[test]
-fn a_failed_unlock_keeps_its_stop_without_a_session_warning() {
+fn a_failed_unlock_reports_that_a_failed_session_end_leaves_a_lock_uncertain() {
     let mut transport = FailingClose {
         inner: replay(
             FIXTURE,

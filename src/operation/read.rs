@@ -60,6 +60,15 @@ impl ReadProg {
             message: error.to_string(),
         })?;
 
+        // The logon was refused, not the read: report it the way the RFC backend does, never as a
+        // stop and never with another attempt.
+        if let Some(error) = response.authorization_failure() {
+            return Err(ReadError {
+                failure: Failure::from(&error),
+                message: error.to_string(),
+            });
+        }
+
         if response.status != 200 {
             let error = TransportError::Http {
                 status: response.status,

@@ -1,7 +1,9 @@
 mod common;
 
 use abapreach::transport::http::{HttpConfig, HttpTransport};
-use abapreach::transport::{Request, Response, SadtTransport, TransportError};
+use abapreach::transport::{
+    Request, Response, SadtTransport, TransportError, is_authorization_failure,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -93,6 +95,17 @@ fn serve_silent(hold: Duration) -> (String, JoinHandle<()>) {
     });
 
     (base_url, handle)
+}
+
+/// A reply that never arrived is a connectivity failure, never an uncertain write.
+fn assert_no_response(error: &TransportError) {
+    assert!(matches!(error, TransportError::NoResponse(_)), "{error:?}");
+    assert!(
+        error
+            .to_string()
+            .starts_with("no response to a read-only request: "),
+        "{error}"
+    );
 }
 
 #[test]
@@ -293,6 +306,34 @@ fn csrf_timeout() {
     assert!(HttpTransport::timeout_after_send().is_post_send_uncertain());
 }
 
+/// A 401 refuses the logon. A 403 keeps its operation-specific behavior, while the CSRF marker
+/// remains the token flow that retries once with a fresh token.
+#[test]
+fn only_http_401_refuses_the_logon() {
+    assert!(is_authorization_failure(401));
+    assert!(!is_authorization_failure(403));
+    assert!(!is_authorization_failure(200));
+    assert!(!is_authorization_failure(409));
+
+    let mut marker = Response::empty(403);
+    marker
+        .headers
+        .insert("x-csrf-token".to_owned(), "Required".to_owned());
+    assert_eq!(marker.authorization_failure(), None);
+
+    let mut denied = Response::empty(401);
+    denied
+        .headers
+        .insert("x-csrf-token".to_owned(), "Required".to_owned());
+    assert_eq!(
+        denied.authorization_failure(),
+        Some(TransportError::Authorization("HTTP 401".to_owned()))
+    );
+
+    assert_eq!(Response::text(403, "denied").authorization_failure(), None);
+    assert_eq!(Response::empty(500).authorization_failure(), None);
+}
+
 #[test]
 fn cookie_store_keeps_every_set_cookie_and_close_ends_the_session() {
     let (base_url, server) = serve(vec![COOKIES, OK, OK]);
@@ -385,6 +426,26 @@ fn csrf_is_refreshed_once_and_retried_with_the_token() {
 }
 
 #[test]
+fn a_401_while_refetching_csrf_is_an_authorization_failure_without_a_retry() {
+    let mut required = Response::empty(403);
+    required
+        .headers
+        .insert("x-csrf-token".to_owned(), "Required".to_owned());
+    let mut transport = HttpTransport::for_test(vec![Ok(required), Ok(Response::empty(401))]);
+
+    let error = transport
+        .request(Request::put("/x", Vec::new()))
+        .unwrap_err();
+
+    assert_eq!(error, TransportError::Authorization("HTTP 401".to_owned()));
+    let recorded = transport.recorded();
+    assert_eq!(recorded.len(), 2, "the original PUT is not retried");
+    assert_eq!(recorded[0].method, "PUT");
+    assert_eq!(recorded[1].method, "GET");
+    assert_eq!(recorded[1].uri, "/sap/bc/adt/discovery");
+}
+
+#[test]
 fn second_csrf_rejection_is_an_error_and_other_statuses_are_responses() {
     let (base_url, server) = serve(vec![REQUIRED, TOKEN, REQUIRED]);
     let mut transport = HttpTransport::connect(config(&base_url, 5000)).unwrap();
@@ -434,6 +495,41 @@ fn builder_error_is_pre_send() {
         matches!(error, TransportError::PreSendConnectivity(_)),
         "{error:?}"
     );
+}
+
+#[test]
+fn a_get_dropped_before_its_reply_is_a_connectivity_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        read_request(&stream);
+    });
+    let mut transport = HttpTransport::connect(config(&base_url, 5000)).unwrap();
+
+    let error = transport.request(Request::get("/x")).unwrap_err();
+
+    server.join().unwrap();
+    assert!(!error.is_post_send_uncertain(), "{error:?}");
+    assert_no_response(&error);
+    assert!(
+        error
+            .to_string()
+            .contains("connection closed before message completed"),
+        "the message names the cause: {error}"
+    );
+}
+
+#[test]
+fn a_get_timeout_is_a_connectivity_failure() {
+    let (base_url, server) = serve_silent(Duration::from_millis(1500));
+    let mut transport = HttpTransport::connect(config(&base_url, 300)).unwrap();
+
+    let error = transport.request(Request::get("/x")).unwrap_err();
+
+    server.join().unwrap();
+    assert!(!error.is_post_send_uncertain(), "{error:?}");
+    assert_no_response(&error);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use super::{Request, Response, SadtTransport, TransportError};
+use super::{Request, Response, SadtTransport, TransportError, is_csrf_required};
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::{Certificate, Method, Url};
 use std::collections::BTreeMap;
@@ -104,7 +104,7 @@ impl HttpTransport {
     }
 
     pub fn classify(status: u16, csrf_token: Option<&str>) -> TransportError {
-        if status == 403 && csrf_token.is_some_and(|value| value.eq_ignore_ascii_case("Required")) {
+        if status == 403 && is_csrf_required(csrf_token) {
             return TransportError::CsrfRequired;
         }
 
@@ -118,10 +118,16 @@ impl HttpTransport {
         TransportError::PostSendUncertain("HTTP timeout after request send".to_owned())
     }
 
-    /// Only a failed connect or a request that could not be built proves nothing was sent.
-    pub fn classify_send_error(error: &reqwest::Error) -> TransportError {
+    /// Only a failed connect or a request that could not be built proves nothing was sent. A GET
+    /// has no side effect, so a reply that never arrived is a connectivity failure; a write that
+    /// left without an answer may still have reached SAP.
+    pub fn classify_send_error(method: &str, error: &reqwest::Error) -> TransportError {
         if error.is_connect() || error.is_builder() {
             return TransportError::PreSendConnectivity(error.to_string());
+        }
+
+        if Self::is_read_only(method) {
+            return TransportError::NoResponse(Self::causes(error));
         }
 
         if error.is_timeout() {
@@ -129,6 +135,34 @@ impl HttpTransport {
         }
 
         TransportError::PostSendUncertain(error.to_string())
+    }
+
+    /// Reading the reply of a GET failed: the same lost reply, with nothing written.
+    fn classify_read_error(method: &str, error: &reqwest::Error) -> TransportError {
+        if Self::is_read_only(method) {
+            return TransportError::NoResponse(Self::causes(error));
+        }
+
+        TransportError::PostSendUncertain(error.to_string())
+    }
+
+    fn is_read_only(method: &str) -> bool {
+        method.eq_ignore_ascii_case("GET")
+    }
+
+    /// reqwest's own text names the URL; the cause behind it (closed connection, timeout) is
+    /// what the user needs, and it reaches the message only through the source chain.
+    fn causes(error: &reqwest::Error) -> String {
+        let mut text = error.to_string();
+        let mut next = std::error::Error::source(error);
+
+        while let Some(cause) = next {
+            text.push_str(": ");
+            text.push_str(&cause.to_string());
+            next = cause.source();
+        }
+
+        text
     }
 
     fn header<'a>(headers: &'a BTreeMap<String, String>, name: &str) -> Option<&'a str> {
@@ -250,7 +284,7 @@ impl HttpTransport {
 
         let response = builder
             .send()
-            .map_err(|error| Self::classify_send_error(&error))?;
+            .map_err(|error| Self::classify_send_error(&prepared.method, &error))?;
         let status = response.status().as_u16();
         let mut headers = BTreeMap::new();
         // Every Set-Cookie arrives as its own header; joining them keeps the context cookie
@@ -267,7 +301,7 @@ impl HttpTransport {
         }
         let body = response
             .bytes()
-            .map_err(|error| TransportError::PostSendUncertain(error.to_string()))?
+            .map_err(|error| Self::classify_read_error(&prepared.method, &error))?
             .to_vec();
 
         Ok(Response {
@@ -284,6 +318,9 @@ impl HttpTransport {
             .headers
             .insert("x-csrf-token".to_owned(), "Fetch".to_owned());
         let response = self.send_once(&fetch, true)?;
+        if let Some(error) = response.authorization_failure() {
+            return Err(error);
+        }
         let token = Self::header(&response.headers, "x-csrf-token")
             .filter(|value| !value.is_empty())
             .ok_or(TransportError::CsrfRequired)?;

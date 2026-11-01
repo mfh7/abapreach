@@ -52,6 +52,48 @@ fn no_change_replays_fixture_v1_and_includes_tls_warning() {
 }
 
 #[test]
+fn a_failed_session_end_after_no_changes_does_not_warn_about_a_lock() {
+    let mut transport = replay(FIXTURE, vec![fx(6)])
+        .failing_close(TransportError::PostSendUncertain("gone".to_owned()));
+    let outcome = DeployProg::run(&mut transport, v1(None), None);
+
+    assert_eq!(outcome.exit, 0);
+    assert_eq!(
+        outcome.stderr,
+        "W: session close failed: post-send outcome uncertain: gone"
+    );
+    assert!(!outcome.stderr.contains("may remain"));
+    transport.assert_finished();
+}
+
+#[test]
+fn a_failed_session_end_after_an_unsent_lock_does_not_warn_about_a_lock() {
+    let mut transport = replay(
+        FIXTURE,
+        vec![
+            fx(6),
+            no_inactive(),
+            Step::Any(Err(TransportError::PreSendConnectivity(
+                "no route".to_owned(),
+            ))),
+        ],
+    )
+    .failing_close(TransportError::PostSendUncertain("gone".to_owned()));
+    let outcome = DeployProg::run(&mut transport, v2(), None);
+
+    assert_eq!(outcome.exit, 1);
+    assert_eq!(
+        outcome.stderr,
+        concat!(
+            "ERROR: pre-send connectivity failure: no route\n",
+            "W: session close failed: post-send outcome uncertain: gone"
+        )
+    );
+    assert!(!outcome.stderr.contains("may remain"));
+    transport.assert_finished();
+}
+
+#[test]
 fn initial_base_mismatch_stops_before_lock() {
     let mut transport = replay(FIXTURE, vec![fx(6)]);
     let outcome = DeployProg::run(&mut transport, v1(Some("00")), None);
@@ -164,7 +206,7 @@ fn failure_class_and_fallback_permission_follow_the_failing_request() {
     let later = run(vec![fx(6), no_inactive(), Step::Any(pre_send())]);
 
     assert_eq!(later.failure, Some(Failure::PreSendConnectivity));
-    assert!(!later.fallback_allowed);
+    assert!(later.fallback_allowed);
 
     let uncertain = run(vec![Step::Any(Err(TransportError::PostSendUncertain(
         "x".to_owned(),
@@ -177,33 +219,38 @@ fn failure_class_and_fallback_permission_follow_the_failing_request() {
 
     assert_eq!(denied.failure, Some(Failure::Authorization));
     assert!(!denied.fallback_allowed);
-    assert_eq!(denied.outcome.exit, 2);
-    assert!(
-        denied
-            .outcome
-            .stderr
-            .starts_with("STOP: cannot read live source: HTTP 401")
+    assert_eq!(denied.outcome.exit, 1);
+    assert_eq!(
+        denied.outcome.stderr,
+        "ERROR: authorization failed: HTTP 401"
     );
 }
 
 #[test]
 fn rejected_lock_is_reported_without_unlock() {
-    let mut transport = replay(
-        FIXTURE,
-        vec![fx(6), no_inactive(), Step::Any(Ok(Response::empty(423)))],
-    );
-    let result = DeployProg::run_classified(&mut transport, v2(), None, &CancelFlag::new());
+    for (status, failure) in [(423, Failure::Conflict), (403, Failure::Validation)] {
+        let mut transport = replay(
+            FIXTURE,
+            vec![fx(6), no_inactive(), Step::Any(Ok(Response::empty(status)))],
+        );
+        let result = DeployProg::run_classified(&mut transport, v2(), None, &CancelFlag::new());
 
-    assert_eq!(result.outcome.status, Some(Status::Rejected));
-    assert_eq!(result.outcome.exit, 1);
-    assert!(
-        result
-            .outcome
-            .stdout
-            .ends_with("REJECTED: lock failed: HTTP 423")
-    );
-    assert_eq!(result.failure, Some(Failure::Conflict));
-    assert_eq!(transport.calls.len(), 3);
+        assert_eq!(
+            result.outcome.status,
+            Some(Status::Rejected),
+            "HTTP {status}"
+        );
+        assert_eq!(result.outcome.exit, 1, "HTTP {status}");
+        assert!(
+            result
+                .outcome
+                .stdout
+                .ends_with(&format!("REJECTED: lock failed: HTTP {status}")),
+            "HTTP {status}"
+        );
+        assert_eq!(result.failure, Some(failure), "HTTP {status}");
+        assert_eq!(transport.calls.len(), 3, "HTTP {status}");
+    }
 
     let mut transport = replay(
         FIXTURE,
@@ -255,6 +302,42 @@ fn an_unreadable_lock_reply_never_claims_the_lock_was_released() {
         outcome.stderr
     );
     assert_eq!(transport.closes, 1);
+}
+
+#[test]
+fn an_unanswered_lock_and_failed_session_end_warn_that_the_lock_may_remain() {
+    let mut transport = replay(
+        FIXTURE,
+        vec![
+            fx(6),
+            no_inactive(),
+            Step::Any(Err(TransportError::PostSendUncertain(
+                "reply lost".to_owned(),
+            ))),
+        ],
+    )
+    .failing_close(TransportError::PostSendUncertain("close lost".to_owned()));
+    let outcome = DeployProg::run(&mut transport, v2(), None);
+
+    assert_eq!(outcome.exit, 1);
+    assert!(
+        outcome.stderr.contains(
+            "W: the lock request got no reply; a lock on YTEST_ABAPREACH01 may remain, check SM12"
+        ),
+        "{}",
+        outcome.stderr
+    );
+    assert!(
+        outcome.stderr.contains(
+            "W: session close failed: post-send outcome uncertain: close lost; a lock on \
+             YTEST_ABAPREACH01 may remain, check SM12"
+        ),
+        "{}",
+        outcome.stderr
+    );
+    assert!(!outcome.stderr.contains("lock was released"));
+    assert_eq!(transport.closes, 1);
+    transport.assert_finished();
 }
 
 #[test]

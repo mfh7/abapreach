@@ -16,6 +16,7 @@ use std::rc::Rc;
 
 const WARNING: &str = "WARNING: connection DEV_100 uses insecure TLS or HTTP.";
 const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
+const V1_HASH: &str = "63886692bf652fa419147f746d6b7760d6c991606fa9603d8ade3caf08ac7c64";
 const SOURCE_URI: &str =
     "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=active";
 
@@ -97,6 +98,15 @@ fn source(text: &str) -> Result<Response, TransportError> {
 
 fn pre_send() -> Result<Response, TransportError> {
     Err(TransportError::PreSendConnectivity("no route".to_owned()))
+}
+
+/// A read-only request whose reply never arrived: ADT reached, nothing written.
+const LOST: &str = "no response to a read-only request: connection closed before message completed";
+
+fn lost() -> Result<Response, TransportError> {
+    Err(TransportError::NoResponse(
+        "connection closed before message completed".to_owned(),
+    ))
 }
 
 fn env(directory: &Path) -> BTreeMap<String, String> {
@@ -304,6 +314,297 @@ fn a_pre_send_fallback_to_rfc_is_reported_with_its_cause() {
         "fallback to RFC: pre-send connectivity failure: no route",
     );
     assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn a_get_that_lost_its_reply_falls_back_to_rfc_with_its_cause() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![lost()]));
+    fake.rfc.push_back(simulate_replay());
+
+    let exit = go(&simulate_args(&file, &[]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0);
+    assert!(exit.stdout.ends_with("SIMULATED_OK"));
+    assert_report(&exit.stdout, "rfc", &format!("fallback to RFC: {LOST}"));
+    assert!(
+        exit.stderr.contains(&format!("NOTE: {LOST}")),
+        "{}",
+        exit.stderr
+    );
+    assert!(
+        exit.stderr.contains(
+            "NOTE: ADT HTTP failed before anything was written; falling back to RFC SADT"
+        )
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn a_csrf_refetch_401_after_a_put_is_final_and_unlocks_without_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let (cell, opened) = shared(replay(
+        "dev-750-rfc.json",
+        vec![
+            fx(6),
+            no_inactive(),
+            fx(7),
+            fx(6),
+            no_inactive(),
+            fx(8),
+            Step::ReplyTo(
+                17,
+                Err(TransportError::Authorization("HTTP 401".to_owned())),
+            ),
+            fx(18),
+        ],
+    ));
+    let mut fake = Fake::default();
+    fake.adt.push_back(opened);
+
+    let args = [
+        "abapreach",
+        "deploy",
+        "PROG",
+        "YTEST_ABAPREACH01",
+        file.to_str().unwrap(),
+        "--conn",
+        "dev_100",
+    ];
+    let exit = go(&args, directory.path(), &mut fake);
+    let transport = cell.borrow();
+
+    assert_eq!(exit.code, 1);
+    assert_eq!(exit.stderr, "ERROR: authorization failed: HTTP 401");
+    assert_eq!(fake.rfc_opened, 0);
+    assert_eq!(
+        transport
+            .calls
+            .iter()
+            .filter(|request| request.method == "PUT")
+            .count(),
+        1
+    );
+    assert_eq!(
+        transport
+            .calls
+            .iter()
+            .filter(|request| request.uri.contains("_action=UNLOCK"))
+            .count(),
+        1
+    );
+    transport.assert_finished();
+}
+
+#[test]
+fn a_get_that_lost_its_reply_falls_back_to_rfc_for_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("out.abap");
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![lost()]));
+    fake.rfc.push_back(scripted(vec![source("A")]));
+
+    let exit = go(
+        &read_args(out.to_str().unwrap(), "dev_100"),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0);
+    assert!(
+        exit.stderr.contains(&format!("NOTE: {LOST}")),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(fs::read_to_string(out).unwrap(), "A\n");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn a_lost_get_never_falls_back_when_base_pins_the_backend() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![lost()]));
+
+    let exit = go(
+        &simulate_args(&file, &["--base", "00"]),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1);
+    assert_eq!(
+        exit.stderr,
+        format!(
+            "ERROR: {LOST}\n\
+             NOTE: deploy PROG cannot fall back after pre-send connectivity: --base pins the backend"
+        )
+    );
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn an_unanswered_versions_get_before_lock_falls_back_to_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+    fake.adt.push_back(
+        shared(replay(
+            "dev-750-rfc.json",
+            vec![fx(6), Step::Versions(lost())],
+        ))
+        .1,
+    );
+    fake.rfc.push_back(simulate_replay());
+
+    let exit = go(&simulate_args(&file, &[]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0);
+    assert_report(&exit.stdout, "rfc", &format!("fallback to RFC: {LOST}"));
+    assert!(exit.stderr.contains("falling back to RFC SADT"));
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn an_unanswered_versions_get_before_lock_does_not_fall_back_when_base_pins_adt() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+    fake.adt.push_back(
+        shared(replay(
+            "dev-750-rfc.json",
+            vec![fx(6), Step::Versions(lost())],
+        ))
+        .1,
+    );
+
+    let exit = go(
+        &simulate_args(&file, &["--base", V1_HASH]),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1);
+    assert!(
+        exit.stderr.contains(&format!("ERROR: {LOST}")),
+        "{}",
+        exit.stderr
+    );
+    assert!(
+        exit.stderr.contains("--base pins the backend"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+}
+
+#[test]
+fn an_unanswered_get_after_lock_does_not_fall_back_and_releases_the_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+    let (adt, opened) = shared(replay(
+        "dev-750-rfc.json",
+        vec![fx(6), no_inactive(), fx(7), Step::ReplyTo(6, lost()), fx(9)],
+    ));
+    fake.adt.push_back(opened);
+
+    let exit = go(&simulate_args(&file, &[]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(
+        exit.stderr.contains(&format!("ERROR: {LOST}")),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(fake.rfc_opened, 0);
+    assert_eq!(
+        adt.borrow()
+            .calls
+            .iter()
+            .filter(|request| request.uri.contains("_action=UNLOCK"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_put_that_lost_its_reply_reconciles_and_never_falls_back() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+    let (_, opened) = shared(replay(
+        "dev-750-http.json",
+        vec![
+            fx(6),
+            no_inactive(),
+            fx(7),
+            fx(6),
+            no_inactive(),
+            fx(8),
+            Step::ReplyTo(
+                17,
+                Err(TransportError::PostSendUncertain(
+                    "connection closed before response".to_owned(),
+                )),
+            ),
+            fx(18),
+            fx(20),
+            fx(26),
+        ],
+    ));
+
+    fake.adt.push_back(opened);
+
+    let exit = go(
+        &[
+            "abapreach",
+            "deploy",
+            "PROG",
+            "YTEST_ABAPREACH01",
+            file.to_str().unwrap(),
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1);
+    assert!(
+        exit.stdout.contains("ACTIVE (reconciled)"),
+        "{}",
+        exit.stdout
+    );
+    assert!(exit.stdout.ends_with("check with read before retrying"));
+    assert_eq!(fake.rfc_opened, 0);
 }
 
 #[test]
@@ -517,6 +818,50 @@ fn a_post_send_or_http_failure_never_falls_back() {
     }
 }
 
+/// A refused logon is neither a stopped run nor a fallback, so every operation reports HTTP 401
+/// the same way: one authorization failure, exit 1 and one attempt.
+#[test]
+fn a_refused_logon_on_the_read_get_is_a_single_authorization_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("out.abap");
+    let mut fake = Fake::default();
+    let (cell, opened) = shared(ScriptedTransport::replies(vec![Ok(Response::empty(401))]));
+
+    fake.adt.push_back(opened);
+
+    let exit = go(
+        &read_args(out.to_str().unwrap(), "dev_100"),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1);
+    assert_eq!(exit.stderr, "ERROR: authorization failed: HTTP 401");
+    assert_eq!(cell.borrow().calls.len(), 1, "the logon is never retried");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert!(!out.exists());
+}
+
+#[test]
+fn a_refused_logon_on_the_deploy_get_is_a_single_authorization_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+    let (cell, opened) = shared(ScriptedTransport::replies(vec![Ok(Response::empty(401))]));
+
+    fake.adt.push_back(opened);
+
+    let exit = go(&simulate_args(&file, &[]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert_eq!(exit.stderr, "ERROR: authorization failed: HTTP 401");
+    assert_eq!(cell.borrow().calls.len(), 1, "the logon is never retried");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+}
+
 #[test]
 fn an_explicit_backend_is_used_alone_and_base_blocks_the_fallback() {
     let directory = tempfile::tempdir().unwrap();
@@ -558,7 +903,7 @@ fn an_explicit_backend_is_used_alone_and_base_blocks_the_fallback() {
 }
 
 #[test]
-fn a_deploy_pre_send_failure_falls_back_but_a_later_failure_does_not() {
+fn a_deploy_pre_send_failure_before_lock_falls_back() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("src.abap");
     let args = [
@@ -589,11 +934,14 @@ fn a_deploy_pre_send_failure_falls_back_but_a_later_failure_does_not() {
         source("REPORT ztest."),
         Err(TransportError::PreSendConnectivity("lock".to_owned())),
     ]));
+    fake.rfc
+        .push_back(scripted(vec![source("REPORT ztest.\nWRITE / 'x'.")]));
 
     let exit = go(&args, directory.path(), &mut fake);
 
-    assert_eq!(exit.code, 1);
-    assert_eq!(fake.rfc_opened, 0);
+    assert_eq!(exit.code, 0);
+    assert!(exit.stderr.contains("falling back to RFC SADT"));
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
 }
 
 #[test]
