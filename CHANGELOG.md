@@ -2,9 +2,13 @@
 
 All notable changes to ABAPReach are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
-[Semantic Versioning](https://semver.org/). Versions `0.1.0` to `0.10.0` are the earlier
-Python implementation, which is the behavioural baseline of the Rust port; their tags live in
-the internal repository where that implementation was developed.
+[Semantic Versioning](https://semver.org/).
+
+**Current Rust CLI:** version `0.11.0` supports existing `PROG` objects only.
+Versions `0.1.0` to `0.10.0` below describe the earlier Python implementation,
+not features available in the current Rust CLI. Their tags live in the
+internal repository where that implementation was developed. See the
+[roadmap](docs/roadmap.md) for the path to 1.0.0, which brings all of them to Rust.
 
 ## [Unreleased]
 
@@ -58,6 +62,8 @@ First release of the Rust implementation (milestone 1, partial scope).
   `connections.json` (`servers[].policies` overrides single keys): `reject` (default), `allow` or
   `ask`; an unreadable version list fails closed unless the policy is `allow`. `doctor` prints the
   effective policy.
+
+**Earlier Python implementation (historical)**
 
 ## [0.10.0] - 2026-10-31
 Python implementation: review fixes; all messages and documentation in English.
