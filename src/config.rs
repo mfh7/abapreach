@@ -200,10 +200,10 @@ impl Config {
     pub fn parse_id(connection_id: &str) -> Result<(String, String), String> {
         let (system_id, client) = connection_id
             .rsplit_once('_')
-            .ok_or_else(|| format!("connection id must be <sid>_<client>: {connection_id}"))?;
+            .ok_or_else(|| format!("connection id must be <SID>_<client>: {connection_id}"))?;
         if system_id.is_empty() || client.is_empty() {
             return Err(format!(
-                "connection id must be <sid>_<client>: {connection_id}"
+                "connection id must be <SID>_<client>: {connection_id}"
             ));
         }
 
