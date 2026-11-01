@@ -1,5 +1,5 @@
 use crate::app::Factories;
-use crate::config::{Connection, tls_warning};
+use crate::config::{Connection, LocalCredentialsPermission, tls_warning};
 use crate::transport::Request;
 
 const DISCOVERY_URI: &str = "/sap/bc/adt/discovery";
@@ -32,11 +32,17 @@ struct AdtProbe {
 
 impl Doctor {
     /// Read-only probes on one connection: every probe runs even when an earlier one failed, and
-    /// each backend gets at most one logon (ADT discovery GET, RFC ping).
-    pub fn probe(connection: &Connection, factories: &mut dyn Factories) -> DoctorReport {
+    /// each backend gets at most one logon (ADT discovery GET, RFC ping). `local_credentials` is
+    /// the permission assessment of the file the credentials came from; it is only reported.
+    pub fn probe(
+        connection: &Connection,
+        local_credentials: LocalCredentialsPermission,
+        factories: &mut dyn Factories,
+    ) -> DoctorReport {
         let mut lines = vec![
             format!("connection {}: configuration available", connection.id),
             "credential available".to_owned(),
+            local_credentials.label(),
             format!(
                 "policy foreign inactive: {}",
                 connection.policies.foreign_inactive

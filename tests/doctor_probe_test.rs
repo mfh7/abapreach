@@ -162,6 +162,7 @@ fn doctor_probes_both_backends_with_one_logon_each() {
         [
             "connection DEV_100: configuration available",
             "credential available",
+            "local credentials: not present",
             "policy foreign inactive: reject",
             "ADT HTTP configured: https://example.com:443",
             "RFC SADT configured: example.com system 00",
@@ -218,6 +219,7 @@ fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
         [
             "connection QAS_100: configuration available",
             "credential available",
+            "local credentials: not present",
             "policy foreign inactive: reject",
             "ADT HTTP: not configured",
             "RFC SADT configured: example.com system 02",
@@ -521,4 +523,135 @@ fn doctor_without_a_configured_route_prints_no_saprouter_line() {
     let exit = doctor(directory.path(), &mut fake);
 
     assert!(!exit.stdout.contains("SAProuter"), "{}", exit.stdout);
+}
+
+/// The local file holds the credentials here, so the doctor output proves the command read it and
+/// still never printed the secret.
+#[test]
+fn doctor_never_prints_the_local_credentials_secret() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fs::write(
+        directory.path().join("connections.local.json"),
+        r#"{"DEV_100_USER":"local-user","DEV_100_PASS":"local-secret-pw"}"#,
+    )
+    .unwrap();
+    fake.adt.push_back(discovery());
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let mut env = env(directory.path());
+    env.remove("DEV_100_USER");
+    env.remove("DEV_100_PASS");
+
+    let exit = run(
+        ["abapreach", "doctor", "--conn", "dev_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        env,
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stdout);
+    assert!(
+        exit.stdout.contains("credential available"),
+        "{}",
+        exit.stdout
+    );
+    assert!(!exit.stdout.contains("local-secret-pw"), "{}", exit.stdout);
+}
+
+/// A file that only the owner may touch needs no warning, and doctor exits 0 either way.
+#[cfg(unix)]
+#[test]
+fn doctor_reports_a_user_only_local_credentials_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let still_local = directory.path().join("connections.local.json");
+    let mut fake = Fake::default();
+
+    fs::write(&still_local, r#"{"DEV_100_USER":"local-user"}"#).unwrap();
+    fs::set_permissions(&still_local, fs::Permissions::from_mode(0o600)).unwrap();
+    fake.adt.push_back(discovery());
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stdout);
+    assert!(
+        exit.stdout
+            .lines()
+            .any(|line| line == "local credentials: user-only permission"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        !exit.stdout.contains("readable by group"),
+        "{}",
+        exit.stdout
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_warns_when_the_local_credentials_are_readable_by_group_or_other() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let exposed = directory.path().join("connections.local.json");
+    let mut fake = Fake::default();
+
+    fs::write(
+        &exposed,
+        r#"{"DEV_100_USER":"local-user","DEV_100_PASS":"local-secret-pw"}"#,
+    )
+    .unwrap();
+    fs::set_permissions(&exposed, fs::Permissions::from_mode(0o644)).unwrap();
+    fake.adt.push_back(discovery());
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stdout);
+    assert!(
+        exit.stdout.lines().any(|line| line
+            .starts_with("WARNING: local credentials are readable by group or other (mode 0644)")
+            && line.contains("docs/getting-started.md")),
+        "{}",
+        exit.stdout
+    );
+    assert!(!exit.stdout.contains("local-secret-pw"), "{}", exit.stdout);
+}
+
+/// Windows reports the mode bits as unavailable and sends the user to the documented ACL
+/// requirement instead of claiming a check it cannot make.
+#[cfg(windows)]
+#[test]
+fn doctor_reports_that_windows_permission_was_not_checked() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fs::write(
+        directory.path().join("connections.local.json"),
+        r#"{"DEV_100_USER":"local-user"}"#,
+    )
+    .unwrap();
+    fake.adt.push_back(discovery());
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stdout);
+    assert!(
+        exit.stdout.lines().any(|line| line
+            == "local credentials: permission not checked; restrict the file to a user-only ACL \
+                (see docs/getting-started.md)"),
+        "{}",
+        exit.stdout
+    );
 }

@@ -1,6 +1,9 @@
 use crate::backend::{BackendKind, Failure, OperationKind, Router, Selection, SelectionReason};
 use crate::cli::{Backend, Cli, Command};
-use crate::config::{Config, ConfigPaths, Connection, scrub, tls_warning};
+use crate::config::{
+    Config, ConfigPaths, Connection, LocalCredentialsPermission, local_credentials_permission,
+    scrub, tls_warning,
+};
 use crate::domain::Outcome;
 use crate::hash::{validate_name, validate_prog};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg};
@@ -152,12 +155,12 @@ pub fn run(
             );
         }
     };
-    let connection = match resolve(connection_id(&cli.command), &env) {
-        Ok(connection) => connection,
+    let (connection, local_credentials) = match resolve(connection_id(&cli.command), &env) {
+        Ok(resolved) => resolved,
         Err(message) => return with_warning(stop(message), warning.as_deref()),
     };
     let exit = with_warning(
-        execute(cli.command, &connection, factories),
+        execute(cli.command, &connection, local_credentials, factories),
         warning.as_deref(),
     );
     let mut stdout = exit.stdout;
@@ -212,10 +215,16 @@ fn connection_id(command: &Command) -> &str {
     }
 }
 
-fn resolve(connection_id: &str, env: &BTreeMap<String, String>) -> Result<Connection, String> {
+fn resolve(
+    connection_id: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<(Connection, LocalCredentialsPermission), String> {
     let paths = ConfigPaths::from_env(env)?;
+    // Read-only and metadata-only; the doctor line reports it, no command changes it.
+    let local_credentials = local_credentials_permission(&paths.local);
+    let connection = Config::load(paths, env)?.resolve(connection_id, env)?;
 
-    Config::load(paths, env)?.resolve(connection_id, env)
+    Ok((connection, local_credentials))
 }
 
 /// One finished try on one backend: what to print and whether a switch is still allowed.
@@ -247,10 +256,15 @@ impl Attempt {
     }
 }
 
-fn execute(command: Command, connection: &Connection, factories: &mut dyn Factories) -> Exit {
+fn execute(
+    command: Command,
+    connection: &Connection,
+    local_credentials: LocalCredentialsPermission,
+    factories: &mut dyn Factories,
+) -> Exit {
     match command {
         Command::Doctor { .. } => {
-            let report = Doctor::probe(connection, factories);
+            let report = Doctor::probe(connection, local_credentials, factories);
 
             Exit {
                 code: report.exit(),
