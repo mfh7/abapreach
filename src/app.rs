@@ -36,6 +36,8 @@ pub type Opened = Result<Box<dyn SadtTransport>, TransportError>;
 pub struct RfcLibraryInfo {
     pub path: String,
     pub version: String,
+    /// Discovery decisions the doctor prints, such as a SAP GUI location it skipped.
+    pub notes: Vec<String>,
 }
 
 /// Opens the transports; tests replace it so no network is touched. A failed open must be a
@@ -100,12 +102,14 @@ impl Factories for RealFactories {
     }
 
     fn rfc_library(&mut self, _: &Connection) -> Result<RfcLibraryInfo, String> {
-        let library = RfcLibrary::load(&Env::current())?;
+        let env = Env::current();
+        let library = RfcLibrary::load(&env)?;
         let (major, minor, patch) = library.version()?;
 
         Ok(RfcLibraryInfo {
             path: library.path().display().to_string(),
             version: format!("{major}.{minor}.{patch}"),
+            notes: env.notes().to_vec(),
         })
     }
 

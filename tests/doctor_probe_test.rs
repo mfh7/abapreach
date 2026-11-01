@@ -20,6 +20,7 @@ fn library() -> Result<RfcLibraryInfo, String> {
     Ok(RfcLibraryInfo {
         path: LIBRARY_PATH.to_owned(),
         version: "7.6.2".to_owned(),
+        notes: Vec::new(),
     })
 }
 
@@ -194,6 +195,33 @@ fn doctor_probes_both_backends_with_one_logon_each() {
     assert_eq!(transport.calls[0].uri, DISCOVERY_URI);
     assert_eq!(transport.closes, 1);
     transport.assert_finished();
+}
+
+#[test]
+fn doctor_reports_why_a_discovered_library_was_skipped() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let reason = concat!(
+        "RFC SAP GUI 32-bit: skipped C:\\Program Files (x86)\\SAP\\FrontEnd\\SAPGUI\\",
+        "sapnwrfccm.dll (a 32-bit library cannot load into the 64-bit process)",
+    );
+
+    fake.adt.push_back(discovery());
+    fake.library.push_back(Ok(RfcLibraryInfo {
+        path: LIBRARY_PATH.to_owned(),
+        version: "7.6.2".to_owned(),
+        notes: vec![reason.to_owned()],
+    }));
+    fake.ping.push_back(Ok(()));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0);
+    assert!(
+        exit.stdout.contains(reason),
+        "missing reason in: {}",
+        exit.stdout
+    );
 }
 
 #[test]

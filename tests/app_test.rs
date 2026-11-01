@@ -1275,6 +1275,7 @@ fn doctor_probes_both_backends_and_warns_once() {
     fake.library.push_back(Ok(RfcLibraryInfo {
         path: "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so".to_owned(),
         version: "7.6.2".to_owned(),
+        notes: Vec::new(),
     }));
     fake.ping.push_back(Ok(()));
 

@@ -14,7 +14,12 @@ pub const SADT_REST_RFC_ENDPOINT: &str = "SADT_REST_RFC_ENDPOINT";
 pub const RFC_TRACE_DIR_ENV: &str = "RFC_TRACE_DIR";
 
 const RFC_LIBRARY_OVERRIDE: &str = "ABAPREACH_RFC_LIBRARY";
-const MAX_GUI_SEARCH_DEPTH: usize = 4;
+pub const MAX_GUI_SEARCH_DEPTH: usize = 4;
+const MACOS_APPLICATIONS: &str = "/Applications";
+const UNIX_SDK_ROOT: &str = "/opt/sap/nwrfcsdk";
+const UNIX_LOCAL_SDK_ROOT: &str = "/usr/local/sap/nwrfcsdk";
+const LINUX_GUI_ROOT: &str = "/opt/sapgui";
+const LINUX_LOCAL_GUI_ROOT: &str = "/usr/local/sapgui";
 const PROGRAM_URI_PREFIX: &str = "/sap/bc/adt/programs/programs/";
 const CHECKRUNS_URI: &str = "/sap/bc/adt/checkruns?reporters=abapCheckRun";
 const ACTIVATION_URI: &str = "/sap/bc/adt/activation?method=activate&preauditRequested=true";
@@ -36,15 +41,45 @@ pub struct Env {
     override_path: Option<PathBuf>,
     gui_paths: Vec<PathBuf>,
     sdk_paths: Vec<PathBuf>,
+    /// Discovery decisions the doctor must show, such as a location that was skipped.
+    notes: Vec<String>,
 }
 
 impl Env {
+    /// Discovery for the platform this binary was built for, from the process environment.
     pub fn current() -> Self {
+        let env = std::env::vars_os()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        Self::discover(Platform::current(), &env, &SystemFs)
+    }
+
+    /// Resolves the explicit override and the automatic candidates for one platform; the
+    /// platform and the file-system queries are parameters so every one of them is testable.
+    pub fn discover(
+        platform: Platform,
+        env: &BTreeMap<String, String>,
+        fs: &dyn CandidateFs,
+    ) -> Self {
+        let gui = gui_candidates(platform, env, fs);
+
         Self {
-            override_path: std::env::var_os(RFC_LIBRARY_OVERRIDE).map(PathBuf::from),
-            gui_paths: macos_gui_paths(),
-            sdk_paths: sdk_paths(),
+            override_path: non_empty(env, RFC_LIBRARY_OVERRIDE).map(PathBuf::from),
+            gui_paths: gui.candidates,
+            sdk_paths: sdk_candidates(platform, env),
+            notes: gui.notes,
         }
+    }
+
+    /// The discovery decisions a user must see; empty when nothing was skipped.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     #[cfg(feature = "test-support")]
@@ -53,6 +88,7 @@ impl Env {
             override_path: Some(PathBuf::from(override_path)),
             gui_paths: vec![PathBuf::from(gui_path)],
             sdk_paths: vec![PathBuf::from(sdk_path)],
+            notes: Vec::new(),
         }
     }
 }
@@ -1022,74 +1058,289 @@ fn is_put_uri(uri: &str) -> bool {
     }
 }
 
-fn macos_gui_paths() -> Vec<PathBuf> {
-    if !cfg!(target_os = "macos") {
-        return Vec::new();
-    }
-
-    let mut paths = Vec::new();
-
-    collect_gui_paths(Path::new("/Applications"), MAX_GUI_SEARCH_DEPTH, &mut paths);
-    paths.sort();
-    paths.dedup();
-    paths
+/// The platform whose library locations are used; tests drive every platform on any host.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Platform {
+    Windows,
+    MacOs,
+    Linux,
 }
 
-fn collect_gui_paths(root: &Path, depth: usize, paths: &mut Vec<PathBuf>) {
-    let candidate = root
-        .join("Contents")
-        .join("Resources")
-        .join("bin")
-        .join("unicode")
-        .join("libsapnwrfc.dylib");
+impl Platform {
+    pub fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Linux
+        }
+    }
+}
 
-    if candidate.is_file() {
-        paths.push(candidate);
+/// The file-system queries candidate discovery needs; tests supply their own fixtures.
+pub trait CandidateFs {
+    fn is_file(&self, path: &Path) -> bool;
+
+    /// The child directories of `path`, sorted so the search order is deterministic.
+    fn child_directories(&self, path: &Path) -> Vec<PathBuf>;
+}
+
+struct SystemFs;
+
+impl CandidateFs for SystemFs {
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+
+    fn child_directories(&self, path: &Path) -> Vec<PathBuf> {
+        let mut directories = fs::read_dir(path)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        directories.sort();
+        directories
+    }
+}
+
+/// One platform's SAP GUI candidates plus the decisions the doctor has to report.
+struct GuiDiscovery {
+    candidates: Vec<PathBuf>,
+    notes: Vec<String>,
+}
+
+/// The NW RFC SDK library name per platform.
+pub fn rfc_library_filename(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Windows => "sapnwrfc.dll",
+        Platform::MacOs => "libsapnwrfc.dylib",
+        Platform::Linux => "libsapnwrfc.so",
+    }
+}
+
+/// The SAP GUI library name per platform.
+pub fn gui_library_filename(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Windows => "sapnwrfccm.dll",
+        Platform::MacOs => "libsapnwrfccm.dylib",
+        Platform::Linux => "libsapnwrfccm.so",
+    }
+}
+
+/// The SDK root order: `SAPNWRFC_HOME`, the home directory, then the platform standard roots.
+/// A missing root stays in the list; the loader reports why that path could not be loaded.
+pub fn sdk_candidates(platform: Platform, env: &BTreeMap<String, String>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+
+    if let Some(home) = non_empty(env, "SAPNWRFC_HOME") {
+        roots.push(PathBuf::from(home));
+    }
+
+    if let Some(home) = home_directory(env) {
+        roots.push(home.join("sap").join("nwrfcsdk"));
+    }
+
+    match platform {
+        Platform::Windows => roots.push(program_files(env).join("SAP").join("nwrfcsdk")),
+        Platform::MacOs | Platform::Linux => roots.extend(
+            [UNIX_SDK_ROOT, UNIX_LOCAL_SDK_ROOT]
+                .into_iter()
+                .map(PathBuf::from),
+        ),
+    }
+
+    roots
+        .into_iter()
+        .map(|root| root.join("lib").join(rfc_library_filename(platform)))
+        .collect()
+}
+
+fn gui_candidates(
+    platform: Platform,
+    env: &BTreeMap<String, String>,
+    fs: &dyn CandidateFs,
+) -> GuiDiscovery {
+    match platform {
+        Platform::Windows => windows_gui(env, fs),
+        Platform::MacOs => macos_gui(fs),
+        Platform::Linux => linux_gui(env, fs),
+    }
+}
+
+/// Windows: the 64-bit SAP GUI directory only; this binary cannot load the 32-bit library.
+fn windows_gui(env: &BTreeMap<String, String>, fs: &dyn CandidateFs) -> GuiDiscovery {
+    let library = |program_files: PathBuf| {
+        program_files
+            .join("SAP")
+            .join("FrontEnd")
+            .join("SAPGUI")
+            .join(gui_library_filename(Platform::Windows))
+    };
+    let gui = library(program_files(env));
+    let gui_32_bit = library(program_files_x86(env));
+    let mut candidates = Vec::new();
+    let mut notes = Vec::new();
+
+    if fs.is_file(&gui) {
+        candidates.push(gui);
+    }
+
+    if fs.is_file(&gui_32_bit) {
+        notes.push(format!(
+            "RFC SAP GUI 32-bit: skipped {} (a 32-bit library cannot load into the 64-bit process)",
+            gui_32_bit.display()
+        ));
+    }
+
+    GuiDiscovery { candidates, notes }
+}
+
+/// macOS: every bundle below `/Applications`, highest version first and never loaded to rank it.
+fn macos_gui(fs: &dyn CandidateFs) -> GuiDiscovery {
+    let mut bundles = Vec::new();
+
+    collect_gui_bundles(
+        Path::new(MACOS_APPLICATIONS),
+        MAX_GUI_SEARCH_DEPTH,
+        fs,
+        &mut bundles,
+    );
+
+    let mut ranked = bundles
+        .into_iter()
+        .map(|bundle| (bundle_version(&bundle), bundle))
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|(left_version, left), (right_version, right)| {
+        right_version
+            .cmp(left_version)
+            .then_with(|| left.cmp(right))
+    });
+
+    let candidates = ranked
+        .into_iter()
+        .flat_map(|(_, bundle)| macos_bundle_libraries(&bundle))
+        .filter(|path| fs.is_file(path))
+        .collect();
+
+    GuiDiscovery {
+        candidates,
+        notes: Vec::new(),
+    }
+}
+
+fn macos_bundle_libraries(bundle: &Path) -> [PathBuf; 2] {
+    let bin = bundle.join("Contents").join("Resources").join("bin");
+
+    [
+        bin.join("unicode").join("libsapnwrfc.dylib"),
+        bin.join("libsapnwrfccm.dylib"),
+    ]
+}
+
+/// A bundle is a directory that holds either SAP GUI library; its own subtree is not searched.
+fn collect_gui_bundles(
+    root: &Path,
+    depth: usize,
+    fs: &dyn CandidateFs,
+    bundles: &mut Vec<PathBuf>,
+) {
+    if macos_bundle_libraries(root)
+        .iter()
+        .any(|path| fs.is_file(path))
+    {
+        bundles.push(root.to_path_buf());
+
+        return;
     }
 
     if depth == 0 {
         return;
     }
 
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
+    for directory in fs.child_directories(root) {
+        collect_gui_bundles(&directory, depth - 1, fs, bundles);
+    }
+}
+
+/// The first version number in the bundle name, e.g. `SAP GUI for Java 8.10 rev15.app` -> [8, 10].
+/// The ranking reads the name only, so no candidate library is mapped just to learn its version.
+pub fn bundle_version(bundle: &Path) -> Vec<u32> {
+    let Some(name) = bundle.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-
-        if path.is_dir() {
-            collect_gui_paths(&path, depth - 1, paths);
-        }
-    }
+    name.split(|character: char| !character.is_ascii_digit() && character != '.')
+        .find_map(|token| {
+            token
+                .trim_matches('.')
+                .split('.')
+                .map(str::parse)
+                .collect::<Result<Vec<u32>, _>>()
+                .ok()
+        })
+        .unwrap_or_default()
 }
 
-fn sdk_paths() -> Vec<PathBuf> {
+/// Linux: the SAP GUI for Java package first, then the SDK family; ICU stays in `unicode/`.
+fn linux_gui(env: &BTreeMap<String, String>, fs: &dyn CandidateFs) -> GuiDiscovery {
     let mut roots = Vec::new();
 
-    if let Some(home) = std::env::var_os("SAPNWRFC_HOME") {
-        roots.push(PathBuf::from(home));
+    if let Some(home) = home_directory(env) {
+        roots.push(home.join("sapgui"));
     }
 
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push(PathBuf::from(home).join("sap").join("nwrfcsdk"));
-    }
+    roots.extend(
+        [LINUX_GUI_ROOT, LINUX_LOCAL_GUI_ROOT]
+            .into_iter()
+            .map(PathBuf::from),
+    );
 
-    roots.push(PathBuf::from("/opt/sap/nwrfcsdk"));
-    roots.push(PathBuf::from("/usr/local/sap/nwrfcsdk"));
-
-    roots
+    let candidates = roots
         .into_iter()
-        .map(|root| root.join("lib").join(rfc_library_filename()))
-        .collect()
+        .flat_map(|root| {
+            [
+                root.join("bin").join(gui_library_filename(Platform::Linux)),
+                root.join("bin")
+                    .join("unicode")
+                    .join(rfc_library_filename(Platform::Linux)),
+            ]
+        })
+        .filter(|path| fs.is_file(path))
+        .collect();
+
+    GuiDiscovery {
+        candidates,
+        notes: Vec::new(),
+    }
 }
 
-fn rfc_library_filename() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "sapnwrfc.dll"
-    } else if cfg!(target_os = "macos") {
-        "libsapnwrfc.dylib"
-    } else {
-        "libsapnwrfc.so"
-    }
+fn home_directory(env: &BTreeMap<String, String>) -> Option<PathBuf> {
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .find_map(|key| non_empty(env, key).map(PathBuf::from))
+}
+
+fn program_files(env: &BTreeMap<String, String>) -> PathBuf {
+    non_empty(env, "ProgramFiles")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+}
+
+fn program_files_x86(env: &BTreeMap<String, String>) -> PathBuf {
+    non_empty(env, "ProgramFiles(x86)")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)"))
+}
+
+fn non_empty<'a>(env: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str> {
+    env.get(key)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
 }

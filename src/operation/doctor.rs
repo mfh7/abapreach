@@ -102,6 +102,7 @@ impl Doctor {
                     "RFC library: {} version {}",
                     info.path, info.version
                 ));
+                lines.extend(info.notes);
 
                 true
             }
