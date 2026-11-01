@@ -25,7 +25,7 @@ sha2 = "0.11.1"
 libloading = "0.9.0"
 thiserror = "2.0.21"
 similar = "3.2.1"
-ctrlc = "3.5.2"
+ctrlc = { version = "3.5.2", features = ["termination"] }
 
 [dev-dependencies]
 # Tests need the fakes behind `test-support`, so a plain `cargo test` turns the feature on.

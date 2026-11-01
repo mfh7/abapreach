@@ -31,6 +31,18 @@ unsafe extern "C" fn record_trace_dir(directory: *const u16, _: *mut c_void) -> 
     0
 }
 
+/// `RfcSetTraceDir` failing, as SAP does with `RFC_INVALID_PARAMETER`.
+const RFC_TRACE_FAILURE: i32 = 20;
+
+/// The tests above share `TRACE_CALLS`, so they run one at a time.
+static TRACE_LOCK: Mutex<()> = Mutex::new(());
+
+unsafe extern "C" fn fail_trace_dir(directory: *const u16, error: *mut c_void) -> i32 {
+    unsafe { record_trace_dir(directory, error) };
+
+    RFC_TRACE_FAILURE
+}
+
 /// The file-system queries candidate discovery needs; every platform is exercised on any OS.
 struct FakeFs {
     files: Vec<PathBuf>,
@@ -179,7 +191,7 @@ fn sap_uc_is_nul_terminated_utf16_and_rejects_invalid_units() {
 }
 
 #[test]
-fn the_trace_goes_to_the_temp_dir_by_symbol_or_by_environment() {
+fn the_trace_directory_is_the_os_temp_dir() {
     let temp = std::env::temp_dir();
 
     assert_eq!(RFC_TRACE_DIR_ENV, "RFC_TRACE_DIR");
@@ -188,15 +200,45 @@ fn the_trace_goes_to_the_temp_dir_by_symbol_or_by_environment() {
         trace_environment(),
         (RFC_TRACE_DIR_ENV, temp.display().to_string())
     );
+}
 
-    assert_eq!(apply_trace_directory(None), TraceTarget::Environment);
+#[test]
+fn trace_symbol_exported_and_successful_sets_the_temp_dir() {
+    let _guard = TRACE_LOCK.lock().unwrap();
+    *TRACE_CALLS.lock().unwrap() = None;
+
     assert_eq!(
         apply_trace_directory(Some(record_trace_dir)),
         TraceTarget::Symbol
     );
     assert_eq!(
         TRACE_CALLS.lock().unwrap().clone(),
-        Some(temp.display().to_string())
+        Some(std::env::temp_dir().display().to_string())
+    );
+}
+
+#[test]
+fn trace_symbol_missing_leaves_the_environment_in_charge() {
+    let _guard = TRACE_LOCK.lock().unwrap();
+    *TRACE_CALLS.lock().unwrap() = None;
+
+    assert_eq!(apply_trace_directory(None), TraceTarget::Environment);
+    assert_eq!(*TRACE_CALLS.lock().unwrap(), None);
+}
+
+#[test]
+fn trace_symbol_returned_error_is_reported_with_its_code() {
+    let _guard = TRACE_LOCK.lock().unwrap();
+    *TRACE_CALLS.lock().unwrap() = None;
+
+    assert_eq!(
+        apply_trace_directory(Some(fail_trace_dir)),
+        TraceTarget::Rejected(RFC_TRACE_FAILURE)
+    );
+    // The call was made; only its result differs from the success case.
+    assert_eq!(
+        TRACE_CALLS.lock().unwrap().clone(),
+        Some(std::env::temp_dir().display().to_string())
     );
 }
 

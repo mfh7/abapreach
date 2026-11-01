@@ -145,6 +145,8 @@ pub struct RfcLibrary {
     arch: Arch,
     family: Family,
     source: Origin,
+    /// What `RfcSetTraceDir` did when the library was loaded.
+    trace: TraceTarget,
     // Never unloaded: SAP's library leaves thread-local destructors that crash after dlclose, and
     // the dependencies preloaded for it have to stay mapped just as long.
     loaded: Loaded,
@@ -182,18 +184,17 @@ impl RfcLibrary {
             return Err("RFC library not found; set ABAPREACH_RFC_LIBRARY".to_owned());
         }
 
-        point_trace_at_temp_dir();
-
         let (chosen, loaded) =
             decide(&candidates, load_candidate).map_err(|error| error.to_string())?;
 
-        set_trace_directory(loaded.library());
+        let trace = set_trace_directory(loaded.library());
 
         Ok(Self {
             path: candidates[chosen].path.clone(),
             arch: loaded.arch(),
             family: candidates[chosen].family,
             source: candidates[chosen].origin,
+            trace,
             loaded,
         })
     }
@@ -231,6 +232,11 @@ impl RfcLibrary {
     pub fn library(&self) -> &Library {
         self.loaded.library()
     }
+
+    /// Whether `RfcSetTraceDir` is exported and what it returned for this library.
+    pub fn trace_target(&self) -> TraceTarget {
+        self.trace
+    }
 }
 
 /// The SAP library writes `dev_rfc.log` into the cwd; its trace belongs in the temp dir.
@@ -243,25 +249,36 @@ pub fn trace_environment() -> (&'static str, String) {
     (RFC_TRACE_DIR_ENV, trace_directory().display().to_string())
 }
 
-/// Sets that variable: the library reads it when it is loaded, before any symbol can be called.
-fn point_trace_at_temp_dir() {
+/// Sets that variable. `set_var` is only sound while no other thread can read the environment,
+/// so `main` calls this first, before `ctrlc` starts its handler thread; `RfcLibrary::load` never
+/// touches the environment itself.
+pub fn init_trace_environment() {
     let (name, directory) = trace_environment();
 
-    // Not thread safe by contract; the process is single threaded until the library is mapped.
+    // Not thread safe by contract; the caller runs before any thread exists.
     unsafe { std::env::set_var(name, directory) };
 }
 
+/// Runs `install` (the signal handler registration) only after the trace environment is set, so
+/// the order cannot be swapped by accident.
+pub fn after_trace_environment<T>(install: impl FnOnce() -> T) -> T {
+    init_trace_environment();
+
+    install()
+}
+
 /// `RfcSetTraceDir` is optional: not every SDK or GUI release exports it.
-fn set_trace_directory(library: &Library) {
+fn set_trace_directory(library: &Library) -> TraceTarget {
     let set_trace_dir = unsafe { library.get::<RfcSetTraceDir>(b"RfcSetTraceDir\0") }
         .ok()
         .map(|symbol| *symbol);
 
-    apply_trace_directory(set_trace_dir);
+    apply_trace_directory(set_trace_dir)
 }
 
-/// Calls `RfcSetTraceDir` when the library exports it, otherwise the environment set before the
-/// load stays in charge, so `dev_rfc.log` never lands in the working directory either way.
+/// Calls `RfcSetTraceDir` when the library exports it, otherwise the environment set at the
+/// start of `main` stays in charge, so `dev_rfc.log` never lands in the working directory. A
+/// returned error is reported, not hidden: the environment is then the only protection left.
 pub fn apply_trace_directory(set_trace_dir: Option<RfcSetTraceDir>) -> TraceTarget {
     let Some(set_trace_dir) = set_trace_dir else {
         return TraceTarget::Environment;
@@ -270,10 +287,13 @@ pub fn apply_trace_directory(set_trace_dir: Option<RfcSetTraceDir>) -> TraceTarg
     let directory = sap_uc(&trace_directory().display().to_string());
     let mut error = RfcErrorInfo::default();
 
-    // A failing call only leaves the environment as the trace setting.
-    unsafe { set_trace_dir(directory.as_ptr(), (&raw mut error).cast::<c_void>()) };
+    let result = unsafe { set_trace_dir(directory.as_ptr(), (&raw mut error).cast::<c_void>()) };
 
-    TraceTarget::Symbol
+    if result == RFC_OK {
+        TraceTarget::Symbol
+    } else {
+        TraceTarget::Rejected(result)
+    }
 }
 
 pub fn sap_uc(value: &str) -> Vec<u16> {
@@ -611,11 +631,16 @@ type RfcDestroyFunction = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> 
 type RfcCloseConnection = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcRc;
 type RfcSetTraceDir = unsafe extern "C" fn(*const SapUc, *mut c_void) -> RfcRc;
 
-/// Where the trace directory was set; the environment is the fallback when the symbol is absent.
+/// Where the trace directory was set; the environment is the fallback when the symbol is absent
+/// or returned an error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TraceTarget {
+    /// `RfcSetTraceDir` is exported and succeeded.
     Symbol,
+    /// `RfcSetTraceDir` is not exported.
     Environment,
+    /// `RfcSetTraceDir` is exported and returned this `RFC_RC`.
+    Rejected(c_int),
 }
 
 pub struct RfcSymbols {

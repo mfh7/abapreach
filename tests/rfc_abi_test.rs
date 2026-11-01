@@ -2,7 +2,8 @@ use abapreach::backend::Failure;
 use abapreach::config::Connection;
 use abapreach::transport::TransportError;
 use abapreach::transport::rfc::{
-    DynamicRfcApi, Env, RfcLibrary, RfcPhase, RfcSymbols, classify_rfc_error, connection_parameters,
+    DynamicRfcApi, Env, RfcLibrary, RfcPhase, RfcSymbols, classify_rfc_error,
+    connection_parameters, init_trace_environment,
 };
 
 // RFC_RC values from sapnwrfc.h, kept as literals so a wrong constant in the product is caught.
@@ -150,6 +151,9 @@ fn connection_parameters_use_sdk_names_and_optional_saprouter() {
 
 #[test]
 fn installed_library_resolves_every_symbol_and_reports_a_version() {
+    // `load` no longer sets the trace environment; `main` does, before any thread exists.
+    init_trace_environment();
+
     let Ok(library) = RfcLibrary::load(&Env::current()) else {
         eprintln!("skipped: no loadable RFC library on this machine");
         return;
