@@ -62,12 +62,35 @@ impl Response {
             body: body.as_ref().as_bytes().to_vec(),
         }
     }
+
+    /// The authorization failure this reply reports. HTTP 401 refuses the logon; HTTP 403 keeps
+    /// its operation-specific handling (including the CSRF token flow).
+    pub fn authorization_failure(&self) -> Option<TransportError> {
+        is_authorization_failure(self.status)
+            .then(|| TransportError::Authorization(format!("HTTP {}", self.status)))
+    }
+}
+
+/// Whether a reply carries the CSRF marker `x-csrf-token: Required`: the token flow refetches the
+/// token once, so that reply is not a refused logon.
+pub fn is_csrf_required(csrf_token: Option<&str>) -> bool {
+    csrf_token.is_some_and(|value| value.eq_ignore_ascii_case("Required"))
+}
+
+/// Whether a reply refuses the logon itself. A refused logon is never retried, because every
+/// attempt counts against the SAP user.
+pub fn is_authorization_failure(status: u16) -> bool {
+    status == 401
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum TransportError {
     #[error("pre-send connectivity failure: {0}")]
     PreSendConnectivity(String),
+    /// A read-only request that was sent but never answered: it has no side effect, so routing
+    /// treats it as a connectivity failure rather than an uncertain write.
+    #[error("no response to a read-only request: {0}")]
+    NoResponse(String),
     #[error("HTTP {status}: {message}")]
     Http { status: u16, message: String },
     #[error("CSRF token required")]

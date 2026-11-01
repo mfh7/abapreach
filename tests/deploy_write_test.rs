@@ -343,16 +343,18 @@ fn activation_status_maps_the_answer_alone() {
 }
 
 #[test]
-fn a_rejected_or_failed_put_unlocks_and_never_activates() {
-    let rejected = then(
+fn a_refused_or_unsent_put_unlocks_and_never_activates() {
+    // A PUT refused with 403 is rejected and the lock is still released.
+    let refused = then(
         vec![fx(6), no_inactive(), fx(7), fx(6), no_inactive(), fx(8)],
         vec![Step::ReplyTo(17, Ok(Response::empty(403))), fx(18)],
     );
-    let mut transport = replay(FIXTURE, rejected);
+    let mut transport = replay(FIXTURE, refused);
     let outcome = DeployProg::run(&mut transport, v2(None), None);
 
     assert_eq!(outcome.status, Some(Status::Rejected));
     assert_eq!(outcome.exit, 1);
+    assert_eq!(outcome.stderr, "");
     assert!(outcome.stdout.ends_with("REJECTED: PUT failed: HTTP 403"));
     assert!(
         transport

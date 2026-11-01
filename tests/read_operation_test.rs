@@ -98,7 +98,12 @@ fn failures_carry_the_routing_class_and_run_keeps_the_string_contract() {
             Err(TransportError::PostSendUncertain("reset".to_owned())),
             Failure::PostSendUncertain,
         ),
+        (
+            Err(TransportError::NoResponse("closed".to_owned())),
+            Failure::PreSendConnectivity,
+        ),
         (Ok(Response::empty(401)), Failure::Authorization),
+        (Ok(Response::empty(403)), Failure::Validation),
         (Ok(Response::empty(404)), Failure::Validation),
         (
             Ok(Response {
@@ -122,4 +127,19 @@ fn failures_carry_the_routing_class_and_run_keeps_the_string_contract() {
     let message = ReadProg::run(&mut transport, "Z", &output, false, None).unwrap_err();
 
     assert_eq!(message, "read PROG Z: HTTP 404");
+}
+
+/// The status of a refused logon travels in the message, so the read reports what the RFC
+/// backend reports instead of a read that failed for its own reason.
+#[test]
+fn a_refused_logon_is_the_authorization_failure_with_its_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("program.abap");
+    let mut transport = common::ScriptedTransport::replies(vec![Ok(Response::empty(401))]);
+    let error = ReadProg::run_classified(&mut transport, "Z", &output, false, None).unwrap_err();
+
+    assert_eq!(error.failure, Failure::Authorization);
+    assert_eq!(error.message, "authorization failed: HTTP 401");
+    assert_eq!(transport.calls.len(), 1);
+    assert!(!output.exists());
 }

@@ -124,25 +124,44 @@ pub fn run(
     env: BTreeMap<String, String>,
     factories: &mut dyn Factories,
 ) -> Exit {
+    // Test-only: an unknown value stops the command before any connection is opened.
+    #[cfg(feature = "fault-injection")]
+    let warning =
+        match crate::fault::Fault::from_lookup(env.get(crate::fault::ENV).map(String::as_str)) {
+            Ok(fault) => fault.map(crate::fault::Fault::warning),
+            Err(message) => return stop(message),
+        };
+    #[cfg(not(feature = "fault-injection"))]
+    let warning: Option<String> = None;
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(error) if error.use_stderr() => {
-            return stop(error.render().to_string().trim_end());
+            return with_warning(
+                stop(error.render().to_string().trim_end()),
+                warning.as_deref(),
+            );
         }
         Err(error) => {
-            return Exit {
-                code: error.exit_code(),
-                stdout: error.render().to_string().trim_end().to_owned(),
-                stderr: String::new(),
-            };
+            return with_warning(
+                Exit {
+                    code: error.exit_code(),
+                    stdout: error.render().to_string().trim_end().to_owned(),
+                    stderr: String::new(),
+                },
+                warning.as_deref(),
+            );
         }
     };
     let connection = match resolve(connection_id(&cli.command), &env) {
         Ok(connection) => connection,
-        Err(message) => return stop(message),
+        Err(message) => return with_warning(stop(message), warning.as_deref()),
     };
-    let exit = execute(cli.command, &connection, factories);
+    let exit = with_warning(
+        execute(cli.command, &connection, factories),
+        warning.as_deref(),
+    );
     let mut stdout = exit.stdout;
+    let stderr = exit.stderr;
 
     if let Some(warning) = tls_warning(&connection)
         && !stdout.lines().any(|line| line == warning)
@@ -154,13 +173,27 @@ pub fn run(
         };
     }
 
-    let secrets = [connection.password.clone()];
+    let secrets = connection.secrets();
 
     Exit {
         code: exit.code,
         stdout: scrub(stdout, &secrets),
-        stderr: scrub(exit.stderr, &secrets),
+        stderr: scrub(stderr, &secrets),
     }
+}
+
+fn with_warning(mut exit: Exit, warning: Option<&str>) -> Exit {
+    if let Some(warning) = warning
+        && !exit.stderr.lines().any(|line| line == warning)
+    {
+        exit.stderr = if exit.stderr.is_empty() {
+            warning.to_owned()
+        } else {
+            format!("{warning}\n{}", exit.stderr)
+        };
+    }
+
+    exit
 }
 
 fn stop(message: impl std::fmt::Display) -> Exit {
@@ -326,7 +359,7 @@ fn backend_kind(backend: Backend) -> BackendKind {
 }
 
 /// Runs the operation on the backend the router picks. A second backend is tried only when the
-/// first one failed before anything was sent and neither `--backend` nor `--base` pins it.
+/// first one failed before it sent a write request and neither `--backend` nor `--base` pins it.
 fn route(
     operation: OperationKind,
     explicit: Option<BackendKind>,
@@ -386,7 +419,7 @@ fn route(
         reason = SelectionReason::Fallback(done.detail.unwrap_or_else(|| failure.to_string()));
         earlier.push(done.outcome.stderr);
         fallback_note = Some(format!(
-            "NOTE: {backend} failed before anything was sent; falling back to RFC SADT"
+            "NOTE: {backend} failed before anything was written; falling back to RFC SADT"
         ));
     }
 }

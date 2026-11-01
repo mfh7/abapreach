@@ -262,10 +262,128 @@ fn a_failed_adt_probe_does_not_stop_the_rfc_probes() {
         "{}",
         exit.stdout
     );
+    assert_capability_lines(
+        &exit,
+        [
+            "capability read PROG: RFC SADT",
+            "capability deploy PROG: RFC SADT",
+            "capability doctor: RFC SADT",
+        ],
+    );
     assert_eq!(
         (fake.adt_calls, fake.library_calls, fake.ping_calls),
         (1, 1, 1)
     );
+}
+
+#[test]
+fn a_failed_rfc_ping_leaves_every_capability_line_with_adt() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(discovery());
+    fake.library.push_back(library());
+    fake.ping.push_back(Err(TransportError::PreSendConnectivity(
+        "no route".to_owned(),
+    )));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(
+        exit.stdout
+            .contains("RFC SADT probe: failed: pre-send connectivity failure: no route"),
+        "{}",
+        exit.stdout
+    );
+    assert_capability_lines(
+        &exit,
+        [
+            "capability read PROG: ADT HTTP",
+            "capability deploy PROG: ADT HTTP",
+            "capability doctor: ADT HTTP",
+        ],
+    );
+    assert_eq!(
+        (fake.adt_calls, fake.library_calls, fake.ping_calls),
+        (1, 1, 1)
+    );
+}
+
+#[test]
+fn a_missing_rfc_library_leaves_every_capability_line_with_adt() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let mut kept = Response::text(200, "<app:service/>");
+    kept.headers
+        .insert("Set-Cookie".to_owned(), "sap-contextid=ctx".to_owned());
+
+    fake.adt.push_back(Ok(Box::new(HttpTransport::for_test(vec![
+        Ok(kept),
+        Ok(Response::empty(200)),
+    ]))));
+    fake.library.push_back(Err(
+        "RFC library not found; set ABAPREACH_RFC_LIBRARY".to_owned()
+    ));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(
+        exit.stdout
+            .contains("RFC SADT probe: not run (RFC library not found)"),
+        "{}",
+        exit.stdout
+    );
+    assert_capability_lines(
+        &exit,
+        [
+            "capability read PROG: ADT HTTP",
+            "capability deploy PROG: ADT HTTP",
+            "capability doctor: ADT HTTP",
+        ],
+    );
+    assert_eq!(
+        (fake.adt_calls, fake.library_calls, fake.ping_calls),
+        (1, 1, 0)
+    );
+}
+
+#[test]
+fn both_probes_failing_leaves_no_capability_backend() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(Err(TransportError::PreSendConnectivity(
+        "no route".to_owned(),
+    )));
+    fake.library.push_back(Err(
+        "RFC library not found; set ABAPREACH_RFC_LIBRARY".to_owned()
+    ));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert_capability_lines(
+        &exit,
+        [
+            "capability read PROG: none",
+            "capability deploy PROG: none",
+            "capability doctor: none",
+        ],
+    );
+    assert_eq!(
+        (fake.adt_calls, fake.library_calls, fake.ping_calls),
+        (1, 1, 0)
+    );
+}
+
+fn assert_capability_lines(exit: &Exit, expected: [&str; 3]) {
+    let lines: Vec<&str> = exit.stdout.lines().collect();
+
+    for line in expected {
+        assert!(lines.contains(&line), "missing {line:?} in {}", exit.stdout);
+    }
 }
 
 #[test]
@@ -351,4 +469,56 @@ fn a_missing_rfc_library_skips_the_ping_and_fails_the_doctor() {
         (fake.adt_calls, fake.library_calls, fake.ping_calls),
         (1, 1, 0)
     );
+}
+
+/// A route with a route password lives in the environment, never in the shared config file.
+#[test]
+fn doctor_names_the_route_source_and_never_prints_the_route() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let route = "/H/router.example.com/S/3299/W/route-secret";
+
+    fake.adt.push_back(discovery());
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let mut env = env(directory.path());
+    env.insert("DEV_SAPROUTER".to_owned(), route.to_owned());
+
+    let exit = run(
+        ["abapreach", "doctor", "--conn", "dev_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        env,
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0);
+    assert!(
+        exit.stdout
+            .lines()
+            .any(|line| line == "SAProuter: configured (from environment)"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        !exit.stdout.contains("router.example.com"),
+        "{}",
+        exit.stdout
+    );
+    assert!(!exit.stdout.contains("route-secret"), "{}", exit.stdout);
+}
+
+#[test]
+fn doctor_without_a_configured_route_prints_no_saprouter_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(discovery());
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert!(!exit.stdout.contains("SAProuter"), "{}", exit.stdout);
 }

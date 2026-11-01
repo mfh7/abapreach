@@ -28,7 +28,10 @@ fn inactive_failures() -> Vec<(Result<Response, TransportError>, String)> {
     let utf8 = String::from_utf8(not_utf8.body.clone()).unwrap_err();
 
     vec![
-        (Ok(Response::empty(401)), "HTTP 401".to_owned()),
+        (
+            Ok(Response::empty(401)),
+            "authorization failed: HTTP 401".to_owned(),
+        ),
         (Ok(Response::empty(403)), "HTTP 403".to_owned()),
         (Ok(Response::empty(500)), "HTTP 500".to_owned()),
         (

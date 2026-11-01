@@ -36,7 +36,7 @@ pub enum SelectionReason {
     DefaultAdt,
     /// No `--backend` and no ADT endpoint in the config, so the connection runs on RFC only.
     RfcOnly,
-    /// The first backend failed before it sent anything; the string is that failure.
+    /// The first backend failed before it sent a write request; the string is that failure.
     Fallback(String),
 }
 
@@ -109,12 +109,14 @@ impl fmt::Display for Failure {
 impl From<&TransportError> for Failure {
     fn from(error: &TransportError) -> Self {
         match error {
-            TransportError::PreSendConnectivity(_) => Self::PreSendConnectivity,
+            TransportError::PreSendConnectivity(_) | TransportError::NoResponse(_) => {
+                Self::PreSendConnectivity
+            }
             TransportError::PostSendUncertain(_) => Self::PostSendUncertain,
             TransportError::Sent(error) => Self::from(error.as_ref()),
             TransportError::Authorization(_) | TransportError::CsrfRequired => Self::Authorization,
             TransportError::Http { status, .. } => match status {
-                401 | 403 => Self::Authorization,
+                401 => Self::Authorization,
                 409 | 423 => Self::Conflict,
                 _ => Self::Validation,
             },

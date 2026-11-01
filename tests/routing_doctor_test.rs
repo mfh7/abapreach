@@ -181,6 +181,10 @@ fn transport_errors_map_to_fallback_classes() {
             Failure::PostSendUncertain,
         ),
         (
+            TransportError::NoResponse(String::new()),
+            Failure::PreSendConnectivity,
+        ),
+        (
             TransportError::Authorization(String::new()),
             Failure::Authorization,
         ),
@@ -191,7 +195,7 @@ fn transport_errors_map_to_fallback_classes() {
             Failure::Validation,
         ),
         (http(401), Failure::Authorization),
-        (http(403), Failure::Authorization),
+        (http(403), Failure::Validation),
         (http(409), Failure::Conflict),
         (http(423), Failure::Conflict),
         (http(500), Failure::Validation),
