@@ -1,0 +1,21 @@
+
+**** Log file opened at 2026-11-01 07:28:17.780658 UTC+07:00 (UTC), Encoding UTF-8
+NW RFC Library: Kernel variant, Release 750 Patch Level 17
+Compilation date          : Apr 24 2026 00:07:00
+CPIC library              : 753.2025.08.18 version 3
+NI library                : 40
+Kernel Release            : 753 Patch Level 1544
+Current working directory : /Users/farhan/VSCode/ABAP/abapreach
+Program                   : rfc_abi_test-ca19739e8279039b
+Process ID                : 88699
+User                      : farhan
+Hardware                  : Apple Macintosh with Mac OS X (Darwin) Apple Silicon arm64 arm64
+Operating_system          : Darwin 27.0.0
+Hostname                  : Farhans-Mac-mini
+IP address                : 
+IPv6 address              : 
+NI IPv6 status            : inactive
+Global trace level        : 0
+
+2026-11-01 07:28:17.780905 [6140440576] >> Info entry
+	Did not find config file /Users/farhan/VSCode/ABAP/abapreach/sapnwrfc.ini.
