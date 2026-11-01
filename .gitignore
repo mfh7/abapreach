@@ -1,1 +1,4 @@
 /target
+/mutants.out*
+dev_rfc*.log
+*.trc

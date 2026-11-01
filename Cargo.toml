@@ -1,0 +1,30 @@
+[package]
+name = "abapreach"
+version = "0.11.0"
+edition = "2024"
+
+[features]
+test-support = []
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "blocking",
+    "rustls",
+    "cookies",
+] }
+url = "2.5.8"
+quick-xml = "0.42.0"
+sha2 = "0.11.1"
+libloading = "0.9.0"
+thiserror = "2.0.21"
+similar = "3.2.1"
+ctrlc = "3.5.2"
+
+[dev-dependencies]
+# Tests need the fakes behind `test-support`, so a plain `cargo test` turns the feature on.
+abapreach = { path = ".", features = ["test-support"] }
+tempfile = "3.27.0"
+httpmock = "0.9.0"
