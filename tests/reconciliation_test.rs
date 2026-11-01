@@ -312,3 +312,27 @@ fn an_activation_that_was_not_sent_is_inactive_without_reconciliation() {
     assert!(!result.fallback_allowed);
     transport.assert_finished();
 }
+
+#[test]
+fn only_a_post_send_uncertain_read_back_is_reconciled_other_failures_are_unknown() {
+    let refused = || Ok(Response::empty(500));
+    let unsent = || Err(TransportError::PreSendConnectivity("no route".to_owned()));
+
+    for reply in [refused(), unsent()] {
+        let tail = vec![fx(17), fx(18), fx(19), Step::ReplyTo(20, reply)];
+        let mut transport = replay(FIXTURE, steps(v2_until_put(), tail));
+        let result = run(&mut transport, input("WRITE / 'v2'."));
+
+        assert_eq!(result.outcome.status, Some(Status::Partial));
+        assert_eq!(result.outcome.exit, 1);
+        assert!(
+            result
+                .outcome
+                .stdout
+                .contains("PARTIAL: outcome unknown, the active source cannot be read")
+        );
+        assert!(result.outcome.stdout.ends_with(RETRY));
+        assert_eq!(count(&transport, "version=inactive"), 0);
+        transport.assert_finished();
+    }
+}

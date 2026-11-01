@@ -511,7 +511,9 @@ impl DynamicRfcApi {
             .flat_map(|(name, value)| [sap_uc(&name), sap_uc(&value)])
             .collect::<Vec<_>>();
         let parameters = storage
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| RfcConnectionParameter {
                 name: pair[0].as_ptr(),
                 value: pair[1].as_ptr(),

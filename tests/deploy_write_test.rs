@@ -245,13 +245,13 @@ fn every_non_2xx_activation_status_has_one_mapping() {
         let mut transport = replay(FIXTURE, then(through_put(), rest));
         let result = DeployProg::run_classified(&mut transport, v2(None), None, &CancelFlag::new());
 
-        assert_eq!(result.outcome.status, Some(Status::Inactive));
+        assert_eq!(result.outcome.status, Some(Status::Rejected));
         assert_eq!(result.outcome.exit, 1);
         assert!(
             result
                 .outcome
                 .stdout
-                .ends_with(&format!("INACTIVE: activation failed: HTTP {code}"))
+                .ends_with(&format!("REJECTED: activation failed: HTTP {code}"))
         );
         assert_eq!(result.failure, Some(failure));
         transport.assert_finished();
@@ -276,9 +276,9 @@ fn activation_without_errors_is_checked_against_the_active_content() {
 #[test]
 fn activation_status_maps_the_answer_alone() {
     assert_eq!(activation_status(200, E_BODY), Some(Status::Inactive));
-    assert_eq!(activation_status(409, b""), Some(Status::Inactive));
-    assert_eq!(activation_status(199, b""), Some(Status::Inactive));
-    assert_eq!(activation_status(300, b""), Some(Status::Inactive));
+    assert_eq!(activation_status(409, b""), Some(Status::Rejected));
+    assert_eq!(activation_status(199, b""), Some(Status::Rejected));
+    assert_eq!(activation_status(300, b""), Some(Status::Rejected));
     assert_eq!(activation_status(200, b""), None);
     assert_eq!(activation_status(204, W_BODY), None);
     assert_eq!(activation_status(200, b"<a><b></a>"), None);
@@ -375,4 +375,25 @@ fn cancel_after_the_put_unlocks_and_does_not_activate() {
     );
     assert_eq!(transport.inner.closes, 1);
     transport.inner.assert_finished();
+}
+
+#[test]
+fn the_lock_response_is_read_with_entities_and_pretty_printing() {
+    let pretty = Step::Any(Ok(Response::text(
+        200,
+        concat!(
+            "<asx:abap xmlns:asx=\"x\">\n <asx:values>\n  <DATA>\n",
+            "   <LOCK_HANDLE>a&amp;b</LOCK_HANDLE>\n   <CORRNR>DEVK000001</CORRNR>\n",
+            "   <IS_LOCAL></IS_LOCAL>\n  </DATA>\n </asx:values>\n</asx:abap>\n",
+        ),
+    )));
+    let steps = vec![fx(6), pretty, fx(6), fx(8), ok(), ok(), fx(19), fx(20)];
+    let mut transport = replay(FIXTURE, steps);
+    let outcome = DeployProg::run(&mut transport, v2(None), None);
+
+    assert_eq!(outcome.status, Some(Status::Active));
+    assert_eq!(
+        transport.calls[4].uri,
+        format!("{PROGRAM}/source/main?lockHandle=a%26b&corrNr=DEVK000001")
+    );
 }

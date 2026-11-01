@@ -201,8 +201,20 @@ impl Finish {
         self
     }
 
-    fn is_transport_error(&self) -> bool {
-        self.status.is_none() && self.exit == 1 && self.failure.is_some()
+    fn is_uncertain(&self) -> bool {
+        self.failure == Some(Failure::PostSendUncertain)
+    }
+
+    /// A read that failed after a sent write: nothing proves what happened.
+    fn unreadable(self) -> Self {
+        Self::status(
+            Status::Partial,
+            format!(
+                "PARTIAL: outcome unknown, the active source cannot be read ({}); {RETRY}",
+                self.stderr.unwrap_or_default().trim()
+            ),
+        )
+        .exit_one()
     }
 
     fn unlock_failed(mut self, reason: &str, name: &str) -> Self {
@@ -277,19 +289,19 @@ impl Run<'_> {
         let live = normalize(self.read_active("read live source")?);
         let live_hash = source_hash(&live);
 
-        if let Some(base) = &input.base {
-            if *base != live_hash {
-                return Err(Finish::stop(format!(
-                    "live changed: live hash {live_hash} != --base {base}"
-                )));
-            }
+        if let Some(base) = &input.base
+            && *base != live_hash
+        {
+            return Err(Finish::stop(format!(
+                "live changed: live hash {live_hash} != --base {base}"
+            )));
         }
 
         if source_hash(&file) == live_hash {
             return Ok(Finish::plain("no changes"));
         }
 
-        let diff = TextDiff::from_lines(&join(&live), &join(&file))
+        let diff = TextDiff::from_lines(join(&live), join(&file))
             .unified_diff()
             .context_radius(3)
             .header("live", "file")
@@ -534,12 +546,14 @@ impl Run<'_> {
 
         self.stdout.extend(format_messages(&text));
 
-        if activation_status(response.status, &response.body).is_some() {
-            return if (200..300).contains(&response.status) {
-                Finish::status(Status::Inactive, "INACTIVE: activation reported errors")
-            } else {
-                Finish::http(Status::Inactive, "activation failed", response.status)
-            };
+        match activation_status(response.status, &response.body) {
+            Some(Status::Rejected) => {
+                return Finish::http(Status::Rejected, "activation failed", response.status);
+            }
+            Some(status) => {
+                return Finish::status(status, "INACTIVE: activation reported errors");
+            }
+            None => {}
         }
 
         match self.read_active("read back the active source") {
@@ -554,8 +568,8 @@ impl Run<'_> {
                 Status::Inactive,
                 "INACTIVE: activation reported no error but the active source differs",
             ),
-            Err(finish) if finish.is_transport_error() => self.reconcile(live_hash, file),
-            Err(finish) => finish,
+            Err(finish) if finish.is_uncertain() => self.reconcile(live_hash, file),
+            Err(finish) => finish.unreadable(),
         }
     }
 
@@ -564,16 +578,7 @@ impl Run<'_> {
     fn reconcile(&mut self, live_hash: &str, file: &[String]) -> Finish {
         let active = match self.read_active("read the active source for reconciliation") {
             Ok(active) => active,
-            Err(finish) => {
-                return Finish::status(
-                    Status::Partial,
-                    format!(
-                        "PARTIAL: outcome unknown, the active source cannot be read ({}); {RETRY}",
-                        finish.stderr.unwrap_or_default().trim()
-                    ),
-                )
-                .exit_one();
-            }
+            Err(finish) => return finish.unreadable(),
         };
         let inactive = if source_hash(&active) == source_hash(file) {
             None
@@ -754,11 +759,11 @@ pub fn reconcile(
     }
 }
 
-/// Verdict from the activation answer alone: `Some(Inactive)` for a non-2xx status or an
-/// `E` message, `None` when only the active content can tell.
+/// Verdict from the activation answer alone: `Some(Rejected)` for a non-2xx status,
+/// `Some(Inactive)` for an `E` message, `None` when only the active content can tell.
 pub fn activation_status(status: u16, body: &[u8]) -> Option<Status> {
     if !(200..300).contains(&status) {
-        return Some(Status::Inactive);
+        return Some(Status::Rejected);
     }
 
     let messages = parse_messages(&String::from_utf8_lossy(body)).ok()?;
