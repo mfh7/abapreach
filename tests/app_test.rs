@@ -245,6 +245,28 @@ fn simulate_prints_the_backend_report_before_the_diff() {
 }
 
 #[test]
+fn a_leading_bom_and_crlf_in_the_deploy_file_do_not_reach_the_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(
+        &file,
+        "\u{feff}REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v2'.\r\n",
+    )
+    .unwrap();
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(simulate_replay());
+
+    let exit = go(&simulate_args(&file, &[]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0);
+    assert!(exit.stdout.ends_with("SIMULATED_OK"));
+    assert!(!exit.stdout.contains('\u{feff}'));
+}
+
+#[test]
 fn a_failed_session_end_is_a_warning_and_changes_neither_status_nor_exit_code() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("src.abap");

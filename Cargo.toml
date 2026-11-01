@@ -32,3 +32,7 @@ ctrlc = { version = "3.5.2", features = ["termination"] }
 abapreach = { path = ".", features = ["test-support"] }
 tempfile = "3.27.0"
 httpmock = "0.9.0"
+# The TLS test server; reqwest already builds this version with the same crypto provider.
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+# Generates the test certificates at run time; already in the tree through rustls.
+aws-lc-rs = { version = "1.19.0", default-features = false, features = ["alloc", "aws-lc-sys"] }

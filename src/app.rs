@@ -5,7 +5,7 @@ use crate::config::{
     scrub, tls_warning,
 };
 use crate::domain::Outcome;
-use crate::hash::{validate_name, validate_prog};
+use crate::hash::{local_source_lines, validate_name, validate_prog};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg};
 use crate::operation::doctor::Doctor;
 use crate::operation::read::ReadProg;
@@ -340,7 +340,7 @@ fn execute(
                 Ok(text) => text,
                 Err(error) => return stop(format!("cannot read {}: {error}", file.display())),
             };
-            let source = text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+            let source = local_source_lines(&text);
 
             if let Err(message) = validate_prog(&name, &source) {
                 return stop(message);

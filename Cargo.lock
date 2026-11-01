@@ -7,12 +7,14 @@ name = "abapreach"
 version = "0.11.1"
 dependencies = [
  "abapreach",
+ "aws-lc-rs",
  "clap",
  "ctrlc",
  "httpmock",
  "libloading",
  "quick-xml",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

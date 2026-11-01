@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 #[cfg(feature = "test-support")]
 use std::collections::VecDeque;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const SESSION_HEADER: &str = "X-sap-adt-sessiontype";
@@ -50,11 +50,9 @@ impl HttpTransport {
             .timeout(config.timeout);
 
         if let Some(path) = config.ca_file {
-            let pem = fs::read(path)
-                .map_err(|error| TransportError::PreSendConnectivity(error.to_string()))?;
-            let certificate = Certificate::from_pem(&pem)
-                .map_err(|error| TransportError::PreSendConnectivity(error.to_string()))?;
-            builder = builder.add_root_certificate(certificate);
+            for certificate in Self::load_ca_file(&path)? {
+                builder = builder.add_root_certificate(certificate);
+            }
         }
 
         let client = builder
@@ -77,6 +75,28 @@ impl HttpTransport {
             #[cfg(feature = "test-support")]
             recorded: Vec::new(),
         })
+    }
+
+    /// The certificates of an `adt.ca_file`. A file without one would leave the OS store as the
+    /// only root and fail later as an unknown issuer, so it is refused here with its own cause.
+    fn load_ca_file(path: &Path) -> Result<Vec<Certificate>, TransportError> {
+        let pem = fs::read(path).map_err(|error| {
+            TransportError::PreSendConnectivity(format!(
+                "cannot read CA file {}: {error}",
+                path.display()
+            ))
+        })?;
+        let certificates = Certificate::from_pem_bundle(&pem)
+            .map_err(|error| TransportError::PreSendConnectivity(Self::causes(&error)))?;
+
+        if certificates.is_empty() {
+            return Err(TransportError::PreSendConnectivity(format!(
+                "no certificate found in CA file {}",
+                path.display()
+            )));
+        }
+
+        Ok(certificates)
     }
 
     #[cfg(feature = "test-support")]
@@ -123,7 +143,8 @@ impl HttpTransport {
     /// left without an answer may still have reached SAP.
     pub fn classify_send_error(method: &str, error: &reqwest::Error) -> TransportError {
         if error.is_connect() || error.is_builder() {
-            return TransportError::PreSendConnectivity(error.to_string());
+            // A refused certificate is only in the cause chain, never in reqwest's own text.
+            return TransportError::PreSendConnectivity(Self::causes(error));
         }
 
         if Self::is_read_only(method) {
