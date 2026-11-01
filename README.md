@@ -172,6 +172,17 @@ activation on one connection. The RFC library is loaded at run time and is not i
 in ABAPReach; installing and licensing it is up to you. Pick a backend with `--backend adt|rfc`; without it ADT HTTP runs
 first, and a connection without `host` and `port` runs on RFC only.
 
+## Platforms
+
+Release 0.12.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
+library lookup per OS, the release file checks, the Linux glibc baseline, the credential
+file permission rules and the test matrix are in
+[Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
+The test matrix stays `pending` until the release-candidate run records each cell.
+
+An explicit `ABAPREACH_RFC_LIBRARY` that cannot be loaded stops the command with an
+error. ABAPReach does not fall back to another library in that case.
+
 ## Safety
 
 Every write goes through the same guards, on both backends.
@@ -218,8 +229,9 @@ has the details.
 
 ### Exit codes
 
-Scripts can rely on three exit codes. Any result that needs a human look exits 1, including a
-write that turned out active only after a read-back.
+Scripts can rely on four exit codes. Any result that needs a human look exits 1, including a
+write that turned out active only after a read-back. An interrupt (Ctrl-C) exits 130; when a
+deploy holds the lock, it exits 130 only after the lock is released.
 
 <table>
   <tr>
@@ -237,6 +249,10 @@ write that turned out active only after a read-back.
   <tr>
     <td align="left"><code>STOP: ...</code></td>
     <td align="center">2</td>
+  </tr>
+  <tr>
+    <td align="left">interrupt (Ctrl-C), after the lock release when a deploy holds the lock</td>
+    <td align="center">130</td>
   </tr>
 </table>
 

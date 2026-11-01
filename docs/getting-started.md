@@ -1,7 +1,9 @@
 # Getting started
 
 ABAPReach 0.11.1 is a macOS arm64-tested CLI for reading and deploying the active
-source of **existing ABAP programs** (`PROG`). You need a Rust toolchain that
+source of **existing ABAP programs** (`PROG`). Release 0.12.0 targets Windows x64,
+Linux x64 and Linux arm64 as well; see [Platforms and release binaries](#platforms-and-release-binaries)
+and the [0.12.0 test matrix](#tested-environment) for what is verified so far. You need a Rust toolchain that
 supports edition 2024, an SAP user allowed to access the relevant ADT or RFC
 services, and a reachable SAP system. Deploy also needs the SAP-side permissions
 and transport state required for the target program. Check those with your SAP
@@ -20,6 +22,136 @@ cargo build --release
 The binary is `target/release/abapreach`. No SAP library is linked or bundled at
 build time. The RFC backend needs a compatible SAP NetWeaver RFC library at run
 time; ADT HTTP does not.
+
+## Platforms and release binaries
+
+The release targets and the paths each one offers. Test status for each cell is in
+[Tested environment](#tested-environment).
+
+| Target | ADT HTTP | RFC, SAP GUI library | RFC, NW RFC SDK |
+| :--- | :--- | :--- | :--- |
+| macOS arm64 | yes | yes (SAP GUI for Java) | yes |
+| Windows x64 | yes | yes (SAP GUI for Windows, 64-bit) | yes |
+| Linux x64 | yes | yes (SAP GUI for Java) | yes |
+| Linux arm64 | yes | not available: SAP GUI for Java for Linux is built for x86_64 only | yes |
+
+The Windows binary is x64. Windows on ARM runs it under x64 emulation together with
+SAP GUI.
+
+### Release files
+
+Each release lists one archive per target, named `abapreach-<version>-<target>`:
+a `.zip` for Windows and a `.tar.gz` for macOS and Linux. Each archive has a SHA256
+value on the release page. Check it before you run the binary:
+
+```sh
+shasum -a 256 abapreach-<version>-<target>.tar.gz
+```
+
+```sh
+sha256sum abapreach-<version>-<target>.tar.gz
+```
+
+```text
+certutil -hashfile abapreach-<version>-<target>.zip SHA256
+```
+
+- **Windows x64:** the binary links the C runtime statically, so no Visual C++
+  redistributable is needed. The binary is not code-signed yet, so Windows
+  SmartScreen can block or warn on the first start. Run it only from a release you
+  checked against the SHA256 value.
+- **macOS:** a file downloaded from a browser carries the quarantine attribute, which
+  Gatekeeper checks. If the binary is blocked, remove the attribute:
+
+  ```sh
+  xattr -d com.apple.quarantine /path/to/abapreach
+  ```
+
+- **Linux:** the release binary needs glibc 2.28 or newer. It is built against glibc
+  2.28. musl-based systems are not supported, because the SAP libraries need glibc.
+  The `.tar.gz` keeps the executable bit. If the file is not executable after
+  extraction, run `chmod +x /path/to/abapreach`. On a headless system, install the
+  `ca-certificates` package; without it HTTPS connections fail certificate checks
+  (see [TLS settings](#tls-settings)).
+
+### RFC library lookup
+
+Without an override, the loader tries these candidates in order and uses the first one
+whose architecture matches the binary and that loads: SAP GUI library first, then the
+NW RFC SDK library. A discovered candidate that fails moves on to the next one.
+
+| Target | SAP GUI library (family `SAP GUI`) | NW RFC SDK library (family `NW RFC SDK`) |
+| :--- | :--- | :--- |
+| Windows x64 | `%ProgramFiles%\SAP\FrontEnd\SAPGUI\sapnwrfccm.dll` (64-bit install only) | `sapnwrfc.dll` in `lib` under `%SAPNWRFC_HOME%`, `%USERPROFILE%\sap\nwrfcsdk`, then `%ProgramFiles%\SAP\nwrfcsdk` |
+| macOS arm64 | `bin/unicode/libsapnwrfc.dylib`, then `bin/libsapnwrfccm.dylib`, inside each SAP GUI app bundle under `/Applications` (searched to four levels; the bundle with the highest version in its name is tried first) | `libsapnwrfc.dylib` in `lib` under `$SAPNWRFC_HOME`, `$HOME/sap/nwrfcsdk`, `/opt/sap/nwrfcsdk`, then `/usr/local/sap/nwrfcsdk` |
+| Linux x64, arm64 | `bin/libsapnwrfccm.so`, then `bin/unicode/libsapnwrfc.so`, inside `$HOME/sapgui`, `/opt/sapgui`, then `/usr/local/sapgui` | `libsapnwrfc.so` in `lib` under `$SAPNWRFC_HOME`, `$HOME/sap/nwrfcsdk`, `/opt/sap/nwrfcsdk`, then `/usr/local/sap/nwrfcsdk` |
+
+On Windows, a 32-bit SAP GUI under `Program Files (x86)` is skipped, because a 32-bit
+library cannot load into this 64-bit binary; `doctor` prints the reason.
+
+An explicit path always wins: set `ABAPREACH_RFC_LIBRARY` to the library file.
+If that path cannot be loaded, ABAPReach stops and reports it. It does not try the
+discovered candidates:
+
+```text
+could not load RFC library <path>: <reason>; an explicit path does not fall back to another candidate
+```
+
+When no candidate exists at all, the message is `RFC library not found; set ABAPREACH_RFC_LIBRARY`.
+A library built for another architecture is refused before it is loaded, with
+`architecture mismatch: the library is <found> but this binary is <expected>`, where
+the labels are `x86-64`, `arm64`, `x86 (32-bit)` and `arm (32-bit)`.
+
+On success, `doctor` prints the loaded library:
+
+```text
+RFC library: <path> version <version> architecture <architecture> family <SAP GUI or NW RFC SDK> source <explicit ABAPREACH_RFC_LIBRARY or discovered>
+```
+
+On Linux, when a library does not declare `$ORIGIN` in its search path, or belongs to the
+NW RFC SDK, ABAPReach first maps the sibling dependencies from the same folder by absolute
+path. The parent process's `LD_LIBRARY_PATH` is not changed. On Windows, the loader searches
+the folder of the library for its dependencies.
+
+### Local credentials file permission
+
+`connections.local.json` holds passwords. Keep it readable by your user only:
+
+- **Unix and macOS:** no group or other permission bits, for example `chmod 600`.
+  `doctor` prints `local credentials: user-only permission` for such a file. If the file
+  is readable by group or other, `doctor` prints a `WARNING: local credentials are
+  readable by group or other (mode ...)` line. The warning does not stop the command.
+- **Windows:** `doctor` prints `local credentials: permission not checked; restrict the file
+  to a user-only ACL`. Remove access for other accounts in the file's security settings
+  yourself; ABAPReach does not check the ACL.
+
+A missing file is reported as `local credentials: not present`.
+
+### Trace files and interrupts
+
+The SAP library writes its trace file `dev_rfc.log` into the current directory unless
+told otherwise. ABAPReach points it at the OS temporary directory: it sets `RFC_TRACE_DIR`
+at startup, before any other thread exists, and calls `RfcSetTraceDir` when the library
+exports it. On Windows the library may not read the environment variable, so the call is
+the protection that matters there. A library without `RfcSetTraceDir` relies on the
+environment variable alone. `doctor` records the outcome on the line after the library line,
+one of:
+
+```text
+RFC trace directory: RfcSetTraceDir exported, set
+RFC trace directory: RfcSetTraceDir not exported, environment only
+RFC trace directory: RfcSetTraceDir exported, returned rc <rc>, environment only
+```
+
+On Ctrl-C, ABAPReach exits with code 130 when no deploy lock is held. When a deploy holds
+the lock, the interrupt is deferred: the deploy finishes its lock release, prints
+`CANCELED: interrupted while the lock was held` (or `CANCELED: interrupted before the
+activation` when the new source was already saved inactive), and exits with code 130. The
+exit code is 130 only after the lock is released; if the release fails, the exit code is 1 and
+the output says the lock may remain. On Unix, SIGTERM
+and SIGHUP (for example a dropped SSH session) take the same path. On
+Windows, CTRL_BREAK does too, but for CTRL_CLOSE, CTRL_LOGOFF and CTRL_SHUTDOWN the OS ends
+the process as soon as the handler returns, so a lock may stay held in SAP.
 
 ## Configure a connection
 
@@ -72,7 +204,7 @@ A route without a password may stay in the server entry as `saprouter` inside
       "systemId": "A4H",
       "clients": ["001"],
       "rfc": {
-        "ashost": "10.0.0.15",
+        "ashost": "sap.example.com",
         "sysnr": "00",
         "saprouter": "/H/saprouter.example.com/S/3299"
       }
@@ -135,7 +267,9 @@ JSON object named `connections.local.json` next to `connections.json`:
 ```
 
 Keep the local credentials file out of version control and limit its file
-permissions. Environment variables take precedence over values in the file.
+permissions; the per-OS rules are in
+[Local credentials file permission](#local-credentials-file-permission). Environment
+variables take precedence over values in the file.
 The connection file and the local credentials file must be readable by the
 process. ABAPReach does not print passwords.
 
@@ -147,12 +281,20 @@ export ABAP_CONNECTIONS=/path/to/connections.json
 
 ### TLS settings
 
-HTTPS certificate verification is on by default. For a custom CA, add an
-`adt` block to the server entry:
+HTTPS certificate verification is on by default. Certificates are checked against the
+operating system's trust store. On a headless Linux system, install `ca-certificates`
+first.
+
+For a custom CA, add an `adt` block to the server entry:
 
 ```text
 "adt": {"scheme": "https", "ca_file": "/path/to/ca.pem"}
 ```
+
+`ca_file` is a PEM file; its certificates are added as trusted roots for that
+connection, on top of the operating system's trust store, not in place of it. ABAPReach stops with `cannot read CA file <path>: <reason>` when the file
+cannot be read, and with `no certificate found in CA file <path>` when it holds no
+certificate.
 
 The `adt` block also accepts `"insecure": true` or `"scheme": "http"` as
 per-connection settings. Those modes print a warning on command output and in
@@ -173,8 +315,8 @@ HTTP passes and RFC fails, ADT reads may still work; inspect the probe lines
 instead of treating exit 1 as proof that every backend is unusable.
 
 For RFC, set `ABAPREACH_RFC_LIBRARY` to the library path if automatic lookup
-does not find it. Otherwise the loader checks an installed SAP GUI library on
-macOS, then `SAPNWRFC_HOME`, then usual SDK folders. `doctor` also reports
+does not find it. The lookup order per OS, and what happens when an explicit path
+fails, are in [RFC library lookup](#rfc-library-lookup). `doctor` also reports
 whether ADT HTTP has a stateful session, which deploy needs for its lock.
 
 ## Read an existing program
@@ -220,6 +362,30 @@ user-controlled workflow, but the CLI does not grant the AI any SAP
 permissions of its own.
 
 ## Tested environment
+
+Release 0.12.0 test matrix. Every cell is `pending`: no run has been recorded yet. Each
+cell becomes PASS, UNSUPPORTED (with the reason) or FAIL after the release-candidate
+run on the released artifacts. A FAIL on a supported path blocks the release.
+
+| Target | Host | ADT HTTP | RFC, SAP GUI library | RFC, NW RFC SDK |
+| :--- | :--- | :--- | :--- | :--- |
+| macOS arm64 | arm64 workstation (regression of 0.11.1) | pending | pending | pending |
+| Windows x64 | x64 binary on an arm64 VM, under emulation; timings labelled `emulated` | pending | pending | pending |
+| Linux x64 | x86_64 host | pending | pending | pending |
+| Linux arm64 | arm64 host | pending | not available: SAP GUI for Java for Linux is built for x86_64 only | pending |
+
+Per cell, the scenarios are `doctor`, three reads, `deploy --simulate`, `deploy`, an
+unchanged deploy, a base hash mismatch, a syntax error, a wrong password, a reset, a
+foreign inactive version under `reject` and `allow`, `ask`, `--tr`, and RFC fault
+injection with the separate fault-injection artifact. Linux and Windows cells also cover
+the loader, trace, source-encoding, credential-permission and CA-trust checks described
+above. Each result records the loaded library path, version and architecture.
+
+The Linux x64 SAP GUI cell stays `pending` until a run on a Linux x64 host records the
+library that loads. The library layout in [RFC library lookup](#rfc-library-lookup) comes
+from the SAP GUI for Java install package, not from a run.
+
+### 0.11.1 record (macOS arm64)
 
 ABAPReach 0.11.1 was tested live on three paths: ADT HTTP, RFC with the
 library from SAP GUI, and RFC with the NW RFC SDK. Each path ran `doctor`,
@@ -294,10 +460,9 @@ revision 11 run.
 
 ### Not tested yet
 
-- Windows (SAP GUI for Windows) and Linux (SAP GUI for Java or the NW RFC SDK).
+- Windows and Linux: no result is recorded yet; see the 0.12.0 matrix above.
   SAP GUI for Java ships per platform, so the Linux package and the RFC
-  library inside it are checked separately when Linux is tested; the macOS
-  result does not carry over.
+  library inside it are checked separately; the macOS result does not carry over.
 - The `ask` prompt and a transportable deploy over ADT HTTP on 7.50: the ADT
   HTTP endpoint of that system was unreachable during these runs.
 - `libsapnwrfccm.dylib`, a second RFC library that SAP GUI 8.10 revision 15
