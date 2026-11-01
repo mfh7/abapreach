@@ -5,7 +5,7 @@ use abapreach::config::Connection;
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::transport::http::HttpTransport;
 use abapreach::transport::{Response, SadtTransport, TransportError};
-use abapreach::{Exit, Factories, RfcLibraryInfo, run};
+use abapreach::{Exit, Factories, RfcLibraryIdentity, RfcLibraryInfo, run};
 use common::ScriptedTransport;
 use replay::{Step, fx, no_inactive, replay};
 use std::cell::RefCell;
@@ -1273,8 +1273,13 @@ fn doctor_probes_both_backends_and_warns_once() {
     fake.adt
         .push_back(scripted(vec![Ok(Response::text(200, "<app:service/>"))]));
     fake.library.push_back(Ok(RfcLibraryInfo {
-        path: "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so".to_owned(),
-        version: "7.6.2".to_owned(),
+        identity: RfcLibraryIdentity {
+            path: "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so".to_owned(),
+            version: "7.6.2".to_owned(),
+            architecture: "x86-64".to_owned(),
+            family: "NW RFC SDK".to_owned(),
+            source: "discovered".to_owned(),
+        },
         notes: Vec::new(),
     }));
     fake.ping.push_back(Ok(()));

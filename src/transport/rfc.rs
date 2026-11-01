@@ -4,7 +4,7 @@ use libloading::{Library, Symbol};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::mem::ManuallyDrop;
 use std::os::raw::{c_int, c_uint};
 use std::path::{Path, PathBuf};
@@ -35,6 +35,29 @@ const MACHO_64_LE: [u8; 4] = [0xcf, 0xfa, 0xed, 0xfe];
 const MACHO_32_LE: [u8; 4] = [0xce, 0xfa, 0xed, 0xfe];
 const MACHO_FAT_ARCH_BYTES: usize = 20;
 const MAX_MACHO_SLICES: usize = 32;
+/// The whole ELF64 header: `e_ident`, `e_type`, `e_machine`, and the program header fields.
+const ELF64_HEADER_BYTES: usize = 64;
+/// One ELF64 program header: `p_type`, `p_flags`, then six eight-byte fields.
+const ELF64_PROGRAM_HEADER_BYTES: usize = 56;
+const ELF64_DYNAMIC_ENTRY_BYTES: usize = 16;
+/// The fields of one ELF64 program header this loader reads, at their offsets inside the entry.
+const PHDR_TYPE: usize = 0;
+const PHDR_OFFSET: usize = 8;
+const PHDR_VADDR: usize = 16;
+const PHDR_FILESZ: usize = 32;
+const ELF64_LOAD: u32 = 1;
+const ELF64_DYNAMIC: u32 = 2;
+/// `DT_NULL`, `DT_NEEDED`, `DT_STRTAB`, `DT_STRSZ`, `DT_RPATH`, and `DT_RUNPATH` in an ELF64 image.
+const DT_NULL: i64 = 0;
+const DT_NEEDED: i64 = 1;
+const DT_STRTAB: i64 = 5;
+const DT_STRSZ: i64 = 10;
+const DT_RPATH: i64 = 15;
+const DT_RUNPATH: i64 = 29;
+/// The placeholder a dependency search path uses for the library's own directory.
+const ELF_ORIGIN: &str = "$ORIGIN";
+/// `LOAD_WITH_ALTERED_SEARCH_PATH`: `LoadLibraryExW` also searches the loaded DLL's own folder.
+pub const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
 const MACHO_X86: u32 = 0x0000_0007;
 const MACHO_X86_64: u32 = 0x0100_0007;
 const MACHO_ARM: u32 = 0x0000_000c;
@@ -119,8 +142,12 @@ impl Env {
 
 pub struct RfcLibrary {
     path: PathBuf,
-    // Never unloaded: SAP's library leaves thread-local destructors that crash after dlclose.
-    library: ManuallyDrop<Library>,
+    arch: Arch,
+    family: Family,
+    source: Origin,
+    // Never unloaded: SAP's library leaves thread-local destructors that crash after dlclose, and
+    // the dependencies preloaded for it have to stay mapped just as long.
+    loaded: Loaded,
 }
 
 impl RfcLibrary {
@@ -131,22 +158,18 @@ impl RfcLibrary {
             .collect()
     }
 
-    /// Every candidate in load order, each with the origin that decides whether it may fall back.
+    /// Every candidate in load order, each labelled with its family and the origin that decides
+    /// whether it may fall back.
     pub fn candidates(env: &Env) -> Vec<Candidate> {
-        let named = |path: &PathBuf| Candidate {
-            path: path.clone(),
-            origin: Origin::Explicit,
-        };
-        let discovered = |path: &PathBuf| Candidate {
-            path: path.clone(),
-            origin: Origin::Discovered,
+        let discovered = |family: Family| {
+            move |path: &PathBuf| Candidate::located(path.clone(), family, Origin::Discovered)
         };
 
         env.override_path
             .iter()
-            .map(named)
-            .chain(env.gui_paths.iter().map(discovered))
-            .chain(env.sdk_paths.iter().map(discovered))
+            .map(|path| Candidate::new(path.clone(), Origin::Explicit))
+            .chain(env.gui_paths.iter().map(discovered(Family::Gui)))
+            .chain(env.sdk_paths.iter().map(discovered(Family::Sdk)))
             .collect()
     }
 
@@ -161,14 +184,17 @@ impl RfcLibrary {
 
         point_trace_at_temp_dir();
 
-        let (chosen, library) = decide(&candidates, |candidate| load_compatible(&candidate.path))
-            .map_err(|error| error.to_string())?;
+        let (chosen, loaded) =
+            decide(&candidates, load_candidate).map_err(|error| error.to_string())?;
 
-        set_trace_directory(&library);
+        set_trace_directory(loaded.library());
 
         Ok(Self {
             path: candidates[chosen].path.clone(),
-            library: ManuallyDrop::new(library),
+            arch: loaded.arch(),
+            family: candidates[chosen].family,
+            source: candidates[chosen].origin,
+            loaded,
         })
     }
 
@@ -188,8 +214,22 @@ impl RfcLibrary {
         Ok((major, minor, patch))
     }
 
+    /// What the doctor reports: the path, the version the library reports, the architecture the
+    /// header declares, the family the file name names, and where the path came from.
+    pub fn identity(&self) -> Result<LibraryIdentity, String> {
+        let (major, minor, patch) = self.version()?;
+
+        Ok(LibraryIdentity::new(
+            self.path.clone(),
+            format!("{major}.{minor}.{patch}"),
+            self.arch,
+            self.family,
+            self.source,
+        ))
+    }
+
     pub fn library(&self) -> &Library {
-        &self.library
+        self.loaded.library()
     }
 }
 
@@ -1094,14 +1134,58 @@ fn is_put_uri(uri: &str) -> bool {
     }
 }
 
-/// What one candidate attempt did: a library that can be used, or why it cannot be.
+/// What one candidate attempt did: a mapped library that can be used, or why it cannot be.
+/// `Loaded` is not that type because it deliberately keeps the preloaded dependencies alive.
 pub type Attempt = Result<Library, String>;
 
 /// One candidate the loader may attempt, and where it came from.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Candidate {
     pub path: PathBuf,
+    pub family: Family,
     pub origin: Origin,
+}
+
+impl Candidate {
+    /// A path the user named, labelled by the library the path itself names.
+    pub fn new(path: PathBuf, origin: Origin) -> Self {
+        Self {
+            family: family_of(&path),
+            path,
+            origin,
+        }
+    }
+
+    /// A path automatic discovery found, labelled with the location family that found it: a SAP GUI
+    /// package also ships the plain `libsapnwrfc` library, so the file name alone cannot say which
+    /// family a discovered path belongs to.
+    pub fn located(path: PathBuf, family: Family, origin: Origin) -> Self {
+        Self {
+            family,
+            path,
+            origin,
+        }
+    }
+}
+
+/// Which SAP product provides a library; the doctor reports it, so a run labelled SAP GUI cannot
+/// silently load the SDK library.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Family {
+    /// The SAP GUI package library, which carries its own RFC implementation.
+    Gui,
+    /// The NW RFC SDK library.
+    Sdk,
+}
+
+impl Family {
+    /// How the doctor names the family.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Gui => "SAP GUI",
+            Self::Sdk => "NW RFC SDK",
+        }
+    }
 }
 
 /// Whether the user named the path or automatic discovery found it.
@@ -1112,6 +1196,38 @@ pub enum Origin {
     Explicit,
     /// Automatic discovery found the path; a failure moves on to the next candidate.
     Discovered,
+}
+
+impl Origin {
+    /// How the doctor names where the loaded library came from.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit ABAPREACH_RFC_LIBRARY",
+            Self::Discovered => "discovered",
+        }
+    }
+}
+
+/// The library family a path the user named belongs to: every SAP GUI release ships the `...cm`
+/// library, and the SDK ships the plain one, which the documented SAP GUI locations answer too.
+/// Automatic discovery does not need this guess, because the location that found a path supplies
+/// its family directly.
+pub fn family_of(path: &Path) -> Family {
+    let text = path.to_string_lossy().to_lowercase();
+    let named = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let gui_location = text
+        .split(['/', '\\'])
+        .any(|component| component.starts_with("sapgui"))
+        || text.contains(".app/");
+
+    if named.contains("sapnwrfccm") || gui_location {
+        Family::Gui
+    } else {
+        Family::Sdk
+    }
 }
 
 /// Why the candidate list produced no library.
@@ -1357,19 +1473,459 @@ pub fn compatible_arch(expected: Arch, header: &[u8]) -> Result<(), String> {
     }
 }
 
-/// The default attempt: inspect the header first, then map the library. A candidate for another
-/// architecture is rejected before any FFI call, so a wrong image is never mapped.
-pub fn load_compatible(path: &Path) -> Attempt {
+/// A mapped library plus the dependencies that were preloaded for it. None of them is ever
+/// unloaded: SAP's library leaves thread-local destructors that crash after `dlclose`, and a
+/// dependency has to stay mapped for as long as the library that needs it.
+pub struct Loaded {
+    arch: Arch,
+    library: ManuallyDrop<Library>,
+    _dependencies: Vec<ManuallyDrop<Library>>,
+}
+
+impl Loaded {
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    /// The architecture the image header declares, checked before the library was mapped.
+    pub fn arch(&self) -> Arch {
+        self.arch
+    }
+}
+
+/// The default attempt for one path: inspect the header first, then map the library. A candidate
+/// for another architecture is rejected before any FFI call, so a wrong image is never mapped.
+pub fn load_compatible(path: &Path) -> Result<Loaded, String> {
+    load_candidate(&Candidate::new(path.to_path_buf(), Origin::Discovered))
+}
+
+/// One candidate attempt: the architecture check on the image header, the platform's dependency
+/// step, and the mapping itself. The caller must keep the preloaded dependencies mapped for as
+/// long as the library is used.
+pub fn load_candidate(candidate: &Candidate) -> Result<Loaded, String> {
     let expected = Arch::current().ok_or_else(|| {
         format!(
             "unsupported host architecture {}: this build cannot check an RFC library",
             std::env::consts::ARCH
         )
     })?;
-    let header = read_header(path)?;
+    let header = read_header(&candidate.path)?;
 
     compatible_arch(expected, &header)?;
+
+    let dependencies = platform_dependencies(candidate)?;
+
+    map_library(&candidate.path).map(|library| Loaded {
+        arch: expected,
+        library: ManuallyDrop::new(library),
+        _dependencies: dependencies.into_iter().map(ManuallyDrop::new).collect(),
+    })
+}
+
+/// Linux keeps a library's own folder out of the search path unless the image says `$ORIGIN`, so
+/// the siblings an image needs are mapped by absolute path first. Windows resolves a DLL's own
+/// dependencies from its folder through the load flags, and macOS resolves them through the
+/// install names, so neither platform preloads anything.
+#[cfg(target_os = "linux")]
+fn platform_dependencies(candidate: &Candidate) -> Result<Vec<Library>, String> {
+    let dynamic = fs::File::open(&candidate.path)
+        .ok()
+        .and_then(|file| elf_dynamic(file).ok());
+    let dependencies = dependency_preload(
+        &candidate.path,
+        candidate.family,
+        dynamic.as_ref(),
+        &SystemFs,
+    );
+
+    preload_dependencies(&dependencies, |path| map_library(path))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_dependencies(_: &Candidate) -> Result<Vec<Library>, String> {
+    Ok(Vec::new())
+}
+
+/// Maps a library through the platform loader: `LoadLibraryExW` with the altered search path on
+/// Windows, `dlopen` elsewhere.
+#[cfg(windows)]
+fn map_library(path: &Path) -> Result<Library, String> {
+    let flags = windows_load_flags(path);
+
+    unsafe { libloading::os::windows::Library::load_with_flags(path, flags) }
+        .map(Into::into)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(windows))]
+fn map_library(path: &Path) -> Result<Library, String> {
     unsafe { Library::new(path) }.map_err(|error| error.to_string())
+}
+
+/// Whether a library needs its siblings preloaded: the SDK family never declares `$ORIGIN`, and any
+/// other library that does not declare it needs the same treatment.
+pub fn needs_dependency_preload(family: Family, declares_origin: bool) -> bool {
+    family == Family::Sdk || !declares_origin
+}
+
+/// The siblings one library has to preload, in its own dependency order: the dependency names it
+/// declares, the ones that sit beside it in its own folder, and never the library itself.
+pub fn sibling_dependencies(
+    library: &Path,
+    needed: &[String],
+    fs: &dyn CandidateFs,
+) -> Vec<PathBuf> {
+    let Some(directory) = library.parent() else {
+        return Vec::new();
+    };
+
+    needed
+        .iter()
+        .map(|name| directory.join(name))
+        .filter(|path| path != library && fs.is_file(path))
+        .collect()
+}
+
+/// The dependencies to preload for one library: the origin rule selects whether the sibling step
+/// runs at all, and an image whose dynamic section could not be read leaves nothing to preload.
+pub fn dependency_preload(
+    library: &Path,
+    family: Family,
+    dynamic: Option<&ElfDynamic>,
+    fs: &dyn CandidateFs,
+) -> Vec<PathBuf> {
+    let Some(dynamic) = dynamic else {
+        return Vec::new();
+    };
+
+    if !needs_dependency_preload(family, dynamic.declares_origin()) {
+        return Vec::new();
+    }
+
+    sibling_dependencies(library, dynamic.needed(), fs)
+}
+
+/// Maps every dependency by absolute path, in order, before the library that needs them. A failure
+/// names the path, so the user can tell which sibling is missing; the parent process search path is
+/// never modified.
+pub fn preload_dependencies<T>(
+    dependencies: &[PathBuf],
+    mut map: impl FnMut(&Path) -> Result<T, String>,
+) -> Result<Vec<T>, String> {
+    dependencies
+        .iter()
+        .map(|path| {
+            map(path).map_err(|error| {
+                format!("could not preload dependency {}: {error}", path.display())
+            })
+        })
+        .collect()
+}
+
+/// The `LoadLibraryExW` flags for one path: the altered search path resolves a DLL's dependencies
+/// from its own folder, and the API rejects that flag for a relative path.
+pub fn windows_load_flags(path: &Path) -> u32 {
+    if is_windows_absolute(path) {
+        LOAD_WITH_ALTERED_SEARCH_PATH
+    } else {
+        0
+    }
+}
+
+/// Whether Windows reads the path as a full path: a rooted path, a drive-qualified path such as
+/// `C:\libraries\sapnwrfc.dll`, or a UNC share such as `\\host\share\sapnwrfc.dll`.
+fn is_windows_absolute(path: &Path) -> bool {
+    if path.has_root() {
+        return true;
+    }
+
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+
+    if bytes.len() >= 3 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return matches!(bytes[2], b'\\' | b'/');
+    }
+
+    bytes.starts_with(b"\\\\")
+}
+
+/// The dependency information of an ELF64 image: the libraries it needs and the search path it
+/// declares for them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ElfDynamic {
+    needed: Vec<String>,
+    run_path: Vec<String>,
+}
+
+impl ElfDynamic {
+    /// The `DT_NEEDED` entries, in the image's own order.
+    pub fn needed(&self) -> &[String] {
+        &self.needed
+    }
+
+    /// The `DT_RUNPATH` and `DT_RPATH` entries as the image stores them.
+    pub fn run_path(&self) -> &[String] {
+        &self.run_path
+    }
+
+    /// Whether a search path component is `$ORIGIN`, which resolves to the library's own folder; a
+    /// library that declares it finds its siblings without help.
+    pub fn declares_origin(&self) -> bool {
+        self.run_path
+            .iter()
+            .flat_map(|entry| entry.split(':'))
+            .any(|component| {
+                let component = component.trim();
+
+                component == ELF_ORIGIN || component.starts_with("$ORIGIN/")
+            })
+    }
+}
+
+/// Reads the dependency information of an ELF64 image without mapping it. An image the loader
+/// cannot read is an error, never a guess, so no candidate is preloaded or mapped from it.
+pub fn elf_dynamic(mut image: impl Read + Seek) -> Result<ElfDynamic, String> {
+    let header = read_at(&mut image, 0, ELF64_HEADER_BYTES as u64)?;
+
+    if !header.starts_with(&ELF_MAGIC) {
+        return Err("not an ELF image".to_owned());
+    }
+
+    if header[4] != 2 || header[5] != 1 {
+        return Err(format!(
+            "unsupported ELF image: class {} and data encoding {} (only 64-bit little-endian \
+             images are read)",
+            header[4], header[5]
+        ));
+    }
+
+    let table_offset = field_u64(&header, 0x20);
+    let table_entry = u64::from(field_u16(&header, 0x36));
+    let table_count = u64::from(field_u16(&header, 0x38));
+
+    if table_entry != ELF64_PROGRAM_HEADER_BYTES as u64 {
+        return Err(format!("unsupported ELF program header size {table_entry}"));
+    }
+
+    let mut loads = Vec::new();
+    let mut dynamic = None;
+
+    for index in 0..table_count {
+        let offset = table_offset + index * table_entry;
+        let entry = read_at(&mut image, offset, ELF64_PROGRAM_HEADER_BYTES as u64)?;
+
+        match field_u32(&entry, PHDR_TYPE) {
+            ELF64_LOAD => loads.push(LoadSegment {
+                address: field_u64(&entry, PHDR_VADDR),
+                size: field_u64(&entry, PHDR_FILESZ),
+                offset: field_u64(&entry, PHDR_OFFSET),
+            }),
+            ELF64_DYNAMIC => {
+                dynamic = Some((
+                    field_u64(&entry, PHDR_OFFSET),
+                    field_u64(&entry, PHDR_FILESZ),
+                ))
+            }
+            _ => {}
+        }
+    }
+
+    let (offset, filesz) = dynamic.ok_or_else(|| {
+        "the image has no dynamic section, so its dependencies cannot be read".to_owned()
+    })?;
+    let section = read_at(&mut image, offset, filesz)?;
+    let mut needed = Vec::new();
+    let mut run_path = Vec::new();
+    let (mut string_table, mut string_bytes) = (None, None);
+
+    for entry in section.as_chunks::<ELF64_DYNAMIC_ENTRY_BYTES>().0 {
+        let tag = i64::from_le_bytes(entry[..8].try_into().unwrap_or_default());
+        let value = u64::from_le_bytes(entry[8..16].try_into().unwrap_or_default());
+
+        match tag {
+            DT_NULL => break,
+            DT_NEEDED => needed.push(value),
+            DT_RPATH | DT_RUNPATH => run_path.push(value),
+            DT_STRTAB => string_table = Some(value),
+            DT_STRSZ => string_bytes = Some(value),
+            _ => {}
+        }
+    }
+
+    if needed.is_empty() && run_path.is_empty() {
+        return Ok(ElfDynamic::default());
+    }
+
+    let address = string_table.ok_or_else(|| {
+        "the dynamic section names dependencies but declares no string table".to_owned()
+    })?;
+    let bytes = string_bytes.ok_or_else(|| {
+        "the dynamic section declares a string table but no size for it".to_owned()
+    })?;
+    let strings = read_at(
+        &mut image,
+        load_address_offset(&loads, address).ok_or_else(|| {
+            format!("string table address {address:#x} is outside every loadable segment")
+        })?,
+        bytes,
+    )?;
+    let mut name = |value: u64| -> Result<String, String> {
+        let start = usize::try_from(value)
+            .map_err(|_| format!("string offset {value} does not fit the image"))?;
+        let tail = strings
+            .get(start..)
+            .ok_or_else(|| format!("string offset {value} is outside the dynamic string table"))?;
+        let end = tail
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(tail.len());
+
+        Ok(String::from_utf8_lossy(&tail[..end]).into_owned())
+    };
+    let needed = needed
+        .into_iter()
+        .map(&mut name)
+        .collect::<Result<Vec<_>, _>>()?;
+    let run_path = run_path
+        .into_iter()
+        .map(name)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(ElfDynamic { needed, run_path })
+}
+
+/// The largest section this loader reads, so a malformed image cannot ask for an implausible
+/// buffer. A section of exactly this length is read, one byte more is refused.
+pub const MAX_READ_BYTES: u64 = 1 << 20;
+
+fn read_at(reader: &mut (impl Read + Seek), offset: u64, bytes: u64) -> Result<Vec<u8>, String> {
+    if bytes > MAX_READ_BYTES {
+        return Err(format!("implausible section length {bytes} at {offset:#x}"));
+    }
+
+    let length = usize::try_from(bytes)
+        .map_err(|_| format!("implausible section length {bytes} at {offset:#x}"))?;
+    let mut buffer = vec![0u8; length];
+
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|error| error.to_string())?;
+    reader
+        .read_exact(&mut buffer)
+        .map_err(|error| format!("truncated image at {offset:#x}: {error}"))?;
+
+    Ok(buffer)
+}
+
+/// One `PT_LOAD` program header: the address it starts at, how many bytes it maps, and where in the
+/// file those bytes start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoadSegment {
+    pub address: u64,
+    pub size: u64,
+    pub offset: u64,
+}
+
+/// The file offset of a loadable address: a dynamic entry stores a load address, and the segment
+/// that maps it decides which file bytes those are.
+pub fn load_address_offset(loads: &[LoadSegment], address: u64) -> Option<u64> {
+    loads.iter().find_map(|segment| {
+        (address >= segment.address && address - segment.address < segment.size)
+            .then(|| segment.offset + (address - segment.address))
+    })
+}
+
+/// One little-endian field of a header or a dynamic entry; a field the buffer cannot hold reads as
+/// zero, so a truncated image is reported by the check that needs the value.
+fn field_u16(bytes: &[u8], offset: usize) -> u16 {
+    field::<2>(bytes, offset)
+        .map(u16::from_le_bytes)
+        .unwrap_or_default()
+}
+
+fn field_u32(bytes: &[u8], offset: usize) -> u32 {
+    field::<4>(bytes, offset)
+        .map(u32::from_le_bytes)
+        .unwrap_or_default()
+}
+
+fn field_u64(bytes: &[u8], offset: usize) -> u64 {
+    field::<8>(bytes, offset)
+        .map(u64::from_le_bytes)
+        .unwrap_or_default()
+}
+
+fn field<const BYTES: usize>(bytes: &[u8], offset: usize) -> Option<[u8; BYTES]> {
+    bytes
+        .get(offset..)
+        .and_then(|tail| tail.first_chunk::<BYTES>())
+        .copied()
+}
+
+/// What the doctor reports about a loaded library, so a run labelled SAP GUI cannot pass with the
+/// SDK library: path, version, architecture, family, and source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LibraryIdentity {
+    path: PathBuf,
+    version: String,
+    arch: Arch,
+    family: Family,
+    source: Origin,
+}
+
+impl LibraryIdentity {
+    pub fn new(path: PathBuf, version: String, arch: Arch, family: Family, source: Origin) -> Self {
+        Self {
+            path,
+            version,
+            arch,
+            family,
+            source,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn arch(&self) -> Arch {
+        self.arch
+    }
+
+    pub fn family(&self) -> Family {
+        self.family
+    }
+
+    pub fn source(&self) -> Origin {
+        self.source
+    }
+
+    /// The one line the doctor prints for the library it loaded.
+    pub fn report(&self) -> String {
+        identity_report(
+            &self.path.display().to_string(),
+            &self.version,
+            self.arch.label(),
+            self.family.label(),
+            self.source.label(),
+        )
+    }
+}
+
+/// The single doctor line an identity renders; both the loader identity and the doctor-facing one
+/// use it, so the five fields always appear in the same order.
+pub fn identity_report(
+    path: &str,
+    version: &str,
+    architecture: &str,
+    family: &str,
+    source: &str,
+) -> String {
+    format!("{path} version {version} architecture {architecture} family {family} source {source}")
 }
 
 fn read_header(path: &Path) -> Result<Vec<u8>, String> {

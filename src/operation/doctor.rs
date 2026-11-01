@@ -1,6 +1,7 @@
-use crate::app::Factories;
+use crate::app::{Factories, RfcLibraryInfo};
 use crate::config::{Connection, LocalCredentialsPermission, tls_warning};
 use crate::transport::Request;
+use crate::transport::rfc::identity_report;
 
 const DISCOVERY_URI: &str = "/sap/bc/adt/discovery";
 
@@ -98,10 +99,7 @@ impl Doctor {
         // A ping needs the library, so a missing library skips (never fails) the ping probe.
         let library_found = match factories.rfc_library(connection) {
             Ok(info) => {
-                lines.push(format!(
-                    "RFC library: {} version {}",
-                    info.path, info.version
-                ));
+                lines.push(format!("RFC library: {}", library_line(&info)));
                 lines.extend(info.notes);
 
                 true
@@ -147,6 +145,17 @@ impl Doctor {
 
         DoctorReport { lines, passed }
     }
+}
+
+/// The five identity fields of the library the probe loaded, in one doctor line.
+fn library_line(info: &RfcLibraryInfo) -> String {
+    identity_report(
+        &info.identity.path,
+        &info.identity.version,
+        &info.identity.architecture,
+        &info.identity.family,
+        &info.identity.source,
+    )
 }
 
 /// Renders the backends a capability line may list, in probe order.

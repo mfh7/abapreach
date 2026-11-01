@@ -1,9 +1,12 @@
 use abapreach::transport::rfc::{
-    Arch, Candidate, CandidateFs, ELF_MAGIC, Env, LoadError, MAX_GUI_SEARCH_DEPTH, Origin,
-    PE_OFFSET_END, Platform, RFC_TRACE_DIR_ENV, RfcLibrary, SystemFs, TraceTarget,
-    apply_trace_directory, bundle_version, compatible_arch, decide, declared_archs, from_sap_uc,
-    gui_library_filename, load_compatible, rfc_library_filename, sap_uc, sdk_candidates,
-    trace_directory, trace_environment,
+    Arch, Candidate, CandidateFs, ELF_MAGIC, ElfDynamic, Env, Family,
+    LOAD_WITH_ALTERED_SEARCH_PATH, LibraryIdentity, LoadError, LoadSegment, MAX_GUI_SEARCH_DEPTH,
+    MAX_READ_BYTES, Origin, PE_OFFSET_END, Platform, RFC_TRACE_DIR_ENV, RfcLibrary, SystemFs,
+    TraceTarget, apply_trace_directory, bundle_version, compatible_arch, decide, declared_archs,
+    dependency_preload, elf_dynamic, family_of, from_sap_uc, gui_library_filename,
+    load_address_offset, load_compatible, needs_dependency_preload, preload_dependencies,
+    rfc_library_filename, sap_uc, sdk_candidates, sibling_dependencies, trace_directory,
+    trace_environment, windows_load_flags,
 };
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -615,10 +618,7 @@ fn candidates(env: &Env) -> Vec<Candidate> {
 fn oracle(pairs: &[(&str, Origin)]) -> Vec<Candidate> {
     pairs
         .iter()
-        .map(|(path, origin)| Candidate {
-            path: PathBuf::from(path),
-            origin: *origin,
-        })
+        .map(|(path, origin)| Candidate::new(PathBuf::from(path), *origin))
         .collect()
 }
 
@@ -814,14 +814,20 @@ fn the_running_architecture_matches_the_build_target() {
 #[test]
 fn the_override_is_explicit_and_discovery_is_not() {
     let env = Env::test_paths("/override", "/gui", "/sdk");
+    // The location that found a discovered path supplies its family; the override is labelled by
+    // the library the named path itself describes.
+    let expected = [
+        ("/override", Family::Sdk, Origin::Explicit),
+        ("/gui", Family::Gui, Origin::Discovered),
+        ("/sdk", Family::Sdk, Origin::Discovered),
+    ];
 
     assert_eq!(
         candidates(&env),
-        oracle(&[
-            ("/override", Origin::Explicit),
-            ("/gui", Origin::Discovered),
-            ("/sdk", Origin::Discovered),
-        ])
+        expected
+            .iter()
+            .map(|(path, family, origin)| Candidate::located(PathBuf::from(path), *family, *origin))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -987,7 +993,10 @@ fn load_compatible_rejects_a_foreign_architecture_before_loading_it() {
 
     std::fs::write(&foreign, header).unwrap();
 
-    let error = load_compatible(&foreign).expect_err("an unreadable header is never mapped");
+    // `Loaded` deliberately has no `Debug`, so the error is the value the test inspects.
+    let error = load_compatible(&foreign)
+        .map(|_| ())
+        .expect_err("an unreadable header is never mapped");
 
     assert!(error.contains("unsupported"), "{error}");
     assert!(load_compatible(&directory.path().join("absent.so")).is_err());
@@ -1048,4 +1057,678 @@ fn a_missing_explicit_override_never_reaches_the_next_candidate() {
         !message.contains(&installed.display().to_string()),
         "{message}"
     );
+}
+
+// --- Task 3b: OS loader adapters and library identity ---
+
+/// An ELF64 image whose dynamic section holds `DT_NEEDED`, `DT_STRTAB`, `DT_STRSZ`, then `DT_NULL`,
+/// and one more `DT_NEEDED` past the terminator, so a reader that ignores the terminator sees a
+/// dependency the image does not have.
+fn elf_with_a_dependency_past_the_terminator(first: &str, past: &str) -> Vec<u8> {
+    let mut strings = vec![0u8];
+    let mut add = |name: &str| {
+        let offset = strings.len() as u64;
+
+        strings.extend_from_slice(name.as_bytes());
+        strings.push(0);
+        offset
+    };
+    let first_offset = add(first);
+    let past_offset = add(past);
+    let entries = [
+        (1i64, first_offset),
+        (5, ELF_STRINGS as u64),
+        (10, strings.len() as u64),
+        (0, 0),
+        (1, past_offset),
+    ];
+    let mut image = vec![0u8; ELF_STRINGS + strings.len()];
+    let (class, machine) = host_elf_machine();
+    let mapped = image.len() as u64;
+
+    image[0..4].copy_from_slice(&ELF_MAGIC);
+    image[4] = class;
+    image[5] = 1;
+    image[18..20].copy_from_slice(&machine.to_le_bytes());
+    image[0x20..0x28].copy_from_slice(&(ELF_PHDRS as u64).to_le_bytes());
+    image[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
+    image[0x38..0x3a].copy_from_slice(&2u16.to_le_bytes());
+    image[ELF_PHDRS..ELF_PHDRS + 4].copy_from_slice(&1u32.to_le_bytes());
+    image[ELF_PHDRS + 32..ELF_PHDRS + 40].copy_from_slice(&mapped.to_le_bytes());
+    image[ELF_PHDRS + 56..ELF_PHDRS + 60].copy_from_slice(&2u32.to_le_bytes());
+    image[ELF_PHDRS + 64..ELF_PHDRS + 72].copy_from_slice(&(ELF_DYNAMIC as u64).to_le_bytes());
+    image[ELF_PHDRS + 88..ELF_PHDRS + 96]
+        .copy_from_slice(&(entries.len() as u64 * 16).to_le_bytes());
+
+    for (index, (tag, value)) in entries.iter().enumerate() {
+        let start = ELF_DYNAMIC + index * 16;
+
+        image[start..start + 8].copy_from_slice(&tag.to_le_bytes());
+        image[start + 8..start + 16].copy_from_slice(&value.to_le_bytes());
+    }
+
+    image[ELF_STRINGS..].copy_from_slice(&strings);
+    image
+}
+
+/// Where the ELF64 fixture puts its parts: two program headers after the header, then up to eight
+/// dynamic entries, then the string table.
+const ELF_PHDRS: usize = 0x40;
+const ELF_DYNAMIC: usize = ELF_PHDRS + 2 * 56;
+const ELF_STRINGS: usize = ELF_DYNAMIC + 8 * 16;
+
+/// The ELF64 image of a shared library with a dynamic section: `needed` dependency names and the
+/// `run_path` or `rpath` entry, each when one is given.
+fn elf_with_dynamic(needed: &[&str], run_path: Option<&str>, rpath: Option<&str>) -> Vec<u8> {
+    const PHDRS: usize = ELF_PHDRS;
+    const DYNAMIC: usize = ELF_DYNAMIC;
+    const STRINGS: usize = ELF_STRINGS;
+    let mut strings = vec![0u8];
+    let mut add = |name: &str| {
+        let offset = strings.len() as u64;
+
+        strings.extend_from_slice(name.as_bytes());
+        strings.push(0);
+        offset
+    };
+    let needed_offsets = needed.iter().map(|name| add(name)).collect::<Vec<_>>();
+    let run_path_offset = run_path.map(&mut add);
+    let rpath_offset = rpath.map(&mut add);
+    let mut entries = needed_offsets
+        .into_iter()
+        .map(|offset| (1i64, offset))
+        .collect::<Vec<_>>();
+
+    entries.extend(run_path_offset.map(|offset| (29, offset)));
+    entries.extend(rpath_offset.map(|offset| (15, offset)));
+    entries.push((5, STRINGS as u64));
+    entries.push((10, strings.len() as u64));
+    entries.push((0, 0));
+
+    let image_bytes = STRINGS + strings.len();
+    let mut image = vec![0u8; image_bytes];
+
+    let (class, machine) = host_elf_machine();
+
+    image[0..4].copy_from_slice(&ELF_MAGIC);
+    image[4] = class;
+    image[5] = 1;
+    image[18..20].copy_from_slice(&machine.to_le_bytes());
+    image[0x20..0x28].copy_from_slice(&(PHDRS as u64).to_le_bytes());
+    image[0x36..0x38].copy_from_slice(&56u16.to_le_bytes());
+    image[0x38..0x3a].copy_from_slice(&2u16.to_le_bytes());
+
+    // One load segment maps every file offset to the same virtual address, so every value in the
+    // dynamic section that is a virtual address is also the file offset; the second program
+    // header is the dynamic one.
+    image[PHDRS..PHDRS + 4].copy_from_slice(&1u32.to_le_bytes());
+    image[PHDRS + 32..PHDRS + 40].copy_from_slice(&(image_bytes as u64).to_le_bytes());
+    image[PHDRS + 56..PHDRS + 60].copy_from_slice(&2u32.to_le_bytes());
+    image[PHDRS + 64..PHDRS + 72].copy_from_slice(&(DYNAMIC as u64).to_le_bytes());
+    image[PHDRS + 88..PHDRS + 96].copy_from_slice(&(entries.len() as u64 * 16).to_le_bytes());
+
+    for (index, (tag, value)) in entries.iter().enumerate() {
+        let start = DYNAMIC + index * 16;
+
+        image[start..start + 8].copy_from_slice(&tag.to_le_bytes());
+        image[start + 8..start + 16].copy_from_slice(&value.to_le_bytes());
+    }
+
+    image[STRINGS..].copy_from_slice(&strings);
+    image
+}
+
+/// The ELF `EI_CLASS` and `e_machine` of the machine running the tests, so a fixture image passes
+/// the architecture check and reaches the platform step the test is about.
+fn host_elf_machine() -> (u8, u16) {
+    match std::env::consts::ARCH {
+        "x86_64" => (2, 0x003e),
+        "aarch64" => (2, 0x00b7),
+        "x86" => (1, 0x0003),
+        _ => (1, 0x0028),
+    }
+}
+
+fn dynamic(image: &[u8]) -> Result<ElfDynamic, String> {
+    elf_dynamic(std::io::Cursor::new(image))
+}
+
+/// An SDK candidate for the platform-gated adapter tests.
+#[cfg(any(windows, target_os = "linux"))]
+fn discovered_sdk(path: &Path) -> Candidate {
+    Candidate {
+        path: path.to_path_buf(),
+        family: Family::Sdk,
+        origin: Origin::Discovered,
+    }
+}
+
+#[test]
+fn library_identity_reports_path_version_architecture_family_and_source() {
+    let identity = LibraryIdentity::new(
+        PathBuf::from("/opt/sap/nwrfcsdk/lib/libsapnwrfc.so"),
+        "7.53.1629".to_owned(),
+        Arch::Arm64,
+        Family::Sdk,
+        Origin::Discovered,
+    );
+
+    assert_eq!(
+        identity.path(),
+        Path::new("/opt/sap/nwrfcsdk/lib/libsapnwrfc.so")
+    );
+    assert_eq!(identity.version(), "7.53.1629");
+    assert_eq!(identity.arch(), Arch::Arm64);
+    assert_eq!(identity.family(), Family::Sdk);
+    assert_eq!(identity.source(), Origin::Discovered);
+    assert_eq!(
+        identity.report(),
+        concat!(
+            "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so version 7.53.1629 architecture arm64 ",
+            "family NW RFC SDK source discovered"
+        )
+    );
+
+    let gui = LibraryIdentity::new(
+        PathBuf::from("/opt/sapgui/bin/libsapnwrfccm.so"),
+        "7.50.17".to_owned(),
+        Arch::X64,
+        Family::Gui,
+        Origin::Explicit,
+    );
+
+    assert_eq!(
+        gui.report(),
+        concat!(
+            "/opt/sapgui/bin/libsapnwrfccm.so version 7.50.17 architecture x86-64 ",
+            "family SAP GUI source explicit ABAPREACH_RFC_LIBRARY"
+        )
+    );
+}
+
+#[test]
+fn a_library_family_and_source_each_render_one_documented_label() {
+    assert_eq!(Family::Gui.label(), "SAP GUI");
+    assert_eq!(Family::Sdk.label(), "NW RFC SDK");
+    assert_eq!(Origin::Explicit.label(), "explicit ABAPREACH_RFC_LIBRARY");
+    assert_eq!(Origin::Discovered.label(), "discovered");
+}
+
+#[test]
+fn family_of_names_a_gui_package_and_an_sdk_folder() {
+    let cases = [
+        (
+            r"C:\Program Files\SAP\FrontEnd\SAPGUI\sapnwrfccm.dll",
+            Family::Gui,
+        ),
+        (
+            concat!(
+                "/Applications/SAP Clients/SAPGUI 8.10rev15/SAPGUI 8.10rev15.app",
+                "/Contents/Resources/bin/unicode/libsapnwrfc.dylib"
+            ),
+            Family::Gui,
+        ),
+        ("/opt/sapgui/bin/libsapnwrfccm.so", Family::Gui),
+        ("/opt/sapgui/bin/unicode/libsapnwrfc.so", Family::Gui),
+        ("/usr/local/sapgui/bin/libsapnwrfccm.so", Family::Gui),
+        ("/custom/libraries/libsapnwrfccm.dylib", Family::Gui),
+        ("/opt/sap/nwrfcsdk/lib/libsapnwrfc.so", Family::Sdk),
+        ("/home/DEV/sap/nwrfcsdk/lib/libsapnwrfc.dylib", Family::Sdk),
+        (r"C:\SAPNWRFC\lib\sapnwrfc.dll", Family::Sdk),
+    ];
+
+    for (path, family) in cases {
+        assert_eq!(family_of(Path::new(path)), family, "{path}");
+    }
+}
+
+#[test]
+fn a_candidate_keeps_the_family_and_source_it_was_discovered_with() {
+    let root = Path::new("/opt/sapgui");
+    let cm = root.join("bin").join("libsapnwrfccm.so");
+    let rfc = root.join("bin").join("unicode").join("libsapnwrfc.so");
+    let fs = FakeFs::new(&[&cm, &rfc], &[]);
+    let found = candidates(&Env::discover(
+        Platform::Linux,
+        &env_with(&[("HOME", "/home/DEV")]),
+        &fs,
+    ));
+
+    assert_eq!(found[0].path, cm);
+    assert_eq!(found[0].family, Family::Gui);
+    assert_eq!(found[0].origin, Origin::Discovered);
+    assert_eq!(found[1].path, rfc);
+    assert_eq!(found[1].family, Family::Gui);
+    assert!(found[2..].iter().all(|c| c.family == Family::Sdk));
+
+    let overridden = candidates(&Env::discover(
+        Platform::Linux,
+        &env_with(&[("ABAPREACH_RFC_LIBRARY", "/opt/sapgui/bin/libsapnwrfccm.so")]),
+        &FakeFs::new(&[], &[]),
+    ));
+
+    // An override is labelled by the library it names, not by its candidate position.
+    assert_eq!(overridden[0].family, Family::Gui);
+    assert_eq!(overridden[0].origin, Origin::Explicit);
+    assert!(overridden[1..].iter().all(|c| c.family == Family::Sdk));
+}
+
+#[test]
+fn windows_load_flags_use_the_altered_search_path_only_for_an_absolute_path() {
+    // The flag makes `LoadLibraryExW` resolve a DLL's dependencies from that DLL's own folder,
+    // and the API rejects it for a relative path.
+    assert_eq!(LOAD_WITH_ALTERED_SEARCH_PATH, 0x0000_0008);
+    assert_eq!(
+        windows_load_flags(Path::new(
+            r"C:\Program Files\SAP\FrontEnd\SAPGUI\sapnwrfccm.dll"
+        )),
+        LOAD_WITH_ALTERED_SEARCH_PATH
+    );
+    assert_eq!(windows_load_flags(Path::new("sapnwrfccm.dll")), 0);
+}
+
+#[test]
+fn elf_dynamic_entries_name_dependencies_and_the_run_path() {
+    let sdk = dynamic(&elf_with_dynamic(
+        &["libsapucum.so", "libicuuc.so.57"],
+        Some("/opt/rh/SAP/lib64:/usr/sap/lib"),
+        None,
+    ))
+    .unwrap();
+
+    assert_eq!(sdk.needed(), ["libsapucum.so", "libicuuc.so.57"]);
+    assert_eq!(sdk.run_path(), ["/opt/rh/SAP/lib64:/usr/sap/lib"]);
+    // The SDK family has no `$ORIGIN`, so its dependencies come from its own folder.
+    assert!(!sdk.declares_origin());
+
+    let gui = dynamic(&elf_with_dynamic(
+        &["libsapucum.so"],
+        Some("$ORIGIN/unicode:$ORIGIN/../lib"),
+        None,
+    ))
+    .unwrap();
+
+    assert!(gui.declares_origin());
+    // `RPATH` is the older spelling of the same search path.
+    assert!(
+        dynamic(&elf_with_dynamic(&[], None, Some("$ORIGIN/lib")))
+            .unwrap()
+            .declares_origin()
+    );
+    // `$ORIGIN` counts only as a path component of its own, not as the start of another name.
+    assert!(
+        !dynamic(&elf_with_dynamic(&[], Some("$ORIGINATES/lib"), None))
+            .unwrap()
+            .declares_origin()
+    );
+    // An image with neither dependencies nor a search path declares neither.
+    let empty = dynamic(&elf_with_dynamic(&[], None, None)).unwrap();
+
+    assert!(empty.needed().is_empty());
+    assert!(empty.run_path().is_empty());
+    assert!(!empty.declares_origin());
+}
+
+#[test]
+fn an_unusable_elf_dynamic_section_is_reported() {
+    let mut without_dynamic = elf_with_dynamic(&["libsapucum.so"], None, None);
+
+    // No program header means no dynamic section, so nothing names a dependency.
+    without_dynamic[0x38..0x3a].copy_from_slice(&0u16.to_le_bytes());
+
+    let mut without_string_table = elf_with_dynamic(&["libsapucum.so"], None, None);
+    // One `DT_NEEDED` entry comes first, so `DT_STRTAB` is the second one; clearing its tag leaves
+    // every name unresolved.
+    let string_table_entry = ELF_DYNAMIC + 16;
+
+    without_string_table[string_table_entry..string_table_entry + 8]
+        .copy_from_slice(&0i64.to_le_bytes());
+
+    let mut string_table_outside = elf_with_dynamic(&["libsapucum.so"], None, None);
+
+    string_table_outside[string_table_entry + 8..string_table_entry + 16]
+        .copy_from_slice(&0x00ff_ffffu64.to_le_bytes());
+
+    let cases = [
+        b"not an ELF image at all".to_vec(),
+        elf_with_dynamic(&["libsapucum.so"], None, None)[..0x40].to_vec(),
+        without_dynamic,
+        without_string_table,
+        string_table_outside,
+    ];
+
+    for image in cases {
+        let error = dynamic(&image).expect_err("an unusable dynamic section is never a decision");
+
+        assert!(!error.is_empty(), "the rejection must carry a reason");
+    }
+}
+
+#[test]
+fn the_sdk_family_or_a_library_without_an_origin_is_preloaded() {
+    // Mandatory for the SDK family, whose image has no `$ORIGIN` run path.
+    assert!(needs_dependency_preload(Family::Sdk, false));
+    assert!(needs_dependency_preload(Family::Sdk, true));
+    // The same rule for any other library that lacks `$ORIGIN`.
+    assert!(needs_dependency_preload(Family::Gui, false));
+    assert!(!needs_dependency_preload(Family::Gui, true));
+}
+
+#[test]
+fn same_directory_preload_only_includes_dependencies_beside_the_library() {
+    let directory = Path::new("/opt/sap/nwrfcsdk/lib");
+    let library = directory.join("libsapnwrfc.so");
+    let entries = dynamic(&elf_with_dynamic(
+        &["libsapucum.so", "libicuuc.so.57", "libabsent.so"],
+        None,
+        None,
+    ))
+    .unwrap();
+    let fs = FakeFs::new(
+        &[
+            &library,
+            &directory.join("libsapucum.so"),
+            &directory.join("libicuuc.so.57"),
+            &directory.join("libunrelated.so"),
+        ],
+        &[],
+    );
+
+    // The image's own dependency order, absolute paths, never the library itself, never a sibling
+    // nothing depends on.
+    assert_eq!(
+        sibling_dependencies(&library, entries.needed(), &fs),
+        vec![
+            directory.join("libsapucum.so"),
+            directory.join("libicuuc.so.57"),
+        ]
+    );
+    assert!(sibling_dependencies(&library, &[], &fs).is_empty());
+}
+
+#[test]
+fn dependency_preload_applies_the_origin_rule_and_keeps_the_order() {
+    let directory = Path::new("/opt/sapgui");
+    let library = directory.join("bin").join("libsapnwrfccm.so");
+    let sibling = directory.join("bin").join("libsapucum.so");
+    let fs = FakeFs::new(&[&library, &sibling], &[]);
+    let without_origin = dynamic(&elf_with_dynamic(&["libsapucum.so"], None, None)).unwrap();
+    let with_origin =
+        dynamic(&elf_with_dynamic(&["libsapucum.so"], Some("$ORIGIN"), None)).unwrap();
+
+    assert_eq!(
+        dependency_preload(&library, Family::Sdk, Some(&without_origin), &fs),
+        vec![sibling.clone()]
+    );
+    assert_eq!(
+        dependency_preload(&library, Family::Gui, Some(&without_origin), &fs),
+        vec![sibling],
+        "a GUI library without $ORIGIN needs the same preload"
+    );
+    assert!(
+        dependency_preload(&library, Family::Gui, Some(&with_origin), &fs).is_empty(),
+        "a library that resolves its own folder needs no preload"
+    );
+    assert!(
+        dependency_preload(&library, Family::Sdk, None, &fs).is_empty(),
+        "an unreadable dynamic section leaves nothing to preload"
+    );
+}
+
+#[test]
+fn preload_dependencies_maps_each_sibling_by_absolute_path_in_order() {
+    let search_path = std::env::var_os("LD_LIBRARY_PATH");
+    let directory = Path::new("/opt/sap/nwrfcsdk/lib");
+    let dependencies = vec![
+        directory.join("libsapucum.so"),
+        directory.join("libicuuc.so.57"),
+    ];
+    let mut opened = Vec::new();
+    let mapped = preload_dependencies(&dependencies, |path| {
+        opened.push(path.to_path_buf());
+
+        Ok(path.to_path_buf())
+    })
+    .unwrap();
+
+    assert_eq!(mapped, dependencies);
+    assert_eq!(opened, dependencies);
+    assert!(opened.iter().all(|path| path.is_absolute()), "{opened:?}");
+    // Preloading never rewrites the search path the parent process handed to this binary.
+    assert_eq!(std::env::var_os("LD_LIBRARY_PATH"), search_path);
+
+    let error = preload_dependencies(&dependencies, |path| {
+        if path == dependencies[1] {
+            Err("cannot be mapped".to_owned())
+        } else {
+            Ok(path.to_path_buf())
+        }
+    })
+    .expect_err("a dependency that cannot be mapped stops the preload");
+
+    assert!(
+        error.contains(&dependencies[1].display().to_string()),
+        "{error}"
+    );
+    assert!(error.contains("cannot be mapped"), "{error}");
+    assert!(preload_dependencies(&[], |_| Ok(())).unwrap().is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_adapter_maps_an_absolute_dll_with_the_altered_search_path() {
+    use abapreach::transport::rfc::load_candidate;
+
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+    let system_dll = Path::new(&system_root)
+        .join("System32")
+        .join("kernel32.dll");
+
+    // No SAP library is needed: the adapter maps a real PE through `LoadLibraryExW`.
+    load_candidate(&discovered_sdk(&system_dll))
+        .map(|_| ())
+        .expect("the adapter must map an absolute DLL");
+    assert!(
+        load_candidate(&discovered_sdk(
+            &Path::new(&system_root).join("System32").join("absent.dll")
+        ))
+        .is_err(),
+        "an absent DLL cannot be mapped"
+    );
+}
+
+/// An SDK library whose image needs a sibling that sits beside it but is not a shared object, so
+/// the preload must fail on it, naming the absolute path, before the library itself is mapped.
+#[cfg(target_os = "linux")]
+fn library_with_an_unloadable_sibling() -> (PathBuf, PathBuf, String) {
+    use abapreach::transport::rfc::load_candidate;
+
+    let directory = tempfile::tempdir().unwrap();
+    let library = directory.path().join("libsapnwrfc.so");
+    let sibling = directory.path().join("libsapucum.so");
+
+    std::fs::write(&library, elf_with_dynamic(&["libsapucum.so"], None, None)).unwrap();
+    std::fs::write(&sibling, b"not a shared object").unwrap();
+
+    let error = load_candidate(&discovered_sdk(&library))
+        .map(|_| ())
+        .expect_err("the SDK family preloads its dependencies before it maps the library");
+
+    // The temporary directory goes away with the tuple, so the assertion happens in the caller.
+    (library, sibling, error)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_adapter_preloads_a_sibling_dependency_by_absolute_path() {
+    let (_, sibling, error) = library_with_an_unloadable_sibling();
+
+    assert!(
+        error.contains(&sibling.display().to_string()),
+        "the preload must name the absolute sibling path: {error}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_adapter_preloads_with_an_empty_ld_library_path() {
+    // `LD_LIBRARY_PATH` is read when a process starts, so only a child process can prove that the
+    // same-directory preload works without it.
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "linux_adapter_child_preloads_with_an_empty_ld_library_path",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env("ABAPREACH_LOADER_CHILD", "1")
+        .env("LD_LIBRARY_PATH", "")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&child.stdout);
+
+    assert!(
+        child.status.success() && stdout.contains("1 passed"),
+        "child failed: {stdout}{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_adapter_child_preloads_with_an_empty_ld_library_path() {
+    // A plain `cargo test` run reaches this test too; only the spawned child does the load.
+    if std::env::var_os("ABAPREACH_LOADER_CHILD").is_none() {
+        return;
+    }
+
+    assert_eq!(std::env::var("LD_LIBRARY_PATH").unwrap_or_default(), "");
+
+    let (_, sibling, error) = library_with_an_unloadable_sibling();
+
+    assert!(
+        error.contains(&sibling.display().to_string()),
+        "the preload must not depend on the search path: {error}"
+    );
+    // The adapter reads the search path but never rewrites it for this process.
+    assert_eq!(std::env::var("LD_LIBRARY_PATH").unwrap_or_default(), "");
+}
+
+/// The load-address lookup the ELF string table goes through: the first segment that contains the
+/// address maps it, and a segment maps `[address, address + size)`, not one byte more.
+#[test]
+fn a_load_address_maps_through_the_segment_that_contains_it() {
+    let loads = [
+        LoadSegment {
+            address: 0x1000,
+            size: 0x100,
+            offset: 0x2000,
+        },
+        LoadSegment {
+            address: 0x4000,
+            size: 0x400,
+            offset: 0x5000,
+        },
+    ];
+
+    assert_eq!(load_address_offset(&loads, 0x1000), Some(0x2000));
+    assert_eq!(load_address_offset(&loads, 0x1080), Some(0x2080));
+    // The last address the segment maps is inside it; the first address past it is not.
+    assert_eq!(load_address_offset(&loads, 0x10ff), Some(0x20ff));
+    assert_eq!(load_address_offset(&loads, 0x1100), None);
+    // A later segment is found only when the earlier one does not contain the address.
+    assert_eq!(load_address_offset(&loads, 0x4100), Some(0x5100));
+    // An address below every segment is outside the image.
+    assert_eq!(load_address_offset(&loads, 0x0fff), None);
+    assert_eq!(load_address_offset(&[], 0x1000), None);
+}
+
+/// A dynamic section is a sequence of entries, and `DT_NULL` ends it: the entries after the terminator
+/// belong to nothing, so a dependency past it is never read.
+#[test]
+fn a_dynamic_section_stops_at_its_null_entry() {
+    let image = elf_with_a_dependency_past_the_terminator("libsapucum.so", "liblater.so");
+    let entries = dynamic(&image).unwrap();
+
+    assert_eq!(entries.needed(), ["libsapucum.so"]);
+    assert!(entries.run_path().is_empty());
+}
+
+/// An ELF image whose class or data encoding the loader cannot read is refused, not guessed: only
+/// 64-bit little-endian images are read.
+#[test]
+fn an_elf_image_of_another_class_or_byte_order_is_refused() {
+    for (class, encoding) in [(1u8, 1u8), (2, 2), (0, 0)] {
+        let mut image = elf_with_dynamic(&["libsapucum.so"], None, None);
+
+        image[4] = class;
+        image[5] = encoding;
+
+        let error = dynamic(&image).expect_err("a foreign ELF class is not read");
+
+        assert!(error.contains("unsupported ELF image"), "{error}");
+    }
+}
+
+/// A section longer than the reader accepts is refused before any buffer is allocated.
+#[test]
+fn a_section_longer_than_the_read_limit_is_refused() {
+    let mut image = elf_with_dynamic(&["libsapucum.so"], None, None);
+
+    // `DT_STRSZ` is the last entry before the terminator.
+    let strings_size = ELF_DYNAMIC + 2 * 16 + 8;
+
+    image[strings_size..strings_size + 8].copy_from_slice(&(MAX_READ_BYTES + 1).to_le_bytes());
+
+    let error = dynamic(&image).expect_err("an implausible section length is never read");
+
+    assert!(error.contains("implausible section length"), "{error}");
+}
+
+/// A section of exactly the read limit is read; the limit itself is not the rejection. The string
+/// table keeps its first name at offset 0, so the padded image still resolves its dependency.
+#[test]
+fn a_section_of_exactly_the_read_limit_is_read() {
+    let mut image = elf_with_dynamic(&["libsapucum.so"], None, None);
+
+    image.resize(ELF_STRINGS + MAX_READ_BYTES as usize, 0);
+    // `DT_STRSZ` is the third entry: one dependency, then the string table address and size.
+    let strings_size = ELF_DYNAMIC + 2 * 16 + 8;
+
+    image[strings_size..strings_size + 8].copy_from_slice(&MAX_READ_BYTES.to_le_bytes());
+
+    let entries = dynamic(&image).expect("a section of exactly the limit is readable");
+
+    assert_eq!(entries.needed(), ["libsapucum.so"]);
+}
+
+/// A Windows full path: a drive-qualified path or a UNC share. A relative name, or a drive letter
+/// that is not followed by a separator, is not a full path.
+#[test]
+fn a_windows_full_path_is_drive_qualified_or_a_unc_share() {
+    let full = [
+        r"C:\libraries\sapnwrfc.dll",
+        r"c:/libraries/sapnwrfc.dll",
+        r"\\\\host\\share\\sapnwrfc.dll",
+        r"\\libraries\\sapnwrfc.dll",
+    ];
+
+    for path in full {
+        assert_eq!(
+            windows_load_flags(Path::new(path)),
+            LOAD_WITH_ALTERED_SEARCH_PATH,
+            "{path}"
+        );
+    }
+
+    let relative = [
+        "sapnwrfc.dll",
+        "libraries/sapnwrfc.dll",
+        "C:sapnwrfc.dll",
+        "",
+    ];
+
+    for path in relative {
+        assert_eq!(windows_load_flags(Path::new(path)), 0, "{path}");
+    }
 }

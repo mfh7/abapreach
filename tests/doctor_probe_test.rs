@@ -4,7 +4,7 @@ use abapreach::config::Connection;
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::transport::http::HttpTransport;
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
-use abapreach::{Exit, Factories, Opened, RfcLibraryInfo, run};
+use abapreach::{Exit, Factories, Opened, RfcLibraryIdentity, RfcLibraryInfo, run};
 use common::ScriptedTransport;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -18,8 +18,13 @@ const LIBRARY_PATH: &str = "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so";
 
 fn library() -> Result<RfcLibraryInfo, String> {
     Ok(RfcLibraryInfo {
-        path: LIBRARY_PATH.to_owned(),
-        version: "7.6.2".to_owned(),
+        identity: RfcLibraryIdentity {
+            path: LIBRARY_PATH.to_owned(),
+            version: "7.6.2".to_owned(),
+            architecture: "x86-64".to_owned(),
+            family: "NW RFC SDK".to_owned(),
+            source: "discovered".to_owned(),
+        },
         notes: Vec::new(),
     })
 }
@@ -168,7 +173,10 @@ fn doctor_probes_both_backends_with_one_logon_each() {
             "ADT HTTP configured: https://example.com:443",
             "RFC SADT configured: example.com system 00",
             "ADT HTTP probe: ok (HTTP 200)",
-            &format!("RFC library: {LIBRARY_PATH} version 7.6.2"),
+            &format!(
+                "RFC library: {LIBRARY_PATH} version 7.6.2 architecture x86-64 family NW RFC SDK \
+                 source discovered"
+            ),
             "RFC SADT probe: ok",
             "capability read PROG: ADT HTTP, RFC SADT",
             "capability deploy PROG: ADT HTTP, RFC SADT",
@@ -208,8 +216,13 @@ fn doctor_reports_why_a_discovered_library_was_skipped() {
 
     fake.adt.push_back(discovery());
     fake.library.push_back(Ok(RfcLibraryInfo {
-        path: LIBRARY_PATH.to_owned(),
-        version: "7.6.2".to_owned(),
+        identity: RfcLibraryIdentity {
+            path: LIBRARY_PATH.to_owned(),
+            version: "7.6.2".to_owned(),
+            architecture: "x86-64".to_owned(),
+            family: "NW RFC SDK".to_owned(),
+            source: "discovered".to_owned(),
+        },
         notes: vec![reason.to_owned()],
     }));
     fake.ping.push_back(Ok(()));
@@ -252,7 +265,10 @@ fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
             "ADT HTTP: not configured",
             "RFC SADT configured: example.com system 02",
             "ADT HTTP probe: not run (ADT not configured)",
-            &format!("RFC library: {LIBRARY_PATH} version 7.6.2"),
+            &format!(
+                "RFC library: {LIBRARY_PATH} version 7.6.2 architecture x86-64 family NW RFC SDK \
+                 source discovered"
+            ),
             "RFC SADT probe: ok",
             "capability read PROG: RFC SADT",
             "capability deploy PROG: RFC SADT",
@@ -679,6 +695,95 @@ fn doctor_reports_that_windows_permission_was_not_checked() {
         exit.stdout.lines().any(|line| line
             == "local credentials: permission not checked; restrict the file to a user-only ACL \
                 (see docs/getting-started.md)"),
+        "{}",
+        exit.stdout
+    );
+}
+
+// --- Task 3b: doctor library identity ---
+
+/// The identity the doctor prints: path, version, architecture, family, and source.
+fn sdk_identity() -> RfcLibraryIdentity {
+    RfcLibraryIdentity {
+        path: LIBRARY_PATH.to_owned(),
+        version: "7.53.1629".to_owned(),
+        architecture: "x86-64".to_owned(),
+        family: "NW RFC SDK".to_owned(),
+        source: "discovered".to_owned(),
+    }
+}
+
+fn identified(path: &str, family: &str, source: &str) -> Result<RfcLibraryInfo, String> {
+    Ok(RfcLibraryInfo {
+        identity: RfcLibraryIdentity {
+            path: path.to_owned(),
+            version: "7.6.2".to_owned(),
+            architecture: "x86-64".to_owned(),
+            family: family.to_owned(),
+            source: source.to_owned(),
+        },
+        notes: Vec::new(),
+    })
+}
+
+#[test]
+fn doctor_library_line_names_path_version_architecture_family_and_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(discovery());
+    fake.library.push_back(Ok(RfcLibraryInfo {
+        identity: sdk_identity(),
+        notes: Vec::new(),
+    }));
+    fake.ping.push_back(Ok(()));
+
+    let exit = doctor(directory.path(), &mut fake);
+    let expected = concat!(
+        "RFC library: /opt/sap/nwrfcsdk/lib/libsapnwrfc.so version 7.53.1629 ",
+        "architecture x86-64 family NW RFC SDK source discovered"
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stdout);
+    assert!(
+        exit.stdout.lines().any(|line| line == expected),
+        "missing {expected:?} in {}",
+        exit.stdout
+    );
+}
+
+#[test]
+fn doctor_reports_a_sap_gui_family_library_named_by_the_override() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let path = "/opt/sapgui/bin/libsapnwrfccm.so";
+
+    fake.library.push_back(identified(
+        path,
+        "SAP GUI",
+        "explicit ABAPREACH_RFC_LIBRARY",
+    ));
+    fake.ping.push_back(Ok(()));
+
+    let exit = run(
+        ["abapreach", "doctor", "--conn", "qas_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        rfc_only_env(directory.path()),
+        &mut fake,
+    );
+
+    // Without an ADT configuration the ping needs no ADT transport, so only the library line is
+    // asserted here; the family must name the library that was actually loaded.
+    assert!(
+        exit.stdout
+            .contains("family SAP GUI source explicit ABAPREACH_RFC_LIBRARY"),
+        "{}",
+        exit.stdout
+    );
+    assert!(exit.stdout.contains(path), "{}", exit.stdout);
+    assert!(
+        !exit.stdout.contains("family NW RFC SDK"),
         "{}",
         exit.stdout
     );

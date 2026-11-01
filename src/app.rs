@@ -31,13 +31,22 @@ pub struct Exit {
 
 pub type Opened = Result<Box<dyn SadtTransport>, TransportError>;
 
-/// The RFC library a probe found: where it came from and the version it reports.
+/// The RFC library a probe found: its identity and the discovery notes behind the choice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RfcLibraryInfo {
-    pub path: String,
-    pub version: String,
+    pub identity: RfcLibraryIdentity,
     /// Discovery decisions the doctor prints, such as a SAP GUI location it skipped.
     pub notes: Vec<String>,
+}
+
+/// The doctor-facing library identity: path, version, architecture, family, and source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RfcLibraryIdentity {
+    pub path: String,
+    pub version: String,
+    pub architecture: String,
+    pub family: String,
+    pub source: String,
 }
 
 /// Opens the transports; tests replace it so no network is touched. A failed open must be a
@@ -103,12 +112,16 @@ impl Factories for RealFactories {
 
     fn rfc_library(&mut self, _: &Connection) -> Result<RfcLibraryInfo, String> {
         let env = Env::current();
-        let library = RfcLibrary::load(&env)?;
-        let (major, minor, patch) = library.version()?;
+        let identity = RfcLibrary::load(&env)?.identity()?;
 
         Ok(RfcLibraryInfo {
-            path: library.path().display().to_string(),
-            version: format!("{major}.{minor}.{patch}"),
+            identity: RfcLibraryIdentity {
+                path: identity.path().display().to_string(),
+                version: identity.version().to_owned(),
+                architecture: identity.arch().label().to_owned(),
+                family: identity.family().label().to_owned(),
+                source: identity.source().label().to_owned(),
+            },
             notes: env.notes().to_vec(),
         })
     }
