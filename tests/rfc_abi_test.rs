@@ -1,3 +1,4 @@
+use abapreach::backend::Failure;
 use abapreach::config::Connection;
 use abapreach::transport::TransportError;
 use abapreach::transport::rfc::{
@@ -11,7 +12,9 @@ const ABAP_RUNTIME_FAILURE: i32 = 3;
 const ABAP_EXCEPTION: i32 = 5;
 const CLOSED: i32 = 6;
 const TIMEOUT: i32 = 8;
-const AUTHORIZATION_FAILURE: i32 = 24;
+const CONVERSION_FAILURE: i32 = 22;
+const ABAP_CLASS_EXCEPTION: i32 = 27;
+const AUTHORIZATION_FAILURE: i32 = 29;
 
 #[test]
 fn symbols_are_the_complete_dynamic_abi_surface() {
@@ -54,17 +57,34 @@ fn open_connect_failure_is_pre_send() {
 }
 
 #[test]
-fn logon_and_authorization_failures_never_allow_a_fallback() {
+fn authorization_failures_keep_their_class_and_mark_invoke_as_sent() {
     for phase in [RfcPhase::Open, RfcPhase::Prepare, RfcPhase::Invoke] {
         for code in [LOGON_FAILURE, AUTHORIZATION_FAILURE] {
             let error = classify_rfc_error(phase, code, "denied");
 
-            assert!(
-                matches!(error, TransportError::Authorization(_)),
-                "{phase:?} {error:?}"
-            );
+            assert_eq!(Failure::from(&error), Failure::Authorization);
+            assert_eq!(error.was_sent(), phase == RfcPhase::Invoke);
         }
     }
+}
+
+#[test]
+fn sdk_authorization_and_conversion_codes_are_never_swapped() {
+    let denied = classify_rfc_error(RfcPhase::Open, AUTHORIZATION_FAILURE, "denied");
+
+    assert_eq!(Failure::from(&denied), Failure::Authorization);
+    assert!(!denied.was_sent(), "{denied:?}");
+
+    let class_exception = classify_rfc_error(RfcPhase::Invoke, ABAP_CLASS_EXCEPTION, "ZCX_FAILURE");
+    let conversion = classify_rfc_error(RfcPhase::Invoke, CONVERSION_FAILURE, "bad parameter");
+
+    assert_eq!(Failure::from(&class_exception), Failure::Validation);
+    assert!(class_exception.was_sent(), "{class_exception:?}");
+    assert!(conversion.was_sent(), "{conversion:?}");
+    assert!(
+        !matches!(conversion, TransportError::PreSendConnectivity(_)),
+        "{conversion:?}"
+    );
 }
 
 #[test]
@@ -89,7 +109,7 @@ fn invoke_communication_failure_is_post_send_uncertain() {
 }
 
 #[test]
-fn invoke_abap_failures_are_authorization_or_protocol_never_uncertain() {
+fn invoke_abap_failures_are_sent_and_keep_their_failure_class() {
     let exception = classify_rfc_error(RfcPhase::Invoke, ABAP_EXCEPTION, "NO_SUCH_ENTRY");
     let runtime = classify_rfc_error(RfcPhase::Invoke, ABAP_RUNTIME_FAILURE, "SYSTEM_FAILURE");
     let denied = classify_rfc_error(
@@ -98,18 +118,12 @@ fn invoke_abap_failures_are_authorization_or_protocol_never_uncertain() {
         "No authorization for S_RFC",
     );
 
-    assert!(
-        matches!(exception, TransportError::Protocol(_)),
-        "{exception:?}"
-    );
-    assert!(
-        matches!(runtime, TransportError::Protocol(_)),
-        "{runtime:?}"
-    );
-    assert!(
-        matches!(denied, TransportError::Authorization(_)),
-        "{denied:?}"
-    );
+    assert!(exception.was_sent());
+    assert!(runtime.was_sent());
+    assert!(denied.was_sent());
+    assert_eq!(Failure::from(&exception), Failure::Validation);
+    assert_eq!(Failure::from(&runtime), Failure::Validation);
+    assert_eq!(Failure::from(&denied), Failure::Authorization);
 }
 
 fn names(parameters: &[(String, String)]) -> Vec<&str> {

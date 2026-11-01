@@ -1,4 +1,4 @@
-use abapreach::operation::deploy::CancelFlag;
+use abapreach::operation::deploy::{CancelFlag, INTERRUPT_EXIT_CODE, InterruptAction};
 use abapreach::{RealFactories, run};
 use std::collections::BTreeMap;
 
@@ -6,8 +6,13 @@ fn main() {
     let cancel = CancelFlag::new();
     let on_interrupt = cancel.clone();
 
-    // The deploy checks the flag while it holds the lock and then unlocks before it ends.
-    let _ = ctrlc::set_handler(move || on_interrupt.set());
+    // A held lock must be released before the process ends, so the deploy gets the flag. Without
+    // a lock there is nothing to clean up and Ctrl-C keeps its usual meaning.
+    let _ = ctrlc::set_handler(move || {
+        if on_interrupt.on_interrupt() == InterruptAction::ExitNow {
+            std::process::exit(INTERRUPT_EXIT_CODE);
+        }
+    });
 
     let env = std::env::vars_os()
         .map(|(key, value)| {

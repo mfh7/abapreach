@@ -107,6 +107,24 @@ fn env(directory: &Path) -> BTreeMap<String, String> {
     ])
 }
 
+fn rfc_only_env(directory: &Path) -> BTreeMap<String, String> {
+    let config = concat!(
+        r#"{"servers":[{"systemId":"QAS","clients":["100"],"#,
+        r#""rfc":{"ashost":"example.com","sysnr":"02"}}]}"#,
+    );
+
+    fs::write(directory.join("connections.json"), config).unwrap();
+
+    BTreeMap::from([
+        (
+            "ABAP_CONNECTIONS".to_owned(),
+            directory.join("connections.json").display().to_string(),
+        ),
+        ("QAS_100_USER".to_owned(), "user".to_owned()),
+        ("QAS_100_PASS".to_owned(), "secret-pw".to_owned()),
+    ])
+}
+
 fn doctor(directory: &Path, fake: &mut Fake) -> Exit {
     run(
         ["abapreach", "doctor", "--conn", "dev_100"]
@@ -169,6 +187,47 @@ fn doctor_probes_both_backends_with_one_logon_each() {
     assert_eq!(transport.calls[0].uri, DISCOVERY_URI);
     assert_eq!(transport.closes, 1);
     transport.assert_finished();
+}
+
+#[test]
+fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let exit = run(
+        ["abapreach", "doctor", "--conn", "qas_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        rfc_only_env(directory.path()),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0);
+    assert_eq!(exit.stderr, "");
+    assert_eq!(
+        exit.stdout,
+        [
+            "connection QAS_100: configuration available",
+            "credential available",
+            "ADT HTTP: not configured",
+            "RFC SADT configured: example.com system 02",
+            "ADT HTTP probe: not run (ADT not configured)",
+            &format!("RFC library: {LIBRARY_PATH} version 7.6.2"),
+            "RFC SADT probe: ok",
+            "capability read PROG: RFC SADT",
+            "capability deploy PROG: RFC SADT",
+            "capability doctor: RFC SADT",
+        ]
+        .join("\n")
+    );
+    assert!(!exit.stdout.contains("WARNING"));
+    assert_eq!(
+        (fake.adt_calls, fake.library_calls, fake.ping_calls),
+        (0, 1, 1)
+    );
 }
 
 #[test]

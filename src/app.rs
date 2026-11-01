@@ -71,7 +71,12 @@ impl RealFactories {
 
 impl Factories for RealFactories {
     fn adt(&mut self, connection: &Connection) -> Opened {
-        let adt = &connection.adt;
+        let adt = connection.adt.as_ref().ok_or_else(|| {
+            TransportError::PreSendConnectivity(format!(
+                "ADT not configured for connection {}",
+                connection.id
+            ))
+        })?;
         let transport = HttpTransport::connect(HttpConfig {
             base_url: format!("{}://{}:{}", adt.scheme, adt.host, adt.port),
             client: connection.client.clone(),
@@ -325,13 +330,14 @@ fn route(
     factories: &mut dyn Factories,
     mut attempt: impl FnMut(&mut dyn SadtTransport, &Selection, &CancelFlag) -> Attempt,
 ) -> Exit {
-    let router = Router::both();
+    let router = Router::new(connection.adt.is_some(), true);
     let cancel = factories.cancel();
     let mut failure = Failure::Initial;
     let mut earlier: Vec<String> = Vec::new();
     let mut reason = match explicit {
         Some(_) => SelectionReason::ExplicitBackend,
-        None => SelectionReason::DefaultAdt,
+        None if connection.adt.is_some() => SelectionReason::DefaultAdt,
+        None => SelectionReason::RfcOnly,
     };
 
     loop {

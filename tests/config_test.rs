@@ -35,11 +35,13 @@ fn resolves_config_env_credentials_and_defaults() {
     assert_eq!(connection.lang, "EN");
     assert_eq!(connection.user, "environment-user");
     assert_eq!(connection.password, "environment-password");
-    assert_eq!(connection.adt.host, "example.com");
-    assert_eq!(connection.adt.port, 443);
-    assert_eq!(connection.adt.scheme, "https");
-    assert_eq!(connection.adt.ca_file, None);
-    assert!(!connection.adt.insecure);
+    let adt = connection.adt.clone().unwrap();
+
+    assert_eq!(adt.host, "example.com");
+    assert_eq!(adt.port, 443);
+    assert_eq!(adt.scheme, "https");
+    assert_eq!(adt.ca_file, None);
+    assert!(!adt.insecure);
     assert_eq!(connection.rfc.ashost, "example.com");
     assert_eq!(connection.rfc.sysnr, "00");
     assert_eq!(connection.rfc.saprouter, None);
@@ -54,9 +56,91 @@ fn resolves_config_env_credentials_and_defaults() {
     .resolve("dv2_100", &env)
     .unwrap();
 
-    assert_eq!(http_connection.adt.scheme, "http");
-    assert_eq!(http_connection.adt.ca_file, Some(PathBuf::from("ca.pem")));
-    assert!(http_connection.adt.insecure);
+    let adt = http_connection.adt.unwrap();
+
+    assert_eq!(adt.scheme, "http");
+    assert_eq!(adt.ca_file, Some(PathBuf::from("ca.pem")));
+    assert!(adt.insecure);
+}
+
+#[test]
+fn a_server_without_an_adt_endpoint_resolves_as_rfc_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let connections = directory.path().join("connections.json");
+    let config = concat!(
+        r#"{"servers":[{"systemId":"QAS","clients":["100"],"#,
+        r#""rfc":{"ashost":"example.com","sysnr":"02"}},{"systemId":"DEV","#,
+        r#""host":"example.com","port":443,"clients":["100"],"#,
+        r#""rfc":{"ashost":"example.com","sysnr":"00"}}]}"#,
+    );
+    fs::write(&connections, config).unwrap();
+    let env = BTreeMap::from([
+        ("QAS_100_USER".to_owned(), "qas-user".to_owned()),
+        ("QAS_100_PASS".to_owned(), "qas-password".to_owned()),
+        ("DEV_100_USER".to_owned(), "dev-user".to_owned()),
+        ("DEV_100_PASS".to_owned(), "dev-password".to_owned()),
+    ]);
+    let config = Config::load(
+        ConfigPaths {
+            connections,
+            local: directory.path().join("connections.local.json"),
+        },
+        &env,
+    )
+    .unwrap();
+    let rfc_only = config.resolve("qas_100", &env).unwrap();
+
+    assert_eq!(rfc_only.id, "QAS_100");
+    assert_eq!(rfc_only.adt, None);
+    assert_eq!(rfc_only.rfc.ashost, "example.com");
+    assert_eq!(rfc_only.rfc.sysnr, "02");
+    assert_eq!(tls_warning(&rfc_only), None);
+    assert_eq!(
+        config.resolve("dev_100", &env).unwrap().adt.unwrap().host,
+        "example.com"
+    );
+}
+
+#[test]
+fn a_half_configured_adt_endpoint_names_the_missing_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let env = BTreeMap::from([
+        ("QAS_100_USER".to_owned(), "user".to_owned()),
+        ("QAS_100_PASS".to_owned(), "password".to_owned()),
+    ]);
+    let resolve = |server: &str| {
+        let connections = directory.path().join("connections.json");
+        fs::write(
+            &connections,
+            format!(
+                concat!(
+                    r#"{{"servers":[{{"systemId":"QAS",{server},"clients":["100"],"#,
+                    r#""rfc":{{"ashost":"example.com","sysnr":"00"}}}}]}}"#,
+                ),
+                server = server
+            ),
+        )
+        .unwrap();
+        Config::load(
+            ConfigPaths {
+                connections,
+                local: directory.path().join("connections.local.json"),
+            },
+            &env,
+        )
+        .unwrap()
+        .resolve("qas_100", &env)
+        .unwrap_err()
+    };
+
+    assert_eq!(
+        resolve(r#""host":"example.com""#),
+        "QAS has host but no port in config"
+    );
+    assert_eq!(
+        resolve(r#""port":443"#),
+        "QAS has port but no host in config"
+    );
 }
 
 #[test]
@@ -66,13 +150,13 @@ fn warning_and_scrub_cover_insecure_and_http_connections() {
         tls_warning(&connection).as_deref(),
         Some("WARNING: connection DEV_100 uses insecure TLS or HTTP.")
     );
-    connection.adt.insecure = false;
-    connection.adt.scheme = "http".to_owned();
+    connection.adt.as_mut().unwrap().insecure = false;
+    connection.adt.as_mut().unwrap().scheme = "http".to_owned();
     assert_eq!(
         tls_warning(&connection).as_deref(),
         Some("WARNING: connection DEV_100 uses insecure TLS or HTTP.")
     );
-    connection.adt.scheme = "https".to_owned();
+    connection.adt.as_mut().unwrap().scheme = "https".to_owned();
     assert_eq!(tls_warning(&connection), None);
     assert_eq!(
         scrub("password=secret", &["secret".to_owned(), "".to_owned()]),

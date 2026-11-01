@@ -38,8 +38,10 @@ pub struct HttpTransport {
 impl HttpTransport {
     pub fn connect(config: HttpConfig) -> Result<Self, TransportError> {
         // The cookie store keeps every Set-Cookie value, so the stateful ADT session survives.
+        // A redirect would re-send the request (with its lock handle) elsewhere: never follow.
         let mut builder = ClientBuilder::new()
             .cookie_store(true)
+            .redirect(reqwest::redirect::Policy::none())
             .danger_accept_invalid_certs(config.insecure)
             .connect_timeout(config.timeout)
             .timeout(config.timeout);
@@ -77,6 +79,7 @@ impl HttpTransport {
     pub fn for_test(replies: Vec<Result<Response, TransportError>>) -> Self {
         Self {
             client: ClientBuilder::new()
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("build test HTTP client"),
             base_url: Url::parse("https://example.com/").expect("parse test URL"),
@@ -171,21 +174,38 @@ impl HttpTransport {
     fn send_once(&mut self, request: &Request, stateful: bool) -> Result<Response, TransportError> {
         let prepared = self.prepare(request, stateful);
 
-        if stateful {
-            self.session_open = true;
-        }
-
         #[cfg(feature = "test-support")]
-        if let Some(replies) = self.replies.as_mut() {
+        let response = if let Some(replies) = self.replies.as_mut() {
             self.recorded.push(prepared);
-            return replies.pop_front().unwrap_or_else(|| {
+            replies.pop_front().unwrap_or_else(|| {
                 Err(TransportError::PreSendConnectivity(
                     "no scripted HTTP reply".to_owned(),
                 ))
-            });
+            })
+        } else {
+            self.send_real(prepared)
+        };
+
+        #[cfg(not(feature = "test-support"))]
+        let response = self.send_real(prepared);
+
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                if stateful {
+                    self.session_open = false;
+                }
+                return Err(error);
+            }
+        };
+
+        if stateful {
+            self.session_open = !matches!(response.status, 401 | 403)
+                && ((200..300).contains(&response.status)
+                    || Self::header(&response.headers, "set-cookie").is_some());
         }
 
-        self.send_real(prepared)
+        Ok(response)
     }
 
     fn send_real(&self, prepared: Request) -> Result<Response, TransportError> {

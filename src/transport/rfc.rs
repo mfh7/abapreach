@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 pub const SADT_REST_RFC_ENDPOINT: &str = "SADT_REST_RFC_ENDPOINT";
 
+/// The library reads this when it is mapped, before any symbol can be called.
+pub const RFC_TRACE_DIR_ENV: &str = "RFC_TRACE_DIR";
+
 const RFC_LIBRARY_OVERRIDE: &str = "ABAPREACH_RFC_LIBRARY";
 const MAX_GUI_SEARCH_DEPTH: usize = 4;
 const PROGRAM_URI_PREFIX: &str = "/sap/bc/adt/programs/programs/";
@@ -21,8 +24,8 @@ const RFC_LOGON_FAILURE: c_int = 2;
 const RFC_ABAP_RUNTIME_FAILURE: c_int = 3;
 const RFC_ABAP_MESSAGE: c_int = 4;
 const RFC_ABAP_EXCEPTION: c_int = 5;
-const RFC_ABAP_CLASS_EXCEPTION: c_int = 22;
-const RFC_AUTHORIZATION_FAILURE: c_int = 24;
+const RFC_ABAP_CLASS_EXCEPTION: c_int = 27;
+const RFC_AUTHORIZATION_FAILURE: c_int = 29;
 
 type SapUc = u16;
 type RfcHandle = *mut c_void;
@@ -77,11 +80,14 @@ impl RfcLibrary {
             return Err("RFC library not found; set ABAPREACH_RFC_LIBRARY".to_owned());
         }
 
+        point_trace_at_temp_dir();
         let mut errors = Vec::new();
 
         for path in candidates {
             match unsafe { Library::new(&path) } {
                 Ok(library) => {
+                    set_trace_directory(&library);
+
                     return Ok(Self {
                         path,
                         library: ManuallyDrop::new(library),
@@ -113,6 +119,49 @@ impl RfcLibrary {
     pub fn library(&self) -> &Library {
         &self.library
     }
+}
+
+/// The SAP library writes `dev_rfc.log` into the cwd; its trace belongs in the temp dir.
+pub fn trace_directory() -> PathBuf {
+    std::env::temp_dir()
+}
+
+/// The variable and the value that point the library at the temp dir before it is mapped.
+pub fn trace_environment() -> (&'static str, String) {
+    (RFC_TRACE_DIR_ENV, trace_directory().display().to_string())
+}
+
+/// Sets that variable: the library reads it when it is loaded, before any symbol can be called.
+fn point_trace_at_temp_dir() {
+    let (name, directory) = trace_environment();
+
+    // Not thread safe by contract; the process is single threaded until the library is mapped.
+    unsafe { std::env::set_var(name, directory) };
+}
+
+/// `RfcSetTraceDir` is optional: not every SDK or GUI release exports it.
+fn set_trace_directory(library: &Library) {
+    let set_trace_dir = unsafe { library.get::<RfcSetTraceDir>(b"RfcSetTraceDir\0") }
+        .ok()
+        .map(|symbol| *symbol);
+
+    apply_trace_directory(set_trace_dir);
+}
+
+/// Calls `RfcSetTraceDir` when the library exports it, otherwise the environment set before the
+/// load stays in charge, so `dev_rfc.log` never lands in the working directory either way.
+pub fn apply_trace_directory(set_trace_dir: Option<RfcSetTraceDir>) -> TraceTarget {
+    let Some(set_trace_dir) = set_trace_dir else {
+        return TraceTarget::Environment;
+    };
+
+    let directory = sap_uc(&trace_directory().display().to_string());
+    let mut error = RfcErrorInfo::default();
+
+    // A failing call only leaves the environment as the trace setting.
+    unsafe { set_trace_dir(directory.as_ptr(), (&raw mut error).cast::<c_void>()) };
+
+    TraceTarget::Symbol
 }
 
 pub fn sap_uc(value: &str) -> Vec<u16> {
@@ -292,7 +341,7 @@ pub enum RfcPhase {
 pub fn classify_rfc_error(phase: RfcPhase, code: i32, message: &str) -> TransportError {
     let text = format!("{message} (RFC code {code})");
 
-    match code {
+    let error = match code {
         RFC_LOGON_FAILURE | RFC_AUTHORIZATION_FAILURE => TransportError::Authorization(text),
         RFC_ABAP_RUNTIME_FAILURE
         | RFC_ABAP_MESSAGE
@@ -312,6 +361,12 @@ pub fn classify_rfc_error(phase: RfcPhase, code: i32, message: &str) -> Transpor
             RfcPhase::Prepare => TransportError::Protocol(text),
             RfcPhase::Invoke => TransportError::PostSendUncertain(text),
         },
+    };
+
+    if phase == RfcPhase::Invoke {
+        error.after_send()
+    } else {
+        error
     }
 }
 
@@ -414,6 +469,14 @@ type RfcGetXString = unsafe extern "C" fn(
 type RfcInvoke = unsafe extern "C" fn(RfcHandle, RfcHandle, *mut RfcErrorInfo) -> RfcRc;
 type RfcDestroyFunction = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcRc;
 type RfcCloseConnection = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcRc;
+type RfcSetTraceDir = unsafe extern "C" fn(*const SapUc, *mut c_void) -> RfcRc;
+
+/// Where the trace directory was set; the environment is the fallback when the symbol is absent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TraceTarget {
+    Symbol,
+    Environment,
+}
 
 pub struct RfcSymbols {
     open_connection: RfcOpenConnection,

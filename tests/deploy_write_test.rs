@@ -5,6 +5,7 @@ use abapreach::backend::Failure;
 use abapreach::domain::Status;
 use abapreach::hash::source_hash;
 use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, activation_status};
+use abapreach::transport::rfc::{RfcPhase, classify_rfc_error};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use replay::{Replay, Step, fx, replay};
 
@@ -13,6 +14,7 @@ const FIXTURE: &str = "dev-750-rfc.json";
 const PROGRAM: &str = "/sap/bc/adt/programs/programs/ytest_abapreach01";
 const E_BODY: &[u8] = br#"<chkl:messages xmlns:chkl="x"><msg type="E" line="1"/></chkl:messages>"#;
 const W_BODY: &[u8] = br#"<chkl:messages xmlns:chkl="x"><msg type="W" line="1"/></chkl:messages>"#;
+const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET without a version returns it; restore only by deploying the base source again on your order";
 
 fn input(last_line: &str, simulate: bool, tr: Option<&str>) -> DeployInput {
     DeployInput {
@@ -232,30 +234,63 @@ fn recorded_activation_errors_are_inactive_without_a_read_back() {
     assert!(
         outcome
             .stdout
-            .ends_with("INACTIVE: activation reported errors")
+            .contains("INACTIVE: activation reported errors")
     );
+    assert!(outcome.stdout.ends_with(ROLLBACK));
     assert!(transport.calls.last().unwrap().uri.contains("activation"));
     transport.assert_finished();
 }
 
 #[test]
-fn every_non_2xx_activation_status_has_one_mapping() {
-    for (code, failure) in [(409, Failure::Conflict), (500, Failure::Validation)] {
-        let rest = vec![fx(18), Step::ReplyTo(19, Ok(Response::empty(code)))];
-        let mut transport = replay(FIXTURE, then(through_put(), rest));
-        let result = DeployProg::run_classified(&mut transport, v2(None), None, &CancelFlag::new());
+fn a_non_2xx_activation_is_reconciled_when_the_active_source_matches() {
+    let steps = then(
+        through_put(),
+        vec![fx(18), Step::ReplyTo(19, Ok(Response::empty(500))), fx(20)],
+    );
+    let mut transport = replay(FIXTURE, steps);
+    let result = DeployProg::run_classified(&mut transport, v2(None), None, &CancelFlag::new());
 
-        assert_eq!(result.outcome.status, Some(Status::Rejected));
-        assert_eq!(result.outcome.exit, 1);
-        assert!(
-            result
-                .outcome
-                .stdout
-                .ends_with(&format!("REJECTED: activation failed: HTTP {code}"))
-        );
-        assert_eq!(result.failure, Some(failure));
-        transport.assert_finished();
-    }
+    assert_eq!(result.outcome.status, Some(Status::Active));
+    assert_eq!(result.outcome.exit, 1);
+    assert!(result.outcome.stdout.contains("ACTIVE (reconciled)"));
+    assert_eq!(result.failure, Some(Failure::Validation));
+    assert!(
+        transport
+            .calls
+            .last()
+            .unwrap()
+            .uri
+            .contains("version=active")
+    );
+    transport.assert_finished();
+}
+
+#[test]
+fn a_non_2xx_activation_is_inactive_when_the_active_source_differs() {
+    let steps = then(
+        through_put(),
+        vec![
+            fx(18),
+            Step::ReplyTo(19, Ok(Response::empty(409))),
+            Step::Pair(20, 10),
+        ],
+    );
+    let mut transport = replay(FIXTURE, steps);
+    let result = DeployProg::run_classified(&mut transport, v2(None), None, &CancelFlag::new());
+
+    assert_eq!(result.outcome.status, Some(Status::Inactive));
+    assert_eq!(result.outcome.exit, 1);
+    assert!(result.outcome.stdout.ends_with(ROLLBACK));
+    assert_eq!(result.failure, Some(Failure::Conflict));
+    assert!(
+        transport
+            .calls
+            .last()
+            .unwrap()
+            .uri
+            .contains("version=active")
+    );
+    transport.assert_finished();
 }
 
 #[test]
@@ -269,8 +304,9 @@ fn activation_without_errors_is_checked_against_the_active_content() {
     assert!(
         outcome
             .stdout
-            .ends_with("INACTIVE: activation reported no error but the active source differs")
+            .contains("INACTIVE: activation reported no error but the active source differs")
     );
+    assert!(outcome.stdout.ends_with(ROLLBACK));
 }
 
 #[test]
@@ -320,6 +356,68 @@ fn a_rejected_or_failed_put_unlocks_and_never_activates() {
     assert_eq!(result.failure, Some(Failure::PreSendConnectivity));
     assert!(!result.fallback_allowed);
     transport.assert_finished();
+}
+
+#[test]
+fn rfc_invoke_failures_during_put_reconcile_before_retrying() {
+    for (code, message) in [
+        (3, "SYSTEM_FAILURE"),
+        (4, "ABAP message"),
+        (5, "NO_SUCH_ENTRY"),
+        (29, "not authorized"),
+    ] {
+        let error = classify_rfc_error(RfcPhase::Invoke, code, message);
+        let steps = vec![
+            fx(6),
+            fx(7),
+            fx(6),
+            fx(8),
+            Step::ReplyTo(17, Err(error)),
+            fx(18),
+            fx(20),
+            fx(26),
+        ];
+        let mut transport = replay(FIXTURE, steps);
+        let outcome = DeployProg::run(&mut transport, v2(None), None);
+
+        assert_eq!((outcome.status, outcome.exit), (Some(Status::Active), 1));
+        assert!(outcome.stdout.ends_with("check with read before retrying"));
+        assert!(
+            transport
+                .calls
+                .iter()
+                .all(|call| !call.uri.contains("activation"))
+        );
+        transport.assert_finished();
+    }
+}
+
+#[test]
+fn rfc_invoke_failures_during_activation_reconcile_before_retrying() {
+    for (code, message) in [
+        (3, "SYSTEM_FAILURE"),
+        (4, "ABAP message"),
+        (5, "NO_SUCH_ENTRY"),
+        (29, "not authorized"),
+    ] {
+        let error = classify_rfc_error(RfcPhase::Invoke, code, message);
+        let steps = then(
+            through_put(),
+            vec![fx(18), Step::ReplyTo(19, Err(error)), fx(20), fx(26)],
+        );
+        let mut transport = replay(FIXTURE, steps);
+        let outcome = DeployProg::run(&mut transport, v2(None), None);
+
+        assert_eq!((outcome.status, outcome.exit), (Some(Status::Active), 1));
+        assert!(outcome.stdout.ends_with("check with read before retrying"));
+        assert!(
+            transport
+                .calls
+                .iter()
+                .any(|call| call.uri.contains("activation"))
+        );
+        transport.assert_finished();
+    }
 }
 
 #[test]

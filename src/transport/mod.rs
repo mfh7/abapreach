@@ -80,6 +80,8 @@ pub enum TransportError {
     Protocol(String),
     #[error("post-send outcome uncertain: {0}")]
     PostSendUncertain(String),
+    #[error("{0}")]
+    Sent(Box<TransportError>),
 }
 
 impl TransportError {
@@ -89,6 +91,18 @@ impl TransportError {
 
     pub fn is_post_send_uncertain(&self) -> bool {
         matches!(self, Self::PostSendUncertain(_))
+    }
+
+    pub fn after_send(self) -> Self {
+        if self.is_post_send_uncertain() {
+            self
+        } else {
+            Self::Sent(Box::new(self))
+        }
+    }
+
+    pub fn was_sent(&self) -> bool {
+        matches!(self, Self::PostSendUncertain(_) | Self::Sent(_))
     }
 }
 

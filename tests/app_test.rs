@@ -98,7 +98,9 @@ fn env(directory: &Path) -> BTreeMap<String, String> {
         r#"{"servers":[{"systemId":"DEV","host":"example.com","port":443,"clients":["100"],"#,
         r#""rfc":{"ashost":"example.com","sysnr":"00"},"adt":{"insecure":true}},"#,
         r#"{"systemId":"DV2","host":"example.com","port":443,"clients":["100"],"#,
-        r#""rfc":{"ashost":"example.com","sysnr":"00"}}]}"#,
+        r#""rfc":{"ashost":"example.com","sysnr":"00"}},"#,
+        r#"{"systemId":"QAS","clients":["100"],"#,
+        r#""rfc":{"ashost":"example.com","sysnr":"02"}}]}"#,
     );
 
     fs::write(directory.join("connections.json"), config).unwrap();
@@ -112,6 +114,8 @@ fn env(directory: &Path) -> BTreeMap<String, String> {
         ("DEV_100_PASS".to_owned(), "secret-pw".to_owned()),
         ("DV2_100_USER".to_owned(), "user".to_owned()),
         ("DV2_100_PASS".to_owned(), "secret-pw".to_owned()),
+        ("QAS_100_USER".to_owned(), "user".to_owned()),
+        ("QAS_100_PASS".to_owned(), "secret-pw".to_owned()),
     ])
 }
 
@@ -139,6 +143,14 @@ fn simulate_args<'a>(file: &'a Path, extra: &[&'a str]) -> Vec<&'a str> {
 
     args.extend_from_slice(extra);
     args.extend_from_slice(&["--conn", "dev_100"]);
+
+    args
+}
+
+fn rfc_only_simulate_args<'a>(file: &'a Path, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = simulate_args(file, extra);
+
+    *args.last_mut().unwrap() = "qas_100";
 
     args
 }
@@ -597,6 +609,76 @@ fn the_password_never_reaches_the_output() {
     assert!(exit.stderr.contains("login failed for ***"));
     assert!(!exit.stderr.contains("secret-pw"));
     assert!(exit.stdout.starts_with(WARNING));
+}
+
+#[test]
+fn an_rfc_only_connection_reads_on_rfc_without_opening_adt() {
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("out.abap");
+    let mut fake = Fake::default();
+
+    fake.rfc.push_back(scripted(vec![source("A\nB")]));
+
+    let exit = go(
+        &read_args(out.to_str().unwrap(), "qas_100"),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0);
+    assert!(exit.stdout.starts_with("2 lines ->"), "{}", exit.stdout);
+    assert!(!exit.stdout.contains("WARNING"));
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+    assert_eq!(fs::read_to_string(out).unwrap(), "A\nB\n");
+}
+
+#[test]
+fn an_rfc_only_connection_simulates_on_rfc_and_names_the_reason() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+
+    fake.rfc.push_back(simulate_replay());
+
+    let exit = go(
+        &rfc_only_simulate_args(&file, &[]),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0);
+    assert!(exit.stdout.ends_with("SIMULATED_OK"));
+    assert_report(
+        &exit.stdout,
+        "rfc",
+        "RFC-only connection (ADT not configured)",
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+}
+
+#[test]
+fn an_explicit_adt_backend_stops_on_an_rfc_only_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    let mut fake = Fake::default();
+    let exit = go(
+        &rfc_only_simulate_args(&file, &["--backend", "adt"]),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2);
+    assert_eq!(
+        exit.stderr,
+        "STOP: ADT HTTP is not available for deploy PROG"
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
 }
 
 #[test]

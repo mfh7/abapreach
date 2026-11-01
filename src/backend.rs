@@ -34,6 +34,8 @@ pub enum SelectionReason {
     ExplicitBackend,
     /// No `--backend`: ADT is tried first.
     DefaultAdt,
+    /// No `--backend` and no ADT endpoint in the config, so the connection runs on RFC only.
+    RfcOnly,
     /// The first backend failed before it sent anything; the string is that failure.
     Fallback(String),
 }
@@ -43,6 +45,7 @@ impl fmt::Display for SelectionReason {
         match self {
             Self::ExplicitBackend => write!(formatter, "explicit --backend"),
             Self::DefaultAdt => write!(formatter, "default ADT"),
+            Self::RfcOnly => write!(formatter, "RFC-only connection (ADT not configured)"),
             Self::Fallback(failure) => write!(formatter, "fallback to RFC: {failure}"),
         }
     }
@@ -108,6 +111,7 @@ impl From<&TransportError> for Failure {
         match error {
             TransportError::PreSendConnectivity(_) => Self::PreSendConnectivity,
             TransportError::PostSendUncertain(_) => Self::PostSendUncertain,
+            TransportError::Sent(error) => Self::from(error.as_ref()),
             TransportError::Authorization(_) | TransportError::CsrfRequired => Self::Authorization,
             TransportError::Http { status, .. } => match status {
                 401 | 403 => Self::Authorization,

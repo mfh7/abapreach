@@ -17,6 +17,7 @@ pub use crate::adt::format_messages;
 
 const LOCK_ACCEPT: &str =
     "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result";
+const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET without a version returns it; restore only by deploying the base source again on your order";
 
 #[derive(Clone, Debug)]
 pub struct DeployInput {
@@ -27,9 +28,22 @@ pub struct DeployInput {
     pub tr: Option<String>,
 }
 
+/// Exit code of an interrupt that arrives while no lock is held: 128 + SIGINT.
+pub const INTERRUPT_EXIT_CODE: i32 = 130;
+
+/// What a SIGINT means right now: leave at once, or let the lock holder unlock first.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterruptAction {
+    ExitNow,
+    Deferred,
+}
+
 /// Set from the Ctrl-C handler; checked once the lock is held.
 #[derive(Clone, Debug, Default)]
-pub struct CancelFlag(Arc<AtomicBool>);
+pub struct CancelFlag {
+    cancelled: Arc<AtomicBool>,
+    lock_held: Arc<AtomicBool>,
+}
 
 impl CancelFlag {
     pub fn new() -> Self {
@@ -37,11 +51,43 @@ impl CancelFlag {
     }
 
     pub fn set(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.cancelled.store(true, Ordering::SeqCst);
     }
 
     pub fn is_set(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Marks the window in which the deploy holds a lock; the guard of the caller's scope ends it.
+    pub fn hold_lock(&self) -> LockScope<'_> {
+        self.lock_held.store(true, Ordering::SeqCst);
+
+        LockScope(self)
+    }
+
+    pub fn lock_held(&self) -> bool {
+        self.lock_held.load(Ordering::SeqCst)
+    }
+
+    /// A SIGINT must not end the process while a lock is held: the flag then makes the deploy
+    /// unlock before it reports. Without a lock there is nothing to clean up, so exit at once.
+    pub fn on_interrupt(&self) -> InterruptAction {
+        if !self.lock_held() {
+            return InterruptAction::ExitNow;
+        }
+
+        self.set();
+
+        InterruptAction::Deferred
+    }
+}
+
+/// Clears the lock window when the holding scope ends, however it ends.
+pub struct LockScope<'a>(&'a CancelFlag);
+
+impl Drop for LockScope<'_> {
+    fn drop(&mut self) {
+        self.0.lock_held.store(false, Ordering::SeqCst);
     }
 }
 
@@ -181,8 +227,17 @@ impl Finish {
     }
 
     fn status(status: Status, line: impl Into<String>) -> Self {
+        let line = line.into();
+        // A reconciliation line ends with the retry instruction, which must stay last.
+        let rollback = status == Status::Inactive && !line.ends_with(RETRY);
+        let mut stdout = vec![line];
+
+        if rollback {
+            stdout.push(ROLLBACK.to_owned());
+        }
+
         Self {
-            stdout: vec![line.into()],
+            stdout,
             ..Self::new(Some(status), status.exit())
         }
     }
@@ -254,12 +309,19 @@ impl Finish {
     fn unlock_failed(mut self, reason: &str, name: &str) -> Self {
         let note = format!("UNLOCK FAILED ({reason}); the lock on {name} may remain");
 
+        self.warn(note);
         self.exit = 1;
         self.lock_unreleased = true;
-        self.stderr = Some(match self.stderr {
-            Some(existing) => format!("{existing}\n{note}"),
-            None => note,
-        });
+        self
+    }
+
+    /// The 2xx lock reply could not be read, so the handle is unknown and the lock cannot be
+    /// released: every later claim that it was would be false.
+    fn lock_unknown(mut self, name: &str) -> Self {
+        let note = format!("W: the lock on {name} may remain (the lock handle is unknown)");
+
+        self.warn(note);
+        self.lock_unreleased = true;
         self
     }
 
@@ -267,6 +329,10 @@ impl Finish {
     fn close_failed(&mut self, reason: &str) {
         let note = format!("W: session close failed: {reason} (lock was released)");
 
+        self.warn(note);
+    }
+
+    fn warn(&mut self, note: String) {
         self.stderr = Some(match self.stderr.take() {
             Some(existing) => format!("{existing}\n{note}"),
             None => note,
@@ -356,6 +422,9 @@ impl Run<'_> {
         self.stdout.push(format!("live hash {live_hash}"));
 
         let lock = self.lock()?;
+        // From here on the lock belongs to this run: Ctrl-C sets the flag instead of exiting, so
+        // every path below still unlocks before it reports.
+        let _lock_scope = cancel.hold_lock();
 
         match self.locked(&lock, input, &file, &live_hash, cancel) {
             Locked::Finished(finish) => Ok(self.release(&lock, &input.name, finish)),
@@ -436,8 +505,9 @@ impl Run<'_> {
             ));
         }
 
-        parse_lock(&String::from_utf8_lossy(&response.body))
-            .map_err(|message| Finish::stop(format!("unreadable lock response: {message}")))
+        parse_lock(&String::from_utf8_lossy(&response.body)).map_err(|message| {
+            Finish::stop(format!("unreadable lock response: {message}")).lock_unknown(&self.name)
+        })
     }
 
     fn locked(
@@ -544,7 +614,7 @@ impl Run<'_> {
                 "PUT failed",
                 response.status,
             )),
-            Err(error) if error.is_post_send_uncertain() => Ok(PutResult::Uncertain),
+            Err(error) if error.was_sent() => Ok(PutResult::Uncertain),
             Err(error) => Err(Finish::error(&error, false)),
         }
     }
@@ -564,7 +634,7 @@ impl Run<'_> {
             .insert("Accept".to_owned(), "application/xml".to_owned());
         let response = match self.call(request) {
             Ok(response) => response,
-            Err(error) if error.is_post_send_uncertain() => {
+            Err(error) if error.was_sent() => {
                 return self.reconcile(live_hash, file);
             }
             Err(error) => {
@@ -581,14 +651,18 @@ impl Run<'_> {
 
         self.stdout.extend(format_messages(&text));
 
-        match activation_status(response.status, &response.body) {
-            Some(Status::Rejected) => {
-                return Finish::http(Status::Rejected, "activation failed", response.status);
-            }
-            Some(status) => {
-                return Finish::status(status, "INACTIVE: activation reported errors");
-            }
-            None => {}
+        if !(200..300).contains(&response.status) {
+            let mut finish = self.reconcile_non_2xx_activation(response.status, file);
+            finish.failure = Some(Failure::from(&TransportError::Http {
+                status: response.status,
+                message: String::new(),
+            }));
+
+            return finish;
+        }
+
+        if let Some(status) = activation_status(response.status, &response.body) {
+            return Finish::status(status, "INACTIVE: activation reported errors");
         }
 
         match self.read_active("read back the active source") {
@@ -604,6 +678,26 @@ impl Run<'_> {
                 "INACTIVE: activation reported no error but the active source differs",
             ),
             Err(finish) if finish.is_uncertain() => self.reconcile(live_hash, file),
+            Err(finish) => finish.unreadable(),
+        }
+    }
+
+    fn reconcile_non_2xx_activation(&mut self, status: u16, file: &[String]) -> Finish {
+        match self.read_active("read back the active source after an activation failure") {
+            Ok(active) if source_hash(&active) == source_hash(file) => Finish::status(
+                Status::Active,
+                format!(
+                    "ACTIVE (reconciled): the active source equals the file after activation HTTP \
+                     {status}; {RETRY}"
+                ),
+            )
+            .exit_one(),
+            Ok(_) => Finish::status(
+                Status::Inactive,
+                format!(
+                    "INACTIVE: activation failed with HTTP {status} and the active source differs"
+                ),
+            ),
             Err(finish) => finish.unreadable(),
         }
     }

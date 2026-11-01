@@ -130,6 +130,29 @@ fn a_failed_session_end_is_reported_and_not_retried() {
 }
 
 #[test]
+fn unauthorized_doctor_read_and_deploy_requests_do_not_end_a_session() {
+    let mut unauthorized = Response::empty(401);
+    unauthorized
+        .headers
+        .insert("Set-Cookie".to_owned(), "sid=test".to_owned());
+
+    for request in [
+        Request::get("/sap/bc/adt/discovery"),
+        Request::get("/sap/bc/adt/programs/programs/ZTEST/source/main?version=active"),
+        Request::put(
+            "/sap/bc/adt/programs/programs/ZTEST/source/main",
+            Vec::new(),
+        ),
+    ] {
+        let mut transport = HttpTransport::for_test(vec![Ok(unauthorized.clone())]);
+
+        assert_eq!(transport.request(request).unwrap().status, 401);
+        assert_eq!(transport.close(), Ok(()));
+        assert_eq!(transport.recorded().len(), 1);
+    }
+}
+
+#[test]
 fn csrf_timeout() {
     assert!(HttpTransport::classify(403, Some("Required")).is_retryable_csrf());
     assert!(!HttpTransport::classify(401, None).is_retryable_csrf());
@@ -167,6 +190,23 @@ fn cookie_store_keeps_every_set_cookie_and_close_ends_the_session() {
     }
     assert!(heads[1].contains("x-sap-adt-sessiontype: stateful"));
     assert!(heads[2].contains("x-sap-adt-sessiontype: stateless"));
+}
+
+#[test]
+fn a_redirect_is_returned_and_never_followed() {
+    // Following it would re-send the request (and its lock handle) to another location.
+    let found = "HTTP/1.1 302 Found\r\nLocation: /followed\r\nContent-Length: 0\r\n\r\n";
+    let (base_url, server) = serve(vec![found]);
+    let mut transport = HttpTransport::connect(config(&base_url, 5000)).unwrap();
+
+    let response = transport
+        .request(Request::get("/sap/bc/adt/discovery"))
+        .unwrap();
+    let heads = server.join().unwrap();
+
+    assert_eq!(response.status, 302);
+    assert_eq!(heads.len(), 1);
+    assert!(heads[0].starts_with("GET /sap/bc/adt/discovery?sap-client=100 HTTP/1.1"));
 }
 
 #[test]

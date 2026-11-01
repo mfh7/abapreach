@@ -210,7 +210,36 @@ fn rejected_lock_is_reported_without_unlock() {
             .stderr
             .starts_with("STOP: unreadable lock response: no LOCK_HANDLE")
     );
+    assert!(
+        outcome
+            .stderr
+            .contains("the lock on YTEST_ABAPREACH01 may remain")
+    );
     assert_eq!(transport.calls.len(), 2);
+}
+
+#[test]
+fn an_unreadable_lock_reply_never_claims_the_lock_was_released() {
+    let mut transport = replay(
+        FIXTURE,
+        vec![fx(6), Step::Any(Ok(Response::text(200, "<DATA/>")))],
+    )
+    .failing_close(TransportError::PostSendUncertain("gone".to_owned()));
+    let outcome = DeployProg::run(&mut transport, v2(), None);
+
+    // The lock exists and its handle is unknown, so it cannot be released: no claim about it.
+    assert_eq!(outcome.exit, 2);
+    assert!(
+        outcome
+            .stderr
+            .contains("the lock on YTEST_ABAPREACH01 may remain (the lock handle is unknown)")
+    );
+    assert!(
+        !outcome.stderr.contains("lock was released"),
+        "{}",
+        outcome.stderr
+    );
+    assert_eq!(transport.closes, 1);
 }
 
 #[test]

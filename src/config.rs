@@ -40,7 +40,8 @@ pub struct Connection {
     pub user: String,
     pub password: String,
     pub lang: String,
-    pub adt: AdtConfig,
+    /// `None` for an RFC-only server: the config has no `host`/`port` ADT endpoint.
+    pub adt: Option<AdtConfig>,
     pub rfc: RfcConfig,
 }
 
@@ -54,13 +55,13 @@ impl Connection {
             user: "user".to_owned(),
             password: "password".to_owned(),
             lang: "EN".to_owned(),
-            adt: AdtConfig {
+            adt: Some(AdtConfig {
                 host: "example.com".to_owned(),
                 port: 443,
                 scheme: "https".to_owned(),
                 ca_file: None,
                 insecure: true,
-            },
+            }),
             rfc: RfcConfig {
                 ashost: "example.com".to_owned(),
                 sysnr: "00".to_owned(),
@@ -142,10 +143,7 @@ impl Config {
             return Err(format!("client {client} not configured for {system_id}"));
         }
         let (user, password) = Self::credentials(&system_id, &client, env, &self.local)?;
-        let scheme = server.adt.scheme.to_ascii_lowercase();
-        if !matches!(scheme.as_str(), "http" | "https") {
-            return Err(format!("unsupported ADT scheme: {scheme}"));
-        }
+        let adt = Self::adt_endpoint(&system_id, server)?;
 
         Ok(Connection {
             id: format!("{system_id}_{client}"),
@@ -154,15 +152,37 @@ impl Config {
             user,
             password,
             lang: server.lang.clone().unwrap_or_else(|| "EN".to_owned()),
-            adt: AdtConfig {
-                host: server.host.clone(),
-                port: server.port,
-                scheme,
-                ca_file: server.adt.ca_file.clone(),
-                insecure: server.adt.insecure,
-            },
+            adt,
             rfc,
         })
+    }
+
+    /// `host` and `port` form the ADT endpoint together; a server with neither is RFC-only,
+    /// and a server with only one of them is a configuration error.
+    fn adt_endpoint(system_id: &str, server: &Server) -> Result<Option<AdtConfig>, String> {
+        let (host, port) = match (&server.host, server.port) {
+            (None, None) => return Ok(None),
+            (Some(host), Some(port)) => (host, port),
+            (Some(_), None) => {
+                return Err(format!("{system_id} has host but no port in config"));
+            }
+            (None, Some(_)) => {
+                return Err(format!("{system_id} has port but no host in config"));
+            }
+        };
+        let scheme = server.adt.scheme.to_ascii_lowercase();
+
+        if !matches!(scheme.as_str(), "http" | "https") {
+            return Err(format!("unsupported ADT scheme: {scheme}"));
+        }
+
+        Ok(Some(AdtConfig {
+            host: host.clone(),
+            port,
+            scheme,
+            ca_file: server.adt.ca_file.clone(),
+            insecure: server.adt.insecure,
+        }))
     }
 
     pub fn parse_id(connection_id: &str) -> Result<(String, String), String> {
@@ -204,7 +224,9 @@ pub fn scrub(text: impl Into<String>, secrets: &[String]) -> String {
 }
 
 pub fn tls_warning(connection: &Connection) -> Option<String> {
-    if connection.adt.insecure || connection.adt.scheme == "http" {
+    let adt = connection.adt.as_ref()?;
+
+    if adt.insecure || adt.scheme == "http" {
         return Some(format!(
             "WARNING: connection {} uses insecure TLS or HTTP.",
             connection.id
@@ -224,8 +246,11 @@ struct ConfigFile {
 #[serde(rename_all = "camelCase")]
 struct Server {
     system_id: String,
-    host: String,
-    port: u16,
+    /// Optional: without it (and `port`) the server is reachable through RFC only.
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
     #[serde(default)]
     clients: Vec<String>,
     #[serde(default)]

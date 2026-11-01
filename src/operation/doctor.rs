@@ -30,23 +30,32 @@ impl Doctor {
         let mut lines = vec![
             format!("connection {}: configuration available", connection.id),
             "credential available".to_owned(),
-            format!(
-                "ADT HTTP configured: {}://{}:{}",
-                connection.adt.scheme, connection.adt.host, connection.adt.port
-            ),
-            format!(
-                "RFC SADT configured: {} system {}",
-                connection.rfc.ashost, connection.rfc.sysnr
-            ),
         ];
+
+        match &connection.adt {
+            Some(adt) => lines.push(format!(
+                "ADT HTTP configured: {}://{}:{}",
+                adt.scheme, adt.host, adt.port
+            )),
+            None => lines.push("ADT HTTP: not configured".to_owned()),
+        }
+
+        lines.push(format!(
+            "RFC SADT configured: {} system {}",
+            connection.rfc.ashost, connection.rfc.sysnr
+        ));
+
         let mut passed = true;
 
-        match adt_probe(connection, factories) {
-            Ok(status) => lines.push(format!("ADT HTTP probe: ok (HTTP {status})")),
-            Err(error) => {
-                passed = false;
-                lines.push(format!("ADT HTTP probe: failed: {error}"));
-            }
+        match connection.adt {
+            Some(_) => match adt_probe(connection, factories) {
+                Ok(status) => lines.push(format!("ADT HTTP probe: ok (HTTP {status})")),
+                Err(error) => {
+                    passed = false;
+                    lines.push(format!("ADT HTTP probe: failed: {error}"));
+                }
+            },
+            None => lines.push("ADT HTTP probe: not run (ADT not configured)".to_owned()),
         }
 
         // A ping needs the library, so a missing library skips (never fails) the ping probe.
@@ -79,10 +88,15 @@ impl Doctor {
             lines.push("RFC SADT probe: not run (RFC library not found)".to_owned());
         }
 
+        let capabilities = if connection.adt.is_some() {
+            "ADT HTTP, RFC SADT"
+        } else {
+            "RFC SADT"
+        };
         lines.extend([
-            "capability read PROG: ADT HTTP, RFC SADT".to_owned(),
-            "capability deploy PROG: ADT HTTP, RFC SADT".to_owned(),
-            "capability doctor: ADT HTTP, RFC SADT".to_owned(),
+            format!("capability read PROG: {capabilities}"),
+            format!("capability deploy PROG: {capabilities}"),
+            format!("capability doctor: {capabilities}"),
         ]);
 
         if let Some(warning) = tls_warning(connection) {
