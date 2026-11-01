@@ -1,0 +1,100 @@
+# Native verification on the four release targets. Tag v* and manual dispatch only
+# (decision 38), no push and no pull_request. Every runner runs formatting, clippy with
+# warnings denied, and the test suite twice: default and `fault-injection`, so a
+# feature-gated test cannot disappear from one platform.
+#
+# This workflow never reaches a system. All tests use fixtures and fakes; no job reads a
+# connection file, an RFC library or a secret.
+name: ci
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify (${{ matrix.runner.label }}, ${{ matrix.runner.arch }})
+    runs-on: ${{ matrix.runner.label }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - label: macos-14
+            arch: arm64
+          - label: windows-latest
+            arch: x64
+          - label: ubuntu-24.04
+            arch: x64
+          - label: ubuntu-24.04-arm
+            arch: arm64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # `ubuntu-24.04-arm` must run the tests natively. This gate is what keeps the arm64
+      # cell honest: if the label is unavailable the job never starts, and if it starts on
+      # another architecture the job fails here. Either way the arm64 cell is recorded as
+      # unresolved; a cross build on an x64 runner never stands in for it.
+      - name: Check the runner architecture
+        id: runner_is_available
+        run: |
+          case "${{ matrix.runner.arch }}" in
+            arm64) accepted="arm64 aarch64" ;;
+            x64) accepted="x86_64 amd64" ;;
+            *) echo "::error::unknown matrix architecture"; exit 1 ;;
+          esac
+          actual="$(uname -m)"
+          case " $accepted " in
+            *" $actual "*) echo "runner architecture $actual matches the matrix" ;;
+            *)
+              echo "::error::${{ matrix.runner.label }} reports $actual but the matrix asks for ${{ matrix.runner.arch }}: an emulated or wrong-architecture runner does not satisfy the native gate"
+              exit 1
+              ;;
+          esac
+
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # aws-lc-sys assembles on Windows and has no NASM here, so install it before any step
+      # that builds the dependency graph.
+      - name: Install NASM
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+
+      - name: Install the Rust toolchain components
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint every target with warnings denied
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run the default test suite
+        run: cargo test
+
+      - name: Run the fault-injection test suite
+        run: cargo test --features fault-injection
+
+      # A misspelled gate in the test file would compile to an empty suite and pass, so
+      # count the fault-injection tests that the feature actually builds.
+      - name: Confirm the fault-injection suite is not empty
+        run: |
+          listed="$(cargo test --features fault-injection --test fault_injection_test -- --list)"
+          count="$(printf '%s\n' "$listed" | grep -c ': test$' || true)"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::the fault-injection suite built no test; the feature gate is broken"
+            exit 1
+          fi
+          echo "fault-injection tests: $count"
