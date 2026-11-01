@@ -590,6 +590,52 @@ fn help_prints_to_stdout_with_exit_0() {
 }
 
 #[test]
+fn version_prints_the_cargo_version_with_exit_0() {
+    let exit = run(
+        ["abapreach", "--version"].map(str::to_owned).to_vec(),
+        BTreeMap::new(),
+        &mut Fake::default(),
+    );
+
+    assert_eq!(exit.code, 0);
+    assert_eq!(
+        exit.stdout,
+        format!("abapreach {}", env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(exit.stderr, "");
+}
+
+#[test]
+fn a_pinned_backend_failure_prints_only_the_no_fallback_note() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n").unwrap();
+
+    for (extra, pin) in [
+        (vec!["--backend", "adt"], "--backend"),
+        (vec!["--base", "00"], "--base"),
+    ] {
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(scripted(vec![pre_send()]));
+
+        let exit = go(&simulate_args(&file, &extra), directory.path(), &mut fake);
+
+        assert_eq!(exit.code, 1, "{extra:?}");
+        assert_eq!(
+            exit.stderr,
+            format!(
+                "ERROR: pre-send connectivity failure: no route\n\
+                 NOTE: deploy PROG cannot fall back after pre-send connectivity: {pin} pins the backend"
+            ),
+            "{extra:?}"
+        );
+        assert_eq!(fake.rfc_opened, 0, "{extra:?}");
+    }
+}
+
+#[test]
 fn the_password_never_reaches_the_output() {
     let directory = tempfile::tempdir().unwrap();
     let out = directory.path().join("out.abap");

@@ -24,5 +24,7 @@ similar = "3.2.1"
 ctrlc = "3.5.2"
 
 [dev-dependencies]
+# Tests need the fakes behind `test-support`, so a plain `cargo test` turns the feature on.
+abapreach = { path = ".", features = ["test-support"] }
 tempfile = "3.27.0"
 httpmock = "0.9.0"

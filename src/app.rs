@@ -334,6 +334,8 @@ fn route(
     let cancel = factories.cancel();
     let mut failure = Failure::Initial;
     let mut earlier: Vec<String> = Vec::new();
+    // Held back until the router agrees to the fallback, so a pinned backend never claims one.
+    let mut fallback_note: Option<String> = None;
     let mut reason = match explicit {
         Some(_) => SelectionReason::ExplicitBackend,
         None if connection.adt.is_some() => SelectionReason::DefaultAdt,
@@ -358,6 +360,9 @@ fn route(
                 );
             }
         };
+        if let Some(note) = fallback_note.take() {
+            earlier.push(note);
+        }
         let selection = Selection::new(backend, reason);
         let opened = match backend {
             BackendKind::AdtHttp => factories.adt(connection),
@@ -375,7 +380,7 @@ fn route(
         failure = done.failure.unwrap_or(Failure::Initial);
         reason = SelectionReason::Fallback(done.detail.unwrap_or_else(|| failure.to_string()));
         earlier.push(done.outcome.stderr);
-        earlier.push(format!(
+        fallback_note = Some(format!(
             "NOTE: {backend} failed before anything was sent; falling back to RFC SADT"
         ));
     }

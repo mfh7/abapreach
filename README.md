@@ -70,3 +70,8 @@ ADT over HTTP is used.
 
 Only `PROG` objects that already exist; no object creation, no other object types, no MCP
 server and no function-module fallback. The tool is built and tested on macOS arm64.
+
+## Tests
+
+Run `cargo test`; the fakes behind the `test-support` feature are enabled for tests by the
+dev-dependency, so no extra flag is needed (`cargo test --features test-support` also works).

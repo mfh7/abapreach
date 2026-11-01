@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "abapreach")]
+#[command(name = "abapreach", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
