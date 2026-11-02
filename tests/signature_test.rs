@@ -7,7 +7,7 @@ fn lines(text: &str) -> Vec<String> {
 const LIVE: &str = "FUNCTION YTEST_FM\n  IMPORTING\n    VALUE(IV_IN) TYPE I\n  EXPORTING\n    VALUE(EV_OUT) TYPE I\n  EXCEPTIONS\n    NOT_FOUND.\n\n\n\n  ev_out = iv_in.\nENDFUNCTION.";
 
 fn diff(file: &str) -> Option<Vec<String>> {
-    interface_diff(&lines(LIVE), &lines(file))
+    interface_diff(&lines(LIVE), &lines(file)).expect("readable test signatures")
 }
 
 #[test]
@@ -73,16 +73,24 @@ fn string_literals_keep_their_case_and_their_dots() {
     let live = "FUNCTION YTEST_FM\n  IMPORTING\n    VALUE(IV_IN) TYPE C DEFAULT 'a. b'.\n  WRITE 'x'.\nENDFUNCTION.";
 
     assert_eq!(
-        interface_diff(&lines(live), &lines(&live.replace("DEFAULT", "default"))),
+        interface_diff(&lines(live), &lines(&live.replace("DEFAULT", "default"))).unwrap(),
         None
     );
-    assert!(interface_diff(&lines(live), &lines(&live.replace("'a. b'", "'A. b'"))).is_some());
+    assert!(
+        interface_diff(&lines(live), &lines(&live.replace("'a. b'", "'A. b'")))
+            .unwrap()
+            .is_some()
+    );
     // The first dot inside the literal does not end the signature.
-    assert!(interface_diff(&lines(live), &lines(&live.replace("'a. b'", "'a. c'"))).is_some());
+    assert!(
+        interface_diff(&lines(live), &lines(&live.replace("'a. b'", "'a. c'")))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
-fn a_source_without_a_readable_signature_is_not_compared() {
+fn a_source_without_a_readable_signature_is_explicitly_rejected() {
     let unreadable = [
         "",
         "WRITE 'x'.",
@@ -91,8 +99,14 @@ fn a_source_without_a_readable_signature_is_not_compared() {
     ];
 
     for text in unreadable {
-        assert_eq!(interface_diff(&lines(LIVE), &lines(text)), None, "{text:?}");
-        assert_eq!(interface_diff(&lines(text), &lines(LIVE)), None, "{text:?}");
+        assert!(
+            interface_diff(&lines(LIVE), &lines(text)).is_err(),
+            "{text:?}"
+        );
+        assert!(
+            interface_diff(&lines(text), &lines(LIVE)).is_err(),
+            "{text:?}"
+        );
     }
 }
 
@@ -102,5 +116,5 @@ fn the_server_rendering_with_crlf_and_upper_case_equals_an_adt_file() {
     let file = "FUNCTION ytest_fm\n  IMPORTING\n    VALUE(iv_in) TYPE i\n  EXPORTING\n    VALUE(ev_out) TYPE i\n  EXCEPTIONS\n    not_found.\n\n  ev_out = iv_in.\nENDFUNCTION.";
     let rendered: Vec<String> = rendered.split('\n').map(str::to_owned).collect();
 
-    assert_eq!(interface_diff(&rendered, &lines(file)), None);
+    assert_eq!(interface_diff(&rendered, &lines(file)).unwrap(), None);
 }

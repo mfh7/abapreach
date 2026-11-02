@@ -6,7 +6,7 @@ use abapreach::object::PackageScope;
 use abapreach::operation::deploy::{activation_request_xml, encode_lock_handle};
 use abapreach::transport::{
     Request, SadtTransport, TransportError,
-    rfc::{FakeRfcApi, RfcTransport, SADT_REST_RFC_ENDPOINT},
+    rfc::{FakeRfcApi, RfcEndpointResponse, RfcTransport, SADT_REST_RFC_ENDPOINT},
 };
 use common::{Fixture, fixture_path, fixture_path_in};
 use std::collections::BTreeMap;
@@ -37,9 +37,12 @@ fn payload() {
     let mut transport = RfcTransport::new(FakeRfcApi::ok());
 
     transport
-        .request(Request::put(
-            "/sap/bc/adt/programs/programs/Z/source/main?lockHandle=a%2Bb%2Fc%3D",
-            "é".as_bytes().to_vec(),
+        .request(with_content_type(
+            Request::put(
+                "/sap/bc/adt/programs/programs/Z/source/main?lockHandle=a%2Bb%2Fc%3D",
+                "é".as_bytes().to_vec(),
+            ),
+            "text/plain; charset=utf-8",
         ))
         .unwrap();
 
@@ -147,12 +150,10 @@ fn allow_list_accepts_only_the_m1_program_requests() {
     let mut transport = RfcTransport::new(FakeRfcApi::ok());
 
     for request in &allowed {
-        transport
-            .request(request.clone())
-            .unwrap_or_else(|error| panic!("{request:?}: {error}"));
+        assert!(admits(&mut transport, request), "{request:?}");
     }
     for request in &denied {
-        assert!(transport.request(request.clone()).is_err(), "{request:?}");
+        assert!(!admits(&mut transport, request), "{request:?}");
     }
 
     assert_eq!(transport.api().counts(), (1, 0, allowed.len()));
@@ -174,8 +175,41 @@ fn fresh() -> RfcTransport<FakeRfcApi> {
     RfcTransport::new(FakeRfcApi::ok())
 }
 
+fn with_activation_response(body: String) -> RfcTransport<FakeRfcApi> {
+    RfcTransport::new(FakeRfcApi::with_responses(vec![RfcEndpointResponse {
+        status: 200,
+        headers: BTreeMap::new(),
+        body: body.into_bytes(),
+    }]))
+}
+
 /// Whether the allow-list lets the request through; any other failure is a test error.
 fn admits(transport: &mut RfcTransport<FakeRfcApi>, request: &Request) -> bool {
+    let mut request = request.clone();
+    if request.headers.is_empty() {
+        let content_type = match request.method.as_str() {
+            "PUT" => Some("text/plain; charset=utf-8"),
+            "POST" if request.uri.starts_with("/sap/bc/adt/activation?") => Some("application/xml"),
+            "POST"
+                if request.uri == "/sap/bc/adt/checkruns?reporters=abapCheckRun"
+                    || request.uri.starts_with("/sap/bc/adt/functions/groups")
+                    || request.uri == "/sap/bc/adt/oo/classes"
+                    || request.uri.starts_with("/sap/bc/adt/oo/classes?")
+                    || request.uri == "/sap/bc/adt/oo/interfaces"
+                    || request.uri.starts_with("/sap/bc/adt/oo/interfaces?")
+                    || request.uri.starts_with("/sap/bc/adt/oo/classes/") =>
+            {
+                Some("application/*")
+            }
+            _ => None,
+        };
+        if let Some(content_type) = content_type {
+            request
+                .headers
+                .insert("Content-Type".to_owned(), content_type.to_owned());
+        }
+    }
+
     match transport.request(request.clone()) {
         Ok(_) => true,
         Err(TransportError::RequestNotAllowed(_)) => false,
@@ -207,6 +241,13 @@ fn handle() -> String {
     encode_lock_handle("qdbc+yR6/xoaD=")
 }
 
+fn with_content_type(mut request: Request, content_type: &str) -> Request {
+    request
+        .headers
+        .insert("Content-Type".to_owned(), content_type.to_owned());
+    request
+}
+
 fn uri_of(kind: ObjectKind, name: &str) -> String {
     kind.object_uri(name, Some("zfg")).unwrap()
 }
@@ -231,6 +272,27 @@ fn worklist(entries: &[&str]) -> String {
 
     body.push_str("</adtcore:objectReferences>");
     body
+}
+
+fn activation_worklist_response(entries: &[&str]) -> String {
+    let entries: String = entries
+        .iter()
+        .map(|uri| {
+            format!(
+                concat!(
+                    r#"<ioc:entry><ioc:object><ioc:ref adtcore:uri="{uri}" "#,
+                    r#"adtcore:type="CLAS/OC" adtcore:name="ZCL_A" "#,
+                    r#"xmlns:adtcore="http://www.sap.com/adt/core"/>"#,
+                    r#"</ioc:object></ioc:entry>"#,
+                ),
+                uri = uri
+            )
+        })
+        .collect();
+
+    format!(
+        r#"<ioc:inactiveObjects xmlns:ioc="http://www.sap.com/abapxml/inactiveCtsObjects">{entries}</ioc:inactiveObjects>"#
+    )
 }
 
 #[test]
@@ -369,6 +431,33 @@ fn create_validation_and_creation_posts_are_admitted_for_every_kind_and_scope() 
 }
 
 #[test]
+fn write_capable_rfc_shapes_reject_an_unsupported_content_type() {
+    let handle = handle();
+    let class_source = format!("{CLASS}/source/main?lockHandle={handle}");
+    let class_create = Request::post("/sap/bc/adt/oo/classes", b"<x/>".to_vec());
+    let include_create = Request::post(
+        format!("{CLASS}/includes?lockHandle={handle}"),
+        b"<x/>".to_vec(),
+    );
+    let checkrun = Request::post(
+        "/sap/bc/adt/checkruns?reporters=abapCheckRun",
+        b"<x/>".to_vec(),
+    );
+    let activation = activation(true, activation_request_xml("zcl_a", CLASS));
+
+    assert_refused(&[
+        with_content_type(
+            Request::put(class_source, b"source".to_vec()),
+            "application/json",
+        ),
+        with_content_type(class_create, "text/plain"),
+        with_content_type(include_create, "application/xml"),
+        with_content_type(checkrun, "application/xml"),
+        with_content_type(activation, "application/*"),
+    ]);
+}
+
+#[test]
 fn the_recorded_transportable_class_flow_is_admitted_except_its_helper_requests() {
     let text = std::fs::read_to_string(fixture_path_in(
         "m3",
@@ -392,10 +481,12 @@ fn the_recorded_transportable_class_flow_is_admitted_except_its_helper_requests(
         }
     }
 
-    // The DELETE and the bare-class verify GET belong to the PM cleanup helper, not to a command.
+    // The fixture records no first activation response, so its resend is refused; the DELETE and
+    // bare-class GET belong to the PM cleanup helper too.
     assert_eq!(
         refused,
         [
+            "POST /sap/bc/adt/activation?method=activate&preauditRequested=false",
             "DELETE /sap/bc/adt/oo/classes/ytest_abapreach_cl6?lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D&corrNr=DEVK900001",
             "GET /sap/bc/adt/oo/classes/ytest_abapreach_cl6",
         ]
@@ -438,7 +529,12 @@ fn the_worklist_resend_is_admitted_only_for_entries_under_the_activated_class() 
     let first = activation(true, activation_request_xml("zcl_a", CLASS));
     let resend = |body: String| activation(false, body);
 
-    let mut transport = fresh();
+    let mut transport = with_activation_response(activation_worklist_response(&[
+        CLASS,
+        &format!("{CLASS}/includes/definitions"),
+        &member,
+        &format!("{CLASS}/source/main#type=CLAS%2FOSI;name=ZCL_A"),
+    ]));
     assert!(admits(&mut transport, &first));
     assert!(admits(&mut transport, &resend(own.clone())));
 
@@ -491,6 +587,55 @@ fn the_worklist_resend_is_admitted_only_for_entries_under_the_activated_class() 
         &activation(true, activation_request_xml("zfm", &function))
     ));
     assert!(!admits(&mut func, &resend(own)));
+}
+
+#[test]
+fn a_class_worklist_resend_must_exactly_match_the_first_rfc_response_and_is_consumed() {
+    let member = format!("{CLASS}/source/main#type=CLAS%2FOM;name=PROBE");
+    let expected = worklist(&[CLASS, &format!("{CLASS}/includes/definitions"), &member]);
+    let first = activation(true, activation_request_xml("zcl_a", CLASS));
+    let resend = |body: String| activation(false, body);
+
+    let mut transport = with_activation_response(activation_worklist_response(&[
+        CLASS,
+        &format!("{CLASS}/includes/definitions"),
+        &member,
+    ]));
+    assert!(admits(&mut transport, &first));
+    assert!(admits(&mut transport, &resend(expected.clone())));
+    assert!(
+        !admits(&mut transport, &resend(expected.clone())),
+        "the worklist is consumed by its sole resend"
+    );
+
+    let cases = [
+        worklist(&[CLASS, &format!("{CLASS}/includes/definitions")]),
+        worklist(&[
+            CLASS,
+            &format!("{CLASS}/includes/definitions"),
+            &member,
+            &format!("{CLASS}/source/main#type=CLAS%2FOSI;name=ZCL_A"),
+        ]),
+        worklist(&[
+            CLASS,
+            &format!("{CLASS}/includes/definitions"),
+            &format!("{CLASS}/source/main#type=CLAS%2FOM;name=OTHER"),
+        ]),
+        worklist(&[&format!("{CLASS}/includes/definitions"), CLASS, &member]),
+    ];
+
+    for sent in cases {
+        let mut transport = with_activation_response(activation_worklist_response(&[
+            CLASS,
+            &format!("{CLASS}/includes/definitions"),
+            &member,
+        ]));
+        assert!(admits(&mut transport, &first));
+        assert!(
+            !admits(&mut transport, &resend(sent.clone())),
+            "must refuse a resend different from the received RFC worklist: {sent}"
+        );
+    }
 }
 
 #[test]
@@ -717,6 +862,14 @@ fn traversal_empty_and_namespaced_paths_are_refused() {
     assert_admitted(&[Request::get(
         "/sap/bc/adt/programs/programs/%2fns%2fprog/source/main?version=active",
     )]);
+    // M1 PROG names retain their legal `$` and `-` segment characters.
+    assert_admitted(&[
+        Request::get("/sap/bc/adt/programs/programs/z$include-1/source/main?version=active"),
+        Request::put(
+            "/sap/bc/adt/programs/programs/z$include-1/source/main?lockHandle=a%2Bb",
+            Vec::new(),
+        ),
+    ]);
 }
 
 #[test]

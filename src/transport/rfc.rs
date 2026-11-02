@@ -618,30 +618,48 @@ impl<A: RfcApi> RfcTransport<A> {
 impl<A: RfcApi> SadtTransport for RfcTransport<A> {
     fn request(&mut self, request: Request) -> Result<Response, TransportError> {
         if !self.admission.admits(&request) {
+            self.admission.clear();
+
             return Err(TransportError::RequestNotAllowed(format!(
                 "{} {}",
                 request.method, request.uri
             )));
         }
 
-        self.ensure_open()?;
+        if let Err(error) = self.ensure_open() {
+            self.admission.clear();
+
+            return Err(error);
+        }
         // Decided before the request is consumed by the call.
         #[cfg(feature = "fault-injection")]
         let dropped = self
             .fault
             .and_then(|fault| fault.drop_reply(is_fault_target(fault.target(), &request)));
-        let response = self.api.invoke(RfcEndpointRequest {
+        let response = match self.api.invoke(RfcEndpointRequest {
             function: SADT_REST_RFC_ENDPOINT,
             method: request.method,
             uri: request.uri,
             version: "HTTP/1.1".to_owned(),
             headers: request.headers,
             body: request.body,
-        })?;
+        }) {
+            Ok(response) => response,
+            Err(error) => {
+                self.admission.clear();
+
+                return Err(error);
+            }
+        };
+
+        self.admission
+            .received_response(response.status, &response.body);
 
         // The RFC call has run and SAP has executed the write; only the reply is discarded.
         #[cfg(feature = "fault-injection")]
         if let Some(error) = dropped {
+            self.admission.clear();
+
             return Err(error);
         }
 
@@ -653,6 +671,8 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
     }
 
     fn close(&mut self) -> Result<(), TransportError> {
+        self.admission.clear();
+
         if self.opened {
             self.api.close();
             self.opened = false;
@@ -668,6 +688,7 @@ pub struct FakeRfcApi {
     closes: usize,
     invocations: usize,
     last_request: Option<RfcEndpointRequest>,
+    responses: std::collections::VecDeque<RfcEndpointResponse>,
 }
 
 #[cfg(feature = "test-support")]
@@ -678,6 +699,14 @@ impl FakeRfcApi {
             closes: 0,
             invocations: 0,
             last_request: None,
+            responses: std::collections::VecDeque::new(),
+        }
+    }
+
+    pub fn with_responses(responses: Vec<RfcEndpointResponse>) -> Self {
+        Self {
+            responses: responses.into(),
+            ..Self::ok()
         }
     }
 
@@ -707,11 +736,11 @@ impl RfcApi for FakeRfcApi {
         self.invocations += 1;
         self.last_request = Some(request);
 
-        Ok(RfcEndpointResponse {
+        Ok(self.responses.pop_front().unwrap_or(RfcEndpointResponse {
             status: 200,
             headers: BTreeMap::new(),
             body: Vec::new(),
-        })
+        }))
     }
 
     fn close(&mut self) {

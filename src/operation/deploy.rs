@@ -11,7 +11,7 @@ use crate::hash::{normalize, source_hash};
 use crate::object::check_deploy_source;
 use crate::operation::read::{ReadError, resolve_group};
 use crate::policy::{Confirmer, Decision, InactiveVersion, Policies, Prompt, Terminal};
-use crate::signature::interface_diff;
+use crate::signature::{interface_diff, validate_signature};
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
@@ -682,6 +682,11 @@ impl Run<'_> {
         cancel: &CancelFlag,
     ) -> Result<Finish, Finish> {
         check_deploy_source(self.kind, &input.name, &input.source).map_err(Finish::stop)?;
+        if self.kind == ObjectKind::Func {
+            validate_signature(&input.source).map_err(|error| {
+                Finish::stop(format!("FUNC source signature unreadable: {error}"))
+            })?;
+        }
         self.resolve_target()?;
 
         let file = normalize(input.source.clone());
@@ -713,7 +718,7 @@ impl Run<'_> {
             .to_string();
 
         self.stdout.push(diff.trim_end().to_owned());
-        self.report_interface_change(&live, &file);
+        self.report_interface_change(&live, &file)?;
         self.stdout.push(format!("live hash {live_hash}"));
 
         if let Some(include) = self
@@ -802,15 +807,17 @@ impl Run<'_> {
         }
     }
 
-    /// A FUNC whose signature differs from the live one: the parameter diff, the callers and the
-    /// runtime-risk warning. Advisory: nothing here rejects, falls back, or enters the hash.
-    fn report_interface_change(&mut self, live: &[String], file: &[String]) {
+    /// A FUNC whose readable signature differs from the live one: the parameter diff, callers,
+    /// and runtime-risk warning are advisory. An unreadable live signature stops before a write.
+    fn report_interface_change(&mut self, live: &[String], file: &[String]) -> Result<(), Finish> {
         if self.kind != ObjectKind::Func {
-            return;
+            return Ok(());
         }
 
-        let Some(diff) = interface_diff(live, file) else {
-            return;
+        let Some(diff) = interface_diff(live, file)
+            .map_err(|error| Finish::stop(format!("live FUNC signature unreadable: {error}")))?
+        else {
+            return Ok(());
         };
 
         self.stdout.push("INTERFACE CHANGED".to_owned());
@@ -839,6 +846,8 @@ impl Run<'_> {
         }
 
         self.warnings.push(RUNTIME_WARNING.to_owned());
+
+        Ok(())
     }
 
     fn where_used(&mut self) -> Result<Vec<Caller>, String> {
@@ -1509,14 +1518,25 @@ impl Run<'_> {
     /// The active source equals what was deployed. A class is also read inactive, because its
     /// activation covers its includes: a different inactive version means it was not activated.
     fn confirmed(&mut self, active: &[String]) -> Finish {
-        if self.kind == ObjectKind::Clas
-            && let InactiveRead::Read(inactive) = self.read_inactive()
-            && source_hash(&inactive) != source_hash(active)
-        {
-            return Finish::status(
-                Status::Inactive,
-                "INACTIVE: the active source equals the file but the inactive source differs",
-            );
+        if self.kind == ObjectKind::Clas {
+            match self.read_inactive() {
+                InactiveRead::Read(inactive) if source_hash(&inactive) != source_hash(active) => {
+                    return Finish::status(
+                        Status::Inactive,
+                        "INACTIVE: the active source equals the file but the inactive source differs",
+                    );
+                }
+                InactiveRead::Unreadable(reason) => {
+                    return Finish::status(
+                        Status::Inactive,
+                        format!(
+                            "INACTIVE: the active source equals the file but the inactive source \
+                             is unreadable ({reason})"
+                        ),
+                    );
+                }
+                InactiveRead::Read(_) | InactiveRead::Absent => {}
+            }
         }
 
         Finish {

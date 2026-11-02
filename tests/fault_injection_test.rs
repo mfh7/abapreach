@@ -27,6 +27,25 @@ const PUT_URI: &str =
     "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?lockHandle=qdbcyR%2BxAqwY%3D";
 const ACTIVATION_URI: &str = "/sap/bc/adt/activation?method=activate&preauditRequested=true";
 
+fn with_content_type(mut request: Request, content_type: &str) -> Request {
+    request
+        .headers
+        .insert("Content-Type".to_owned(), content_type.to_owned());
+    request
+}
+
+fn put(uri: &str, body: Vec<u8>) -> Request {
+    with_content_type(Request::put(uri, body), "text/plain; charset=utf-8")
+}
+
+fn activation() -> Request {
+    with_content_type(Request::post(ACTIVATION_URI, Vec::new()), "application/xml")
+}
+
+fn create(uri: &str, body: Vec<u8>) -> Request {
+    with_content_type(Request::post(uri, body), "application/*")
+}
+
 fn v2() -> DeployInput {
     DeployInput {
         name: "YTEST_ABAPREACH01".to_owned(),
@@ -206,10 +225,7 @@ fn the_put_is_dropped_and_the_activation_is_not() {
 
     assert!(get.is_ok());
 
-    let put = transport.request(Request::put(
-        PUT_URI,
-        b"REPORT ytest_abapreach01.\n".to_vec(),
-    ));
+    let put = transport.request(put(PUT_URI, b"REPORT ytest_abapreach01.\n".to_vec()));
 
     assert_eq!(
         put.unwrap_err(),
@@ -217,7 +233,7 @@ fn the_put_is_dropped_and_the_activation_is_not() {
     );
     assert_eq!(transport.api().counts(), (1, 0, 2));
 
-    let activation = transport.request(Request::post(ACTIVATION_URI, Vec::new()));
+    let activation = transport.request(activation());
 
     assert!(activation.is_ok());
 }
@@ -226,11 +242,11 @@ fn the_put_is_dropped_and_the_activation_is_not() {
 fn the_activation_is_dropped_and_the_put_is_not() {
     let mut transport =
         RfcTransport::with_fault(FakeRfcApi::ok(), Some(injection("drop-reply:ACTIVATE")));
-    let put = transport.request(Request::put(PUT_URI, Vec::new()));
+    let put = transport.request(put(PUT_URI, Vec::new()));
 
     assert!(put.is_ok());
 
-    let activation = transport.request(Request::post(ACTIVATION_URI, Vec::new()));
+    let activation = transport.request(activation());
 
     assert_eq!(
         activation.unwrap_err(),
@@ -254,7 +270,7 @@ fn the_create_post_is_dropped_after_it_ran_and_nothing_else_is() {
     for uri in creates {
         let mut transport =
             RfcTransport::with_fault(FakeRfcApi::ok(), Some(injection("drop-reply:CREATE")));
-        let create = transport.request(Request::post(uri, b"<x/>".to_vec()));
+        let create = transport.request(create(uri, b"<x/>".to_vec()));
 
         assert_eq!(
             create.unwrap_err(),
@@ -289,15 +305,15 @@ fn a_create_fault_leaves_validation_reconciliation_and_the_other_writes_alone() 
             "/sap/bc/adt/oo/classes/zcl?_action=LOCK&accessMode=MODIFY",
             Vec::new(),
         ),
-        Request::put(
+        put(
             "/sap/bc/adt/oo/classes/zcl/source/main?lockHandle=a%2Bb",
             Vec::new(),
         ),
-        Request::post(
+        create(
             "/sap/bc/adt/oo/classes/zcl/includes?lockHandle=a%2Bb",
             Vec::new(),
         ),
-        Request::post(ACTIVATION_URI, Vec::new()),
+        activation(),
     ];
 
     for request in others {
@@ -310,7 +326,7 @@ fn a_create_fault_leaves_validation_reconciliation_and_the_other_writes_alone() 
 
         assert!(
             transport
-                .request(Request::post("/sap/bc/adt/oo/classes", Vec::new()))
+                .request(create("/sap/bc/adt/oo/classes", Vec::new()))
                 .is_ok(),
             "{target}"
         );
@@ -321,12 +337,8 @@ fn a_create_fault_leaves_validation_reconciliation_and_the_other_writes_alone() 
 fn without_a_fault_every_request_is_answered() {
     let mut transport = RfcTransport::with_fault(FakeRfcApi::ok(), None);
 
-    assert!(transport.request(Request::put(PUT_URI, Vec::new())).is_ok());
-    assert!(
-        transport
-            .request(Request::post(ACTIVATION_URI, Vec::new()))
-            .is_ok()
-    );
+    assert!(transport.request(put(PUT_URI, Vec::new())).is_ok());
+    assert!(transport.request(activation()).is_ok());
 }
 
 #[test]

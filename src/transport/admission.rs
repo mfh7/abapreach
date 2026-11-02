@@ -5,6 +5,7 @@
 //! parameter is refused. Pure logic with no platform dependency.
 
 use super::Request;
+use crate::adt::{ActivationBody, classify_activation, parse_object_refs};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
@@ -56,15 +57,17 @@ struct Path {
     part: Part,
 }
 
-/// The state the boundary keeps: the class of the last admitted first activation step, which is
-/// the only class whose worklist the second step may resend.
+/// The state the boundary keeps between activation calls. A resend is only legal for the exact
+/// worklist returned by the RFC endpoint after a class's first activation request.
 #[derive(Debug, Default)]
 pub struct Admission {
-    activated_class: Option<String>,
+    awaiting_first_response: bool,
+    expected_worklist: Option<Vec<String>>,
 }
 
 impl Admission {
-    /// Whether the request may be sent. Admitting a first activation step remembers its class.
+    /// Whether the request may be sent. A class first step waits for its RFC response before a
+    /// resend can be admitted.
     pub fn admits(&mut self, request: &Request) -> bool {
         let uri = request.uri.as_str();
 
@@ -76,13 +79,14 @@ impl Admission {
 
         match request.method.as_str() {
             "GET" => is_read(uri, path, query),
-            "PUT" => is_put(path, query),
+            "PUT" => is_put(path, query) && has_content_type(request, "text/plain; charset=utf-8"),
             "POST" => {
                 if let Some(preaudit) = uri.strip_prefix(ACTIVATION) {
-                    return self.admits_activation(preaudit, &request.body);
+                    return has_content_type(request, "application/xml")
+                        && self.admits_activation(preaudit, &request.body);
                 }
 
-                is_post(uri, path, query)
+                is_post(request, uri, path, query)
             }
             _ => false,
         }
@@ -98,9 +102,9 @@ impl Admission {
 
     /// The first step names one object. An empty body is the M1 request and activates nothing.
     fn first_step(&mut self, body: &[u8]) -> bool {
-        if body.is_empty() {
-            self.activated_class = None;
+        self.clear();
 
+        if body.is_empty() {
             return true;
         }
 
@@ -118,20 +122,43 @@ impl Admission {
             return false;
         }
 
-        self.activated_class = (parsed.kind == Kind::Clas).then(|| reference.to_ascii_lowercase());
+        self.awaiting_first_response = parsed.kind == Kind::Clas;
 
         true
     }
 
-    /// The second step of a transportable class: every entry of the worklist, members with their
-    /// `#type=` fragment included, and every one below the class of the first step.
-    fn resend(&self, body: &[u8]) -> bool {
-        let (Some(class), Some(entries)) = (self.activated_class.as_deref(), references(body))
-        else {
-            return false;
-        };
+    /// The sole resend consumes the worklist even when it does not match, so a rejected request
+    /// cannot be followed by another attempt.
+    fn resend(&mut self, body: &[u8]) -> bool {
+        let expected = self.expected_worklist.take();
+        self.awaiting_first_response = false;
 
-        !entries.is_empty() && entries.iter().all(|entry| is_class_entry(class, entry))
+        matches!(
+            (expected, references(body)),
+            (Some(expected), Some(actual)) if actual == expected
+        )
+    }
+
+    /// Records the first activation response the RFC transport actually received. Anything other
+    /// than a non-empty worklist makes a resend unavailable.
+    pub(crate) fn received_response(&mut self, status: u16, body: &[u8]) {
+        if !self.awaiting_first_response {
+            return;
+        }
+
+        self.awaiting_first_response = false;
+        self.expected_worklist = ((200..300).contains(&status)
+            && classify_activation(&String::from_utf8_lossy(body)) == ActivationBody::Worklist)
+            .then(|| parse_object_refs(&String::from_utf8_lossy(body)).ok())
+            .flatten()
+            .filter(|entries| !entries.is_empty())
+            .map(|entries| entries.into_iter().map(|entry| entry.uri).collect());
+    }
+
+    /// No error or terminal path may leave a resend capability behind.
+    pub(crate) fn clear(&mut self) {
+        self.awaiting_first_response = false;
+        self.expected_worklist = None;
     }
 }
 
@@ -200,9 +227,9 @@ fn is_put(path: &str, query: Option<&str>) -> bool {
         && query.is_some_and(is_lock_and_request)
 }
 
-fn is_post(uri: &str, path: &str, query: Option<&str>) -> bool {
+fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> bool {
     if uri == CHECKRUNS {
-        return true;
+        return has_content_type(request, "application/*");
     }
 
     if path == USAGE_REFERENCES {
@@ -214,7 +241,7 @@ fn is_post(uri: &str, path: &str, query: Option<&str>) -> bool {
     }
 
     if is_create(path, query) {
-        return true;
+        return has_content_type(request, "application/*");
     }
 
     let Some(parsed) = parse_path(path) else {
@@ -226,9 +253,18 @@ fn is_post(uri: &str, path: &str, query: Option<&str>) -> bool {
             query == LOCK || query.strip_prefix(UNLOCK).is_some_and(is_encoded_handle)
         }),
         // The include POST runs under the class lock.
-        Part::Includes => query.is_some_and(is_lock_and_request),
+        Part::Includes => {
+            query.is_some_and(is_lock_and_request) && has_content_type(request, "application/*")
+        }
         _ => false,
     }
+}
+
+fn has_content_type(request: &Request, expected: &str) -> bool {
+    request
+        .headers
+        .get("Content-Type")
+        .is_some_and(|value| value == expected)
 }
 
 /// `lockHandle=<handle>[&corrNr=<request>]`, the query of a write under a lock. A lock itself
@@ -385,9 +421,14 @@ fn part_of(kind: Kind, tail: &str) -> Option<Part> {
     }
 }
 
-/// An object name as one path segment: SAP name characters only, so `.`, `..`, an empty segment
-/// and an escape are refused. Only a program accepts the `%2f` of a namespace slash.
+/// An object name as one path segment. Existing M1 program paths accepted legal SAP segment
+/// characters such as `$`, `-` and `.`; preserve those while accepting only the evidenced `%2f`
+/// namespace escape. New M3 object paths remain deliberately narrower.
 fn is_name(name: &str, namespace_escape: bool) -> bool {
+    if namespace_escape {
+        return is_m1_program_name(name);
+    }
+
     let mut rest = name;
 
     if rest.is_empty() {
@@ -397,14 +438,35 @@ fn is_name(name: &str, namespace_escape: bool) -> bool {
     while let Some(character) = rest.chars().next() {
         if character.is_ascii_alphanumeric() || character == '_' {
             rest = &rest[1..];
-        } else if namespace_escape
-            && rest
-                .get(..3)
-                .is_some_and(|escape| escape.eq_ignore_ascii_case("%2f"))
-        {
-            rest = &rest[3..];
         } else {
             return false;
+        }
+    }
+
+    true
+}
+
+fn is_m1_program_name(name: &str) -> bool {
+    if name.is_empty() || matches!(name, "." | "..") {
+        return false;
+    }
+
+    let mut rest = name;
+    while let Some(character) = rest.chars().next() {
+        if character == '%' {
+            if !rest
+                .get(..3)
+                .is_some_and(|escape| escape.eq_ignore_ascii_case("%2f"))
+            {
+                return false;
+            }
+            rest = &rest[3..];
+        } else if character == '/'
+            || !(character.is_ascii_alphanumeric() || matches!(character, '_' | '$' | '-' | '.'))
+        {
+            return false;
+        } else {
+            rest = &rest[character.len_utf8()..];
         }
     }
 
@@ -446,42 +508,6 @@ fn is_encoded(value: &str) -> bool {
     }
 
     true
-}
-
-/// Whether a worklist entry lies under the class: the class, a part of it, or a member of its
-/// source with the `#type=<type>;name=<name>` fragment the worklist lists.
-fn is_class_entry(class: &str, entry: &str) -> bool {
-    let (uri, fragment) = match entry.split_once('#') {
-        Some((uri, fragment)) => (uri, Some(fragment)),
-        None => (entry, None),
-    };
-    let uri = uri.to_ascii_lowercase();
-    let below = match uri.strip_prefix(class) {
-        Some("") => true,
-        Some(rest) => rest
-            .strip_prefix('/')
-            .is_some_and(|rest| rest.split('/').all(|segment| is_name(segment, false))),
-        None => false,
-    };
-
-    below && fragment.is_none_or(is_member_fragment)
-}
-
-fn is_member_fragment(fragment: &str) -> bool {
-    let Some((object_type, name)) = fragment
-        .strip_prefix("type=")
-        .and_then(|rest| rest.split_once(";name="))
-    else {
-        return false;
-    };
-    let characters = |value: &str, extra: &[char]| {
-        !value.is_empty()
-            && value
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '%' || extra.contains(&c))
-    };
-
-    characters(object_type, &[]) && characters(name, &['~', '.', '=', '-'])
 }
 
 /// The `uri` of every `objectReference` of an activation body. A body that is not an

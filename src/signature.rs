@@ -2,6 +2,7 @@
 //! to the first `.`. Only the interface is compared, so a change of the body is never reported.
 
 use similar::TextDiff;
+use std::fmt;
 
 const SECTIONS: [&str; 6] = [
     "IMPORTING",
@@ -19,22 +20,46 @@ const SECTIONS: [&str; 6] = [
 ///
 /// shortcut: parameters are compared as tokens and shown per line, not parsed into typed
 /// parameters; upgrade when a reader needs "parameter X changed" instead of a line diff.
-pub fn interface_diff(live: &[String], file: &[String]) -> Option<Vec<String>> {
+pub fn interface_diff(
+    live: &[String],
+    file: &[String],
+) -> Result<Option<Vec<String>>, SignatureError> {
     let live = signature(live)?;
     let file = signature(file)?;
 
     if tokens(&live) == tokens(&file) {
-        return None;
+        return Ok(None);
     }
 
     let diff = TextDiff::from_lines(render(&live), render(&file));
     let text = diff.unified_diff().header("live", "file").to_string();
 
-    Some(text.lines().map(str::to_owned).collect())
+    Ok(Some(text.lines().map(str::to_owned).collect()))
+}
+
+/// Rejecting a malformed local FUNC source before checkrun prevents it from being treated as a
+/// body-only edit. A malformed live source is equally not comparable.
+pub fn validate_signature(source: &[String]) -> Result<(), SignatureError> {
+    signature(source).map(|_| ())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SignatureError {
+    Unreadable,
+}
+
+impl fmt::Display for SignatureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unreadable => {
+                formatter.write_str("FUNCTION statement is missing or unterminated")
+            }
+        }
+    }
 }
 
 /// The signature as display lines: one section keyword or one declaration per line.
-fn signature(source: &[String]) -> Option<Vec<Vec<String>>> {
+fn signature(source: &[String]) -> Result<Vec<Vec<String>>, SignatureError> {
     let mut statement: Vec<Vec<String>> = Vec::new();
     let mut ended = false;
 
@@ -55,10 +80,12 @@ fn signature(source: &[String]) -> Option<Vec<Vec<String>>> {
         }
     }
 
-    let first = statement.first()?.first()?;
+    let Some(first) = statement.first().and_then(|line| line.first()) else {
+        return Err(SignatureError::Unreadable);
+    };
 
     if !ended || first != "FUNCTION" {
-        return None;
+        return Err(SignatureError::Unreadable);
     }
 
     let mut lines = Vec::new();
@@ -83,7 +110,7 @@ fn signature(source: &[String]) -> Option<Vec<Vec<String>>> {
         }
     }
 
-    Some(lines)
+    Ok(lines)
 }
 
 fn flush(word: &mut String, tokens: &mut Vec<String>) {

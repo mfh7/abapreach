@@ -1718,6 +1718,8 @@ fn deploy_of_the_m3_kinds_reaches_the_transport_instead_of_the_not_available_sto
     fake.adt
         .push_back(scripted(vec![Ok(Response::text(200, search))]));
 
+    fs::write(&file, "FUNCTION ytest_fm.\n  WRITE 'x'.\nENDFUNCTION.\n").unwrap();
+
     let exit = go(
         &[
             "abapreach",

@@ -786,6 +786,47 @@ fn a_body_only_func_change_asks_no_where_used() {
 }
 
 #[test]
+fn unreadable_func_signatures_stop_before_the_checkrun() {
+    let live = func_rendered("v1");
+    let malformed = lines("WRITE 'not a function'.");
+    let cases = [
+        (
+            "file",
+            func_locked_phase(func_before_lock(&live, &empty_worklist()), &live).post(
+                &format!("{FM_URI}?_action=UNLOCK&{HANDLE_QUERY}"),
+                200,
+                "",
+            ),
+            malformed.clone(),
+        ),
+        (
+            "live",
+            func_locked_phase(
+                func_before_lock("WRITE 'not a function'.", &empty_worklist()),
+                "WRITE 'not a function'.",
+            )
+            .post(&format!("{FM_URI}?_action=UNLOCK&{HANDLE_QUERY}"), 200, ""),
+            func_source("v2"),
+        ),
+    ];
+
+    for (side, mut fake, file) in cases {
+        let result = run(
+            &mut fake,
+            FM,
+            func_scope(),
+            input(&file, true, None),
+            ForeignInactive::Reject,
+        );
+
+        assert_eq!(result.outcome.exit, 2, "{side}: {:?}", result.outcome);
+        assert!(result.outcome.stderr.contains("signature"), "{side}");
+        assert_eq!(fake.count("POST", "checkruns"), 0, "{side}");
+        assert_eq!(fake.count("POST", "_action=LOCK"), 0, "{side}");
+    }
+}
+
+#[test]
 fn a_supplied_group_that_differs_from_the_resolved_one_stops_after_the_resolution() {
     let mut fake = Fake::new().get(&func_search(), 200, &search_reply());
     let result = run(
@@ -1286,6 +1327,57 @@ fn a_class_whose_inactive_source_still_differs_after_activation_is_inactive() {
 
     assert_eq!(result.outcome.status, Some(Status::Inactive));
     assert_eq!(result.outcome.exit, 1);
+}
+
+#[test]
+fn class_activation_never_reports_active_when_the_inactive_reread_is_unreadable() {
+    let file = main_source("v2");
+    let unreadable = [
+        (
+            "transport",
+            Err(TransportError::NoResponse("lost".to_owned())),
+        ),
+        ("http", Ok(Response::empty(500))),
+        (
+            "utf8",
+            Ok(Response {
+                status: 200,
+                headers: Default::default(),
+                body: vec![0xff],
+            }),
+        ),
+    ];
+
+    for (activation, body) in [("clean", ""), ("warnings", MESSAGES_W)] {
+        for (kind, inactive) in &unreadable {
+            let (source, fake) = transportable_class_put();
+            let mut fake = fake
+                .post(ACTIVATE, 200, body)
+                .get(&format!("{source}?version=active"), 200, &text_of(&file))
+                .on(
+                    "GET",
+                    &format!("{source}?version=inactive"),
+                    inactive.clone(),
+                );
+            let result = deploy_transportable_class(&mut fake, &file);
+
+            assert_eq!(
+                result.outcome.status,
+                Some(Status::Inactive),
+                "{activation}/{kind}: {:?}",
+                result.outcome
+            );
+            assert_eq!(result.outcome.exit, 1, "{activation}/{kind}");
+            assert!(
+                result
+                    .outcome
+                    .stdout
+                    .contains("inactive source is unreadable"),
+                "{activation}/{kind}: {}",
+                result.outcome.stdout
+            );
+        }
+    }
 }
 
 #[test]
