@@ -1846,7 +1846,7 @@ fn create_with_a_transportable_package_and_no_request_stops_before_any_connectio
     let directory = tempfile::tempdir().unwrap();
     let mut fake = Fake::default();
     let exit = go(
-        &create_args(&["--package", "ZABAPTEST"]),
+        &create_args(&["--package", "ZPKG_TEST"]),
         directory.path(),
         &mut fake,
     );
@@ -1856,7 +1856,7 @@ fn create_with_a_transportable_package_and_no_request_stops_before_any_connectio
     assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
 
     let exit = go(
-        &create_args(&["--package", "ZABAPTEST", "--tr", "DEVK9&x"]),
+        &create_args(&["--package", "ZPKG_TEST", "--tr", "DEVK9&x"]),
         directory.path(),
         &mut fake,
     );

@@ -573,9 +573,12 @@ pub struct RfcTransport<A> {
     opened: bool,
     /// The request boundary and the state of the activation protocol it keeps.
     admission: Admission,
-    /// Test-only: the write whose reply is discarded after SAP executed it.
+    /// Test-only: the write whose reply is discarded after SAP executed it, and the read that fails.
     #[cfg(feature = "fault-injection")]
-    fault: Option<crate::fault::Fault>,
+    faults: Vec<crate::fault::Fault>,
+    /// Test-only: a create `POST` has been admitted, so the next `GET` is its reconciliation read.
+    #[cfg(feature = "fault-injection")]
+    create_sent: bool,
 }
 
 impl<A> RfcTransport<A> {
@@ -585,17 +588,25 @@ impl<A> RfcTransport<A> {
             opened: false,
             admission: Admission::default(),
             #[cfg(feature = "fault-injection")]
-            fault: crate::fault::Fault::from_env(),
+            faults: crate::fault::Fault::from_env(),
+            #[cfg(feature = "fault-injection")]
+            create_sent: false,
         }
     }
 
     #[cfg(feature = "fault-injection")]
     pub fn with_fault(api: A, fault: Option<crate::fault::Fault>) -> Self {
+        Self::with_faults(api, fault.into_iter().collect())
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub fn with_faults(api: A, faults: Vec<crate::fault::Fault>) -> Self {
         Self {
             api,
             opened: false,
             admission: Admission::default(),
-            fault,
+            faults,
+            create_sent: false,
         }
     }
 
@@ -633,9 +644,27 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
         }
         // Decided before the request is consumed by the call.
         #[cfg(feature = "fault-injection")]
-        let dropped = self
-            .fault
-            .and_then(|fault| fault.drop_reply(is_fault_target(fault.target(), &request)));
+        let read_is_reconciliation = request.method == "GET" && self.create_sent;
+        #[cfg(feature = "fault-injection")]
+        if is_create_post(&request) {
+            self.create_sent = true;
+        }
+        #[cfg(feature = "fault-injection")]
+        if let Some(error) = self
+            .faults
+            .iter()
+            .find_map(|fault| fault.fail_read(read_is_reconciliation))
+        {
+            self.admission.clear();
+
+            return Err(error);
+        }
+        #[cfg(feature = "fault-injection")]
+        let dropped = self.faults.iter().find_map(|fault| {
+            fault
+                .target()
+                .and_then(|target| fault.drop_reply(is_fault_target(target, &request)))
+        });
         let response = match self.api.invoke(RfcEndpointRequest {
             function: SADT_REST_RFC_ENDPOINT,
             method: request.method,

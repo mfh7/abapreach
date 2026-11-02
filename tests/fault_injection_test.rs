@@ -5,8 +5,11 @@
 mod common;
 mod replay;
 
+use abapreach::backend::{BackendKind, Selection, SelectionReason};
+use abapreach::cli::CreateKind;
 use abapreach::config::Connection;
 use abapreach::fault::{Fault, Target};
+use abapreach::operation::create::{CreateInput, CreateProg};
 use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg};
 use abapreach::transport::rfc::{
     FakeRfcApi, RfcApi, RfcEndpointRequest, RfcEndpointResponse, RfcTransport,
@@ -61,7 +64,7 @@ fn v2() -> DeployInput {
 }
 
 fn injection(target: &str) -> Fault {
-    Fault::from_lookup(Some(target)).unwrap().unwrap()
+    Fault::from_lookup(Some(target)).unwrap().pop().unwrap()
 }
 
 /// The recorded deploy of v2 over v1 up to and including the PUT.
@@ -333,6 +336,144 @@ fn a_create_fault_leaves_validation_reconciliation_and_the_other_writes_alone() 
     }
 }
 
+const RECONCILE_URI: &str =
+    "/sap/bc/adt/oo/classes/zcl/objectstructure?version=active&withShortDescriptions=true";
+
+#[test]
+fn the_read_after_a_create_fails_without_reaching_sap_and_no_other_read_does() {
+    let mut transport =
+        RfcTransport::with_fault(FakeRfcApi::ok(), Some(injection("fail-read:RECONCILE")));
+
+    // Reads before the create, and the create itself, are untouched.
+    assert!(transport.request(Request::get(RECONCILE_URI)).is_ok());
+    assert!(
+        transport
+            .request(Request::get("/sap/bc/adt/functions/groups/zfg"))
+            .is_ok()
+    );
+    assert!(
+        transport
+            .request(create("/sap/bc/adt/oo/classes", Vec::new()))
+            .is_ok()
+    );
+    assert_eq!(transport.api().counts(), (1, 0, 3));
+
+    let read = transport.request(Request::get(RECONCILE_URI));
+
+    assert_eq!(
+        read.unwrap_err(),
+        TransportError::NoResponse("injected fault: the reconciliation read failed".to_owned())
+    );
+    // The read never reached the endpoint.
+    assert_eq!(transport.api().counts(), (1, 0, 3));
+}
+
+#[test]
+fn the_reconciliation_fault_leaves_a_run_without_a_create_alone() {
+    for fault in [Some("drop-reply:CREATE"), Some("drop-reply:PUT"), None] {
+        let mut transport = RfcTransport::with_fault(FakeRfcApi::ok(), fault.map(injection));
+
+        assert!(
+            transport
+                .request(create("/sap/bc/adt/oo/classes", Vec::new()))
+                .is_err()
+                == (fault == Some("drop-reply:CREATE"))
+        );
+        // Only the reconciliation fault fails a read; a drop-reply fault never does.
+        assert!(
+            transport.request(Request::get(RECONCILE_URI)).is_ok(),
+            "{fault:?}"
+        );
+    }
+}
+
+#[test]
+fn both_faults_combine_a_lost_create_reply_and_a_failed_reconciliation() {
+    let mut transport = RfcTransport::with_faults(
+        FakeRfcApi::ok(),
+        Fault::from_lookup(Some("drop-reply:CREATE,fail-read:RECONCILE")).unwrap(),
+    );
+    let post = transport.request(create("/sap/bc/adt/oo/classes", Vec::new()));
+
+    assert!(post.unwrap_err().is_post_send_uncertain());
+    assert!(transport.request(Request::get(RECONCILE_URI)).is_err());
+    assert_eq!(transport.api().counts(), (1, 0, 1));
+}
+
+fn clas_create() -> CreateInput {
+    CreateInput {
+        kind: CreateKind::Clas,
+        name: "ZCL".to_owned(),
+        text: "T".to_owned(),
+        package: None,
+        group: None,
+        tr: None,
+        simulate: false,
+    }
+}
+
+fn reply(status: u16, body: &str) -> RfcEndpointResponse {
+    RfcEndpointResponse {
+        status,
+        headers: BTreeMap::new(),
+        body: body.as_bytes().to_vec(),
+    }
+}
+
+#[test]
+fn a_failed_reconciliation_read_ends_the_create_partial_without_a_second_post() {
+    let check_ok = concat!(
+        r#"<asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA>"#,
+        r#"<CHECK_RESULT>X</CHECK_RESULT></DATA></asx:values></asx:abap>"#,
+    );
+    let selection = Selection::new(BackendKind::RfcSadt, SelectionReason::DefaultAdt);
+    let mut connection = Connection::test_insecure();
+
+    connection.user = "TESTUSER".to_owned();
+
+    for (value, detail) in [
+        (
+            "drop-reply:CREATE,fail-read:RECONCILE",
+            "no response to a read-only request: injected fault: the reconciliation read failed",
+        ),
+        // Without the read fault the same lost reply reconciles to an existing object.
+        ("drop-reply:CREATE", "ZCL exists"),
+    ] {
+        let mut transport = RfcTransport::with_faults(
+            FakeRfcApi::with_responses(vec![
+                reply(200, check_ok),
+                reply(200, ""),
+                reply(200, "<x/>"),
+            ]),
+            Fault::from_lookup(Some(value)).unwrap(),
+        );
+        let result = CreateProg::run(
+            &mut transport,
+            clas_create(),
+            Some(&selection),
+            Some(&connection),
+        );
+
+        assert_eq!(
+            result.outcome.status,
+            Some(abapreach::domain::Status::Partial),
+            "{value}"
+        );
+        assert_eq!(result.outcome.exit, 1, "{value}");
+        assert!(
+            result.outcome.stdout.contains("CREATE: PARTIAL"),
+            "{value}: {}",
+            result.outcome.stdout
+        );
+        assert!(
+            result.outcome.stdout.contains(detail),
+            "{value}: {}",
+            result.outcome.stdout
+        );
+        assert!(!result.fallback_allowed, "{value}");
+    }
+}
+
 #[test]
 fn without_a_fault_every_request_is_answered() {
     let mut transport = RfcTransport::with_fault(FakeRfcApi::ok(), None);
@@ -347,9 +488,9 @@ fn a_target_only_matches_its_own_write() {
     let activation = injection("drop-reply:ACTIVATE");
     let create = injection("drop-reply:CREATE");
 
-    assert_eq!(put.target(), Target::Put);
-    assert_eq!(activation.target(), Target::Activate);
-    assert_eq!(create.target(), Target::Create);
+    assert_eq!(put.target(), Some(Target::Put));
+    assert_eq!(activation.target(), Some(Target::Activate));
+    assert_eq!(create.target(), Some(Target::Create));
     assert_eq!(put.drop_reply(false), None);
     assert_eq!(activation.drop_reply(false), None);
     assert_eq!(create.drop_reply(false), None);
@@ -494,6 +635,28 @@ fn a_valid_fault_warning_precedes_every_early_stop() {
         );
         assert_eq!(fake.opens, 0);
     }
+}
+
+#[test]
+fn a_combined_value_prints_every_fault_in_one_warning() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Unreachable::default();
+    let exit = run(
+        vec!["abapreach".to_owned(), "bogus".to_owned()],
+        env(
+            directory.path(),
+            Some("drop-reply:CREATE,fail-read:RECONCILE"),
+        ),
+        &mut fake,
+    );
+
+    assert!(
+        exit.stderr.starts_with(
+            "WARNING: fault injection active (drop-reply:CREATE,fail-read:RECONCILE)\n"
+        ),
+        "{}",
+        exit.stderr
+    );
 }
 
 #[test]

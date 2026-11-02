@@ -33,6 +33,8 @@ internal repository where that implementation was developed. See the
   pre-audit, only when every entry is under the class URI; an error message fails the deploy and a
   warning-only response is verified by rereading the source.
 - RFC admission allow-list covers the new object kinds.
+- Fault-injection builds accept `drop-reply:CREATE` and `fail-read:RECONCILE`, combinable as a
+  comma-separated `ABAPREACH_FAULT` list, to test uncertain create outcomes.
 
 ### Fixed
 - Windows, SAP GUI 8.00 `sapnwrfccm.dll`: the library is a single-byte build, so the UTF-16 strings

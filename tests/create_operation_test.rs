@@ -382,8 +382,8 @@ fn the_description_is_escaped_in_the_body() {
 fn every_transportable_post_carries_the_corrnr() {
     for kind in KINDS {
         let status = if kind == CreateKind::Func { 201 } else { 200 };
-        let package = (kind != CreateKind::Func).then_some("ZABAPTEST");
-        let mut fake = clean(kind, "ZABAPTEST", Some(TR), status);
+        let package = (kind != CreateKind::Func).then_some("ZPKG_TEST");
+        let mut fake = clean(kind, "ZPKG_TEST", Some(TR), status);
         let result = run(&mut fake, input(kind, package, Some(TR), false));
 
         assert_eq!(result.outcome.exit, 0, "{kind:?}: {:?}", result.outcome);
@@ -400,22 +400,22 @@ fn every_transportable_post_carries_the_corrnr() {
 fn a_transportable_package_without_a_request_cannot_become_a_scope() {
     assert_eq!(PackageScope::of("$TMP", None), Ok(PackageScope::Local));
     assert_eq!(
-        PackageScope::of("ZABAPTEST", Some(TR)),
+        PackageScope::of("ZPKG_TEST", Some(TR)),
         Ok(PackageScope::Transportable {
             request: TR.to_owned()
         })
     );
-    assert!(PackageScope::of("ZABAPTEST", None).is_err());
+    assert!(PackageScope::of("ZPKG_TEST", None).is_err());
     assert!(PackageScope::of("$TMP", Some(TR)).is_err());
-    assert!(PackageScope::of("ZABAPTEST", Some("")).is_err());
-    assert!(PackageScope::of("ZABAPTEST", Some("DEVK9&corrNr=X")).is_err());
-    assert!(PackageScope::of("ZABAPTEST", Some(&"D".repeat(21))).is_err());
+    assert!(PackageScope::of("ZPKG_TEST", Some("")).is_err());
+    assert!(PackageScope::of("ZPKG_TEST", Some("DEVK9&corrNr=X")).is_err());
+    assert!(PackageScope::of("ZPKG_TEST", Some(&"D".repeat(21))).is_err());
 }
 
 #[test]
 fn the_creation_uri_appends_the_corrnr_only_for_a_transportable_scope() {
     let local = PackageScope::Local;
-    let transportable = PackageScope::of("ZABAPTEST", Some(TR)).unwrap();
+    let transportable = PackageScope::of("ZPKG_TEST", Some(TR)).unwrap();
 
     for kind in KINDS {
         let base = kind.creation_uri(Some("YTEST_ABAPREACH_FG")).unwrap();
@@ -445,11 +445,11 @@ fn simulate_validates_and_writes_nothing() {
         let mut fake = Fake::new();
 
         if kind == CreateKind::Func {
-            fake = fake.get(GROUP_URI, 200, &group_metadata("ZABAPTEST"));
+            fake = fake.get(GROUP_URI, 200, &group_metadata("ZPKG_TEST"));
         }
 
-        let mut fake = fake.post(&validation_uri(kind, "ZABAPTEST"), 200, &ok);
-        let package = (kind != CreateKind::Func).then_some("ZABAPTEST");
+        let mut fake = fake.post(&validation_uri(kind, "ZPKG_TEST"), 200, &ok);
+        let package = (kind != CreateKind::Func).then_some("ZPKG_TEST");
         let result = run(&mut fake, input(kind, package, Some(TR), true));
 
         assert_eq!(result.outcome.status, Some(Status::SimulatedOk), "{kind:?}");
@@ -609,7 +609,7 @@ fn a_function_module_without_its_group_is_rejected_before_validation() {
 #[test]
 fn a_function_module_follows_the_transport_rules_of_its_group_package() {
     // A transportable group needs --tr; a local group rejects it. Both stop with exit 2.
-    let mut fake = Fake::new().get(GROUP_URI, 200, &group_metadata("ZABAPTEST"));
+    let mut fake = Fake::new().get(GROUP_URI, 200, &group_metadata("ZPKG_TEST"));
     let result = run(&mut fake, input(CreateKind::Func, None, None, false));
 
     assert_eq!(result.outcome.exit, 2);
@@ -917,10 +917,10 @@ fn a_backend_without_a_stateful_session_creates_nothing() {
 
 #[test]
 fn the_report_names_the_backend_and_the_plan() {
-    let mut fake = clean(CreateKind::Intf, "ZABAPTEST", Some(TR), 200);
+    let mut fake = clean(CreateKind::Intf, "ZPKG_TEST", Some(TR), 200);
     let result = run(
         &mut fake,
-        input(CreateKind::Intf, Some("ZABAPTEST"), Some(TR), false),
+        input(CreateKind::Intf, Some("ZPKG_TEST"), Some(TR), false),
     );
     let lines: Vec<&str> = result.outcome.stdout.lines().collect();
 

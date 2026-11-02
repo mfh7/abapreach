@@ -11,6 +11,8 @@ use crate::transport::TransportError;
 pub const ENV: &str = "ABAPREACH_FAULT";
 
 const DROP_REPLY: &str = "drop-reply";
+const FAIL_READ: &str = "fail-read";
+const RECONCILE: &str = "RECONCILE";
 const UNKNOWN: &str = "unknown ABAPREACH_FAULT value";
 
 /// The write whose reply is dropped.
@@ -47,58 +49,82 @@ impl Target {
 pub enum Fault {
     /// The request is sent and executed, then its reply is discarded.
     DropReply(Target),
+    /// The read-only reconciliation GET that follows a create `POST` fails without being sent.
+    FailReconcileRead,
 }
 
 impl Fault {
     fn parse(value: &str) -> Option<Self> {
         let (action, target) = value.split_once(':')?;
 
-        match action {
-            DROP_REPLY => Some(Self::DropReply(Target::parse(target)?)),
+        match (action, target) {
+            (DROP_REPLY, _) => Some(Self::DropReply(Target::parse(target)?)),
+            (FAIL_READ, RECONCILE) => Some(Self::FailReconcileRead),
             _ => None,
         }
     }
 
-    /// `Ok(None)` when the variable is unset, `Err` for a value this build does not know.
-    pub fn from_lookup(value: Option<&str>) -> Result<Option<Self>, String> {
-        match value {
-            None => Ok(None),
-            Some(value) => Self::parse(value)
-                .map(Some)
-                .ok_or_else(|| UNKNOWN.to_owned()),
-        }
-    }
-
-    /// The fault the process environment selects. An unknown value has already stopped the
-    /// command (`app::run`) before the first request, so it injects nothing here.
-    pub fn from_env() -> Option<Self> {
-        Self::from_lookup(std::env::var(ENV).ok().as_deref())
-            .ok()
-            .flatten()
-    }
-
-    pub fn target(self) -> Target {
-        match self {
-            Self::DropReply(target) => target,
-        }
-    }
-
-    /// The stderr line every command prints while the fault is active.
-    pub fn warning(self) -> String {
-        format!(
-            "WARNING: fault injection active (drop-reply:{})",
-            self.target().name()
+    /// The faults the variable selects: empty when it is unset, otherwise a comma-separated list
+    /// (`drop-reply:CREATE,fail-read:RECONCILE`). `Err` for any item this build does not know.
+    pub fn from_lookup(value: Option<&str>) -> Result<Vec<Self>, String> {
+        value.map_or_else(
+            || Ok(Vec::new()),
+            |value| {
+                value
+                    .split(',')
+                    .map(|item| Self::parse(item).ok_or_else(|| UNKNOWN.to_owned()))
+                    .collect()
+            },
         )
+    }
+
+    /// The faults the process environment selects. An unknown value has already stopped the
+    /// command (`app::run`) before the first request, so it injects nothing here.
+    pub fn from_env() -> Vec<Self> {
+        Self::from_lookup(std::env::var(ENV).ok().as_deref()).unwrap_or_default()
+    }
+
+    /// The write a drop-reply fault targets; `None` for a fault that drops no reply.
+    pub fn target(self) -> Option<Target> {
+        match self {
+            Self::DropReply(target) => Some(target),
+            Self::FailReconcileRead => None,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::DropReply(target) => format!("{DROP_REPLY}:{}", target.name()),
+            Self::FailReconcileRead => format!("{FAIL_READ}:{RECONCILE}"),
+        }
+    }
+
+    /// The stderr line every command prints while the faults are active; `None` without any.
+    pub fn warning(faults: &[Self]) -> Option<String> {
+        (!faults.is_empty()).then(|| {
+            let labels: Vec<String> = faults.iter().map(|fault| fault.label()).collect();
+
+            format!("WARNING: fault injection active ({})", labels.join(","))
+        })
     }
 
     /// The uncertain outcome of a dropped reply, for a request the fault targets; `None` leaves
     /// every other request untouched.
     pub fn drop_reply(self, targeted: bool) -> Option<TransportError> {
+        let target = self.target()?;
+
         targeted.then(|| {
             TransportError::PostSendUncertain(format!(
                 "injected fault: reply dropped after {}",
-                self.target().name()
+                target.name()
             ))
+        })
+    }
+
+    /// The failure of the reconciliation read, for a read the fault targets.
+    pub fn fail_read(self, targeted: bool) -> Option<TransportError> {
+        (self == Self::FailReconcileRead && targeted).then(|| {
+            TransportError::NoResponse("injected fault: the reconciliation read failed".to_owned())
         })
     }
 }
@@ -109,7 +135,8 @@ mod tests {
 
     #[test]
     fn a_lookup_without_a_value_injects_nothing() {
-        assert_eq!(Fault::from_lookup(None), Ok(None));
+        assert_eq!(Fault::from_lookup(None), Ok(Vec::new()));
+        assert_eq!(Fault::warning(&[]), None);
     }
 
     #[test]
@@ -121,11 +148,13 @@ mod tests {
         ];
 
         for (value, name) in cases {
-            let fault = Fault::from_lookup(Some(value)).unwrap().unwrap();
+            let faults = Fault::from_lookup(Some(value)).unwrap();
+            let fault = faults[0];
 
-            assert_eq!(fault.target().name(), name);
+            assert_eq!(faults.len(), 1);
+            assert_eq!(fault.target().unwrap().name(), name);
             assert_eq!(
-                fault.warning(),
+                Fault::warning(&faults).unwrap(),
                 format!("WARNING: fault injection active ({value})")
             );
             assert_eq!(
@@ -133,7 +162,38 @@ mod tests {
                 format!("post-send outcome uncertain: injected fault: reply dropped after {name}")
             );
             assert_eq!(fault.drop_reply(false), None);
+            assert_eq!(fault.fail_read(true), None);
         }
+    }
+
+    #[test]
+    fn the_reconciliation_read_failure_is_a_known_value_that_drops_no_reply() {
+        let faults = Fault::from_lookup(Some("fail-read:RECONCILE")).unwrap();
+        let fault = faults[0];
+
+        assert_eq!(fault, Fault::FailReconcileRead);
+        assert_eq!(fault.target(), None);
+        assert_eq!(fault.drop_reply(true), None);
+        assert_eq!(fault.fail_read(false), None);
+        assert_eq!(
+            fault.fail_read(true).unwrap().to_string(),
+            "no response to a read-only request: injected fault: the reconciliation read failed"
+        );
+        assert_eq!(
+            Fault::warning(&faults).unwrap(),
+            "WARNING: fault injection active (fail-read:RECONCILE)"
+        );
+    }
+
+    #[test]
+    fn faults_combine_as_a_comma_separated_list() {
+        let faults = Fault::from_lookup(Some("drop-reply:CREATE,fail-read:RECONCILE")).unwrap();
+
+        assert_eq!(faults.len(), 2);
+        assert_eq!(
+            Fault::warning(&faults).unwrap(),
+            "WARNING: fault injection active (drop-reply:CREATE,fail-read:RECONCILE)"
+        );
     }
 
     #[test]
@@ -146,7 +206,17 @@ mod tests {
             "drop-reply:create",
             "drop-reply:INCLUDE",
             "drop-reply:GET",
+            "drop-reply:RECONCILE",
             "drop-reply:PUT ",
+            "drop-reply:PUT,",
+            ",drop-reply:PUT",
+            "drop-reply:PUT,drop-reply:nope",
+            "drop-reply:PUT drop-reply:CREATE",
+            "fail-read",
+            "fail-read:",
+            "fail-read:reconcile",
+            "fail-read:CREATE",
+            "fail-read:RECONCILE ",
             "drop:PUT",
             "POST",
         ] {

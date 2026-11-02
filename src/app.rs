@@ -158,7 +158,7 @@ pub fn run(
     #[cfg(feature = "fault-injection")]
     let warning =
         match crate::fault::Fault::from_lookup(env.get(crate::fault::ENV).map(String::as_str)) {
-            Ok(fault) => fault.map(crate::fault::Fault::warning),
+            Ok(faults) => crate::fault::Fault::warning(&faults),
             Err(message) => return stop(message),
         };
     #[cfg(not(feature = "fault-injection"))]
