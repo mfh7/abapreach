@@ -1,16 +1,16 @@
-# Native verification on the four release targets. Tag v* and manual dispatch only
-# (decision 38), no push and no pull_request. Every runner runs formatting, clippy with
-# warnings denied, and the test suite twice: default and `fault-injection`, so a
-# feature-gated test cannot disappear from one platform.
+# Native verification on the four release targets. Reusable workflow plus manual dispatch
+# (decision 38): release.yml calls it for an rc tag, so an rc is built and published only after
+# this run passed on all four runners in the same release run. It has no push, tag or
+# pull_request trigger of its own, so a tag push never runs it twice. Every runner runs
+# formatting, clippy with warnings denied, and the test suite twice: default and
+# `fault-injection`, so a feature-gated test cannot disappear from one platform.
 #
 # This workflow never reaches a system. All tests use fixtures and fakes; no job reads a
 # connection file, an RFC library or a secret.
 name: ci
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -72,14 +72,18 @@ jobs:
 
       - name: Install the Rust toolchain components
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          rustup default stable
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustup default 1.99.1
+          rustc --version | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Lint every target with warnings denied
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --features fault-injection -- -D warnings
+          cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run the default test suite
         run: cargo test

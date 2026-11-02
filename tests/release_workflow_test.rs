@@ -12,6 +12,7 @@ use yaml_subset::{Block, find, get, items, keys, map, parse, scalar, scalars};
 const WORKFLOW_PATH: &str = ".github/workflows/release.yml";
 const BARE_BUILD_JOB: &str = "build-bare";
 const LINUX_BUILD_JOB: &str = "build-linux";
+const CI_JOB: &str = "ci";
 
 /// Target triple, runner label, archive extension, executable name.
 const TARGETS: [(&str, &str, &str, &str); 4] = [
@@ -111,7 +112,8 @@ fn release_workflow_triggers_are_v_tags_and_a_dry_run_dispatch_only() {
 fn release_workflow_grants_write_access_only_to_the_two_publish_jobs() {
     let document = document();
     let top = get(&document, "permissions");
-    assert_eq!(keys(top), ["contents"]);
+    assert_eq!(keys(top), ["actions", "contents"]);
+    assert_eq!(scalar(get(top, "actions")), "read");
     assert_eq!(scalar(get(top, "contents")), "read");
 
     for (name, _) in map(get(&document, "jobs")) {
@@ -141,6 +143,7 @@ fn release_workflow_grants_write_access_only_to_the_two_publish_jobs() {
         keys(get(&document, "jobs")),
         [
             "plan",
+            "ci",
             "build-linux",
             "build-bare",
             "publish-rc",
@@ -148,6 +151,32 @@ fn release_workflow_grants_write_access_only_to_the_two_publish_jobs() {
             "publish-final"
         ]
     );
+}
+
+#[test]
+fn release_workflow_calls_ci_with_read_only_contents_and_gates_the_rc_jobs_on_it() {
+    let document = document();
+    let ci = job(&document, CI_JOB);
+    assert_eq!(scalar(get(ci, "uses")), "./.github/workflows/ci.yml");
+    assert_eq!(scalar(get(ci, "if")), "needs.plan.outputs.mode == 'rc'");
+    // A called workflow inherits the caller's permissions, so the job must narrow them.
+    let permissions = get(ci, "permissions");
+    assert_eq!(keys(permissions), ["contents"]);
+    assert_eq!(scalar(get(permissions, "contents")), "read");
+    assert_eq!(
+        find(ci, "steps"),
+        None,
+        "a calling job has no steps of its own"
+    );
+    assert_eq!(find(ci, "secrets"), None, "no secret is passed to CI");
+
+    for name in [BARE_BUILD_JOB, LINUX_BUILD_JOB, "publish-rc"] {
+        let needs = scalars(get(job(&document, name), "needs"));
+        assert!(
+            needs.contains(&CI_JOB),
+            "job `{name}` must need `ci`: {needs:?}"
+        );
+    }
 }
 
 #[test]
@@ -278,8 +307,8 @@ fn release_workflow_inspects_the_executable_extracted_from_the_packaged_archive(
             .collect::<Vec<_>>();
         assert_eq!(
             extraction.len(),
-            2,
-            "{build}: one extraction step per OS family"
+            if build == LINUX_BUILD_JOB { 1 } else { 2 },
+            "{build}"
         );
         for script in extraction {
             assert!(
@@ -306,6 +335,8 @@ fn release_workflow_inspects_the_executable_extracted_from_the_packaged_archive(
         }
 
         if build == LINUX_BUILD_JOB {
+            assert!(!job_text(&document, build).contains("RUSTFLAGS"), "{build}");
+            assert!(!job_text(&document, build).contains("Windows"), "{build}");
             let glibc = step_index(&document, build, "check-glibc.sh");
             assert!(
                 extract < glibc && glibc < upload,
@@ -335,6 +366,39 @@ fn release_workflow_inspects_the_executable_extracted_from_the_packaged_archive(
             assert_eq!(scalar(get(&steps[imports], "if")), "runner.os == 'Windows'");
         }
     }
+}
+
+#[test]
+fn release_workflow_promotion_requires_a_successful_release_run_of_the_rc_tag() {
+    let document = document();
+    // CI now runs inside the rc's release run, so neither job polls ci.yml any more: publish-rc
+    // is gated by `needs: ci`, and promotion checks the conclusion of the rc's release run.
+    for name in ["publish-rc", "promote-verify"] {
+        let scripts = run_scripts(&document, name).join("\n");
+        assert!(!scripts.contains("ci.yml"), "{name}: {scripts}");
+    }
+
+    let scripts = run_scripts(&document, "promote-verify").join("\n");
+    for needle in [
+        "gh run list",
+        "--workflow release.yml",
+        "--event push",
+        "--branch \"$RC_TAG\"",
+        "--commit \"$RC_SHA\"",
+        "--json conclusion",
+        "grep -qx success",
+    ] {
+        assert!(scripts.contains(needle), "missing `{needle}`: {scripts}");
+    }
+
+    // The check needs the rc tag and commit, so it follows the lookup step.
+    let lookup = step_index(&document, "promote-verify", "gh release view");
+    let check = step_index(&document, "promote-verify", "gh run list");
+    let download = step_index(&document, "promote-verify", "gh release download");
+    assert!(
+        lookup < check && check < download,
+        "lookup, run check, download"
+    );
 }
 
 #[test]
@@ -471,6 +535,10 @@ fn release_workflow_takes_expression_values_through_the_environment() {
     // context through `env:` instead.
     let document = document();
     for (name, _) in map(get(&document, "jobs")) {
+        // The `ci` job calls a workflow and has no steps.
+        if find(job(&document, name), "steps").is_none() {
+            continue;
+        }
         for script in run_scripts(&document, name) {
             assert!(
                 !script.contains("${{"),

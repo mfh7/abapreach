@@ -47,9 +47,8 @@ const PHDR_VADDR: usize = 16;
 const PHDR_FILESZ: usize = 32;
 const ELF64_LOAD: u32 = 1;
 const ELF64_DYNAMIC: u32 = 2;
-/// `DT_NULL`, `DT_NEEDED`, `DT_STRTAB`, `DT_STRSZ`, `DT_RPATH`, and `DT_RUNPATH` in an ELF64 image.
+/// `DT_NULL`, `DT_STRTAB`, `DT_STRSZ`, `DT_RPATH`, and `DT_RUNPATH` in an ELF64 image.
 const DT_NULL: i64 = 0;
-const DT_NEEDED: i64 = 1;
 const DT_STRTAB: i64 = 5;
 const DT_STRSZ: i64 = 10;
 const DT_RPATH: i64 = 15;
@@ -147,6 +146,8 @@ pub struct RfcLibrary {
     source: Origin,
     /// What `RfcSetTraceDir` did when the library was loaded.
     trace: TraceTarget,
+    /// Runtime loader warnings that doctor must show without making the candidate fail.
+    notes: Vec<String>,
     // Never unloaded: SAP's library leaves thread-local destructors that crash after dlclose, and
     // the dependencies preloaded for it have to stay mapped just as long.
     loaded: Loaded,
@@ -190,17 +191,23 @@ impl RfcLibrary {
         let trace = set_trace_directory(loaded.library());
 
         Ok(Self {
-            path: candidates[chosen].path.clone(),
+            path: loaded.path().to_path_buf(),
             arch: loaded.arch(),
             family: candidates[chosen].family,
             source: candidates[chosen].origin,
             trace,
+            notes: loaded.notes().to_vec(),
             loaded,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Non-blocking runtime loader warnings, for example a missing optional ICU set.
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     /// The SDK version reported by `RfcGetVersion`; no connection is opened for it.
@@ -1518,8 +1525,10 @@ pub fn compatible_arch(expected: Arch, header: &[u8]) -> Result<(), String> {
 /// dependency has to stay mapped for as long as the library that needs it.
 pub struct Loaded {
     arch: Arch,
+    path: PathBuf,
     library: ManuallyDrop<Library>,
     _dependencies: Vec<ManuallyDrop<Library>>,
+    notes: Vec<String>,
 }
 
 impl Loaded {
@@ -1530,6 +1539,14 @@ impl Loaded {
     /// The architecture the image header declares, checked before the library was mapped.
     pub fn arch(&self) -> Arch {
         self.arch
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn notes(&self) -> &[String] {
+        &self.notes
     }
 }
 
@@ -1549,16 +1566,28 @@ pub fn load_candidate(candidate: &Candidate) -> Result<Loaded, String> {
             std::env::consts::ARCH
         )
     })?;
-    let header = read_header(&candidate.path)?;
+    let path = std::path::absolute(&candidate.path).map_err(|error| {
+        format!(
+            "could not make {} absolute: {error}",
+            candidate.path.display()
+        )
+    })?;
+    let header = read_header(&path)?;
 
     compatible_arch(expected, &header)?;
 
-    let dependencies = platform_dependencies(candidate)?;
+    let dependencies = platform_dependencies(&path)?;
 
-    map_library(&candidate.path).map(|library| Loaded {
+    map_library(&path).map(|library| Loaded {
         arch: expected,
+        path,
         library: ManuallyDrop::new(library),
-        _dependencies: dependencies.into_iter().map(ManuallyDrop::new).collect(),
+        _dependencies: dependencies
+            .libraries
+            .into_iter()
+            .map(ManuallyDrop::new)
+            .collect(),
+        notes: dependencies.notes,
     })
 }
 
@@ -1567,14 +1596,8 @@ pub fn load_candidate(candidate: &Candidate) -> Result<Loaded, String> {
 /// dependencies from its folder through the load flags, and macOS resolves them through the
 /// install names, so neither platform preloads anything.
 #[cfg(target_os = "linux")]
-fn platform_dependencies(candidate: &Candidate) -> Result<Vec<Library>, String> {
-    let library = candidate.path.canonicalize().map_err(|error| {
-        format!(
-            "could not resolve {} before reading ELF dependencies: {error}",
-            candidate.path.display()
-        )
-    })?;
-    let file = fs::File::open(&library).map_err(|error| {
+fn platform_dependencies(library: &Path) -> Result<PlatformDependencies, String> {
+    let file = fs::File::open(library).map_err(|error| {
         format!(
             "could not open {} to read ELF dependencies: {error}",
             library.display()
@@ -1586,15 +1609,29 @@ fn platform_dependencies(candidate: &Candidate) -> Result<Vec<Library>, String> 
             library.display()
         )
     })?;
-    let dependencies = dependency_preload(&library, candidate.family, Some(&dynamic), &SystemFs)?;
-    let dependencies = exclude_library_aliases(&library, dependencies)?;
+    let directory = library
+        .parent()
+        .ok_or_else(|| format!("could not read ICU libraries beside {}", library.display()))?;
+    let files = fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let plan = dependency_preload(library, Some(&dynamic), &files)?;
+    let libraries = preload_dependencies(&plan.paths, |path| map_library(path))?;
 
-    preload_dependencies(&dependencies, |path| map_library(path))
+    Ok(PlatformDependencies {
+        libraries,
+        notes: plan.note.into_iter().collect(),
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
-fn platform_dependencies(_: &Candidate) -> Result<Vec<Library>, String> {
-    Ok(Vec::new())
+fn platform_dependencies(_: &Path) -> Result<PlatformDependencies, String> {
+    Ok(PlatformDependencies::default())
 }
 
 /// Maps a library through the platform loader: `LoadLibraryExW` with the altered search path on
@@ -1613,75 +1650,107 @@ fn map_library(path: &Path) -> Result<Library, String> {
     unsafe { Library::new(path) }.map_err(|error| error.to_string())
 }
 
-/// Whether a library needs its siblings preloaded: the SDK family never declares `$ORIGIN`, and any
-/// other library that does not declare it needs the same treatment.
-pub fn needs_dependency_preload(family: Family, declares_origin: bool) -> bool {
-    family == Family::Sdk || !declares_origin
+const MISSING_ICU_NOTE: &str = "WARNING: RFC ICU libraries were not found beside the RFC library; the NW RFC SDK may still find them through LD_LIBRARY_PATH.";
+const ICU_PREFIXES: [&str; 3] = ["libicudata", "libicuuc", "libicui18n"];
+
+/// The library paths and doctor note selected before mapping an RFC candidate.
+#[derive(Debug, Default)]
+pub struct DependencyPreload {
+    pub paths: Vec<PathBuf>,
+    pub note: Option<String>,
 }
 
-/// The siblings one library has to preload, in its own dependency order: the dependency names it
-/// declares, the ones that sit beside it in its own folder, and never the library itself.
-pub fn sibling_dependencies(
-    library: &Path,
-    needed: &[String],
-    fs: &dyn CandidateFs,
-) -> Vec<PathBuf> {
-    let Some(directory) = library.parent() else {
-        return Vec::new();
-    };
-    if !directory.is_absolute() {
-        return Vec::new();
-    }
-
-    needed
-        .iter()
-        .filter_map(|name| {
-            let name = Path::new(name);
-            if name.components().count() != 1 || name.file_name().is_none() {
-                return None;
-            }
-            let path = directory.join(name);
-            (path != library && fs.is_file(&path)).then_some(path)
-        })
-        .collect()
+#[derive(Default)]
+struct PlatformDependencies {
+    libraries: Vec<Library>,
+    notes: Vec<String>,
 }
 
-/// The dependencies to preload for one library: the origin rule selects whether the sibling step
-/// runs at all, and an image whose dynamic section could not be read rejects the candidate.
+/// The ICU libraries one SDK image needs when it cannot resolve `$ORIGIN`. A complete highest
+/// version set is chosen in the ICU dependency order data, common, internationalization. SAP's
+/// RFC library opens these SONAMEs by bare name, so mapping their absolute paths first lets glibc
+/// satisfy that later `dlopen` without changing the parent process environment.
 pub fn dependency_preload(
     library: &Path,
-    family: Family,
     dynamic: Option<&ElfDynamic>,
-    fs: &dyn CandidateFs,
-) -> Result<Vec<PathBuf>, String> {
+    files: &[PathBuf],
+) -> Result<DependencyPreload, String> {
     let dynamic = dynamic.ok_or_else(|| {
         "could not read ELF dynamic section; dependencies cannot be read".to_owned()
     })?;
 
-    if !needs_dependency_preload(family, dynamic.declares_origin()) {
-        return Ok(Vec::new());
+    if dynamic.declares_origin() {
+        return Ok(DependencyPreload::default());
     }
 
-    Ok(sibling_dependencies(library, dynamic.needed(), fs))
+    match icu_dependencies(library, files) {
+        Some(paths) => Ok(DependencyPreload { paths, note: None }),
+        None => Ok(DependencyPreload {
+            paths: Vec::new(),
+            note: Some(MISSING_ICU_NOTE.to_owned()),
+        }),
+    }
 }
 
-/// Drops a dependency path that resolves to the library itself. A symlink alias is still the
-/// library, so it must not be mapped before the real library; an alias that cannot be resolved
-/// fails the candidate instead of guessing what would be loaded.
-pub fn exclude_library_aliases(
-    library: &Path,
-    dependencies: Vec<PathBuf>,
-) -> Result<Vec<PathBuf>, String> {
-    dependencies
+/// Finds one complete ICU version set in the RFC library's own directory. A file named
+/// `libicuuc57.so` has version `57`; the `.so.57` spelling is accepted too. Multiple complete
+/// sets are ranked numerically, highest first. Files such as `libsapucum.so` are deliberately
+/// ignored because the SDK does not declare or preload them.
+pub fn icu_dependencies(library: &Path, files: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    let directory = library.parent()?;
+    let mut versions = BTreeMap::<String, [Option<PathBuf>; 3]>::new();
+
+    for path in files {
+        if path.parent() != Some(directory) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        for (index, prefix) in ICU_PREFIXES.iter().enumerate() {
+            let Some(version) = icu_version(name, prefix) else {
+                continue;
+            };
+            let set = versions.entry(version).or_insert([None, None, None]);
+            if set[index].as_ref().is_none_or(|current| path < current) {
+                set[index] = Some(path.clone());
+            }
+        }
+    }
+
+    versions
         .into_iter()
-        .filter_map(|path| match path.canonicalize() {
-            Ok(target) if target == library => None,
-            Ok(_) => Some(Ok(path)),
-            Err(error) => Some(Err(format!(
-                "could not resolve dependency {} before preload: {error}",
-                path.display()
-            ))),
+        .filter_map(|(version, set)| {
+            Some((
+                version_rank(&version),
+                vec![set[0].clone()?, set[1].clone()?, set[2].clone()?],
+            ))
         })
+        .max_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, paths)| paths)
+}
+
+fn icu_version(name: &str, prefix: &str) -> Option<String> {
+    let suffix = name.strip_prefix(prefix)?;
+    let (before_so, after_so) = suffix.split_once(".so")?;
+    if !after_so.is_empty() && !after_so.starts_with('.') {
+        return None;
+    }
+    let version = if before_so.is_empty() {
+        after_so.strip_prefix('.').unwrap_or_default()
+    } else {
+        before_so
+    };
+
+    (!version.is_empty()).then(|| version.to_owned())
+}
+
+fn version_rank(version: &str) -> Vec<u64> {
+    version
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
         .collect()
 }
 
@@ -1729,20 +1798,14 @@ fn is_windows_absolute(path: &Path) -> bool {
     bytes.starts_with(b"\\\\")
 }
 
-/// The dependency information of an ELF64 image: the libraries it needs and the search path it
-/// declares for them.
+/// The dependency information of an ELF64 image needed by this loader: only its declared search
+/// path. `DT_NEEDED` does not describe the SDK's runtime ICU `dlopen` calls and is ignored.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ElfDynamic {
-    needed: Vec<String>,
     run_path: Vec<String>,
 }
 
 impl ElfDynamic {
-    /// The `DT_NEEDED` entries, in the image's own order.
-    pub fn needed(&self) -> &[String] {
-        &self.needed
-    }
-
     /// The `DT_RUNPATH` and `DT_RPATH` entries as the image stores them.
     pub fn run_path(&self) -> &[String] {
         &self.run_path
@@ -1814,7 +1877,6 @@ pub fn elf_dynamic(mut image: impl Read + Seek) -> Result<ElfDynamic, String> {
         "the image has no dynamic section, so its dependencies cannot be read".to_owned()
     })?;
     let section = read_at(&mut image, offset, filesz)?;
-    let mut needed = Vec::new();
     let mut run_path = Vec::new();
     let (mut string_table, mut string_bytes) = (None, None);
 
@@ -1824,7 +1886,6 @@ pub fn elf_dynamic(mut image: impl Read + Seek) -> Result<ElfDynamic, String> {
 
         match tag {
             DT_NULL => break,
-            DT_NEEDED => needed.push(value),
             DT_RPATH | DT_RUNPATH => run_path.push(value),
             DT_STRTAB => string_table = Some(value),
             DT_STRSZ => string_bytes = Some(value),
@@ -1832,15 +1893,15 @@ pub fn elf_dynamic(mut image: impl Read + Seek) -> Result<ElfDynamic, String> {
         }
     }
 
-    if needed.is_empty() && run_path.is_empty() {
+    if run_path.is_empty() {
         return Ok(ElfDynamic::default());
     }
 
     let address = string_table.ok_or_else(|| {
-        "the dynamic section names dependencies but declares no string table".to_owned()
+        "the dynamic section names a search path but declares no string table".to_owned()
     })?;
     let bytes = string_bytes.ok_or_else(|| {
-        "the dynamic section declares a string table but no size for it".to_owned()
+        "the dynamic section names a search path but no string table size".to_owned()
     })?;
     let strings = read_at(
         &mut image,
@@ -1849,7 +1910,7 @@ pub fn elf_dynamic(mut image: impl Read + Seek) -> Result<ElfDynamic, String> {
         })?,
         bytes,
     )?;
-    let mut name = |value: u64| -> Result<String, String> {
+    let name = |value: u64| -> Result<String, String> {
         let start = usize::try_from(value)
             .map_err(|_| format!("string offset {value} does not fit the image"))?;
         let tail = strings
@@ -1862,16 +1923,12 @@ pub fn elf_dynamic(mut image: impl Read + Seek) -> Result<ElfDynamic, String> {
 
         Ok(String::from_utf8_lossy(&tail[..end]).into_owned())
     };
-    let needed = needed
-        .into_iter()
-        .map(&mut name)
-        .collect::<Result<Vec<_>, _>>()?;
     let run_path = run_path
         .into_iter()
         .map(name)
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(ElfDynamic { needed, run_path })
+    Ok(ElfDynamic { run_path })
 }
 
 /// The largest section this loader reads, so a malformed image cannot ask for an implausible
@@ -1897,18 +1954,17 @@ fn read_at(reader: &mut (impl Read + Seek), offset: u64, bytes: u64) -> Result<V
     Ok(buffer)
 }
 
-/// One `PT_LOAD` program header: the address it starts at, how many bytes it maps, and where in the
-/// file those bytes start.
+/// One `PT_LOAD` program header used only to locate the run-path string table in the image.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LoadSegment {
-    pub address: u64,
-    pub size: u64,
-    pub offset: u64,
+struct LoadSegment {
+    address: u64,
+    size: u64,
+    offset: u64,
 }
 
 /// The file offset of a loadable address: a dynamic entry stores a load address, and the segment
 /// that maps it decides which file bytes those are.
-pub fn load_address_offset(loads: &[LoadSegment], address: u64) -> Option<u64> {
+fn load_address_offset(loads: &[LoadSegment], address: u64) -> Option<u64> {
     loads.iter().find_map(|segment| {
         (address >= segment.address && address - segment.address < segment.size)
             .then(|| segment.offset + (address - segment.address))
@@ -2269,10 +2325,10 @@ fn linux_gui(env: &BTreeMap<String, String>, fs: &dyn CandidateFs) -> GuiDiscove
         .into_iter()
         .flat_map(|root| {
             [
-                root.join("bin").join(gui_library_filename(Platform::Linux)),
                 root.join("bin")
                     .join("unicode")
                     .join(rfc_library_filename(Platform::Linux)),
+                root.join("bin").join(gui_library_filename(Platform::Linux)),
             ]
         })
         .filter(|path| fs.is_file(path))

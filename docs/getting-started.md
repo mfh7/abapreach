@@ -86,9 +86,10 @@ NW RFC SDK library. A discovered candidate that fails moves on to the next one.
 
 | Target | SAP GUI library (family `SAP GUI`) | NW RFC SDK library (family `NW RFC SDK`) |
 | :--- | :--- | :--- |
-| Windows x64 | `%ProgramFiles%\SAP\FrontEnd\SAPGUI\sapnwrfccm.dll` (64-bit install only) | `sapnwrfc.dll` in `lib` under `%SAPNWRFC_HOME%`, `%USERPROFILE%\sap\nwrfcsdk`, then `%ProgramFiles%\SAP\nwrfcsdk` |
+| Windows x64 | `%ProgramFiles%\SAP\FrontEnd\SAPGUI\sapnwrfccm.dll` (64-bit install only) | `sapnwrfc.dll` in `lib` under `%SAPNWRFC_HOME%`, `%USERPROFILE%\sap\nwrfcsdk`, then `%ProgramFiles%\SAP\nwrfcsdk`; this SDK DLL needs the Microsoft Visual C++ 2015-2022 x64 Redistributable because it imports `MSVCP140.dll` and `VCRUNTIME140.dll` (the `abapreach.exe` binary itself does not) |
 | macOS arm64 | `bin/unicode/libsapnwrfc.dylib`, then `bin/libsapnwrfccm.dylib`, inside each SAP GUI app bundle under `/Applications` (searched to four levels; the bundle with the highest version in its name is tried first) | `libsapnwrfc.dylib` in `lib` under `$SAPNWRFC_HOME`, `$HOME/sap/nwrfcsdk`, `/opt/sap/nwrfcsdk`, then `/usr/local/sap/nwrfcsdk` |
-| Linux x64, arm64 | `bin/libsapnwrfccm.so`, then `bin/unicode/libsapnwrfc.so`, inside `$HOME/sapgui`, `/opt/sapgui`, then `/usr/local/sapgui` | `libsapnwrfc.so` in `lib` under `$SAPNWRFC_HOME`, `$HOME/sap/nwrfcsdk`, `/opt/sap/nwrfcsdk`, then `/usr/local/sap/nwrfcsdk` |
+| Linux x64 | `bin/unicode/libsapnwrfc.so`, then `bin/libsapnwrfccm.so`, inside `$HOME/sapgui`, `/opt/sapgui`, then `/usr/local/sapgui` | `libsapnwrfc.so` in `lib` under `$SAPNWRFC_HOME`, `$HOME/sap/nwrfcsdk`, `/opt/sap/nwrfcsdk`, then `/usr/local/sap/nwrfcsdk` |
+| Linux arm64 | Unsupported: SAP GUI for Java Linux is x86_64 only | `libsapnwrfc.so` in `lib` under `$SAPNWRFC_HOME`, `$HOME/sap/nwrfcsdk`, `/opt/sap/nwrfcsdk`, then `/usr/local/sap/nwrfcsdk` |
 
 On Windows, a 32-bit SAP GUI under `Program Files (x86)` is skipped, because a 32-bit
 library cannot load into this 64-bit binary; `doctor` prints the reason.
@@ -112,10 +113,16 @@ On success, `doctor` prints the loaded library:
 RFC library: <path> version <version> architecture <architecture> family <SAP GUI or NW RFC SDK> source <explicit ABAPREACH_RFC_LIBRARY or discovered>
 ```
 
-On Linux, when a library does not declare `$ORIGIN` in its search path, or belongs to the
-NW RFC SDK, ABAPReach first maps the sibling dependencies from the same folder by absolute
-path. The parent process's `LD_LIBRARY_PATH` is not changed. On Windows, the loader searches
-the folder of the library for its dependencies.
+On Linux, if an RFC library does not declare `$ORIGIN` in `RUNPATH` or `RPATH`, ABAPReach looks
+in that library's own folder for one complete ICU set and maps it by absolute path in this order:
+`libicudata*.so*`, `libicuuc*.so*`, then `libicui18n*.so*`. If several complete sets exist, it
+uses the highest version. This is required for the NW RFC SDK, which opens ICU by bare SONAME at
+run time; ABAPReach does not preload `libsapucum.so`. If no complete set is found, the candidate
+still loads and doctor prints exactly `WARNING: RFC ICU libraries were not found beside the RFC
+library; the NW RFC SDK may still find them through LD_LIBRARY_PATH.` Keep the SDK folder intact,
+or set `LD_LIBRARY_PATH` to that folder so the SDK can find ICU itself. The parent process's
+`LD_LIBRARY_PATH` is not changed. On Windows, the loader searches the folder of the library for
+its dependencies.
 
 SAP GUI for Java libraries declare `$ORIGIN`, so they are loaded without a preload step.
 
@@ -132,6 +139,8 @@ SAP GUI for Java libraries declare `$ORIGIN`, so they are loaded without a prelo
   yourself; ABAPReach does not check the ACL.
 
 A missing file is reported as `local credentials: not present`.
+If its metadata cannot be read on Unix, doctor prints a `WARNING: local credentials metadata
+could not be read: ...` line. This is non-blocking and does not change doctor's exit status.
 
 ### Trace files and interrupts
 

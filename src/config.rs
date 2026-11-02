@@ -59,7 +59,7 @@ impl LocalCredentialsPermission {
                  restrict the file to the owner (see docs/getting-started.md)."
             ),
             Self::MetadataError { error } => {
-                format!("ERROR: local credentials metadata could not be read: {error}")
+                format!("WARNING: local credentials metadata could not be read: {error}")
             }
             Self::NotChecked => concat!(
                 "local credentials: permission not checked; restrict the file to a user-only ",

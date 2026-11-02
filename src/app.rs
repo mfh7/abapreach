@@ -116,6 +116,7 @@ impl Factories for RealFactories {
         let identity = library.identity()?;
         let mut notes = env.notes().to_vec();
 
+        notes.extend(library.notes().iter().cloned());
         notes.push(library.trace_target().label());
 
         Ok(RfcLibraryInfo {

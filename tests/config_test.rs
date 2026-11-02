@@ -346,7 +346,9 @@ fn local_credentials_metadata_errors_are_reported_to_doctor() {
         LocalCredentialsPermission::MetadataError { .. }
     ));
     assert!(
-        permission.label().contains("metadata"),
+        permission
+            .label()
+            .starts_with("WARNING: local credentials metadata could not be read:"),
         "{}",
         permission.label()
     );

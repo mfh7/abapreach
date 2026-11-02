@@ -1,6 +1,7 @@
 # Tag release builds (decision 38: v* tags and manual dispatch only).
 #
-# rc tag `v0.12.0-rc.N`  Builds four ordinary archives and four fault-injection test archives
+# rc tag `v0.12.0-rc.N`  Runs ci.yml as a called workflow (all four runners) first, so nothing is
+#                        built or published unless CI passed in this same run. Then builds four ordinary archives and four fault-injection test archives
 #                        from the tag commit, inspects the executable inside every packaged
 #                        archive, and publishes the ordinary archives with their SHA256 files as
 #                        a GitHub prerelease. The fault-injection archives stay workflow
@@ -8,7 +9,8 @@
 #                        downloads the `release-*` artifacts only.
 # final tag `v0.12.0`    Builds nothing. Finds the rc prerelease whose commit is the tag commit or
 #                        its ancestor, requires every changed file in between to be README.md or
-#                        under docs/, copies the tested rc archives to the final names, proves the
+#                        under docs/, requires that the release run of the rc tag concluded
+#                        success (that run contains the CI of the rc commit), copies the tested rc archives to the final names, proves the
 #                        executables are byte-identical, and publishes them as the Release.
 # manual dispatch        Runs the same promotion checks against `rc_tag` and the dispatched commit
 #                        as a dry run. It creates no tag and no Release.
@@ -30,6 +32,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -101,9 +104,22 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "mode: $mode, tag: $tag, archive version: $archive_version"
 
+  # The called workflow inherits the caller's permissions unless the job narrows them, so this
+  # job grants it contents: read and nothing else. ci.yml has no tag trigger of its own, so
+  # this is the only CI run for the tag.
+  ci:
+    name: ci
+    needs: plan
+    if: needs.plan.outputs.mode == 'rc'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
   build-linux:
     name: Linux build (${{ matrix.runner.target }}, ${{ matrix.variant.artifact }})
-    needs: plan
+    needs:
+      - plan
+      - ci
     if: needs.plan.outputs.mode == 'rc'
     runs-on: ${{ matrix.runner.label }}
     container: ${{ matrix.runner.image }}
@@ -136,21 +152,12 @@ jobs:
       TARGET: ${{ matrix.runner.target }}
       EXE: ${{ matrix.runner.exe }}
       FLAGS: ${{ matrix.variant.flags }}
-      RUSTFLAGS: ${{ matrix.runner.rustflags }}
       ARCHIVE_FILE: abapreach-${{ needs.plan.outputs.version }}-${{ matrix.runner.target }}${{ matrix.variant.suffix }}.${{ matrix.runner.ext }}
     steps:
       - name: Check out the tag commit
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      # aws-lc-sys assembles on Windows and has no NASM here, so install it before the build.
-      - name: Install NASM
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install nasm --no-progress -y
-          echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
       # The manylinux_2_28 images carry no Rust toolchain; the hosted runners already do.
       - name: Install the Rust toolchain
@@ -160,25 +167,17 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustup default 1.99.1
+          rustc --version | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # RUSTFLAGS from the job environment links the CRT statically on Windows only.
       - name: Build the executable
         run: cargo build --release --locked --target "$TARGET" $FLAGS
 
-      - name: Package the archive (Unix)
-        if: runner.os != 'Windows'
+      - name: Package the archive
         run: |
           mkdir dist
           tar -C "target/$TARGET/release" -czf "dist/$ARCHIVE_FILE" "$EXE"
-
-      - name: Package the archive (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -LiteralPath "target\$env:TARGET\release\$env:EXE" -DestinationPath "dist\$env:ARCHIVE_FILE"
 
       - name: Record the archive SHA256
         run: |
@@ -187,30 +186,14 @@ jobs:
 
       # Everything below inspects the file that a user extracts from the archive, never
       # target/release.
-      - name: Extract the archive for inspection (Unix)
-        if: runner.os != 'Windows'
+      - name: Extract the archive for inspection
         run: |
           mkdir inspect
           tar -xzf "dist/$ARCHIVE_FILE" -C inspect
 
-      - name: Extract the archive for inspection (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Expand-Archive -LiteralPath "dist\$env:ARCHIVE_FILE" -DestinationPath inspect
-
       - name: Check the glibc baseline of the packaged executable
         if: runner.os == 'Linux'
         run: objdump -T "inspect/$EXE" | bash .github/scripts/check-glibc.sh 2.28
-
-      - name: Check the import table of the packaged executable
-        if: runner.os == 'Windows'
-        run: |
-          rustup component add llvm-tools
-          host="$(rustc -vV | tr -d '\r' | sed -n 's/^host: //p')"
-          sysroot="$(cygpath -u "$(rustc --print sysroot | tr -d '\r')")"
-          readobj="$sysroot/lib/rustlib/$host/bin/llvm-readobj.exe"
-          test -x "$readobj"
-          "$readobj" --coff-imports "inspect/$EXE" | bash .github/scripts/check-imports.sh
 
       - name: Record the executable SHA256
         run: |
@@ -232,7 +215,9 @@ jobs:
 
   build-bare:
     name: bare build (${{ matrix.runner.target }}, ${{ matrix.variant.artifact }})
-    needs: plan
+    needs:
+      - plan
+      - ci
     if: needs.plan.outputs.mode == 'rc'
     runs-on: ${{ matrix.runner.label }}
     timeout-minutes: 60
@@ -281,8 +266,9 @@ jobs:
 
       - name: Install the Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustup default 1.99.1
+          rustc --version | tee -a "$GITHUB_STEP_SUMMARY"
 
       # RUSTFLAGS from the job environment links the CRT statically on Windows only.
       - name: Build the executable
@@ -351,6 +337,7 @@ jobs:
     name: publish the rc prerelease
     needs:
       - plan
+      - ci
       - build-bare
       - build-linux
     if: needs.plan.outputs.mode == 'rc'
@@ -449,6 +436,20 @@ jobs:
         env:
           RC_SHA: ${{ steps.rc.outputs.rc_sha }}
         run: bash .github/scripts/check-doc-only.sh "$RC_SHA" "$GITHUB_SHA"
+
+      # CI runs inside the rc's own release run (the `ci` job), and the publish job needs it. A
+      # release run of the rc tag that concluded success therefore proves CI passed on the rc
+      # commit. The dry-run dispatch is excluded by `--event push`.
+      - name: Require a successful release run for the rc tag
+        env:
+          RC_SHA: ${{ steps.rc.outputs.rc_sha }}
+          RC_TAG: ${{ steps.rc.outputs.rc_tag }}
+        run: |
+          conclusions="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml --event push --branch "$RC_TAG" --commit "$RC_SHA" --json conclusion --jq '.[].conclusion')"
+          if ! printf '%s\n' "$conclusions" | grep -qx success; then
+            echo "::error::release.yml has no successful run for rc tag $RC_TAG at $RC_SHA, so CI did not pass for that commit"
+            exit 1
+          fi
 
       - name: Download the tested rc archives
         env:

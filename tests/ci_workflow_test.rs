@@ -1,12 +1,13 @@
 //! Guards for the native four-runner verification workflow. The workflow file is the artifact, so
-//! the tests read it and check the parts a later edit could weaken: the trigger set, the runner
+//! the tests read it and check the parts a later edit could weaken: the trigger set (reusable plus
+//! manual dispatch, never its own tag push, so release.yml is the only tag-time caller), the runner
 //! matrix, the four cargo commands in every runner, and the absence of anything that could reach a
 //! real system or hide a failing suite.
 
 use std::path::PathBuf;
 
 mod yaml_subset;
-use yaml_subset::{Block, find, get, items, keys, lines, map, parse, scalar, scalars};
+use yaml_subset::{Block, find, get, items, keys, lines, map, parse, scalar};
 
 const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 
@@ -20,9 +21,18 @@ const RUNNERS: [(&str, &str); 4] = [
 
 const FORMATTED: &str = "cargo fmt --check";
 const LINTED: &str = "cargo clippy --all-targets --all-features -- -D warnings";
+const DEFAULT_LINTED: &str = "cargo clippy --all-targets -- -D warnings";
+const FAULT_LINTED: &str = "cargo clippy --all-targets --features fault-injection -- -D warnings";
 const DEFAULT_TESTS: &str = "cargo test";
 const FAULT_TESTS: &str = "cargo test --features fault-injection";
-const REQUIRED: [&str; 4] = [FORMATTED, LINTED, DEFAULT_TESTS, FAULT_TESTS];
+const REQUIRED: [&str; 6] = [
+    FORMATTED,
+    DEFAULT_LINTED,
+    FAULT_LINTED,
+    LINTED,
+    DEFAULT_TESTS,
+    FAULT_TESTS,
+];
 
 /// Nothing here may reach a system: no secret, and no connection source.
 const FORBIDDEN: [&str; 4] = [
@@ -36,6 +46,21 @@ fn workflow_text() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(WORKFLOW_PATH);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+}
+
+#[test]
+fn ci_workflow_uses_the_pinned_toolchain_and_records_its_version() {
+    let text = workflow_text();
+    assert!(text.contains("rustup toolchain install 1.99.1"), "{text}");
+    assert!(
+        text.contains("rustc --version | tee -a \"$GITHUB_STEP_SUMMARY\""),
+        "{text}"
+    );
+    assert!(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("rust-toolchain.toml")
+            .exists()
+    );
 }
 
 fn document() -> Block {
@@ -90,15 +115,13 @@ fn ci_workflow_has_one_job_on_the_four_target_runners() {
 }
 
 #[test]
-fn ci_workflow_triggers_are_v_tags_and_manual_dispatch_only() {
+fn ci_workflow_is_reusable_and_manually_dispatchable_with_no_trigger_of_its_own() {
     let document = document();
     let triggers = get(&document, "on");
-    assert_eq!(keys(triggers), ["push", "workflow_dispatch"]);
-
-    let push = get(triggers, "push");
-    assert_eq!(keys(push), ["tags"]);
-    assert_eq!(scalars(get(push, "tags")), ["v*"]);
-
+    // No `push`: release.yml calls this workflow for an rc tag, and a second tag-push run would
+    // run CI twice and race the release run.
+    assert_eq!(keys(triggers), ["workflow_call", "workflow_dispatch"]);
+    assert_eq!(map(get(triggers, "workflow_call")), &[]);
     // A manual dispatch has no filter, so it stays usable for the rc gate from the tagged commit.
     assert_eq!(map(get(triggers, "workflow_dispatch")), &[]);
 }
