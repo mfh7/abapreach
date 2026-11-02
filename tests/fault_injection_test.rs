@@ -242,6 +242,82 @@ fn the_activation_is_dropped_and_the_put_is_not() {
 }
 
 #[test]
+fn the_create_post_is_dropped_after_it_ran_and_nothing_else_is() {
+    let creates = [
+        "/sap/bc/adt/functions/groups",
+        "/sap/bc/adt/functions/groups/zfg/fmodules?corrNr=DEVK900001",
+        "/sap/bc/adt/oo/classes",
+        "/sap/bc/adt/oo/classes?corrNr=DEVK900001",
+        "/sap/bc/adt/oo/interfaces",
+    ];
+
+    for uri in creates {
+        let mut transport =
+            RfcTransport::with_fault(FakeRfcApi::ok(), Some(injection("drop-reply:CREATE")));
+        let create = transport.request(Request::post(uri, b"<x/>".to_vec()));
+
+        assert_eq!(
+            create.unwrap_err(),
+            TransportError::PostSendUncertain(
+                "injected fault: reply dropped after CREATE".to_owned()
+            ),
+            "{uri}"
+        );
+        // The request ran: only its reply is gone.
+        assert_eq!(transport.api().counts(), (1, 0, 1), "{uri}");
+    }
+}
+
+#[test]
+fn a_create_fault_leaves_validation_reconciliation_and_the_other_writes_alone() {
+    let mut transport =
+        RfcTransport::with_fault(FakeRfcApi::ok(), Some(injection("drop-reply:CREATE")));
+    let others = [
+        Request::post(
+            "/sap/bc/adt/oo/validation/objectname?objtype=CLAS%2FOC&objname=ZCL&description=T&packagename=%24TMP",
+            Vec::new(),
+        ),
+        Request::post(
+            "/sap/bc/adt/functions/validation?objtype=FUGR%2FF&objname=ZFG&description=T&packagename=%24TMP",
+            Vec::new(),
+        ),
+        Request::get(
+            "/sap/bc/adt/oo/classes/zcl/objectstructure?version=active&withShortDescriptions=true",
+        ),
+        Request::get("/sap/bc/adt/functions/groups/zfg"),
+        Request::post(
+            "/sap/bc/adt/oo/classes/zcl?_action=LOCK&accessMode=MODIFY",
+            Vec::new(),
+        ),
+        Request::put(
+            "/sap/bc/adt/oo/classes/zcl/source/main?lockHandle=a%2Bb",
+            Vec::new(),
+        ),
+        Request::post(
+            "/sap/bc/adt/oo/classes/zcl/includes?lockHandle=a%2Bb",
+            Vec::new(),
+        ),
+        Request::post(ACTIVATION_URI, Vec::new()),
+    ];
+
+    for request in others {
+        assert!(transport.request(request.clone()).is_ok(), "{request:?}");
+    }
+
+    // The PUT and activation faults do not touch the create either.
+    for target in ["drop-reply:PUT", "drop-reply:ACTIVATE"] {
+        let mut transport = RfcTransport::with_fault(FakeRfcApi::ok(), Some(injection(target)));
+
+        assert!(
+            transport
+                .request(Request::post("/sap/bc/adt/oo/classes", Vec::new()))
+                .is_ok(),
+            "{target}"
+        );
+    }
+}
+
+#[test]
 fn without_a_fault_every_request_is_answered() {
     let mut transport = RfcTransport::with_fault(FakeRfcApi::ok(), None);
 
@@ -257,11 +333,14 @@ fn without_a_fault_every_request_is_answered() {
 fn a_target_only_matches_its_own_write() {
     let put = injection("drop-reply:PUT");
     let activation = injection("drop-reply:ACTIVATE");
+    let create = injection("drop-reply:CREATE");
 
     assert_eq!(put.target(), Target::Put);
     assert_eq!(activation.target(), Target::Activate);
+    assert_eq!(create.target(), Target::Create);
     assert_eq!(put.drop_reply(false), None);
     assert_eq!(activation.drop_reply(false), None);
+    assert_eq!(create.drop_reply(false), None);
 }
 
 #[derive(Default)]

@@ -1,3 +1,6 @@
+use super::admission::Admission;
+#[cfg(feature = "fault-injection")]
+use super::admission::{is_create_post, is_put_request};
 use super::{Request, Response, SadtTransport, TransportError};
 use crate::config::Connection;
 use libloading::{Library, Symbol};
@@ -67,8 +70,7 @@ const UNIX_SDK_ROOT: &str = "/opt/sap/nwrfcsdk";
 const UNIX_LOCAL_SDK_ROOT: &str = "/usr/local/sap/nwrfcsdk";
 const LINUX_GUI_ROOT: &str = "/opt/sapgui";
 const LINUX_LOCAL_GUI_ROOT: &str = "/usr/local/sapgui";
-const PROGRAM_URI_PREFIX: &str = "/sap/bc/adt/programs/programs/";
-const CHECKRUNS_URI: &str = "/sap/bc/adt/checkruns?reporters=abapCheckRun";
+#[cfg(feature = "fault-injection")]
 const ACTIVATION_URI: &str = "/sap/bc/adt/activation?method=activate&preauditRequested=true";
 const RFC_OK: c_int = 0;
 const RFC_COMMUNICATION_FAILURE: c_int = 1;
@@ -569,6 +571,8 @@ pub trait RfcApi {
 pub struct RfcTransport<A> {
     api: A,
     opened: bool,
+    /// The request boundary and the state of the activation protocol it keeps.
+    admission: Admission,
     /// Test-only: the write whose reply is discarded after SAP executed it.
     #[cfg(feature = "fault-injection")]
     fault: Option<crate::fault::Fault>,
@@ -579,6 +583,7 @@ impl<A> RfcTransport<A> {
         Self {
             api,
             opened: false,
+            admission: Admission::default(),
             #[cfg(feature = "fault-injection")]
             fault: crate::fault::Fault::from_env(),
         }
@@ -589,6 +594,7 @@ impl<A> RfcTransport<A> {
         Self {
             api,
             opened: false,
+            admission: Admission::default(),
             fault,
         }
     }
@@ -611,7 +617,7 @@ impl<A: RfcApi> RfcTransport<A> {
 
 impl<A: RfcApi> SadtTransport for RfcTransport<A> {
     fn request(&mut self, request: Request) -> Result<Response, TransportError> {
-        if !is_allowed(&request) {
+        if !self.admission.admits(&request) {
             return Err(TransportError::RequestNotAllowed(format!(
                 "{} {}",
                 request.method, request.uri
@@ -1409,109 +1415,14 @@ impl Drop for DynamicRfcApi {
     }
 }
 
-fn is_allowed(request: &Request) -> bool {
-    match request.method.as_str() {
-        "GET" => {
-            request.uri == "/sap/bc/adt/discovery"
-                || is_source_uri(&request.uri, "version=active")
-                || is_source_uri(&request.uri, "version=inactive")
-                || is_versions_uri(&request.uri)
-        }
-        "POST" => {
-            is_lock_uri(&request.uri)
-                || is_unlock_uri(&request.uri)
-                || request.uri == CHECKRUNS_URI
-                || request.uri == ACTIVATION_URI
-        }
-        "PUT" => is_put_uri(&request.uri),
-        _ => false,
-    }
-}
-
-/// Whether the request is the write a fault targets: the source `PUT` or the activation.
+/// Whether the request is the write a fault targets: the source `PUT`, the activation or the
+/// create `POST`.
 #[cfg(feature = "fault-injection")]
 fn is_fault_target(target: crate::fault::Target, request: &Request) -> bool {
     match target {
-        crate::fault::Target::Put => request.method == "PUT" && is_put_uri(&request.uri),
+        crate::fault::Target::Put => is_put_request(request),
         crate::fault::Target::Activate => request.method == "POST" && request.uri == ACTIVATION_URI,
-    }
-}
-
-fn program_and_query(uri: &str) -> Option<(&str, &str)> {
-    let (program, query) = uri.strip_prefix(PROGRAM_URI_PREFIX)?.split_once('?')?;
-
-    if program.is_empty() || program.contains('/') {
-        return None;
-    }
-
-    Some((program, query))
-}
-
-fn source_and_query(uri: &str) -> Option<(&str, &str)> {
-    let (source, query) = uri.strip_prefix(PROGRAM_URI_PREFIX)?.split_once('?')?;
-    let program = source.strip_suffix("/source/main")?;
-
-    if program.is_empty() || program.contains('/') {
-        return None;
-    }
-
-    Some((program, query))
-}
-
-fn is_source_uri(uri: &str, expected_query: &str) -> bool {
-    let Some((_, query)) = source_and_query(uri) else {
-        return false;
-    };
-
-    query == expected_query
-}
-
-/// `GET <program>/source/main/versions`: the source version list the `foreign_inactive` guard
-/// reads.
-fn is_versions_uri(uri: &str) -> bool {
-    let Some(program) = uri
-        .strip_prefix(PROGRAM_URI_PREFIX)
-        .and_then(|rest| rest.strip_suffix("/source/main/versions"))
-    else {
-        return false;
-    };
-
-    !program.is_empty() && !program.contains('/')
-}
-
-fn is_lock_uri(uri: &str) -> bool {
-    matches!(
-        program_and_query(uri),
-        Some((_, "_action=LOCK&accessMode=MODIFY"))
-    )
-}
-
-fn is_unlock_uri(uri: &str) -> bool {
-    let Some((_, query)) = program_and_query(uri) else {
-        return false;
-    };
-
-    query
-        .strip_prefix("_action=UNLOCK&lockHandle=")
-        .is_some_and(|handle| !handle.is_empty() && !handle.contains('&'))
-}
-
-fn is_put_uri(uri: &str) -> bool {
-    let Some((_, query)) = source_and_query(uri) else {
-        return false;
-    };
-    let Some(lock_and_corr) = query.strip_prefix("lockHandle=") else {
-        return false;
-    };
-
-    match lock_and_corr.split_once("&corrNr=") {
-        Some((handle, corr_nr)) => {
-            !handle.is_empty()
-                && !handle.contains('&')
-                && !corr_nr.is_empty()
-                && !corr_nr.contains('&')
-        }
-        None => !lock_and_corr.is_empty() && !lock_and_corr.contains('&'),
+        crate::fault::Target::Create => is_create_post(request),
     }
 }
 

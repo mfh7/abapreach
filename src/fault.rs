@@ -20,6 +20,8 @@ pub enum Target {
     Put,
     /// `POST /sap/bc/adt/activation`.
     Activate,
+    /// The create `POST` of a function group, function module, class or interface.
+    Create,
 }
 
 impl Target {
@@ -27,6 +29,7 @@ impl Target {
         match value {
             "PUT" => Some(Self::Put),
             "ACTIVATE" => Some(Self::Activate),
+            "CREATE" => Some(Self::Create),
             _ => None,
         }
     }
@@ -35,6 +38,7 @@ impl Target {
         match self {
             Self::Put => "PUT",
             Self::Activate => "ACTIVATE",
+            Self::Create => "CREATE",
         }
     }
 }
@@ -109,10 +113,11 @@ mod tests {
     }
 
     #[test]
-    fn the_two_writes_of_the_rfc_path_are_known_values() {
+    fn the_three_writes_of_the_rfc_path_are_known_values() {
         let cases = [
             ("drop-reply:PUT", "PUT"),
             ("drop-reply:ACTIVATE", "ACTIVATE"),
+            ("drop-reply:CREATE", "CREATE"),
         ];
 
         for (value, name) in cases {
@@ -138,6 +143,8 @@ mod tests {
             "drop-reply",
             "drop-reply:",
             "drop-reply:put",
+            "drop-reply:create",
+            "drop-reply:INCLUDE",
             "drop-reply:GET",
             "drop-reply:PUT ",
             "drop:PUT",
