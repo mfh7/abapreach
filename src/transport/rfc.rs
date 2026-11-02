@@ -2736,7 +2736,8 @@ pub fn bundle_version(bundle: &Path) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-/// Linux: the SAP GUI for Java package first, then the SDK family; ICU stays in `unicode/`.
+/// Linux: the SAP GUI for Java package first (direct layout, then `SAPGUI<version>` installs
+/// highest first, per root), then the SDK family; ICU stays in `unicode/`.
 fn linux_gui(env: &BTreeMap<String, String>, fs: &dyn CandidateFs) -> GuiDiscovery {
     let mut roots = Vec::new();
 
@@ -2753,13 +2754,13 @@ fn linux_gui(env: &BTreeMap<String, String>, fs: &dyn CandidateFs) -> GuiDiscove
     let candidates = roots
         .into_iter()
         .flat_map(|root| {
-            [
-                root.join("bin")
-                    .join("unicode")
-                    .join(rfc_library_filename(Platform::Linux)),
-                root.join("bin").join(gui_library_filename(Platform::Linux)),
-            ]
+            let mut installs = vec![root.clone()];
+
+            installs.extend(linux_versioned_installs(&root, fs));
+
+            installs
         })
+        .flat_map(|install| linux_install_libraries(&install))
         .filter(|path| fs.is_file(path))
         .collect();
 
@@ -2767,6 +2768,48 @@ fn linux_gui(env: &BTreeMap<String, String>, fs: &dyn CandidateFs) -> GuiDiscove
         candidates,
         notes: Vec::new(),
     }
+}
+
+fn linux_install_libraries(install: &Path) -> [PathBuf; 2] {
+    let bin = install.join("bin");
+
+    [
+        bin.join("unicode")
+            .join(rfc_library_filename(Platform::Linux)),
+        bin.join(gui_library_filename(Platform::Linux)),
+    ]
+}
+
+/// The direct child directories named like `SAPGUI8.10rev14`, highest version first. A sibling
+/// without a version, such as the launcher-only `SAPGUI`, is not an install.
+fn linux_versioned_installs(root: &Path, fs: &dyn CandidateFs) -> Vec<PathBuf> {
+    let mut ranked = fs
+        .child_directories(root)
+        .into_iter()
+        .filter_map(|directory| {
+            let name = directory.file_name()?.to_str()?;
+            let version = install_version(name.strip_prefix("SAPGUI")?);
+
+            (!version.is_empty()).then_some((version, directory))
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|(left_version, left), (right_version, right)| {
+        right_version
+            .cmp(left_version)
+            .then_with(|| left.cmp(right))
+    });
+
+    ranked.into_iter().map(|(_, directory)| directory).collect()
+}
+
+/// Every number in the install name, e.g. `8.10rev14` -> [8, 10, 14], so the revision breaks a tie.
+/// Vector order compares major, minor, then revision numerically.
+pub fn install_version(name: &str) -> Vec<u32> {
+    name.split(|character: char| !character.is_ascii_digit())
+        .filter(|token| !token.is_empty())
+        .filter_map(|token| token.parse().ok())
+        .collect()
 }
 
 fn home_directory(env: &BTreeMap<String, String>) -> Option<PathBuf> {

@@ -4,9 +4,9 @@ use abapreach::transport::rfc::{
     MAX_READ_BYTES, Origin, PE_OFFSET_END, Platform, RFC_TRACE_DIR_ENV, RfcLibrary, SystemFs,
     TraceTarget, UcString, UcWidth, apply_trace_directory, apply_trace_directory_to,
     bundle_version, compatible_arch, decide, declared_archs, dependency_preload, elf_dynamic,
-    family_of, from_sap_uc, gui_library_filename, icu_dependencies, load_compatible,
-    preload_dependencies, rfc_library_filename, sap_uc, sdk_candidates, trace_directory,
-    trace_environment, windows_dependency_preload, windows_load_flags,
+    family_of, from_sap_uc, gui_library_filename, icu_dependencies, install_version,
+    load_compatible, preload_dependencies, rfc_library_filename, sap_uc, sdk_candidates,
+    trace_directory, trace_environment, windows_dependency_preload, windows_load_flags,
 };
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -499,6 +499,129 @@ fn linux_gui_package_layout_precedes_the_nw_rfc_sdk_family() {
         RfcLibrary::candidate_paths(&discovered),
         vec![rfc, cm].into_iter().chain(sdk).collect::<Vec<_>>()
     );
+}
+
+/// The two GUI libraries of one Linux install, in discovery order.
+fn linux_install_libraries(install: &Path) -> Vec<PathBuf> {
+    vec![
+        install.join("bin").join("unicode").join("libsapnwrfc.so"),
+        install.join("bin").join("libsapnwrfccm.so"),
+    ]
+}
+
+/// The Linux GUI candidates `Env::discover` yields before the SDK family.
+fn linux_gui_candidates(files: &[PathBuf], directories: &[PathBuf]) -> Vec<PathBuf> {
+    let fs = FakeFs::from_paths(files, directories);
+    let discovered = Env::discover(Platform::Linux, &env_with(&[("HOME", "/home/DEV")]), &fs);
+    let candidates = RfcLibrary::candidate_paths(&discovered);
+    let sdk = sdk_libraries(
+        Platform::Linux,
+        &[
+            Path::new("/home/DEV/sap/nwrfcsdk"),
+            Path::new("/opt/sap/nwrfcsdk"),
+            Path::new("/usr/local/sap/nwrfcsdk"),
+        ],
+    );
+
+    assert!(candidates.ends_with(&sdk), "{candidates:?}");
+
+    candidates[..candidates.len() - sdk.len()].to_vec()
+}
+
+#[test]
+fn install_version_reads_every_number_in_the_name() {
+    let cases = [
+        ("8.10rev14", vec![8, 10, 14]),
+        ("8.00rev5", vec![8, 0, 5]),
+        ("8.10", vec![8, 10]),
+        ("", Vec::new()),
+    ];
+
+    for (name, expected) in cases {
+        assert_eq!(
+            install_version(name),
+            expected,
+            "unexpected version for {name}"
+        );
+    }
+}
+
+#[test]
+fn linux_versioned_install_folder_is_found() {
+    let install = Path::new("/home/DEV/sapgui/SAPGUI8.10rev14");
+    let libraries = linux_install_libraries(install);
+    let directories = [
+        PathBuf::from("/home/DEV/sapgui/SAPGUI"),
+        install.to_path_buf(),
+    ];
+
+    assert_eq!(linux_gui_candidates(&libraries, &directories), libraries);
+}
+
+#[test]
+fn linux_versioned_installs_are_ordered_highest_first() {
+    let root = Path::new("/home/DEV/sapgui");
+    let ranked = [
+        root.join("SAPGUI8.00rev5"),
+        root.join("SAPGUI8.10rev9"),
+        root.join("SAPGUI8.10rev14"),
+        root.join("SAPGUI10.0rev1"),
+    ];
+    let files = ranked
+        .iter()
+        .flat_map(|install| linux_install_libraries(install))
+        .collect::<Vec<_>>();
+    let expected = ranked
+        .iter()
+        .rev()
+        .flat_map(|install| linux_install_libraries(install))
+        .collect::<Vec<_>>();
+
+    // Numeric order: 10.0 outranks 8.10, and revision 14 outranks revision 9.
+    assert_eq!(linux_gui_candidates(&files, &ranked), expected);
+}
+
+#[test]
+fn linux_launcher_only_gui_folder_is_ignored() {
+    let root = Path::new("/home/DEV/sapgui");
+    let launcher = root.join("SAPGUI").join("bin").join("guistart");
+    let install = root.join("SAPGUI8.10rev14");
+    let libraries = linux_install_libraries(&install);
+    let files = [vec![launcher], libraries.clone()].concat();
+    let directories = [root.join("SAPGUI"), install];
+
+    assert_eq!(linux_gui_candidates(&files, &directories), libraries);
+    assert!(linux_gui_candidates(&files[..1], &directories).is_empty());
+}
+
+#[test]
+fn linux_direct_layout_still_works_beside_versioned_installs() {
+    let root = Path::new("/opt/sapgui");
+    let install = root.join("SAPGUI8.10rev14");
+    let direct = linux_install_libraries(root);
+    let versioned = linux_install_libraries(&install);
+    let files = [direct.clone(), versioned.clone()].concat();
+
+    assert_eq!(
+        linux_gui_candidates(&files, &[install]),
+        [direct, versioned].concat()
+    );
+}
+
+#[test]
+fn linux_roots_keep_their_order_across_versioned_installs() {
+    let home_install = Path::new("/home/DEV/sapgui/SAPGUI8.00rev5");
+    let opt_install = Path::new("/opt/sapgui/SAPGUI8.10rev14");
+    let local_install = Path::new("/usr/local/sapgui/SAPGUI10.0rev1");
+    let installs = [home_install, opt_install, local_install];
+    let files = installs
+        .iter()
+        .flat_map(|install| linux_install_libraries(install))
+        .collect::<Vec<_>>();
+    let directories = installs.map(Path::to_path_buf);
+
+    // Root order wins over version: the home install is tried first even though it is the oldest.
+    assert_eq!(linux_gui_candidates(&files, &directories), files);
 }
 
 #[test]
