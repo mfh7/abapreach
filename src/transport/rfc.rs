@@ -1954,7 +1954,7 @@ fn platform_dependencies(library: &Path) -> Result<PlatformDependencies, String>
         })
         .unwrap_or_default();
     let plan = dependency_preload(library, Some(&dynamic), &files)?;
-    let libraries = preload_dependencies(&plan.paths, |path| map_library(path))?;
+    let libraries = preload_dependencies(&plan.paths, map_library)?;
 
     Ok(PlatformDependencies {
         libraries,

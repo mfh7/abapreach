@@ -490,6 +490,24 @@ fn connect_error_is_pre_send() {
     );
 }
 
+/// A connect that times out (no SYN-ACK, as on a closed Windows loopback port or a firewall that
+/// drops) sent nothing, so it is pre-send for a write as well as a read. 192.0.2.1 is TEST-NET-1:
+/// it never connects, so both a timeout and an immediate "unreachable" prove the same thing.
+#[test]
+fn connect_phase_failure_is_pre_send_for_reads_and_writes() {
+    for request in [Request::get("/x"), Request::put("/x", b"body".to_vec())] {
+        let mut transport = HttpTransport::connect(config("http://192.0.2.1:9/", 400)).unwrap();
+
+        let error = transport.request(request).unwrap_err();
+
+        assert!(
+            matches!(error, TransportError::PreSendConnectivity(_)),
+            "{error:?}"
+        );
+        assert!(!error.is_post_send_uncertain(), "{error:?}");
+    }
+}
+
 #[test]
 fn builder_error_is_pre_send() {
     let mut transport = HttpTransport::connect(config("http://127.0.0.1:9/", 2000)).unwrap();

@@ -46,7 +46,10 @@ impl HttpTransport {
             .cookie_store(true)
             .redirect(reqwest::redirect::Policy::none())
             .danger_accept_invalid_certs(config.insecure)
-            .connect_timeout(config.timeout)
+            // Strictly below the request timeout: when both fire together (a closed Windows
+            // loopback port retries SYNs for ~2 s) the overall timeout wins and a connect that
+            // sent nothing is misread as a lost reply. A connect-phase timeout is `is_connect()`.
+            .connect_timeout(config.timeout.mul_f32(0.75))
             .timeout(config.timeout);
 
         if let Some(path) = config.ca_file {
