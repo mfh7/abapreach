@@ -1,6 +1,6 @@
 use abapreach::{
     cli::{Backend, Cli, Command, ObjectKind},
-    hash::{normalize, source_hash, validate_prog},
+    hash::{local_source_lines, normalize, source_hash, validate_prog},
 };
 use clap::Parser;
 use std::path::PathBuf;
@@ -51,6 +51,61 @@ fn normalization_and_validation() {
     assert!(validate_prog(&"X".repeat(41), &["x".to_owned()]).is_err());
     assert!(validate_prog("Z", &["x".repeat(256)]).is_err());
     assert!(validate_prog("Z", &[]).is_err());
+}
+
+#[test]
+fn deploy_strips_only_leading_utf8_bom_and_normalizes_crlf() {
+    let lines = local_source_lines("\u{feff}REPORT z.  \r\n\r\nWRITE / 'v1'.\r\n");
+
+    assert_eq!(
+        lines,
+        vec![
+            "REPORT z.  \r".to_owned(),
+            "\r".to_owned(),
+            "WRITE / 'v1'.\r".to_owned(),
+            String::new(),
+        ]
+    );
+    assert_eq!(
+        normalize(lines),
+        vec![
+            "REPORT z.".to_owned(),
+            String::new(),
+            "WRITE / 'v1'.".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn local_source_without_a_bom_is_split_unchanged() {
+    assert_eq!(
+        local_source_lines("a\r\nb"),
+        vec!["a\r".to_owned(), "b".to_owned()]
+    );
+    assert_eq!(local_source_lines(""), vec![String::new()]);
+}
+
+#[test]
+fn a_bom_outside_the_first_position_is_kept() {
+    assert_eq!(
+        local_source_lines("a\n\u{feff}b"),
+        vec!["a".to_owned(), "\u{feff}b".to_owned()]
+    );
+    // Only one BOM is a byte-order mark; a second one at the start is content.
+    assert_eq!(
+        local_source_lines("\u{feff}\u{feff}a"),
+        vec!["\u{feff}a".to_owned()]
+    );
+}
+
+#[test]
+fn bom_and_crlf_source_hashes_like_the_plain_lf_source() {
+    let windows = local_source_lines("\u{feff}REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v1'.\r\n");
+    let unix = local_source_lines("REPORT ytest_abapreach01.\n\nWRITE / 'v1'.\n");
+
+    assert_eq!(source_hash(&windows), V1_HASH);
+    assert_eq!(source_hash(&windows), source_hash(&unix));
+    assert!(validate_prog("YTEST_ABAPREACH01", &windows).is_ok());
 }
 
 #[test]

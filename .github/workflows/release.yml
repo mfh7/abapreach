@@ -1,0 +1,520 @@
+# Tag release builds (decision 38: v* tags and manual dispatch only).
+#
+# rc tag `v0.12.0-rc.N`  Runs ci.yml as a called workflow (all four runners) first, so nothing is
+#                        built or published unless CI passed in this same run. Then builds four ordinary archives and four fault-injection test archives
+#                        from the tag commit, inspects the executable inside every packaged
+#                        archive, and publishes the ordinary archives with their SHA256 files as
+#                        a GitHub prerelease. The fault-injection archives stay workflow
+#                        artifacts: only the publish job exists with write access, and it
+#                        downloads the `release-*` artifacts only.
+# final tag `v0.12.0`    Builds nothing. Finds the rc prerelease whose commit is the tag commit or
+#                        its ancestor, requires every changed file in between to be README.md or
+#                        under docs/, requires that the release run of the rc tag concluded
+#                        success (that run contains the CI of the rc commit), copies the tested rc archives to the final names, proves the
+#                        executables are byte-identical, and publishes them as the Release.
+# manual dispatch        Runs the same promotion checks against `rc_tag` and the dispatched commit
+#                        as a dry run. It creates no tag and no Release.
+#
+# Release archives hold the single executable at the archive root, so promotion is a rename.
+# This workflow never reaches a system. It reads no connection file, RFC library or secret
+# beyond the default workflow token.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: "Dry run of the promotion against this rc tag, for example v0.12.0-rc.1. Creates no tag and no Release."
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      base_version: ${{ steps.plan.outputs.base_version }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Decide what this run does
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_RC_TAG: ${{ inputs.rc_tag }}
+        run: |
+          rc_pattern='^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'
+          final_pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [ "$EVENT" = workflow_dispatch ]; then
+            tag="$INPUT_RC_TAG"
+            [[ "$tag" =~ $rc_pattern ]] || { echo "::error::rc_tag must look like v0.12.0-rc.1"; exit 1; }
+            mode=dry-run
+          elif [[ "$REF_NAME" =~ $rc_pattern ]]; then
+            tag="$REF_NAME"
+            mode=rc
+          elif [[ "$REF_NAME" =~ $final_pattern ]]; then
+            tag="$REF_NAME"
+            mode=promote
+          else
+            echo "::error::tag $REF_NAME is neither vX.Y.Z-rc.N nor vX.Y.Z"
+            exit 1
+          fi
+          version="${tag#v}"
+          base_version="${version%%-rc.*}"
+
+          # The rc binary is promoted without a rebuild, so it must already report the final
+          # version. Check it where the binary is built.
+          if [ "$mode" = rc ]; then
+            cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+            if [ "$cargo_version" != "$base_version" ]; then
+              echo "::error::Cargo.toml says $cargo_version but tag $tag releases $base_version"
+              exit 1
+            fi
+          fi
+
+          # Archive names use the rc version for an rc build and the final version when promoting.
+          if [ "$mode" != rc ]; then
+            archive_version="$base_version"
+          else
+            archive_version="$version"
+          fi
+          {
+            echo "mode=$mode"
+            echo "tag=$tag"
+            echo "version=$archive_version"
+            echo "base_version=$base_version"
+          } >> "$GITHUB_OUTPUT"
+          echo "mode: $mode, tag: $tag, archive version: $archive_version"
+
+  # The called workflow inherits the caller's permissions unless the job narrows them, so this
+  # job grants it contents: read and nothing else. ci.yml has no tag trigger of its own, so
+  # this is the only CI run for the tag.
+  ci:
+    name: ci
+    needs: plan
+    if: needs.plan.outputs.mode == 'rc'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  build-linux:
+    name: Linux build (${{ matrix.runner.target }}, ${{ matrix.variant.artifact }})
+    needs:
+      - plan
+      - ci
+    if: needs.plan.outputs.mode == 'rc'
+    runs-on: ${{ matrix.runner.label }}
+    container: ${{ matrix.runner.image }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - label: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+            exe: abapreach
+            image: quay.io/pypa/manylinux_2_28_x86_64
+          - label: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            ext: tar.gz
+            exe: abapreach
+            image: quay.io/pypa/manylinux_2_28_aarch64
+        variant:
+          - artifact: release
+            flags: ""
+            suffix: ""
+          - artifact: fault-injection
+            flags: "--features fault-injection"
+            suffix: "-fault-injection"
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.runner.target }}
+      EXE: ${{ matrix.runner.exe }}
+      FLAGS: ${{ matrix.variant.flags }}
+      ARCHIVE_FILE: abapreach-${{ needs.plan.outputs.version }}-${{ matrix.runner.target }}${{ matrix.variant.suffix }}.${{ matrix.runner.ext }}
+    steps:
+      - name: Check out the tag commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The manylinux_2_28 images carry no Rust toolchain; the hosted runners already do.
+      - name: Install the Rust toolchain
+        run: |
+          if ! command -v rustup > /dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustup default 1.99.1
+          rustc --version | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Build the executable
+        run: cargo build --release --locked --target "$TARGET" $FLAGS
+
+      - name: Package the archive
+        run: |
+          mkdir dist
+          tar -C "target/$TARGET/release" -czf "dist/$ARCHIVE_FILE" "$EXE"
+
+      - name: Record the archive SHA256
+        run: |
+          printf '%s  %s\n' "$(bash .github/scripts/sha256.sh "dist/$ARCHIVE_FILE")" "$ARCHIVE_FILE" > "dist/$ARCHIVE_FILE.sha256"
+          cat "dist/$ARCHIVE_FILE.sha256"
+
+      # Everything below inspects the file that a user extracts from the archive, never
+      # target/release.
+      - name: Extract the archive for inspection
+        run: |
+          mkdir inspect
+          tar -xzf "dist/$ARCHIVE_FILE" -C inspect
+
+      - name: Check the glibc baseline of the packaged executable
+        if: runner.os == 'Linux'
+        run: objdump -T "inspect/$EXE" | bash .github/scripts/check-glibc.sh 2.28
+
+      - name: Record the executable SHA256
+        run: |
+          {
+            echo "### $ARCHIVE_FILE"
+            echo
+            echo "- archive SHA256: \`$(cut -d' ' -f1 "dist/$ARCHIVE_FILE.sha256")\`"
+            echo "- executable SHA256: \`$(bash .github/scripts/sha256.sh "inspect/$EXE")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the archive as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.variant.artifact }}-${{ matrix.runner.target }}
+          path: |
+            dist/${{ env.ARCHIVE_FILE }}
+            dist/${{ env.ARCHIVE_FILE }}.sha256
+          if-no-files-found: error
+
+  build-bare:
+    name: bare build (${{ matrix.runner.target }}, ${{ matrix.variant.artifact }})
+    needs:
+      - plan
+      - ci
+    if: needs.plan.outputs.mode == 'rc'
+    runs-on: ${{ matrix.runner.label }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - label: macos-14
+            target: aarch64-apple-darwin
+            ext: tar.gz
+            exe: abapreach
+          - label: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+            exe: abapreach.exe
+            rustflags: "-C target-feature=+crt-static"
+        variant:
+          - artifact: release
+            flags: ""
+            suffix: ""
+          - artifact: fault-injection
+            flags: "--features fault-injection"
+            suffix: "-fault-injection"
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.runner.target }}
+      EXE: ${{ matrix.runner.exe }}
+      FLAGS: ${{ matrix.variant.flags }}
+      RUSTFLAGS: ${{ matrix.runner.rustflags }}
+      ARCHIVE_FILE: abapreach-${{ needs.plan.outputs.version }}-${{ matrix.runner.target }}${{ matrix.variant.suffix }}.${{ matrix.runner.ext }}
+    steps:
+      - name: Check out the tag commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # aws-lc-sys assembles on Windows and has no NASM here, so install it before the build.
+      - name: Install NASM
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          echo "C:\\Program Files\\NASM" >> $env:GITHUB_PATH
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustup default 1.99.1
+          rustc --version | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # RUSTFLAGS from the job environment links the CRT statically on Windows only.
+      - name: Build the executable
+        run: cargo build --release --locked --target "$TARGET" $FLAGS
+
+      - name: Package the archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir dist
+          tar -C "target/$TARGET/release" -czf "dist/$ARCHIVE_FILE" "$EXE"
+
+      - name: Package the archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -LiteralPath "target\\$env:TARGET\\release\\$env:EXE" -DestinationPath "dist\\$env:ARCHIVE_FILE"
+
+      - name: Record the archive SHA256
+        run: |
+          printf '%s  %s\n' "$(bash .github/scripts/sha256.sh "dist/$ARCHIVE_FILE")" "$ARCHIVE_FILE" > "dist/$ARCHIVE_FILE.sha256"
+          cat "dist/$ARCHIVE_FILE.sha256"
+
+      # Everything below inspects the file that a user extracts from the archive, never
+      # target/release.
+      - name: Extract the archive for inspection (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir inspect
+          tar -xzf "dist/$ARCHIVE_FILE" -C inspect
+
+      - name: Extract the archive for inspection (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Expand-Archive -LiteralPath "dist\\$env:ARCHIVE_FILE" -DestinationPath inspect
+
+      - name: Check the import table of the packaged executable
+        if: runner.os == 'Windows'
+        run: |
+          rustup component add llvm-tools
+          host="$(rustc -vV | tr -d '\r' | sed -n 's/^host: //p')"
+          sysroot="$(cygpath -u "$(rustc --print sysroot | tr -d '\r')")"
+          readobj="$sysroot/lib/rustlib/$host/bin/llvm-readobj.exe"
+          test -x "$readobj"
+          "$readobj" --coff-imports "inspect/$EXE" | bash .github/scripts/check-imports.sh
+
+      - name: Record the executable SHA256
+        run: |
+          {
+            echo "### $ARCHIVE_FILE"
+            echo
+            echo "- archive SHA256: \`$(cut -d' ' -f1 "dist/$ARCHIVE_FILE.sha256")\`"
+            echo "- executable SHA256: \`$(bash .github/scripts/sha256.sh "inspect/$EXE")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the archive as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.variant.artifact }}-${{ matrix.runner.target }}
+          path: |
+            dist/${{ env.ARCHIVE_FILE }}
+            dist/${{ env.ARCHIVE_FILE }}.sha256
+          if-no-files-found: error
+
+  publish-rc:
+    name: publish the rc prerelease
+    needs:
+      - plan
+      - ci
+      - build-bare
+      - build-linux
+    if: needs.plan.outputs.mode == 'rc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the tag commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Only the ordinary artifacts match this pattern.
+      - name: Download the ordinary archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Verify the archive set
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: bash .github/scripts/verify-dist.sh dist "$VERSION"
+
+      - name: Create the prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          {
+            echo "Release candidate $TAG. SHA256 of each archive, also attached as .sha256 files:"
+            echo
+            echo '```text'
+            cat dist/*.sha256
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "$TAG" --notes-file notes.md
+
+  promote-verify:
+    name: promote the tested rc binaries
+    needs: plan
+    if: needs.plan.outputs.mode != 'rc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MODE: ${{ needs.plan.outputs.mode }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      BASE_VERSION: ${{ needs.plan.outputs.base_version }}
+    steps:
+      - name: Check out the full history and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A final tag takes the newest rc prerelease of its version whose commit is an ancestor of
+      # the tag commit. A dry run takes exactly the rc tag it was given.
+      - name: Locate the rc prerelease for the base commit
+        id: rc
+        run: |
+          if [ "$MODE" = dry-run ]; then
+            candidates="$TAG"
+          else
+            candidates="$(git tag --list "v${BASE_VERSION}-rc.*" --sort=-v:refname)"
+          fi
+          selected=""
+          for candidate in $candidates; do
+            rc_sha="$(git rev-list -n 1 "refs/tags/$candidate" 2> /dev/null)" || continue
+            git merge-base --is-ancestor "$rc_sha" "$GITHUB_SHA" || continue
+            prerelease="$(gh release view "$candidate" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease 2> /dev/null)" || continue
+            [ "$prerelease" = true ] || continue
+            selected="$candidate"
+            break
+          done
+          if [ -z "$selected" ]; then
+            echo "::error::no rc prerelease v${BASE_VERSION}-rc.N exists for a commit at or below $GITHUB_SHA"
+            exit 1
+          fi
+          {
+            echo "rc_tag=$selected"
+            echo "rc_sha=$rc_sha"
+            echo "rc_version=${selected#v}"
+          } >> "$GITHUB_OUTPUT"
+          echo "base rc prerelease: $selected at $rc_sha"
+
+      - name: Require a documentation-only diff from the rc commit
+        env:
+          RC_SHA: ${{ steps.rc.outputs.rc_sha }}
+        run: bash .github/scripts/check-doc-only.sh "$RC_SHA" "$GITHUB_SHA"
+
+      # CI runs inside the rc's own release run (the `ci` job), and the publish job needs it. A
+      # release run of the rc tag that concluded success therefore proves CI passed on the rc
+      # commit. The dry-run dispatch is excluded by `--event push`.
+      - name: Require a successful release run for the rc tag
+        env:
+          RC_SHA: ${{ steps.rc.outputs.rc_sha }}
+          RC_TAG: ${{ steps.rc.outputs.rc_tag }}
+        run: |
+          conclusions="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml --event push --branch "$RC_TAG" --commit "$RC_SHA" --json conclusion --jq '.[].conclusion')"
+          if ! printf '%s\n' "$conclusions" | grep -qx success; then
+            echo "::error::release.yml has no successful run for rc tag $RC_TAG at $RC_SHA, so CI did not pass for that commit"
+            exit 1
+          fi
+
+      - name: Download the tested rc archives
+        env:
+          RC_TAG: ${{ steps.rc.outputs.rc_tag }}
+        run: gh release download "$RC_TAG" --repo "$GITHUB_REPOSITORY" --dir rc
+
+      - name: Rename the rc archives and verify the binaries are identical
+        env:
+          RC_VERSION: ${{ steps.rc.outputs.rc_version }}
+          RC_TAG: ${{ steps.rc.outputs.rc_tag }}
+        run: |
+          bash .github/scripts/promote-archives.sh rc "$RC_VERSION" promoted "$BASE_VERSION" | tee promotion.txt
+          {
+            echo "### Promotion of $RC_TAG to $BASE_VERSION (mode: $MODE)"
+            echo
+            sed 's/^/- /' promotion.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the promoted archives as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: promoted-binaries
+          path: promoted/*
+          if-no-files-found: error
+
+  publish-final:
+    name: publish the final release
+    needs:
+      - plan
+      - promote-verify
+    if: needs.plan.outputs.mode == 'promote'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the tag commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download the promoted archives
+        uses: actions/download-artifact@v4
+        with:
+          name: promoted-binaries
+          path: dist
+
+      - name: Verify the promoted set
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: bash .github/scripts/verify-dist.sh dist "$VERSION"
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          {
+            echo "Release $TAG. These are the tested release-candidate binaries, promoted without a rebuild. SHA256 of each archive, also attached as .sha256 files:"
+            echo
+            echo '```text'
+            cat dist/*.sha256
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file notes.md

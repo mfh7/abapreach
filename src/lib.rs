@@ -11,4 +11,4 @@ pub mod operation;
 pub mod policy;
 pub mod transport;
 
-pub use app::{Exit, Factories, Opened, RealFactories, RfcLibraryInfo, run};
+pub use app::{Exit, Factories, Opened, RealFactories, RfcLibraryIdentity, RfcLibraryInfo, run};

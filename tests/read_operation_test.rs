@@ -143,3 +143,20 @@ fn a_refused_logon_is_the_authorization_failure_with_its_status() {
     assert_eq!(transport.calls.len(), 1);
     assert!(!output.exists());
 }
+
+#[test]
+fn read_output_is_lf_only_even_for_crlf_and_trailing_space_replies() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("program.abap");
+    let mut transport = common::ScriptedTransport::replies(vec![Ok(Response::text(
+        200,
+        "REPORT z.  \r\n\r\nWRITE / 'v1'.\r\n\r\n",
+    ))]);
+
+    ReadProg::run(&mut transport, "Z", &output, false, None).unwrap();
+
+    let written = fs::read(output).unwrap();
+
+    assert_eq!(written, b"REPORT z.\n\nWRITE / 'v1'.\n");
+    assert!(!written.contains(&b'\r'));
+}

@@ -326,7 +326,7 @@ fn cancel_during_the_check_unlocks_without_a_write() {
     let cancel = transport.cancel.clone();
     let outcome = DeployProg::run_with_cancel(&mut transport, valid(), &cancel);
 
-    assert_eq!(outcome.exit, 1);
+    assert_eq!(outcome.exit, 130);
     assert!(outcome.stderr.starts_with("CANCELED"));
     assert!(
         transport

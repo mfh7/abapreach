@@ -1,4 +1,7 @@
-use abapreach::config::{Config, ConfigPaths, Connection, SaprouterSource, scrub, tls_warning};
+use abapreach::config::{
+    Config, ConfigPaths, Connection, LocalCredentialsPermission, SaprouterSource,
+    classify_credentials_mode, local_credentials_permission, scrub, tls_warning,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -199,7 +202,7 @@ fn local_file_is_optional_but_an_unreadable_one_stops() {
 }
 
 #[test]
-fn stops_for_bad_ids_missing_credentials_and_bad_default_paths() {
+fn stops_for_bad_ids_and_missing_credentials() {
     assert_eq!(
         Config::parse_id("dev_land_100").unwrap(),
         ("DEV_LAND".to_owned(), "100".to_owned())
@@ -216,24 +219,61 @@ fn stops_for_bad_ids_missing_credentials_and_bad_default_paths() {
         Config::credentials("DEV", "100", &missing, &local).unwrap(),
         ("user".to_owned(), "local-password".to_owned())
     );
-    let defaults = ConfigPaths::from_env(&BTreeMap::from([(
+}
+
+/// The default location stays Python-tooling compatible on every OS: `<home>/.config/abap-rfc`.
+#[test]
+fn config_paths_default_under_home_when_home_is_set() {
+    let paths = ConfigPaths::from_env(&BTreeMap::from([(
         "HOME".to_owned(),
         "/tmp/home".to_owned(),
     )]))
     .unwrap();
+
     assert_eq!(
-        defaults.connections,
+        paths.connections,
         PathBuf::from("/tmp/home").join(".config/abap-rfc/connections.json")
     );
     assert_eq!(
-        defaults.local,
+        paths.local,
         PathBuf::from("/tmp/home").join(".config/abap-rfc/connections.local.json")
     );
+}
+
+/// `USERPROFILE` is the Windows home variable, and an empty `HOME` counts as absent like the other
+/// key-map lookups.
+#[test]
+fn config_paths_use_userprofile_when_home_is_missing() {
+    for env in [
+        BTreeMap::from([("USERPROFILE".to_owned(), "/tmp/profile".to_owned())]),
+        BTreeMap::from([
+            ("HOME".to_owned(), String::new()),
+            ("USERPROFILE".to_owned(), "/tmp/profile".to_owned()),
+        ]),
+    ] {
+        let paths = ConfigPaths::from_env(&env).unwrap();
+
+        assert_eq!(
+            paths.connections,
+            PathBuf::from("/tmp/profile").join(".config/abap-rfc/connections.json")
+        );
+        assert_eq!(
+            paths.local,
+            PathBuf::from("/tmp/profile").join(".config/abap-rfc/connections.local.json")
+        );
+    }
+}
+
+/// `ABAP_CONNECTIONS` keeps winning over a home-derived default, and `~` expands with the same
+/// home rule the default uses.
+#[test]
+fn config_paths_prefer_abap_connections_over_the_home_default() {
     let overridden = ConfigPaths::from_env(&BTreeMap::from([
         ("HOME".to_owned(), "/tmp/home".to_owned()),
         ("ABAP_CONNECTIONS".to_owned(), "~/custom.json".to_owned()),
     ]))
     .unwrap();
+
     assert_eq!(
         overridden.connections,
         PathBuf::from("/tmp/home/custom.json")
@@ -241,6 +281,172 @@ fn stops_for_bad_ids_missing_credentials_and_bad_default_paths() {
     assert_eq!(
         overridden.local,
         PathBuf::from("/tmp/home/connections.local.json")
+    );
+
+    let expanded = ConfigPaths::from_env(&BTreeMap::from([
+        ("USERPROFILE".to_owned(), "/tmp/profile".to_owned()),
+        ("ABAP_CONNECTIONS".to_owned(), "~/custom.json".to_owned()),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        expanded.connections,
+        PathBuf::from("/tmp/profile/custom.json")
+    );
+
+    let absolute = ConfigPaths::from_env(&BTreeMap::from([
+        ("HOME".to_owned(), "/tmp/home".to_owned()),
+        (
+            "ABAP_CONNECTIONS".to_owned(),
+            "/elsewhere/connections.json".to_owned(),
+        ),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        absolute.connections,
+        PathBuf::from("/elsewhere/connections.json")
+    );
+    assert_eq!(
+        absolute.local,
+        PathBuf::from("/elsewhere/connections.local.json")
+    );
+}
+
+#[test]
+fn config_paths_stop_when_no_home_variable_is_set() {
+    let missing = ConfigPaths::from_env(&BTreeMap::new()).unwrap_err();
+
+    assert!(missing.contains("HOME"), "{missing}");
+    assert!(missing.contains("USERPROFILE"), "{missing}");
+}
+
+#[test]
+fn an_absent_local_credentials_file_has_no_permission_to_check() {
+    let directory = tempfile::tempdir().unwrap();
+
+    assert_eq!(
+        local_credentials_permission(&directory.path().join("connections.local.json")),
+        LocalCredentialsPermission::NotPresent
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn local_credentials_metadata_errors_are_reported_to_doctor() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("not-a-directory");
+    fs::write(&file, "not credentials").unwrap();
+    let inaccessible = file.join("connections.local.json");
+
+    let permission = local_credentials_permission(&inaccessible);
+
+    assert!(matches!(
+        permission,
+        LocalCredentialsPermission::MetadataError { .. }
+    ));
+    assert!(
+        permission
+            .label()
+            .starts_with("WARNING: local credentials metadata could not be read:"),
+        "{}",
+        permission.label()
+    );
+}
+
+#[test]
+fn a_platform_without_a_permission_check_reports_it_and_points_at_the_documentation() {
+    let label = LocalCredentialsPermission::NotChecked.label();
+
+    assert_eq!(
+        label,
+        "local credentials: permission not checked; restrict the file to a user-only ACL \
+         (see docs/getting-started.md)"
+    );
+}
+
+/// The rule is portable, so every OS exercises it even where the mode bits cannot be read.
+#[test]
+fn the_permission_rule_flags_any_group_or_other_bit() {
+    assert_eq!(
+        classify_credentials_mode(None),
+        LocalCredentialsPermission::NotChecked
+    );
+
+    for mode in [0o600, 0o400, 0o700] {
+        assert_eq!(
+            classify_credentials_mode(Some(mode)),
+            LocalCredentialsPermission::UserOnly,
+            "{mode:04o}"
+        );
+    }
+
+    for mode in [0o640, 0o604, 0o644, 0o660] {
+        assert_eq!(
+            classify_credentials_mode(Some(mode)),
+            LocalCredentialsPermission::GroupOrOtherReadable { mode },
+            "{mode:04o}"
+        );
+    }
+}
+
+/// Group and other must not be able to read a file that holds credentials.
+#[cfg(unix)]
+#[test]
+fn local_credentials_permission_rejects_group_or_other_access() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join("connections.local.json");
+
+    fs::write(&local, r#"{"DEV_100_PASS":"secret-pw"}"#).unwrap();
+
+    for mode in [0o640, 0o604, 0o644, 0o660] {
+        fs::set_permissions(&local, fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(
+            local_credentials_permission(&local),
+            LocalCredentialsPermission::GroupOrOtherReadable { mode },
+            "{mode:04o}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn local_credentials_with_mode_0600_are_user_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join("connections.local.json");
+
+    fs::write(&local, r#"{"DEV_100_PASS":"secret-pw"}"#).unwrap();
+
+    for mode in [0o600, 0o400] {
+        fs::set_permissions(&local, fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(
+            local_credentials_permission(&local),
+            LocalCredentialsPermission::UserOnly,
+            "{mode:04o}"
+        );
+    }
+}
+
+/// The warning names the modes but never a byte of the file content.
+#[test]
+fn the_group_or_other_warning_names_the_mode_without_the_secret() {
+    let label = LocalCredentialsPermission::GroupOrOtherReadable { mode: 0o644 }.label();
+
+    assert!(label.starts_with("WARNING: "), "{label}");
+    assert!(label.contains("0644"), "{label}");
+    assert!(label.contains("docs/getting-started.md"), "{label}");
+    assert!(!label.contains("secret"), "{label}");
+    assert_eq!(
+        LocalCredentialsPermission::UserOnly.label(),
+        "local credentials: user-only permission"
+    );
+    assert_eq!(
+        LocalCredentialsPermission::NotPresent.label(),
+        "local credentials: not present"
     );
 }
 
@@ -415,4 +621,24 @@ fn the_system_route_comes_from_env_then_local_then_config() {
         )
     );
     assert_eq!(resolve_route(paths, &env, "qas_100"), (None, None));
+}
+
+#[test]
+fn secrets_hide_the_password_the_route_and_only_its_host_and_password_fragments() {
+    let mut connection = Connection::test_insecure();
+
+    connection.password = "password-x".to_owned();
+
+    assert_eq!(connection.secrets(), ["password-x"]);
+
+    let route = "/H/router.example.com/S/3299/H/ab/W/secret";
+
+    connection.rfc.saprouter = Some(route.to_owned());
+
+    // Only the value after an `H` or `W` marker counts, and only from three characters on: the
+    // port after `S` and the short value after `H` stay readable. Longest first.
+    assert_eq!(
+        connection.secrets(),
+        [route, "router.example.com", "password-x", "secret"]
+    );
 }

@@ -157,7 +157,7 @@ fn cancel_after_lock_unlocks_and_closes() {
 
     let outcome = DeployProg::run_with_cancel(&mut transport, v2(), &cancel);
 
-    assert_eq!(outcome.exit, 1);
+    assert_eq!(outcome.exit, 130);
     assert!(outcome.stderr.starts_with("CANCELED"));
     assert!(
         transport

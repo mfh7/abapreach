@@ -5,7 +5,7 @@ use abapreach::config::Connection;
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::transport::http::HttpTransport;
 use abapreach::transport::{Response, SadtTransport, TransportError};
-use abapreach::{Exit, Factories, RfcLibraryInfo, run};
+use abapreach::{Exit, Factories, RfcLibraryIdentity, RfcLibraryInfo, run};
 use common::ScriptedTransport;
 use replay::{Step, fx, no_inactive, replay};
 use std::cell::RefCell;
@@ -242,6 +242,28 @@ fn simulate_prints_the_backend_report_before_the_diff() {
     assert!(exit.stdout.ends_with("SIMULATED_OK"));
     assert_report(&exit.stdout, "adt", "default ADT");
     assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+}
+
+#[test]
+fn a_leading_bom_and_crlf_in_the_deploy_file_do_not_reach_the_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(
+        &file,
+        "\u{feff}REPORT ytest_abapreach01.\r\n\r\nWRITE / 'v2'.\r\n",
+    )
+    .unwrap();
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(simulate_replay());
+
+    let exit = go(&simulate_args(&file, &[]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0);
+    assert!(exit.stdout.ends_with("SIMULATED_OK"));
+    assert!(!exit.stdout.contains('\u{feff}'));
 }
 
 #[test]
@@ -1273,8 +1295,15 @@ fn doctor_probes_both_backends_and_warns_once() {
     fake.adt
         .push_back(scripted(vec![Ok(Response::text(200, "<app:service/>"))]));
     fake.library.push_back(Ok(RfcLibraryInfo {
-        path: "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so".to_owned(),
-        version: "7.6.2".to_owned(),
+        identity: RfcLibraryIdentity {
+            path: "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so".to_owned(),
+            version: "7.6.2".to_owned(),
+            architecture: "x86-64".to_owned(),
+            family: "NW RFC SDK".to_owned(),
+            source: "discovered".to_owned(),
+            chars: "UTF-16".to_owned(),
+        },
+        notes: Vec::new(),
     }));
     fake.ping.push_back(Ok(()));
 
@@ -1324,7 +1353,7 @@ fn the_cancel_flag_of_the_factories_reaches_the_deploy() {
     ];
     let exit = go(&args, directory.path(), &mut fake);
 
-    assert_eq!(exit.code, 1);
+    assert_eq!(exit.code, 130);
     assert!(exit.stderr.starts_with("CANCELED"));
     assert_eq!(cell.borrow().closes, 1);
     assert!(

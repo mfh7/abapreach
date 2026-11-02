@@ -1,8 +1,13 @@
-use crate::app::Factories;
-use crate::config::{Connection, tls_warning};
+use crate::app::{Factories, RfcLibraryInfo};
+use crate::config::{Connection, LocalCredentialsPermission, tls_warning};
 use crate::transport::Request;
+use crate::transport::rfc::identity_report;
 
 const DISCOVERY_URI: &str = "/sap/bc/adt/discovery";
+
+/// What stands in for a host the doctor does not print; it is the mask `scrub` uses, so a host
+/// that a probe error carries is masked the same way.
+const HOST_MASK: &str = "***";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DoctorReport {
@@ -32,11 +37,17 @@ struct AdtProbe {
 
 impl Doctor {
     /// Read-only probes on one connection: every probe runs even when an earlier one failed, and
-    /// each backend gets at most one logon (ADT discovery GET, RFC ping).
-    pub fn probe(connection: &Connection, factories: &mut dyn Factories) -> DoctorReport {
+    /// each backend gets at most one logon (ADT discovery GET, RFC ping). `local_credentials` is
+    /// the permission assessment of the file the credentials came from; it is only reported.
+    pub fn probe(
+        connection: &Connection,
+        local_credentials: LocalCredentialsPermission,
+        factories: &mut dyn Factories,
+    ) -> DoctorReport {
         let mut lines = vec![
             format!("connection {}: configuration available", connection.id),
             "credential available".to_owned(),
+            local_credentials.label(),
             format!(
                 "policy foreign inactive: {}",
                 connection.policies.foreign_inactive
@@ -45,15 +56,16 @@ impl Doctor {
 
         match &connection.adt {
             Some(adt) => lines.push(format!(
-                "ADT HTTP configured: {}://{}:{}",
-                adt.scheme, adt.host, adt.port
+                "ADT HTTP configured: {}://{HOST_MASK}:{}",
+                adt.scheme, adt.port
             )),
             None => lines.push("ADT HTTP: not configured".to_owned()),
         }
 
+        // The application server host is as internal as a route host, so it is never printed.
         lines.push(format!(
-            "RFC SADT configured: {} system {}",
-            connection.rfc.ashost, connection.rfc.sysnr
+            "RFC SADT configured: {HOST_MASK} system {}",
+            connection.rfc.sysnr
         ));
 
         // The route may carry a `/W/<password>`, so only its source is ever printed.
@@ -92,10 +104,8 @@ impl Doctor {
         // A ping needs the library, so a missing library skips (never fails) the ping probe.
         let library_found = match factories.rfc_library(connection) {
             Ok(info) => {
-                lines.push(format!(
-                    "RFC library: {} version {}",
-                    info.path, info.version
-                ));
+                lines.push(format!("RFC library: {}", library_line(&info)));
+                lines.extend(info.notes);
 
                 true
             }
@@ -140,6 +150,18 @@ impl Doctor {
 
         DoctorReport { lines, passed }
     }
+}
+
+/// The identity fields of the library the probe loaded, in one doctor line.
+fn library_line(info: &RfcLibraryInfo) -> String {
+    identity_report(
+        &info.identity.path,
+        &info.identity.version,
+        &info.identity.architecture,
+        &info.identity.family,
+        &info.identity.source,
+        &info.identity.chars,
+    )
 }
 
 /// Renders the backends a capability line may list, in probe order.

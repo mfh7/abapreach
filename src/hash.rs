@@ -3,6 +3,17 @@ use sha2::{Digest, Sha256};
 pub const MAX_LINE: usize = 255;
 pub const MAX_NAME: usize = 40;
 
+/// Splits a locally read deploy file into lines. Editors on Windows prepend one UTF-8 BOM; it is
+/// not source, so it is dropped from the first position only. CR and trailing blanks stay for
+/// `normalize`, which the hash and the diff share.
+pub fn local_source_lines(text: &str) -> Vec<String> {
+    text.strip_prefix('\u{feff}')
+        .unwrap_or(text)
+        .split('\n')
+        .map(str::to_owned)
+        .collect()
+}
+
 pub fn normalize(lines: Vec<String>) -> Vec<String> {
     let mut normalized = lines
         .into_iter()

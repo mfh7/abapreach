@@ -1,6 +1,6 @@
 [package]
 name = "abapreach"
-version = "0.11.1"
+version = "0.12.0"
 description = "Read and safely deploy existing ABAP programs via ADT HTTP or RFC/SADT."
 edition = "2024"
 
@@ -25,10 +25,14 @@ sha2 = "0.11.1"
 libloading = "0.9.0"
 thiserror = "2.0.21"
 similar = "3.2.1"
-ctrlc = "3.5.2"
+ctrlc = { version = "3.5.2", features = ["termination"] }
 
 [dev-dependencies]
 # Tests need the fakes behind `test-support`, so a plain `cargo test` turns the feature on.
 abapreach = { path = ".", features = ["test-support"] }
 tempfile = "3.27.0"
 httpmock = "0.9.0"
+# The TLS test server; reqwest already builds this version with the same crypto provider.
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+# Generates the test certificates at run time; already in the tree through rustls.
+aws-lc-rs = { version = "1.19.0", default-features = false, features = ["alloc", "aws-lc-sys"] }

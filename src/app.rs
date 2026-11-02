@@ -1,8 +1,11 @@
 use crate::backend::{BackendKind, Failure, OperationKind, Router, Selection, SelectionReason};
 use crate::cli::{Backend, Cli, Command};
-use crate::config::{Config, ConfigPaths, Connection, scrub, tls_warning};
+use crate::config::{
+    Config, ConfigPaths, Connection, LocalCredentialsPermission, local_credentials_permission,
+    scrub, tls_warning,
+};
 use crate::domain::Outcome;
-use crate::hash::{validate_name, validate_prog};
+use crate::hash::{local_source_lines, validate_name, validate_prog};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg};
 use crate::operation::doctor::Doctor;
 use crate::operation::read::ReadProg;
@@ -28,11 +31,24 @@ pub struct Exit {
 
 pub type Opened = Result<Box<dyn SadtTransport>, TransportError>;
 
-/// The RFC library a probe found: where it came from and the version it reports.
+/// The RFC library a probe found: its identity and the discovery notes behind the choice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RfcLibraryInfo {
+    pub identity: RfcLibraryIdentity,
+    /// Discovery decisions the doctor prints, such as a SAP GUI location it skipped.
+    pub notes: Vec<String>,
+}
+
+/// The doctor-facing library identity: path, version, architecture, family, and source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RfcLibraryIdentity {
     pub path: String,
     pub version: String,
+    pub architecture: String,
+    pub family: String,
+    pub source: String,
+    /// The character size the library reads: `UTF-16` or `single-byte`.
+    pub chars: String,
 }
 
 /// Opens the transports; tests replace it so no network is touched. A failed open must be a
@@ -97,12 +113,24 @@ impl Factories for RealFactories {
     }
 
     fn rfc_library(&mut self, _: &Connection) -> Result<RfcLibraryInfo, String> {
-        let library = RfcLibrary::load(&Env::current())?;
-        let (major, minor, patch) = library.version()?;
+        let env = Env::current();
+        let library = RfcLibrary::load(&env)?;
+        let identity = library.identity()?;
+        let mut notes = env.notes().to_vec();
+
+        notes.extend(library.notes().iter().cloned());
+        notes.push(library.trace_target().label());
 
         Ok(RfcLibraryInfo {
-            path: library.path().display().to_string(),
-            version: format!("{major}.{minor}.{patch}"),
+            identity: RfcLibraryIdentity {
+                path: identity.path().display().to_string(),
+                version: identity.version().to_owned(),
+                architecture: identity.arch().label().to_owned(),
+                family: identity.family().label().to_owned(),
+                source: identity.source().label().to_owned(),
+                chars: identity.width().label().to_owned(),
+            },
+            notes,
         })
     }
 
@@ -152,12 +180,13 @@ pub fn run(
             );
         }
     };
-    let connection = match resolve(connection_id(&cli.command), &env) {
-        Ok(connection) => connection,
+    let is_doctor = matches!(cli.command, Command::Doctor { .. });
+    let (connection, local_credentials) = match resolve(connection_id(&cli.command), &env) {
+        Ok(resolved) => resolved,
         Err(message) => return with_warning(stop(message), warning.as_deref()),
     };
     let exit = with_warning(
-        execute(cli.command, &connection, factories),
+        execute(cli.command, &connection, local_credentials, factories),
         warning.as_deref(),
     );
     let mut stdout = exit.stdout;
@@ -173,7 +202,12 @@ pub fn run(
         };
     }
 
-    let secrets = connection.secrets();
+    let mut secrets = connection.secrets();
+
+    if is_doctor {
+        secrets.extend(connection.hosts());
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    }
 
     Exit {
         code: exit.code,
@@ -212,10 +246,16 @@ fn connection_id(command: &Command) -> &str {
     }
 }
 
-fn resolve(connection_id: &str, env: &BTreeMap<String, String>) -> Result<Connection, String> {
+fn resolve(
+    connection_id: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<(Connection, LocalCredentialsPermission), String> {
     let paths = ConfigPaths::from_env(env)?;
+    // Read-only and metadata-only; the doctor line reports it, no command changes it.
+    let local_credentials = local_credentials_permission(&paths.local);
+    let connection = Config::load(paths, env)?.resolve(connection_id, env)?;
 
-    Config::load(paths, env)?.resolve(connection_id, env)
+    Ok((connection, local_credentials))
 }
 
 /// One finished try on one backend: what to print and whether a switch is still allowed.
@@ -247,10 +287,15 @@ impl Attempt {
     }
 }
 
-fn execute(command: Command, connection: &Connection, factories: &mut dyn Factories) -> Exit {
+fn execute(
+    command: Command,
+    connection: &Connection,
+    local_credentials: LocalCredentialsPermission,
+    factories: &mut dyn Factories,
+) -> Exit {
     match command {
         Command::Doctor { .. } => {
-            let report = Doctor::probe(connection, factories);
+            let report = Doctor::probe(connection, local_credentials, factories);
 
             Exit {
                 code: report.exit(),
@@ -309,7 +354,7 @@ fn execute(command: Command, connection: &Connection, factories: &mut dyn Factor
                 Ok(text) => text,
                 Err(error) => return stop(format!("cannot read {}: {error}", file.display())),
             };
-            let source = text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+            let source = local_source_lines(&text);
 
             if let Err(message) = validate_prog(&name, &source) {
                 return stop(message);

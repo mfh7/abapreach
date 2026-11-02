@@ -1,6 +1,6 @@
 # Deploy safety
 
-This guide describes what ABAPReach 0.11.1 checks before and after it writes
+This guide describes what ABAPReach 0.12.0 checks before and after it writes
 an existing `PROG`. It is not a substitute for reviewing your local change
 and your SAP transport state.
 

@@ -33,6 +33,78 @@ impl ConfigPaths {
     }
 }
 
+/// The read-only permission assessment of `connections.local.json`, which holds credentials.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LocalCredentialsPermission {
+    /// No local credentials file, so there is nothing to protect.
+    NotPresent,
+    /// Only the owning user holds a permission bit on the file.
+    UserOnly,
+    /// A group or other user holds a permission bit on a file that stores credentials.
+    GroupOrOtherReadable { mode: u32 },
+    /// The file exists but its metadata could not be inspected.
+    MetadataError { error: String },
+    /// The platform reports no portable permission bits (Windows ACLs), so nothing was checked.
+    NotChecked,
+}
+
+impl LocalCredentialsPermission {
+    /// The doctor line for this assessment; it names the file mode, never the file content.
+    pub fn label(&self) -> String {
+        match self {
+            Self::NotPresent => "local credentials: not present".to_owned(),
+            Self::UserOnly => "local credentials: user-only permission".to_owned(),
+            Self::GroupOrOtherReadable { mode } => format!(
+                "WARNING: local credentials are readable by group or other (mode {mode:04o}); \
+                 restrict the file to the owner (see docs/getting-started.md)."
+            ),
+            Self::MetadataError { error } => {
+                format!("WARNING: local credentials metadata could not be read: {error}")
+            }
+            Self::NotChecked => concat!(
+                "local credentials: permission not checked; restrict the file to a user-only ",
+                "ACL (see docs/getting-started.md)"
+            )
+            .to_owned(),
+        }
+    }
+}
+
+/// Assesses the local credentials file without opening it: only its metadata is read, so the
+/// assessment never touches the secret content. A missing file stays optional.
+pub fn local_credentials_permission(path: &Path) -> LocalCredentialsPermission {
+    match fs::metadata(path) {
+        Ok(metadata) => classify_credentials_mode(platform_mode(&metadata)),
+        Err(error) if error.kind() == ErrorKind::NotFound => LocalCredentialsPermission::NotPresent,
+        Err(error) => LocalCredentialsPermission::MetadataError {
+            error: error.to_string(),
+        },
+    }
+}
+
+/// The portable rule: `None` means the platform exposes no mode bits, and any group or other bit
+/// counts as exposure, because a secret file has no legitimate group or other access at all.
+pub fn classify_credentials_mode(mode: Option<u32>) -> LocalCredentialsPermission {
+    match mode {
+        None => LocalCredentialsPermission::NotChecked,
+        Some(mode) if mode & 0o077 == 0 => LocalCredentialsPermission::UserOnly,
+        Some(mode) => LocalCredentialsPermission::GroupOrOtherReadable { mode },
+    }
+}
+
+#[cfg(unix)]
+fn platform_mode(metadata: &fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+
+    Some(metadata.permissions().mode() & 0o777)
+}
+
+/// Windows ACLs carry no mode bits, so the assessment reports that it did not check.
+#[cfg(not(unix))]
+fn platform_mode(_: &fs::Metadata) -> Option<u32> {
+    None
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Connection {
     pub id: String,
@@ -67,6 +139,15 @@ impl Connection {
 
         secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
         secrets
+    }
+
+    /// The server hosts. Only the doctor hides them: its probe errors may quote them, while a
+    /// read or deploy prints source text that has no business being rewritten.
+    pub fn hosts(&self) -> Vec<String> {
+        let mut hosts = vec![self.rfc.ashost.clone()];
+
+        hosts.extend(self.adt.iter().map(|adt| adt.host.clone()));
+        hosts
     }
 
     #[cfg(feature = "test-support")]
@@ -412,11 +493,12 @@ fn expand_home(path: &str, env: &BTreeMap<String, String>) -> Result<PathBuf, St
     Ok(PathBuf::from(path))
 }
 
+/// `HOME` on Unix and macOS, then Windows `USERPROFILE`; an empty value counts as absent.
 fn home(env: &BTreeMap<String, String>) -> Result<PathBuf, String> {
-    env.get("HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| "HOME is required to resolve configuration path".to_owned())
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .find_map(|key| non_empty(env, key).map(PathBuf::from))
+        .ok_or_else(|| "HOME or USERPROFILE is required to resolve configuration path".to_owned())
 }
 
 fn read_json<T>(path: &Path) -> Result<T, String>
