@@ -25,6 +25,7 @@ fn library() -> Result<RfcLibraryInfo, String> {
             architecture: "x86-64".to_owned(),
             family: "NW RFC SDK".to_owned(),
             source: "discovered".to_owned(),
+            chars: "UTF-16".to_owned(),
         },
         notes: Vec::new(),
     })
@@ -171,12 +172,12 @@ fn doctor_probes_both_backends_with_one_logon_each() {
             "credential available",
             "local credentials: not present",
             "policy foreign inactive: reject",
-            "ADT HTTP configured: https://example.com:443",
-            "RFC SADT configured: example.com system 00",
+            "ADT HTTP configured: https://***:443",
+            "RFC SADT configured: *** system 00",
             "ADT HTTP probe: ok (HTTP 200)",
             &format!(
                 "RFC library: {LIBRARY_PATH} version 7.6.2 architecture x86-64 family NW RFC SDK \
-                 source discovered"
+                 source discovered chars UTF-16"
             ),
             "RFC SADT probe: ok",
             "capability read PROG: ADT HTTP, RFC SADT",
@@ -223,6 +224,7 @@ fn doctor_reports_why_a_discovered_library_was_skipped() {
             architecture: "x86-64".to_owned(),
             family: "NW RFC SDK".to_owned(),
             source: "discovered".to_owned(),
+            chars: "UTF-16".to_owned(),
         },
         notes: vec![reason.to_owned()],
     }));
@@ -264,11 +266,11 @@ fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
             "local credentials: not present",
             "policy foreign inactive: reject",
             "ADT HTTP: not configured",
-            "RFC SADT configured: example.com system 02",
+            "RFC SADT configured: *** system 02",
             "ADT HTTP probe: not run (ADT not configured)",
             &format!(
                 "RFC library: {LIBRARY_PATH} version 7.6.2 architecture x86-64 family NW RFC SDK \
-                 source discovered"
+                 source discovered chars UTF-16"
             ),
             "RFC SADT probe: ok",
             "capability read PROG: RFC SADT",
@@ -711,6 +713,7 @@ fn sdk_identity() -> RfcLibraryIdentity {
         architecture: "x86-64".to_owned(),
         family: "NW RFC SDK".to_owned(),
         source: "discovered".to_owned(),
+        chars: "UTF-16".to_owned(),
     }
 }
 
@@ -722,6 +725,7 @@ fn identified(path: &str, family: &str, source: &str) -> Result<RfcLibraryInfo, 
             architecture: "x86-64".to_owned(),
             family: family.to_owned(),
             source: source.to_owned(),
+            chars: "UTF-16".to_owned(),
         },
         notes: Vec::new(),
     })
@@ -742,7 +746,7 @@ fn doctor_library_line_names_path_version_architecture_family_and_source() {
     let exit = doctor(directory.path(), &mut fake);
     let expected = concat!(
         "RFC library: /opt/sap/nwrfcsdk/lib/libsapnwrfc.so version 7.53.1629 ",
-        "architecture x86-64 family NW RFC SDK source discovered"
+        "architecture x86-64 family NW RFC SDK source discovered chars UTF-16"
     );
 
     assert_eq!(exit.code, 0, "{}", exit.stdout);
@@ -801,7 +805,7 @@ fn doctor_reports_a_sap_gui_family_library_named_by_the_override() {
     // asserted here; the family must name the library that was actually loaded.
     assert!(
         exit.stdout
-            .contains("family SAP GUI source explicit ABAPREACH_RFC_LIBRARY"),
+            .contains("family SAP GUI source explicit ABAPREACH_RFC_LIBRARY chars UTF-16"),
         "{}",
         exit.stdout
     );
@@ -811,4 +815,96 @@ fn doctor_reports_a_sap_gui_family_library_named_by_the_override() {
         "{}",
         exit.stdout
     );
+}
+
+/// A connection whose ADT host and application server host are both unique strings.
+fn env_with_two_hosts(directory: &Path) -> BTreeMap<String, String> {
+    let config = r#"{"servers":[{"systemId":"DEV","host":"adt-host.example.net","port":8443,"clients":["100"],"rfc":{"ashost":"10.20.30.40","sysnr":"00"},"adt":{}}]}"#;
+
+    fs::write(directory.join("connections.json"), config).unwrap();
+
+    BTreeMap::from([
+        (
+            "ABAP_CONNECTIONS".to_owned(),
+            directory.join("connections.json").display().to_string(),
+        ),
+        ("DEV_100_USER".to_owned(), "user".to_owned()),
+        ("DEV_100_PASS".to_owned(), "secret-pw".to_owned()),
+    ])
+}
+
+fn assert_no_host(exit: &Exit) {
+    for text in [&exit.stdout, &exit.stderr] {
+        assert!(!text.contains("10.20.30.40"), "{text}");
+        assert!(!text.contains("adt-host.example.net"), "{text}");
+    }
+}
+
+#[test]
+fn doctor_masks_the_application_server_host_and_the_adt_host_in_the_configured_lines() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(discovery());
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let exit = run(
+        ["abapreach", "doctor", "--conn", "dev_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        env_with_two_hosts(directory.path()),
+        &mut fake,
+    );
+    let lines = exit.stdout.lines().collect::<Vec<_>>();
+
+    assert_eq!(exit.code, 0, "{}", exit.stdout);
+    assert!(
+        lines.contains(&"ADT HTTP configured: https://***:8443"),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"RFC SADT configured: *** system 00"),
+        "{lines:?}"
+    );
+    assert_no_host(&exit);
+}
+
+#[test]
+fn doctor_masks_both_hosts_in_the_failed_probe_lines() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(Err(TransportError::PreSendConnectivity(
+        "connect to adt-host.example.net:8443 (10.20.30.40) refused".to_owned(),
+    )));
+    fake.library.push_back(library());
+    fake.ping.push_back(Err(TransportError::PreSendConnectivity(
+        "RfcOpenConnection: partner 10.20.30.40:3300 not reached (adt-host.example.net)".to_owned(),
+    )));
+
+    let exit = run(
+        ["abapreach", "doctor", "--conn", "dev_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        env_with_two_hosts(directory.path()),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1, "{}", exit.stdout);
+    assert!(
+        exit.stdout
+            .lines()
+            .any(|line| line.starts_with("ADT HTTP probe: failed: ") && line.contains("***")),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stdout
+            .lines()
+            .any(|line| line.starts_with("RFC SADT probe: failed: ") && line.contains("***")),
+        "{}",
+        exit.stdout
+    );
+    assert_no_host(&exit);
 }

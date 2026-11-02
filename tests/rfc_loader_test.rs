@@ -2,10 +2,11 @@ use abapreach::transport::rfc::{
     Arch, Candidate, CandidateFs, ELF_MAGIC, ElfDynamic, Env, Family,
     LOAD_WITH_ALTERED_SEARCH_PATH, LibraryIdentity, LoadError, MAX_GUI_SEARCH_DEPTH,
     MAX_READ_BYTES, Origin, PE_OFFSET_END, Platform, RFC_TRACE_DIR_ENV, RfcLibrary, SystemFs,
-    TraceTarget, apply_trace_directory, bundle_version, compatible_arch, decide, declared_archs,
-    dependency_preload, elf_dynamic, family_of, from_sap_uc, gui_library_filename,
-    icu_dependencies, load_compatible, preload_dependencies, rfc_library_filename, sap_uc,
-    sdk_candidates, trace_directory, trace_environment, windows_load_flags,
+    TraceTarget, UcString, UcWidth, apply_trace_directory, apply_trace_directory_to,
+    bundle_version, compatible_arch, decide, declared_archs, dependency_preload, elf_dynamic,
+    family_of, from_sap_uc, gui_library_filename, icu_dependencies, load_compatible,
+    preload_dependencies, rfc_library_filename, sap_uc, sdk_candidates, trace_directory,
+    trace_environment, windows_dependency_preload, windows_load_flags,
 };
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -15,7 +16,8 @@ use std::sync::Mutex;
 /// The trace directory the fake `RfcSetTraceDir` was called with.
 static TRACE_CALLS: Mutex<Option<String>> = Mutex::new(None);
 
-unsafe extern "C" fn record_trace_dir(directory: *const u16, _: *mut c_void) -> i32 {
+unsafe extern "C" fn record_trace_dir(directory: *const c_void, _: *mut c_void) -> i32 {
+    let directory = directory.cast::<u16>();
     let mut units = Vec::new();
 
     // The pointer is NUL-terminated UTF-16 that stays alive for the duration of the call.
@@ -36,7 +38,17 @@ const RFC_TRACE_FAILURE: i32 = 20;
 /// The tests above share `TRACE_CALLS`, so they run one at a time.
 static TRACE_LOCK: Mutex<()> = Mutex::new(());
 
-unsafe extern "C" fn fail_trace_dir(directory: *const u16, error: *mut c_void) -> i32 {
+/// The same call as a single-byte library reads it: a `char*`, one byte per character.
+unsafe extern "C" fn record_narrow_trace_dir(directory: *const c_void, _: *mut c_void) -> i32 {
+    // The pointer is a NUL-terminated byte string that stays alive for the duration of the call.
+    let text = unsafe { std::ffi::CStr::from_ptr(directory.cast()) };
+
+    *TRACE_CALLS.lock().unwrap() = Some(text.to_str().unwrap().to_owned());
+
+    0
+}
+
+unsafe extern "C" fn fail_trace_dir(directory: *const c_void, error: *mut c_void) -> i32 {
     unsafe { record_trace_dir(directory, error) };
 
     RFC_TRACE_FAILURE
@@ -207,7 +219,7 @@ fn trace_symbol_exported_and_successful_sets_the_temp_dir() {
     *TRACE_CALLS.lock().unwrap() = None;
 
     assert_eq!(
-        apply_trace_directory(Some(record_trace_dir)),
+        apply_trace_directory(Some(record_trace_dir), UcWidth::Utf16),
         TraceTarget::Symbol
     );
     assert_eq!(
@@ -221,7 +233,10 @@ fn trace_symbol_missing_leaves_the_environment_in_charge() {
     let _guard = TRACE_LOCK.lock().unwrap();
     *TRACE_CALLS.lock().unwrap() = None;
 
-    assert_eq!(apply_trace_directory(None), TraceTarget::Environment);
+    assert_eq!(
+        apply_trace_directory(None, UcWidth::Utf16),
+        TraceTarget::Environment
+    );
     assert_eq!(*TRACE_CALLS.lock().unwrap(), None);
 }
 
@@ -247,7 +262,7 @@ fn trace_symbol_returned_error_is_reported_with_its_code() {
     *TRACE_CALLS.lock().unwrap() = None;
 
     assert_eq!(
-        apply_trace_directory(Some(fail_trace_dir)),
+        apply_trace_directory(Some(fail_trace_dir), UcWidth::Utf16),
         TraceTarget::Rejected(RFC_TRACE_FAILURE)
     );
     // The call was made; only its result differs from the success case.
@@ -1266,6 +1281,7 @@ fn library_identity_reports_path_version_architecture_family_and_source() {
         Arch::Arm64,
         Family::Sdk,
         Origin::Discovered,
+        UcWidth::Utf16,
     );
 
     assert_eq!(
@@ -1280,7 +1296,7 @@ fn library_identity_reports_path_version_architecture_family_and_source() {
         identity.report(),
         concat!(
             "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so version 7.53.1629 architecture arm64 ",
-            "family NW RFC SDK source discovered"
+            "family NW RFC SDK source discovered chars UTF-16"
         )
     );
 
@@ -1290,13 +1306,14 @@ fn library_identity_reports_path_version_architecture_family_and_source() {
         Arch::X64,
         Family::Gui,
         Origin::Explicit,
+        UcWidth::Narrow,
     );
 
     assert_eq!(
         gui.report(),
         concat!(
             "/opt/sapgui/bin/libsapnwrfccm.so version 7.50.17 architecture x86-64 ",
-            "family SAP GUI source explicit ABAPREACH_RFC_LIBRARY"
+            "family SAP GUI source explicit ABAPREACH_RFC_LIBRARY chars single-byte"
         )
     );
 }
@@ -1510,7 +1527,8 @@ fn sdk_icu_preload_uses_a_complete_set_or_notes_that_ld_library_path_may_resolve
 #[test]
 fn preload_dependencies_maps_each_sibling_by_absolute_path_in_order() {
     let search_path = std::env::var_os("LD_LIBRARY_PATH");
-    let directory = Path::new("/opt/sap/nwrfcsdk/lib");
+    // Absolute on every OS: `/opt/...` has no drive, so Windows does not call it absolute.
+    let directory = std::env::temp_dir().join("nwrfcsdk").join("lib");
     let dependencies = vec![
         directory.join("libsapucum.so"),
         directory.join("libicuuc.so.57"),
@@ -1551,20 +1569,15 @@ fn preload_dependencies_maps_each_sibling_by_absolute_path_in_order() {
 fn windows_adapter_maps_an_absolute_dll_with_the_altered_search_path() {
     use abapreach::transport::rfc::load_candidate;
 
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
-    let system_dll = Path::new(&system_root)
-        .join("System32")
-        .join("kernel32.dll");
+    let directory = tempfile::tempdir().unwrap();
+    let library = built_shared_object(directory.path());
 
     // No SAP library is needed: the adapter maps a real PE through `LoadLibraryExW`.
-    load_candidate(&discovered_sdk(&system_dll))
+    load_candidate(&discovered_sdk(&library))
         .map(|_| ())
         .expect("the adapter must map an absolute DLL");
     assert!(
-        load_candidate(&discovered_sdk(
-            &Path::new(&system_root).join("System32").join("absent.dll")
-        ))
-        .is_err(),
+        load_candidate(&discovered_sdk(&directory.path().join("absent.dll"))).is_err(),
         "an absent DLL cannot be mapped"
     );
 }
@@ -1903,7 +1916,11 @@ fn one_icu_file_per_version_and_prefix_is_chosen_by_the_smallest_path() {
 /// that builds the tests, so no SAP library is needed to exercise the whole load path.
 fn built_shared_object(directory: &Path) -> PathBuf {
     let source = directory.join("empty.rs");
-    let library = directory.join("libempty_fixture");
+    // The extension matters: `LoadLibraryExW` appends `.dll` to a name that has none.
+    let library = directory.join(format!(
+        "libempty_fixture.{}",
+        std::env::consts::DLL_EXTENSION
+    ));
 
     std::fs::write(&source, "").unwrap();
 
@@ -1952,4 +1969,278 @@ fn linux_adapter_reports_no_note_when_the_icu_set_is_beside_the_library() {
         .unwrap_or_else(|error| panic!("the fixture must load: {error}"));
 
     assert!(loaded.notes().is_empty(), "{:?}", loaded.notes());
+}
+
+/// The first bytes `RfcGetVersion` returned on the machines this was measured on: the SAP GUI 8.00
+/// for Windows library "753 Patch Level 1524" as single bytes, and an SDK as UTF-16.
+const NARROW_VERSION_TEXT: [u8; 4] = [0x37, 0x35, 0x33, 0x20];
+const UTF16_VERSION_TEXT: [u8; 4] = [0x37, 0x00, 0x35, 0x00];
+
+#[test]
+fn the_character_width_is_read_from_the_version_text() {
+    assert_eq!(UcWidth::detect(&NARROW_VERSION_TEXT), UcWidth::Narrow);
+    assert_eq!(UcWidth::detect(&UTF16_VERSION_TEXT), UcWidth::Utf16);
+    // Nothing to tell apart reads as the width every other library has.
+    assert_eq!(UcWidth::detect(&[]), UcWidth::Utf16);
+    assert_eq!(UcWidth::detect(&[0x37]), UcWidth::Utf16);
+    assert_eq!(UcWidth::detect(&[0, 0]), UcWidth::Utf16);
+    assert_eq!(UcWidth::detect(&[0, 0x37]), UcWidth::Utf16);
+}
+
+fn bytes_of(text: &UcString, count: usize) -> Vec<u8> {
+    // The string owns at least `count` bytes, and every byte of it is initialized.
+    unsafe { std::slice::from_raw_parts(text.as_ptr().cast::<u8>(), count).to_vec() }
+}
+
+#[test]
+fn a_string_is_encoded_in_the_width_of_the_library_that_reads_it() {
+    let wide = UcString::encode(UcWidth::Utf16, "ASHOST").unwrap();
+    let narrow = UcString::encode(UcWidth::Narrow, "ASHOST").unwrap();
+
+    assert_eq!((wide.chars(), narrow.chars()), (6, 6));
+    assert_eq!(
+        bytes_of(&wide, 14),
+        [b'A', 0, b'S', 0, b'H', 0, b'O', 0, b'S', 0, b'T', 0, 0, 0]
+    );
+    // Two terminators, so a read in the wrong width still ends inside the buffer.
+    assert_eq!(bytes_of(&narrow, 8), b"ASHOST\0\0");
+    assert_eq!(UcString::encode(UcWidth::Narrow, "").unwrap().chars(), 0);
+}
+
+#[test]
+fn a_single_byte_library_refuses_text_it_cannot_hold() {
+    let wide = UcString::encode(UcWidth::Utf16, "Aé").unwrap();
+    let error = UcString::encode(UcWidth::Narrow, "Aé").err().unwrap();
+
+    assert_eq!(wide.chars(), 2);
+    assert_eq!(
+        error,
+        "a single-byte RFC library accepts ASCII only; the text contains other characters; use the \
+         NW RFC SDK library (ABAPREACH_RFC_LIBRARY=...\\sapnwrfc.dll) instead"
+    );
+}
+
+#[test]
+fn trace_directory_reaches_a_single_byte_library_as_bytes() {
+    let _guard = TRACE_LOCK.lock().unwrap();
+    *TRACE_CALLS.lock().unwrap() = None;
+
+    assert_eq!(
+        apply_trace_directory_to(
+            Some(record_narrow_trace_dir),
+            UcWidth::Narrow,
+            r"C:\Users\user\AppData\Local\Temp"
+        ),
+        TraceTarget::Symbol
+    );
+    // Read as `char*`, the string is whole; read as UTF-16 it would have stopped after `C`.
+    assert_eq!(
+        TRACE_CALLS.lock().unwrap().clone(),
+        Some(r"C:\Users\user\AppData\Local\Temp".to_owned())
+    );
+}
+
+#[test]
+fn trace_directory_is_not_passed_when_a_single_byte_library_cannot_read_it() {
+    let _guard = TRACE_LOCK.lock().unwrap();
+    *TRACE_CALLS.lock().unwrap() = None;
+
+    assert_eq!(
+        apply_trace_directory_to(
+            Some(record_narrow_trace_dir),
+            UcWidth::Narrow,
+            r"C:\Users\José\AppData\Local\Temp"
+        ),
+        TraceTarget::NotEncodable
+    );
+    assert_eq!(*TRACE_CALLS.lock().unwrap(), None);
+    assert_eq!(
+        TraceTarget::NotEncodable.label(),
+        "RFC trace directory: RfcSetTraceDir exported, not called (the temp directory is not ASCII \
+         and the library uses single-byte characters), environment only"
+    );
+}
+
+#[test]
+fn trace_directory_with_other_characters_still_reaches_a_utf16_library() {
+    let _guard = TRACE_LOCK.lock().unwrap();
+    *TRACE_CALLS.lock().unwrap() = None;
+
+    assert_eq!(
+        apply_trace_directory_to(
+            Some(record_trace_dir),
+            UcWidth::Utf16,
+            r"C:\Users\José\AppData\Local\Temp"
+        ),
+        TraceTarget::Symbol
+    );
+    assert_eq!(
+        TRACE_CALLS.lock().unwrap().clone(),
+        Some(r"C:\Users\José\AppData\Local\Temp".to_owned())
+    );
+}
+
+const WINDOWS_ICU_SET: [&str; 3] = ["icudt57.dll", "icuuc57.dll", "icuin57.dll"];
+
+#[test]
+fn windows_preloads_the_icu_set_beside_the_sdk_library_in_dependency_order() {
+    let directory = Path::new("/users/user/sap/nwrfcsdk/lib");
+    let library = directory.join("sapnwrfc.dll");
+    let files = icu_files(
+        directory,
+        &[
+            "libsapucum.dll",
+            "icuin57.dll",
+            "sapnwrfc.dll",
+            "icuuc57.dll",
+            "icudt57.dll",
+        ],
+    );
+    let plan = windows_dependency_preload(&library, &files);
+
+    // Data, common, internationalization, whatever order the directory lists them in.
+    assert_eq!(plan.paths, icu_files(directory, &WINDOWS_ICU_SET));
+    assert_eq!(plan.note, None);
+}
+
+#[test]
+fn windows_prefers_the_highest_complete_icu_version_and_ignores_other_files() {
+    let directory = Path::new("/sdk/lib");
+    let library = directory.join("sapnwrfc.dll");
+    let mut files = icu_files(
+        directory,
+        &[
+            "icudt50.dll",
+            "icuuc50.dll",
+            "icuin50.dll",
+            "icudt57.dll",
+            "icuuc57.dll",
+            "icuin57.dll",
+            // Version 60 lacks `icuin`, so it never forms a set.
+            "icudt60.dll",
+            "icuuc60.dll",
+            // Not ICU libraries: a debug build, a different prefix, no version.
+            "icuuc57d.dll",
+            "icuio57.dll",
+            "icuuc.dll",
+            "icuuc57.lib",
+        ],
+    );
+
+    files.extend(icu_files(
+        Path::new("/elsewhere"),
+        &["icudt70.dll", "icuuc70.dll", "icuin70.dll"],
+    ));
+
+    assert_eq!(
+        windows_dependency_preload(&library, &files).paths,
+        icu_files(directory, &WINDOWS_ICU_SET)
+    );
+}
+
+#[test]
+fn windows_matches_icu_names_the_way_the_file_system_does() {
+    let directory = Path::new("/sdk/lib");
+    let library = directory.join("SAPNWRFC.DLL");
+    let files = icu_files(directory, &["ICUDT57.DLL", "ICUUC57.dll", "icuin57.DLL"]);
+
+    assert_eq!(windows_dependency_preload(&library, &files).paths, files);
+}
+
+const MISSING_WINDOWS_ICU_WARNING: &str = "WARNING: RFC ICU libraries were not found beside the RFC library; the NW RFC SDK may still find them through PATH.";
+
+#[test]
+fn windows_warns_when_the_sdk_library_has_no_complete_icu_set() {
+    let directory = Path::new("/sdk/lib");
+    let library = directory.join("sapnwrfc.dll");
+
+    for names in [
+        &[][..],
+        &["icudt57.dll", "icuuc57.dll"][..],
+        &["icudt57.dll", "icuuc57.dll", "icuin60.dll"][..],
+    ] {
+        let plan = windows_dependency_preload(&library, &icu_files(directory, names));
+
+        assert!(plan.paths.is_empty(), "{names:?}");
+        assert_eq!(
+            plan.note.as_deref(),
+            Some(MISSING_WINDOWS_ICU_WARNING),
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn windows_gives_the_sap_gui_library_no_icu_warning() {
+    // The SAP GUI library ships without ICU and never asks for it.
+    let directory = Path::new("/Program Files/SAP/FrontEnd/SAPGUI");
+    let library = directory.join("sapnwrfccm.dll");
+    let plan = windows_dependency_preload(&library, &icu_files(directory, &["guirfc.dll"]));
+
+    assert!(plan.paths.is_empty());
+    assert_eq!(plan.note, None);
+}
+
+#[test]
+fn windows_preloads_icu_only_for_the_sdk_library_name() {
+    let directory = Path::new("/sdk/lib");
+    let files = icu_files(directory, &WINDOWS_ICU_SET);
+
+    // A stray ICU set beside the SAP GUI library (or any other name) is not mapped for it.
+    for name in ["sapnwrfccm.dll", "other.dll"] {
+        let plan = windows_dependency_preload(&directory.join(name), &files);
+
+        assert!(plan.paths.is_empty(), "{name}");
+        assert_eq!(plan.note, None, "{name}");
+    }
+}
+
+/// Windows only: the real loader, with DLL copies of the empty fixture standing in for ICU.
+#[cfg(windows)]
+mod windows_loader {
+    use super::*;
+
+    /// `GetModuleHandle`: whether a bare module name is already mapped, which is what makes a
+    /// later `LoadLibrary("icuuc57.dll")` by SAP's library succeed without a search path.
+    fn is_mapped(name: &str) -> bool {
+        libloading::os::windows::Library::open_already_loaded(name).is_ok()
+    }
+
+    fn sdk_directory(icu: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = built_shared_object(directory.path());
+        let library = directory.path().join("sapnwrfc.dll");
+
+        std::fs::copy(&fixture, &library).unwrap();
+
+        for name in icu {
+            std::fs::copy(&fixture, directory.path().join(name)).unwrap();
+        }
+
+        (directory, library)
+    }
+
+    #[test]
+    fn the_icu_set_is_mapped_by_name_before_the_library_is() {
+        // Unique names: the loader never unloads, so another test must not already hold them.
+        let names = ["icudt901.dll", "icuuc901.dll", "icuin901.dll"];
+        let (_directory, library) = sdk_directory(&names);
+
+        assert!(names.iter().all(|name| !is_mapped(name)));
+
+        let loaded = RfcLibrary::load(&Env::test_paths(library.to_str().unwrap(), "", ""))
+            .unwrap_or_else(|error| panic!("the fixture must load: {error}"));
+
+        assert!(loaded.notes().is_empty(), "{:?}", loaded.notes());
+        assert!(names.iter().all(|name| is_mapped(name)));
+    }
+
+    #[test]
+    fn a_missing_icu_set_loads_the_library_with_the_path_warning() {
+        let (_directory, library) = sdk_directory(&[]);
+        let loaded = RfcLibrary::load(&Env::test_paths(library.to_str().unwrap(), "", ""))
+            .unwrap_or_else(|error| panic!("the fixture must load: {error}"));
+
+        assert_eq!(loaded.notes(), [MISSING_WINDOWS_ICU_WARNING]);
+    }
 }

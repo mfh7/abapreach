@@ -12,6 +12,26 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
+### Fixed
+- Windows, SAP GUI 8.00 `sapnwrfccm.dll`: the library is a single-byte build, so the UTF-16 strings
+  ABAPReach passed were read as one character (`RFC_INVALID_PARAMETER` from `RfcSetTraceDir` and
+  `RfcOpenConnection`). The character width is now detected from the library and every string is
+  passed in it; the RFC SADT probe passes with this library.
+- Windows: `dev_rfc.log` no longer lands in the working directory. `RFC_TRACE_DIR` is also written
+  to the environment of the shared UCRT (`ucrtbase.dll`), which is where the SAP libraries read it;
+  this holds for the statically linked release build as well as for a dynamic-CRT build.
+- Windows, NW RFC SDK: the ICU libraries beside a library named `sapnwrfc.dll` are mapped by
+  absolute path before the library, so the SDK no longer exits at load with
+  `Could not open the ICU common library` when its folder is not on `PATH`. A missing set prints a
+  `WARNING: RFC ICU libraries were not found ...` line.
+- `doctor` never prints the ADT host or the application server host: the `configured` lines show
+  `***` for the host, and the text of a failed probe is scrubbed of both.
+- `doctor` library line ends with `chars UTF-16` or `chars single-byte`, the character size of the
+  loaded RFC library.
+- A single-byte RFC library refuses non-ASCII request metadata (URI, headers, connection
+  parameters) with a message that points to the NW RFC SDK library; ABAP source travels as XSTRING
+  bytes and is not affected.
+
 ## [0.12.0] - 2026-11-02
 
 ### Added

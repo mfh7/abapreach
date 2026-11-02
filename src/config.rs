@@ -141,6 +141,15 @@ impl Connection {
         secrets
     }
 
+    /// The server hosts. Only the doctor hides them: its probe errors may quote them, while a
+    /// read or deploy prints source text that has no business being rewritten.
+    pub fn hosts(&self) -> Vec<String> {
+        let mut hosts = vec![self.rfc.ashost.clone()];
+
+        hosts.extend(self.adt.iter().map(|adt| adt.host.clone()));
+        hosts
+    }
+
     #[cfg(feature = "test-support")]
     pub fn test_insecure() -> Self {
         Self {

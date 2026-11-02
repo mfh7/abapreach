@@ -1,13 +1,13 @@
 use abapreach::transport::rfc::{
-    Env, RfcLibrary, TraceTarget, apply_trace_directory, init_trace_environment,
+    Env, RfcLibrary, TraceTarget, UcWidth, apply_trace_directory, init_trace_environment,
 };
 use std::ffi::c_void;
 
-unsafe extern "C" fn trace_ok(_: *const u16, _: *mut c_void) -> i32 {
+unsafe extern "C" fn trace_ok(_: *const c_void, _: *mut c_void) -> i32 {
     0
 }
 
-unsafe extern "C" fn trace_error(_: *const u16, _: *mut c_void) -> i32 {
+unsafe extern "C" fn trace_error(_: *const c_void, _: *mut c_void) -> i32 {
     20
 }
 
@@ -29,10 +29,16 @@ fn no_dev_rfc_file_appears_in_the_working_directory() {
     std::env::set_current_dir(directory.path()).unwrap();
     init_trace_environment();
 
-    assert_eq!(apply_trace_directory(Some(trace_ok)), TraceTarget::Symbol);
-    assert_eq!(apply_trace_directory(None), TraceTarget::Environment);
     assert_eq!(
-        apply_trace_directory(Some(trace_error)),
+        apply_trace_directory(Some(trace_ok), UcWidth::Utf16),
+        TraceTarget::Symbol
+    );
+    assert_eq!(
+        apply_trace_directory(None, UcWidth::Utf16),
+        TraceTarget::Environment
+    );
+    assert_eq!(
+        apply_trace_directory(Some(trace_error), UcWidth::Narrow),
         TraceTarget::Rejected(20)
     );
     assert_eq!(dev_rfc_files(), Vec::<String>::new());

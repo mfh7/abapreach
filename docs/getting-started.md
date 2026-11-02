@@ -110,7 +110,7 @@ the labels are `x86-64`, `arm64`, `x86 (32-bit)` and `arm (32-bit)`.
 On success, `doctor` prints the loaded library:
 
 ```text
-RFC library: <path> version <version> architecture <architecture> family <SAP GUI or NW RFC SDK> source <explicit ABAPREACH_RFC_LIBRARY or discovered>
+RFC library: <path> version <version> architecture <architecture> family <SAP GUI or NW RFC SDK> source <explicit ABAPREACH_RFC_LIBRARY or discovered> chars <UTF-16 or single-byte>
 ```
 
 On Linux, if an RFC library does not declare `$ORIGIN` in `RUNPATH` or `RPATH`, ABAPReach looks
@@ -121,8 +121,27 @@ run time; ABAPReach does not preload `libsapucum.so`. If no complete set is foun
 still loads and doctor prints exactly `WARNING: RFC ICU libraries were not found beside the RFC
 library; the NW RFC SDK may still find them through LD_LIBRARY_PATH.` Keep the SDK folder intact,
 or set `LD_LIBRARY_PATH` to that folder so the SDK can find ICU itself. The parent process's
-`LD_LIBRARY_PATH` is not changed. On Windows, the loader searches the folder of the library for
-its dependencies.
+`LD_LIBRARY_PATH` is not changed.
+
+On Windows, the loader searches the folder of the library for its static dependencies, but the NW
+RFC SDK opens its ICU libraries later by bare name, and that folder is not on the search path. So
+ABAPReach maps `icudt<N>.dll`, `icuuc<N>.dll`, then `icuin<N>.dll` (highest complete version, names
+matched ignoring case) from the SDK folder by absolute path before it maps `sapnwrfc.dll`; a later
+load by bare name finds the module that is already mapped. No `PATH` entry is needed. If no complete
+set is found next to `sapnwrfc.dll`, the library still loads and doctor prints `WARNING: RFC ICU
+libraries were not found beside the RFC library; the NW RFC SDK may still find them through PATH.`
+Only a library named `sapnwrfc.dll` gets this treatment (and this line): the SAP GUI library
+`sapnwrfccm.dll` needs no ICU, so nothing is mapped for it and it gets no such line.
+
+The SAP GUI 8.00 for Windows library is a single-byte build: it reads every string as `char*`
+instead of UTF-16. ABAPReach reads the width from the version text the library returns, passes
+strings in that width, and prints it as `chars UTF-16` or `chars single-byte` on the library line.
+Such a library accepts ASCII only in the request metadata (the URI, the headers, and the
+connection parameters such as the password): a non-ASCII character there stops with `a single-byte
+RFC library accepts ASCII only; the text contains other characters; use the NW RFC SDK library
+(ABAPREACH_RFC_LIBRARY=...\sapnwrfc.dll) instead`. ABAP source is not affected: it travels as
+XSTRING bytes, so non-ASCII source works through the single-byte library. The SDK library has no
+limit on the metadata either.
 
 SAP GUI for Java libraries declare `$ORIGIN`, so they are loaded without a preload step.
 
@@ -147,15 +166,18 @@ could not be read: ...` line. This is non-blocking and does not change doctor's 
 The SAP library writes its trace file `dev_rfc.log` into the current directory unless
 told otherwise. ABAPReach points it at the OS temporary directory: it sets `RFC_TRACE_DIR`
 at startup, before any other thread exists, and calls `RfcSetTraceDir` when the library
-exports it. On Windows the library may not read the environment variable, so the call is
-the protection that matters there. A library without `RfcSetTraceDir` relies on the
-environment variable alone. `doctor` records the outcome on the line after the library line,
-one of:
+exports it. On Windows it also writes the variable into the environment of the shared UCRT
+(`ucrtbase.dll`): the SAP libraries read it through `getenv`, which does not see a variable set
+only through the Win32 API, and a statically linked executable never fills that copy at start-up.
+So the library's first call already logs to the temporary directory. A library without
+`RfcSetTraceDir` relies on the environment variable alone. `doctor` records the outcome on the
+line after the library line, one of:
 
 ```text
 RFC trace directory: RfcSetTraceDir exported, set
 RFC trace directory: RfcSetTraceDir not exported, environment only
 RFC trace directory: RfcSetTraceDir exported, returned rc <rc>, environment only
+RFC trace directory: RfcSetTraceDir exported, not called (the temp directory is not ASCII and the library uses single-byte characters), environment only
 ```
 
 On Ctrl-C, ABAPReach exits with code 130 when no deploy lock is held. When a deploy holds

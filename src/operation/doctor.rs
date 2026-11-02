@@ -5,6 +5,10 @@ use crate::transport::rfc::identity_report;
 
 const DISCOVERY_URI: &str = "/sap/bc/adt/discovery";
 
+/// What stands in for a host the doctor does not print; it is the mask `scrub` uses, so a host
+/// that a probe error carries is masked the same way.
+const HOST_MASK: &str = "***";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DoctorReport {
     lines: Vec<String>,
@@ -52,15 +56,16 @@ impl Doctor {
 
         match &connection.adt {
             Some(adt) => lines.push(format!(
-                "ADT HTTP configured: {}://{}:{}",
-                adt.scheme, adt.host, adt.port
+                "ADT HTTP configured: {}://{HOST_MASK}:{}",
+                adt.scheme, adt.port
             )),
             None => lines.push("ADT HTTP: not configured".to_owned()),
         }
 
+        // The application server host is as internal as a route host, so it is never printed.
         lines.push(format!(
-            "RFC SADT configured: {} system {}",
-            connection.rfc.ashost, connection.rfc.sysnr
+            "RFC SADT configured: {HOST_MASK} system {}",
+            connection.rfc.sysnr
         ));
 
         // The route may carry a `/W/<password>`, so only its source is ever printed.
@@ -147,7 +152,7 @@ impl Doctor {
     }
 }
 
-/// The five identity fields of the library the probe loaded, in one doctor line.
+/// The identity fields of the library the probe loaded, in one doctor line.
 fn library_line(info: &RfcLibraryInfo) -> String {
     identity_report(
         &info.identity.path,
@@ -155,6 +160,7 @@ fn library_line(info: &RfcLibraryInfo) -> String {
         &info.identity.architecture,
         &info.identity.family,
         &info.identity.source,
+        &info.identity.chars,
     )
 }
 

@@ -47,6 +47,8 @@ pub struct RfcLibraryIdentity {
     pub architecture: String,
     pub family: String,
     pub source: String,
+    /// The character size the library reads: `UTF-16` or `single-byte`.
+    pub chars: String,
 }
 
 /// Opens the transports; tests replace it so no network is touched. A failed open must be a
@@ -126,6 +128,7 @@ impl Factories for RealFactories {
                 architecture: identity.arch().label().to_owned(),
                 family: identity.family().label().to_owned(),
                 source: identity.source().label().to_owned(),
+                chars: identity.width().label().to_owned(),
             },
             notes,
         })
@@ -177,6 +180,7 @@ pub fn run(
             );
         }
     };
+    let is_doctor = matches!(cli.command, Command::Doctor { .. });
     let (connection, local_credentials) = match resolve(connection_id(&cli.command), &env) {
         Ok(resolved) => resolved,
         Err(message) => return with_warning(stop(message), warning.as_deref()),
@@ -198,7 +202,12 @@ pub fn run(
         };
     }
 
-    let secrets = connection.secrets();
+    let mut secrets = connection.secrets();
+
+    if is_doctor {
+        secrets.extend(connection.hosts());
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    }
 
     Exit {
         code: exit.code,

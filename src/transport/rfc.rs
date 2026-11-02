@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 
 pub const SADT_REST_RFC_ENDPOINT: &str = "SADT_REST_RFC_ENDPOINT";
 
-/// The library reads this when it is mapped, before any symbol can be called.
+/// The library reads this (through the C runtime's `getenv`) when it opens its log, which is its
+/// first call.
 pub const RFC_TRACE_DIR_ENV: &str = "RFC_TRACE_DIR";
 
 const RFC_LIBRARY_OVERRIDE: &str = "ABAPREACH_RFC_LIBRARY";
@@ -77,6 +78,8 @@ const RFC_ABAP_MESSAGE: c_int = 4;
 const RFC_ABAP_EXCEPTION: c_int = 5;
 const RFC_ABAP_CLASS_EXCEPTION: c_int = 27;
 const RFC_AUTHORIZATION_FAILURE: c_int = 29;
+/// `RFC_INVALID_PARAMETER`: the code reported for a text the library's character set cannot hold.
+const RFC_NOT_REPRESENTABLE: c_int = 20;
 
 type SapUc = u16;
 type RfcHandle = *mut c_void;
@@ -146,6 +149,8 @@ pub struct RfcLibrary {
     source: Origin,
     /// What `RfcSetTraceDir` did when the library was loaded.
     trace: TraceTarget,
+    /// How many bytes one `SAP_UC` of this library takes; decided before any string is passed.
+    width: UcWidth,
     /// Runtime loader warnings that doctor must show without making the candidate fail.
     notes: Vec<String>,
     // Never unloaded: SAP's library leaves thread-local destructors that crash after dlclose, and
@@ -188,7 +193,11 @@ impl RfcLibrary {
         let (chosen, loaded) =
             decide(&candidates, load_candidate).map_err(|error| error.to_string())?;
 
-        let trace = set_trace_directory(loaded.library());
+        // The width comes first: `RfcSetTraceDir` takes a string in the library's own character
+        // size. `RfcGetVersion` takes no string and, with `RFC_TRACE_DIR` already set by `main`,
+        // its log file already lands in the temp dir.
+        let width = detect_width(loaded.library());
+        let trace = set_trace_directory(loaded.library(), width);
 
         Ok(Self {
             path: loaded.path().to_path_buf(),
@@ -196,6 +205,7 @@ impl RfcLibrary {
             family: candidates[chosen].family,
             source: candidates[chosen].origin,
             trace,
+            width,
             notes: loaded.notes().to_vec(),
             loaded,
         })
@@ -233,6 +243,7 @@ impl RfcLibrary {
             self.arch,
             self.family,
             self.source,
+            self.width,
         ))
     }
 
@@ -243,6 +254,11 @@ impl RfcLibrary {
     /// Whether `RfcSetTraceDir` is exported and what it returned for this library.
     pub fn trace_target(&self) -> TraceTarget {
         self.trace
+    }
+
+    /// The size of one `SAP_UC` in this library.
+    pub fn width(&self) -> UcWidth {
+        self.width
     }
 }
 
@@ -263,7 +279,46 @@ pub fn init_trace_environment() {
     let (name, directory) = trace_environment();
 
     // Not thread safe by contract; the caller runs before any thread exists.
-    unsafe { std::env::set_var(name, directory) };
+    unsafe { std::env::set_var(name, &directory) };
+    #[cfg(windows)]
+    set_crt_environment(name, &directory);
+}
+
+/// `LOAD_LIBRARY_SEARCH_SYSTEM32`: a bare system DLL name is looked up in System32 only, never in
+/// the working directory.
+#[cfg(windows)]
+const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
+
+/// Rust's `set_var` calls only `SetEnvironmentVariableW`, but the SAP libraries are C and read the
+/// environment through `getenv` of the shared UCRT (`ucrtbase.dll`, which both SAP DLLs import).
+/// That copy is not the Win32 block: a dynamic-CRT executable fills it once at start-up, so a later
+/// `set_var` never reaches it, and a static-CRT executable (the release build) never fills it at
+/// all, so the library saw no `RFC_TRACE_DIR` and opened `dev_rfc.log` in the working directory on
+/// its first call. The write goes through the `_wputenv_s` of that very `ucrtbase.dll` instead of
+/// this executable's own CRT, so it reaches the library's copy in both builds. The caller has the
+/// same single-thread contract as `set_var`.
+#[cfg(windows)]
+fn set_crt_environment(name: &str, value: &str) {
+    type PutEnv = unsafe extern "C" fn(*const u16, *const u16) -> c_int;
+
+    let Ok(ucrt) = (unsafe {
+        libloading::os::windows::Library::load_with_flags(
+            "ucrtbase.dll",
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    }) else {
+        return;
+    };
+    let (name, value) = (sap_uc(name), sap_uc(value));
+
+    // A failure leaves the environment as `set_var` set it, and `RfcSetTraceDir` still follows.
+    if let Ok(put_env) = unsafe { ucrt.get::<PutEnv>(b"_wputenv_s\0") } {
+        let _ = unsafe { put_env(name.as_ptr(), value.as_ptr()) };
+    }
+
+    // Never unloaded: the copy of the environment lives in this module instance, and the SAP
+    // library must find that instance, with the variable in it, when it is mapped later.
+    std::mem::forget(ucrt);
 }
 
 /// Runs `install` (the signal handler registration) only after the trace environment is set, so
@@ -275,23 +330,41 @@ pub fn after_trace_environment<T>(install: impl FnOnce() -> T) -> T {
 }
 
 /// `RfcSetTraceDir` is optional: not every SDK or GUI release exports it.
-fn set_trace_directory(library: &Library) -> TraceTarget {
+fn set_trace_directory(library: &Library, width: UcWidth) -> TraceTarget {
     let set_trace_dir = unsafe { library.get::<RfcSetTraceDir>(b"RfcSetTraceDir\0") }
         .ok()
         .map(|symbol| *symbol);
 
-    apply_trace_directory(set_trace_dir)
+    apply_trace_directory(set_trace_dir, width)
 }
 
 /// Calls `RfcSetTraceDir` when the library exports it, otherwise the environment set at the
 /// start of `main` stays in charge, so `dev_rfc.log` never lands in the working directory. A
 /// returned error is reported, not hidden: the environment is then the only protection left.
-pub fn apply_trace_directory(set_trace_dir: Option<RfcSetTraceDir>) -> TraceTarget {
+pub fn apply_trace_directory(set_trace_dir: Option<RfcSetTraceDir>, width: UcWidth) -> TraceTarget {
+    apply_trace_directory_to(
+        set_trace_dir,
+        width,
+        &trace_directory().display().to_string(),
+    )
+}
+
+/// `apply_trace_directory` for a named directory, so the width decisions are testable with any
+/// path.
+pub fn apply_trace_directory_to(
+    set_trace_dir: Option<RfcSetTraceDir>,
+    width: UcWidth,
+    directory: &str,
+) -> TraceTarget {
     let Some(set_trace_dir) = set_trace_dir else {
         return TraceTarget::Environment;
     };
 
-    let directory = sap_uc(&trace_directory().display().to_string());
+    // A directory the library cannot read is never passed: a wrong string would move the trace
+    // somewhere else, so the environment stays in charge.
+    let Ok(directory) = UcString::encode(width, directory) else {
+        return TraceTarget::NotEncodable;
+    };
     let mut error = RfcErrorInfo::default();
 
     let result = unsafe { set_trace_dir(directory.as_ptr(), (&raw mut error).cast::<c_void>()) };
@@ -317,6 +390,152 @@ pub fn from_sap_uc(units: &[u16]) -> Result<String, String> {
         .unwrap_or(units.len());
 
     String::from_utf16(&units[..end]).map_err(|error| error.to_string())
+}
+
+/// The size of one `SAP_UC`. NW RFC SDK libraries and the macOS and Linux SAP GUI libraries use
+/// UTF-16, but the SAP GUI 8.00 for Windows `sapnwrfccm.dll` is a single-byte build: it reads every
+/// string argument as `char*`, so a UTF-16 name such as `ASHOST` reaches it as `A`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UcWidth {
+    /// Two bytes per character, UTF-16.
+    Utf16,
+    /// One byte per character.
+    Narrow,
+}
+
+impl UcWidth {
+    /// The width a library uses, from the first bytes of the string `RfcGetVersion` returns. That
+    /// text starts with at least two printable characters, so a zero second byte means UTF-16.
+    /// Anything that cannot be told apart reads as UTF-16, the width of every other library.
+    pub fn detect(version_text: &[u8]) -> Self {
+        match version_text {
+            [first, second, ..] if *first != 0 && *second != 0 => Self::Narrow,
+            _ => Self::Utf16,
+        }
+    }
+
+    /// How a message and the doctor name the width.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Utf16 => "UTF-16",
+            Self::Narrow => "single-byte",
+        }
+    }
+}
+
+/// Reads the width from the version text the library itself returns; `RfcGetVersion` takes no
+/// string, so it is safe to call before the width is known.
+fn detect_width(library: &Library) -> UcWidth {
+    let Ok(get_version) = load_symbol::<RfcGetVersion>(library, b"RfcGetVersion\0") else {
+        return UcWidth::Utf16;
+    };
+    let (mut major, mut minor, mut patch) = (0, 0, 0);
+    let text = unsafe { get_version(&mut major, &mut minor, &mut patch) }.cast::<u8>();
+
+    if text.is_null() {
+        return UcWidth::Utf16;
+    }
+
+    // Two bytes are always readable: a first byte of zero ends the string, and the terminator
+    // itself is the second byte.
+    let first = unsafe { *text };
+    let second = if first == 0 {
+        0
+    } else {
+        unsafe { *text.add(1) }
+    };
+
+    UcWidth::detect(&[first, second])
+}
+
+/// A NUL-terminated string in the character size of the library that receives it.
+pub enum UcString {
+    Utf16(Vec<u16>),
+    Narrow(Vec<u8>),
+}
+
+impl UcString {
+    /// A single-byte library accepts only ASCII here: its code page is not known, and a wrong
+    /// byte in a name, a URI or a password must not reach SAP.
+    pub fn encode(width: UcWidth, value: &str) -> Result<Self, String> {
+        match width {
+            UcWidth::Utf16 => Ok(Self::Utf16(sap_uc(value))),
+            UcWidth::Narrow if value.is_ascii() => {
+                let mut bytes = value.as_bytes().to_vec();
+
+                // Two terminators: a library that misjudges its width and reads UTF-16 (or a
+                // wide string over this one) still finds the end inside the buffer.
+                bytes.extend([0, 0]);
+                Ok(Self::Narrow(bytes))
+            }
+            UcWidth::Narrow => Err(format!(
+                "a {} RFC library accepts ASCII only; the text contains other characters; use the NW RFC SDK library (ABAPREACH_RFC_LIBRARY=...\\sapnwrfc.dll) instead",
+                UcWidth::Narrow.label()
+            )),
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const c_void {
+        match self {
+            Self::Utf16(units) => units.as_ptr().cast(),
+            Self::Narrow(bytes) => bytes.as_ptr().cast(),
+        }
+    }
+
+    /// The length in characters, without the terminator.
+    pub fn chars(&self) -> usize {
+        match self {
+            Self::Utf16(units) => units.len() - 1,
+            Self::Narrow(bytes) => bytes.len() - 2,
+        }
+    }
+}
+
+/// A buffer the library fills with characters.
+enum UcBuffer {
+    Utf16(Vec<u16>),
+    Narrow(Vec<u8>),
+}
+
+impl UcBuffer {
+    fn new(width: UcWidth, chars: usize) -> Self {
+        match width {
+            UcWidth::Utf16 => Self::Utf16(vec![0; chars]),
+            UcWidth::Narrow => Self::Narrow(vec![0; chars]),
+        }
+    }
+
+    fn chars(&self) -> usize {
+        match self {
+            Self::Utf16(units) => units.len(),
+            Self::Narrow(bytes) => bytes.len(),
+        }
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut c_void {
+        match self {
+            Self::Utf16(units) => units.as_mut_ptr().cast(),
+            Self::Narrow(bytes) => bytes.as_mut_ptr().cast(),
+        }
+    }
+
+    /// The first `written` characters as text.
+    fn text(&self, written: usize) -> Result<String, String> {
+        match self {
+            Self::Utf16(units) => from_sap_uc(&units[..written.min(units.len())]),
+            Self::Narrow(bytes) => Ok(narrow_text(&bytes[..written.min(bytes.len())])),
+        }
+    }
+}
+
+/// Single-byte text up to the first NUL; a byte outside ASCII shows as the replacement character.
+fn narrow_text(bytes: &[u8]) -> String {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -555,10 +774,11 @@ pub fn connection_parameters(connection: &Connection) -> Vec<(String, String)> {
     parameters
 }
 
+/// Both pointers address strings in the library's character size.
 #[repr(C)]
 struct RfcConnectionParameter {
-    name: *const SapUc,
-    value: *const SapUc,
+    name: *const c_void,
+    value: *const c_void,
 }
 
 #[repr(C)]
@@ -574,6 +794,36 @@ struct RfcErrorInfo {
     abap_msg_v2: [SapUc; 51],
     abap_msg_v3: [SapUc; 51],
     abap_msg_v4: [SapUc; 51],
+}
+
+/// Where a single-byte library stores the error text: after `code`, `group`, and a 128-byte key.
+const NARROW_MESSAGE_OFFSET: usize = 8 + 128;
+const NARROW_MESSAGE_BYTES: usize = 512;
+
+impl RfcErrorInfo {
+    /// The error text. A single-byte library fills the same memory with a denser layout, so its
+    /// text is read from the byte offset the layout gives, not from the UTF-16 field.
+    fn text(&self, width: UcWidth) -> String {
+        match width {
+            UcWidth::Utf16 => {
+                from_sap_uc(&self.message).unwrap_or_else(|_| "unreadable error text".to_owned())
+            }
+            UcWidth::Narrow => {
+                // `key` and `message` are plain `u16` arrays, so every byte read here is
+                // initialized, and the range ends inside `message`.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        std::ptr::from_ref(self)
+                            .cast::<u8>()
+                            .add(NARROW_MESSAGE_OFFSET),
+                        NARROW_MESSAGE_BYTES,
+                    )
+                };
+
+                narrow_text(bytes)
+            }
+        }
+    }
 }
 
 impl Default for RfcErrorInfo {
@@ -597,37 +847,42 @@ impl Default for RfcErrorInfo {
 type RfcOpenConnection =
     unsafe extern "C" fn(*const RfcConnectionParameter, c_uint, *mut RfcErrorInfo) -> RfcHandle;
 type RfcPing = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcRc;
-type RfcGetVersion = unsafe extern "C" fn(*mut c_uint, *mut c_uint, *mut c_uint) -> *const SapUc;
+type RfcGetVersion = unsafe extern "C" fn(*mut c_uint, *mut c_uint, *mut c_uint) -> *const c_void;
 type RfcGetFunctionDesc =
-    unsafe extern "C" fn(RfcHandle, *const SapUc, *mut RfcErrorInfo) -> RfcHandle;
+    unsafe extern "C" fn(RfcHandle, *const c_void, *mut RfcErrorInfo) -> RfcHandle;
 type RfcCreateFunction = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcHandle;
 type RfcGetStructure =
-    unsafe extern "C" fn(RfcHandle, *const SapUc, *mut RfcHandle, *mut RfcErrorInfo) -> RfcRc;
+    unsafe extern "C" fn(RfcHandle, *const c_void, *mut RfcHandle, *mut RfcErrorInfo) -> RfcRc;
 type RfcGetTable =
-    unsafe extern "C" fn(RfcHandle, *const SapUc, *mut RfcHandle, *mut RfcErrorInfo) -> RfcRc;
+    unsafe extern "C" fn(RfcHandle, *const c_void, *mut RfcHandle, *mut RfcErrorInfo) -> RfcRc;
 type RfcAppendNewRow = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcHandle;
-type RfcSetString =
-    unsafe extern "C" fn(RfcHandle, *const SapUc, *const SapUc, c_uint, *mut RfcErrorInfo) -> RfcRc;
+type RfcSetString = unsafe extern "C" fn(
+    RfcHandle,
+    *const c_void,
+    *const c_void,
+    c_uint,
+    *mut RfcErrorInfo,
+) -> RfcRc;
 type RfcSetXString = unsafe extern "C" fn(
     RfcHandle,
-    *const SapUc,
+    *const c_void,
     *const c_void,
     c_uint,
     *mut RfcErrorInfo,
 ) -> RfcRc;
 type RfcGetStringLength =
-    unsafe extern "C" fn(RfcHandle, *const SapUc, *mut c_uint, *mut RfcErrorInfo) -> RfcRc;
+    unsafe extern "C" fn(RfcHandle, *const c_void, *mut c_uint, *mut RfcErrorInfo) -> RfcRc;
 type RfcGetString = unsafe extern "C" fn(
     RfcHandle,
-    *const SapUc,
-    *mut SapUc,
+    *const c_void,
+    *mut c_void,
     c_uint,
     *mut c_uint,
     *mut RfcErrorInfo,
 ) -> RfcRc;
 type RfcGetXString = unsafe extern "C" fn(
     RfcHandle,
-    *const SapUc,
+    *const c_void,
     *mut c_void,
     c_uint,
     *mut c_uint,
@@ -636,7 +891,7 @@ type RfcGetXString = unsafe extern "C" fn(
 type RfcInvoke = unsafe extern "C" fn(RfcHandle, RfcHandle, *mut RfcErrorInfo) -> RfcRc;
 type RfcDestroyFunction = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcRc;
 type RfcCloseConnection = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcRc;
-type RfcSetTraceDir = unsafe extern "C" fn(*const SapUc, *mut c_void) -> RfcRc;
+type RfcSetTraceDir = unsafe extern "C" fn(*const c_void, *mut c_void) -> RfcRc;
 
 /// Where the trace directory was set; the environment is the fallback when the symbol is absent
 /// or returned an error.
@@ -648,6 +903,9 @@ pub enum TraceTarget {
     Environment,
     /// `RfcSetTraceDir` is exported and returned this `RFC_RC`.
     Rejected(c_int),
+    /// `RfcSetTraceDir` is exported, but the directory cannot be written in the library's
+    /// character size, so it was not called.
+    NotEncodable,
 }
 
 impl TraceTarget {
@@ -661,6 +919,7 @@ impl TraceTarget {
             Self::Rejected(result) => format!(
                 "RFC trace directory: RfcSetTraceDir exported, returned rc {result}, environment only"
             ),
+            Self::NotEncodable => "RFC trace directory: RfcSetTraceDir exported, not called (the temp directory is not ASCII and the library uses single-byte characters), environment only".to_owned(),
         }
     }
 }
@@ -737,14 +996,19 @@ fn load_symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T, String> {
     Ok(*symbol)
 }
 
-fn rfc_error(phase: RfcPhase, operation: &str, error: &RfcErrorInfo) -> TransportError {
-    let message =
-        from_sap_uc(&error.message).unwrap_or_else(|_| "unreadable error text".to_owned());
+fn rfc_error(
+    width: UcWidth,
+    phase: RfcPhase,
+    operation: &str,
+    error: &RfcErrorInfo,
+) -> TransportError {
+    let message = error.text(width);
 
     classify_rfc_error(phase, error.code, &format!("{operation}: {message}"))
 }
 
 fn check(
+    width: UcWidth,
     phase: RfcPhase,
     operation: &str,
     result: RfcRc,
@@ -753,16 +1017,24 @@ fn check(
     if result == RFC_OK {
         Ok(())
     } else {
-        Err(rfc_error(phase, operation, error))
+        Err(rfc_error(width, phase, operation, error))
     }
+}
+
+/// A name or value in the library's character size, as the error of the phase that needs it.
+fn encode(width: UcWidth, phase: RfcPhase, text: &str) -> Result<UcString, TransportError> {
+    UcString::encode(width, text).map_err(|reason| {
+        classify_rfc_error(phase, RFC_NOT_REPRESENTABLE, &format!("RFC text: {reason}"))
+    })
 }
 
 pub struct DynamicRfcApi {
     // Keeps the library mapped for as long as the copied function pointers are used.
     _library: RfcLibrary,
     symbols: RfcSymbols,
-    // Owns the UTF-16 buffers that `parameters` points into.
-    _parameter_storage: Vec<Vec<SapUc>>,
+    width: UcWidth,
+    // Owns the buffers that `parameters` points into.
+    _parameter_storage: Vec<UcString>,
     parameters: Vec<RfcConnectionParameter>,
     connection: Option<RfcHandle>,
 }
@@ -770,10 +1042,19 @@ pub struct DynamicRfcApi {
 impl DynamicRfcApi {
     pub fn load(library: RfcLibrary, parameters: Vec<(String, String)>) -> Result<Self, String> {
         let symbols = RfcSymbols::load(library.library())?;
-        let storage = parameters
-            .into_iter()
-            .flat_map(|(name, value)| [sap_uc(&name), sap_uc(&value)])
-            .collect::<Vec<_>>();
+        let width = library.width();
+        let mut storage = Vec::with_capacity(parameters.len() * 2);
+
+        // Only the parameter name is ever named in an error: a value may be the password.
+        for (name, value) in parameters {
+            for text in [&name, &value] {
+                storage.push(
+                    UcString::encode(width, text)
+                        .map_err(|reason| format!("RFC connection parameter {name}: {reason}"))?,
+                );
+            }
+        }
+
         let parameters = storage
             .as_chunks::<2>()
             .0
@@ -787,6 +1068,7 @@ impl DynamicRfcApi {
         Ok(Self {
             _library: library,
             symbols,
+            width,
             _parameter_storage: storage,
             parameters,
             connection: None,
@@ -797,8 +1079,8 @@ impl DynamicRfcApi {
     pub fn abi_layout_checked() -> bool {
         use std::mem::{align_of, offset_of, size_of};
 
-        size_of::<RfcConnectionParameter>() == 2 * size_of::<*const SapUc>()
-            && align_of::<RfcConnectionParameter>() == align_of::<*const SapUc>()
+        size_of::<RfcConnectionParameter>() == 2 * size_of::<*const c_void>()
+            && align_of::<RfcConnectionParameter>() == align_of::<*const c_void>()
             && size_of::<RfcErrorInfo>() == 1752
             && align_of::<RfcErrorInfo>() == 4
             && offset_of!(RfcErrorInfo, group) == 4
@@ -806,6 +1088,8 @@ impl DynamicRfcApi {
             && offset_of!(RfcErrorInfo, message) == 264
             && offset_of!(RfcErrorInfo, abap_msg_class) == 1288
             && offset_of!(RfcErrorInfo, abap_msg_v4) == 1648
+            && NARROW_MESSAGE_OFFSET + NARROW_MESSAGE_BYTES
+                <= offset_of!(RfcErrorInfo, abap_msg_class)
     }
 
     pub fn version(&self) -> (u32, u32, u32) {
@@ -823,7 +1107,7 @@ impl DynamicRfcApi {
         let mut error = RfcErrorInfo::default();
         let result = unsafe { (self.symbols.ping)(connection, &mut error) };
 
-        check(RfcPhase::Open, "RfcPing", result, &error)
+        check(self.width, RfcPhase::Open, "RfcPing", result, &error)
     }
 
     fn ensure_open(&mut self) -> Result<RfcHandle, TransportError> {
@@ -842,7 +1126,12 @@ impl DynamicRfcApi {
         };
 
         if connection.is_null() {
-            return Err(rfc_error(RfcPhase::Open, "RfcOpenConnection", &error));
+            return Err(rfc_error(
+                self.width,
+                RfcPhase::Open,
+                "RfcOpenConnection",
+                &error,
+            ));
         }
 
         self.connection = Some(connection);
@@ -855,25 +1144,25 @@ impl DynamicRfcApi {
         container: RfcHandle,
         name: &str,
     ) -> Result<RfcHandle, TransportError> {
-        let name = sap_uc(name);
+        let name = encode(self.width, phase, name)?;
         let mut value = std::ptr::null_mut();
         let mut error = RfcErrorInfo::default();
         let result = unsafe {
             (self.symbols.get_structure)(container, name.as_ptr(), &mut value, &mut error)
         };
 
-        check(phase, "RfcGetStructure", result, &error)?;
+        check(self.width, phase, "RfcGetStructure", result, &error)?;
         Ok(value)
     }
 
     fn table(&self, container: RfcHandle, name: &str) -> Result<RfcHandle, TransportError> {
-        let name = sap_uc(name);
+        let name = encode(self.width, RfcPhase::Prepare, name)?;
         let mut value = std::ptr::null_mut();
         let mut error = RfcErrorInfo::default();
         let result =
             unsafe { (self.symbols.get_table)(container, name.as_ptr(), &mut value, &mut error) };
 
-        check(RfcPhase::Prepare, "RfcGetTable", result, &error)?;
+        check(self.width, RfcPhase::Prepare, "RfcGetTable", result, &error)?;
         Ok(value)
     }
 
@@ -883,20 +1172,26 @@ impl DynamicRfcApi {
         name: &str,
         value: &str,
     ) -> Result<(), TransportError> {
-        let name = sap_uc(name);
-        let units = sap_uc(value);
+        let name = encode(self.width, RfcPhase::Prepare, name)?;
+        let text = encode(self.width, RfcPhase::Prepare, value)?;
         let mut error = RfcErrorInfo::default();
         let result = unsafe {
             (self.symbols.set_string)(
                 container,
                 name.as_ptr(),
-                units.as_ptr(),
-                (units.len() - 1) as c_uint,
+                text.as_ptr(),
+                text.chars() as c_uint,
                 &mut error,
             )
         };
 
-        check(RfcPhase::Prepare, "RfcSetString", result, &error)
+        check(
+            self.width,
+            RfcPhase::Prepare,
+            "RfcSetString",
+            result,
+            &error,
+        )
     }
 
     fn set_xstring(
@@ -905,7 +1200,7 @@ impl DynamicRfcApi {
         name: &str,
         value: &[u8],
     ) -> Result<(), TransportError> {
-        let name = sap_uc(name);
+        let name = encode(self.width, RfcPhase::Prepare, name)?;
         let mut error = RfcErrorInfo::default();
         let result = unsafe {
             (self.symbols.set_xstring)(
@@ -917,24 +1212,40 @@ impl DynamicRfcApi {
             )
         };
 
-        check(RfcPhase::Prepare, "RfcSetXString", result, &error)
+        check(
+            self.width,
+            RfcPhase::Prepare,
+            "RfcSetXString",
+            result,
+            &error,
+        )
     }
 
-    fn string_length(&self, container: RfcHandle, name: &[SapUc]) -> Result<usize, TransportError> {
+    fn string_length(
+        &self,
+        container: RfcHandle,
+        name: &UcString,
+    ) -> Result<usize, TransportError> {
         let mut length = 0;
         let mut error = RfcErrorInfo::default();
         let result = unsafe {
             (self.symbols.get_string_length)(container, name.as_ptr(), &mut length, &mut error)
         };
 
-        check(RfcPhase::Invoke, "RfcGetStringLength", result, &error)?;
+        check(
+            self.width,
+            RfcPhase::Invoke,
+            "RfcGetStringLength",
+            result,
+            &error,
+        )?;
         Ok(length as usize)
     }
 
     fn get_string(&self, container: RfcHandle, name: &str) -> Result<String, TransportError> {
-        let name = sap_uc(name);
+        let name = encode(self.width, RfcPhase::Invoke, name)?;
         let length = self.string_length(container, &name)?;
-        let mut buffer = vec![0; length + 1];
+        let mut buffer = UcBuffer::new(self.width, length + 1);
         let mut written = 0;
         let mut error = RfcErrorInfo::default();
         let result = unsafe {
@@ -942,18 +1253,20 @@ impl DynamicRfcApi {
                 container,
                 name.as_ptr(),
                 buffer.as_mut_ptr(),
-                buffer.len() as c_uint,
+                buffer.chars() as c_uint,
                 &mut written,
                 &mut error,
             )
         };
 
-        check(RfcPhase::Invoke, "RfcGetString", result, &error)?;
-        from_sap_uc(&buffer[..written as usize]).map_err(TransportError::PostSendUncertain)
+        check(self.width, RfcPhase::Invoke, "RfcGetString", result, &error)?;
+        buffer
+            .text(written as usize)
+            .map_err(TransportError::PostSendUncertain)
     }
 
     fn get_xstring(&self, container: RfcHandle, name: &str) -> Result<Vec<u8>, TransportError> {
-        let name = sap_uc(name);
+        let name = encode(self.width, RfcPhase::Invoke, name)?;
         let length = self.string_length(container, &name)?;
         let mut buffer = vec![0u8; length.max(1)];
         let mut written = 0;
@@ -969,7 +1282,13 @@ impl DynamicRfcApi {
             )
         };
 
-        check(RfcPhase::Invoke, "RfcGetXString", result, &error)?;
+        check(
+            self.width,
+            RfcPhase::Invoke,
+            "RfcGetXString",
+            result,
+            &error,
+        )?;
         buffer.truncate(written as usize);
         Ok(buffer)
     }
@@ -992,7 +1311,12 @@ impl DynamicRfcApi {
             let row = unsafe { (self.symbols.append_new_row)(headers, &mut error) };
 
             if row.is_null() {
-                return Err(rfc_error(RfcPhase::Prepare, "RfcAppendNewRow", &error));
+                return Err(rfc_error(
+                    self.width,
+                    RfcPhase::Prepare,
+                    "RfcAppendNewRow",
+                    &error,
+                ));
             }
 
             self.set_string(row, "NAME", name)?;
@@ -1003,7 +1327,7 @@ impl DynamicRfcApi {
         let mut error = RfcErrorInfo::default();
         let result = unsafe { (self.symbols.invoke)(connection, function, &mut error) };
 
-        check(RfcPhase::Invoke, "RfcInvoke", result, &error)?;
+        check(self.width, RfcPhase::Invoke, "RfcInvoke", result, &error)?;
         let response = self.structure(RfcPhase::Invoke, function, "RESPONSE")?;
         let status_line = self.structure(RfcPhase::Invoke, response, "STATUS_LINE")?;
         let status = self
@@ -1031,19 +1355,29 @@ impl RfcApi for DynamicRfcApi {
         request: RfcEndpointRequest,
     ) -> Result<RfcEndpointResponse, TransportError> {
         let connection = self.ensure_open()?;
-        let name = sap_uc(request.function);
+        let name = encode(self.width, RfcPhase::Prepare, request.function)?;
         let mut error = RfcErrorInfo::default();
         let descriptor =
             unsafe { (self.symbols.get_function_desc)(connection, name.as_ptr(), &mut error) };
 
         if descriptor.is_null() {
-            return Err(rfc_error(RfcPhase::Prepare, "RfcGetFunctionDesc", &error));
+            return Err(rfc_error(
+                self.width,
+                RfcPhase::Prepare,
+                "RfcGetFunctionDesc",
+                &error,
+            ));
         }
 
         let function = unsafe { (self.symbols.create_function)(descriptor, &mut error) };
 
         if function.is_null() {
-            return Err(rfc_error(RfcPhase::Prepare, "RfcCreateFunction", &error));
+            return Err(rfc_error(
+                self.width,
+                RfcPhase::Prepare,
+                "RfcCreateFunction",
+                &error,
+            ));
         }
 
         let result = self.call(connection, function, &request);
@@ -1592,9 +1926,8 @@ pub fn load_candidate(candidate: &Candidate) -> Result<Loaded, String> {
 }
 
 /// Linux keeps a library's own folder out of the search path unless the image says `$ORIGIN`, so
-/// the siblings an image needs are mapped by absolute path first. Windows resolves a DLL's own
-/// dependencies from its folder through the load flags, and macOS resolves them through the
-/// install names, so neither platform preloads anything.
+/// the siblings an image needs are mapped by absolute path first. macOS resolves them through the
+/// install names and preloads nothing.
 #[cfg(target_os = "linux")]
 fn platform_dependencies(library: &Path) -> Result<PlatformDependencies, String> {
     let file = fs::File::open(library).map_err(|error| {
@@ -1629,7 +1962,31 @@ fn platform_dependencies(library: &Path) -> Result<PlatformDependencies, String>
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Windows resolves a DLL's own static imports from its folder through the load flags, but the
+/// SDK opens ICU by bare name later, so those three are mapped first (see
+/// `windows_dependency_preload`).
+#[cfg(windows)]
+fn platform_dependencies(library: &Path) -> Result<PlatformDependencies, String> {
+    let files = library
+        .parent()
+        .and_then(|directory| fs::read_dir(directory).ok())
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let plan = windows_dependency_preload(library, &files);
+    let libraries = preload_dependencies(&plan.paths, map_library)?;
+
+    Ok(PlatformDependencies {
+        libraries,
+        notes: plan.note.into_iter().collect(),
+    })
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 fn platform_dependencies(_: &Path) -> Result<PlatformDependencies, String> {
     Ok(PlatformDependencies::default())
 }
@@ -1651,6 +2008,7 @@ fn map_library(path: &Path) -> Result<Library, String> {
 }
 
 const MISSING_ICU_NOTE: &str = "WARNING: RFC ICU libraries were not found beside the RFC library; the NW RFC SDK may still find them through LD_LIBRARY_PATH.";
+const MISSING_WINDOWS_ICU_NOTE: &str = "WARNING: RFC ICU libraries were not found beside the RFC library; the NW RFC SDK may still find them through PATH.";
 const ICU_PREFIXES: [&str; 3] = ["libicudata", "libicuuc", "libicui18n"];
 
 /// The library paths and doctor note selected before mapping an RFC candidate.
@@ -1697,6 +2055,17 @@ pub fn dependency_preload(
 /// sets are ranked numerically, highest first. Files such as `libsapucum.so` are deliberately
 /// ignored because the SDK does not declare or preload them.
 pub fn icu_dependencies(library: &Path, files: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    icu_set(library, files, icu_version)
+}
+
+/// The shared selection: `version_of(file name, prefix)` names the version a file belongs to, and
+/// the highest version that has all three files wins. The paths come back data, common,
+/// internationalization.
+fn icu_set(
+    library: &Path,
+    files: &[PathBuf],
+    version_of: impl Fn(&str, usize) -> Option<String>,
+) -> Option<Vec<PathBuf>> {
     let directory = library.parent()?;
     let mut versions = BTreeMap::<String, [Option<PathBuf>; 3]>::new();
 
@@ -1708,8 +2077,8 @@ pub fn icu_dependencies(library: &Path, files: &[PathBuf]) -> Option<Vec<PathBuf
             continue;
         };
 
-        for (index, prefix) in ICU_PREFIXES.iter().enumerate() {
-            let Some(version) = icu_version(name, prefix) else {
+        for index in 0..ICU_PREFIXES.len() {
+            let Some(version) = version_of(name, index) else {
                 continue;
             };
             let set = versions.entry(version).or_insert([None, None, None]);
@@ -1731,8 +2100,8 @@ pub fn icu_dependencies(library: &Path, files: &[PathBuf]) -> Option<Vec<PathBuf
         .map(|(_, paths)| paths)
 }
 
-fn icu_version(name: &str, prefix: &str) -> Option<String> {
-    let suffix = name.strip_prefix(prefix)?;
+fn icu_version(name: &str, index: usize) -> Option<String> {
+    let suffix = name.strip_prefix(ICU_PREFIXES[index])?;
     let (before_so, after_so) = suffix.split_once(".so")?;
     if !after_so.is_empty() && !after_so.starts_with('.') {
         return None;
@@ -1744,6 +2113,48 @@ fn icu_version(name: &str, prefix: &str) -> Option<String> {
     };
 
     (!version.is_empty()).then(|| version.to_owned())
+}
+
+/// The Windows file names of the same three libraries, in the same order.
+const WINDOWS_ICU_PREFIXES: [&str; 3] = ["icudt", "icuuc", "icuin"];
+
+/// The version of a Windows ICU file: `icuuc57.dll` is version `57`. The match ignores case, as
+/// the file system does, and a name with anything but digits between prefix and extension is not
+/// an ICU library (`icuuc57d.dll` is a debug build the SDK never loads).
+fn windows_icu_version(name: &str, index: usize) -> Option<String> {
+    let name = name.to_ascii_lowercase();
+    let version = name
+        .strip_prefix(WINDOWS_ICU_PREFIXES[index])?
+        .strip_suffix(".dll")?;
+
+    (!version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| version.to_owned())
+}
+
+/// What the Windows loader maps before an RFC library. The SDK finds its ICU libraries later by
+/// bare name (`LoadLibrary("icuuc57.dll")`), and the library's own folder is not on that search
+/// path; but a bare name is satisfied by a module of that name that is already mapped, so the
+/// complete highest-version set beside the library is mapped first by absolute path, in the ICU
+/// dependency order data, common, internationalization. Only the SDK library (`sapnwrfc.dll`) is
+/// known to need ICU: the SAP GUI library has none beside it and never asks, so it gets no note.
+pub fn windows_dependency_preload(library: &Path, files: &[PathBuf]) -> DependencyPreload {
+    // The same rule for the preload and the note: only `sapnwrfc.dll` is known to need ICU, so a
+    // stray ICU set beside any other library (the SAP GUI one) is never mapped for it.
+    let needs_icu = library
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(rfc_library_filename(Platform::Windows)));
+
+    if !needs_icu {
+        return DependencyPreload::default();
+    }
+
+    match icu_set(library, files, windows_icu_version) {
+        Some(paths) => DependencyPreload { paths, note: None },
+        None => DependencyPreload {
+            paths: Vec::new(),
+            note: Some(MISSING_WINDOWS_ICU_NOTE.to_owned()),
+        },
+    }
 }
 
 fn version_rank(version: &str) -> Vec<u64> {
@@ -2007,16 +2418,25 @@ pub struct LibraryIdentity {
     arch: Arch,
     family: Family,
     source: Origin,
+    width: UcWidth,
 }
 
 impl LibraryIdentity {
-    pub fn new(path: PathBuf, version: String, arch: Arch, family: Family, source: Origin) -> Self {
+    pub fn new(
+        path: PathBuf,
+        version: String,
+        arch: Arch,
+        family: Family,
+        source: Origin,
+        width: UcWidth,
+    ) -> Self {
         Self {
             path,
             version,
             arch,
             family,
             source,
+            width,
         }
     }
 
@@ -2040,6 +2460,10 @@ impl LibraryIdentity {
         self.source
     }
 
+    pub fn width(&self) -> UcWidth {
+        self.width
+    }
+
     /// The one line the doctor prints for the library it loaded.
     pub fn report(&self) -> String {
         identity_report(
@@ -2048,20 +2472,25 @@ impl LibraryIdentity {
             self.arch.label(),
             self.family.label(),
             self.source.label(),
+            self.width.label(),
         )
     }
 }
 
 /// The single doctor line an identity renders; both the loader identity and the doctor-facing one
-/// use it, so the five fields always appear in the same order.
+/// use it, so the six fields always appear in the same order. `chars` is the character size the
+/// library reads, `UTF-16` or `single-byte`.
 pub fn identity_report(
     path: &str,
     version: &str,
     architecture: &str,
     family: &str,
     source: &str,
+    chars: &str,
 ) -> String {
-    format!("{path} version {version} architecture {architecture} family {family} source {source}")
+    format!(
+        "{path} version {version} architecture {architecture} family {family} source {source} chars {chars}"
+    )
 }
 
 fn read_header(path: &Path) -> Result<Vec<u8>, String> {

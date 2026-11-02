@@ -1301,6 +1301,7 @@ fn doctor_probes_both_backends_and_warns_once() {
             architecture: "x86-64".to_owned(),
             family: "NW RFC SDK".to_owned(),
             source: "discovered".to_owned(),
+            chars: "UTF-16".to_owned(),
         },
         notes: Vec::new(),
     }));
