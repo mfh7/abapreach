@@ -10,6 +10,7 @@ pub mod hash;
 pub mod object;
 pub mod operation;
 pub mod policy;
+pub mod signature;
 pub mod transport;
 
 pub use app::{Exit, Factories, Opened, RealFactories, RfcLibraryIdentity, RfcLibraryInfo, run};

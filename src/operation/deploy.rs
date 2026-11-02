@@ -1,6 +1,7 @@
 use crate::adt::{
-    ActivationBody, AdtMessage, ObjectRef, classify_activation, parse_messages, parse_object_refs,
-    parse_versions, prog_uri,
+    ActivationBody, AdtMessage, Caller, ObjectRef, USAGE_REQUEST_XML, classify_activation,
+    parse_callers, parse_messages, parse_object_refs, parse_versions, prog_uri,
+    usage_references_uri,
 };
 use crate::backend::{Failure, Selection, SelectionReason};
 use crate::cli::{IncludeKind, ObjectKind};
@@ -10,6 +11,7 @@ use crate::hash::{normalize, source_hash};
 use crate::object::check_deploy_source;
 use crate::operation::read::{ReadError, resolve_group};
 use crate::policy::{Confirmer, Decision, InactiveVersion, Policies, Prompt, Terminal};
+use crate::signature::interface_diff;
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
@@ -29,6 +31,8 @@ const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET witho
 const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
 const INACTIVE_OBJECTS_ACCEPT: &str =
     "application/vnd.sap.adt.inactivectsobjects.v1+xml, application/xml;q=0.8";
+const WHERE_USED_LIMIT: usize = 50;
+const RUNTIME_WARNING: &str = "W: callers' syntax check does not catch missing CALL FUNCTION parameters; they dump at runtime";
 const OBJECT_STRUCTURE: &str = "objectstructure?version=active&withShortDescriptions=true";
 
 #[derive(Clone, Debug)]
@@ -644,7 +648,10 @@ impl Run<'_> {
     }
 
     fn call(&mut self, request: Request) -> Result<Response, TransportError> {
-        let mutates = request.method != "GET" && !request.uri.contains("/checkruns");
+        // A checkrun without save and a where-used query are POSTs that write nothing.
+        let mutates = request.method != "GET"
+            && !request.uri.contains("/checkruns")
+            && !request.uri.contains("/usageReferences?");
         let response = self.transport.request(request);
 
         if mutates && (response.is_ok() || response.as_ref().is_err_and(TransportError::was_sent)) {
@@ -706,6 +713,7 @@ impl Run<'_> {
             .to_string();
 
         self.stdout.push(diff.trim_end().to_owned());
+        self.report_interface_change(&live, &file);
         self.stdout.push(format!("live hash {live_hash}"));
 
         if let Some(include) = self
@@ -792,6 +800,68 @@ impl Run<'_> {
                     .lock_released())
             }
         }
+    }
+
+    /// A FUNC whose signature differs from the live one: the parameter diff, the callers and the
+    /// runtime-risk warning. Advisory: nothing here rejects, falls back, or enters the hash.
+    fn report_interface_change(&mut self, live: &[String], file: &[String]) {
+        if self.kind != ObjectKind::Func {
+            return;
+        }
+
+        let Some(diff) = interface_diff(live, file) else {
+            return;
+        };
+
+        self.stdout.push("INTERFACE CHANGED".to_owned());
+        self.stdout.extend(diff);
+
+        match self.where_used() {
+            Ok(callers) if callers.is_empty() => self.stdout.push("WHERE-USED: none".to_owned()),
+            Ok(callers) => {
+                for caller in callers.iter().take(WHERE_USED_LIMIT) {
+                    let kind = caller.kind.split('/').next().unwrap_or_default();
+
+                    self.stdout
+                        .push(format!("WHERE-USED {kind} {}", caller.name));
+                }
+
+                if callers.len() > WHERE_USED_LIMIT {
+                    self.stdout.push(format!(
+                        "WHERE-USED ... {} more",
+                        callers.len() - WHERE_USED_LIMIT
+                    ));
+                }
+            }
+            Err(reason) => self
+                .warnings
+                .push(format!("W: where-used unavailable: {reason}")),
+        }
+
+        self.warnings.push(RUNTIME_WARNING.to_owned());
+    }
+
+    fn where_used(&mut self) -> Result<Vec<Caller>, String> {
+        let mut request = Request::post(
+            usage_references_uri(&self.uri),
+            USAGE_REQUEST_XML.as_bytes().to_vec(),
+        );
+
+        for header in ["Content-Type", "Accept"] {
+            request
+                .headers
+                .insert(header.to_owned(), "application/*".to_owned());
+        }
+
+        let response = self.call(request).map_err(|error| error.to_string())?;
+
+        if response.status != 200 {
+            return Err(format!("HTTP {}", response.status));
+        }
+
+        let text = String::from_utf8(response.body).map_err(|error| error.to_string())?;
+
+        parse_callers(&text).map_err(|error| format!("unreadable reply: {error}"))
     }
 
     /// Resolves the URIs of the target. A FUNC first asks the server for its function group; a

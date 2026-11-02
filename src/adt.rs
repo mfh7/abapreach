@@ -275,6 +275,76 @@ fn object_ref(element: &BytesStart<'_>) -> Result<ObjectRef, String> {
     Ok(found)
 }
 
+/// The body of the where-used request: `usageReferences` takes the object from the query.
+pub const USAGE_REQUEST_XML: &str = r#"<?xml version="1.0" encoding="ASCII"?><usagereferences:usageReferenceRequest xmlns:usagereferences="http://www.sap.com/adt/ris/usageReferences"><usagereferences:affectedObjects/></usagereferences:usageReferenceRequest>"#;
+
+/// The where-used request of an object: the `uri` query keeps the slashes of the object URI
+/// literal, every other character outside the URI-safe set is percent-encoded.
+pub fn usage_references_uri(object_uri: &str) -> String {
+    let mut query = String::new();
+
+    for byte in object_uri.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                query.push(char::from(byte));
+            }
+            other => query.push_str(&format!("%{other:02X}")),
+        }
+    }
+
+    format!("/sap/bc/adt/repository/informationsystem/usageReferences?uri={query}")
+}
+
+/// One calling object of a where-used result.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Caller {
+    pub kind: String,
+    pub name: String,
+}
+
+/// The callers of a `usageReferenceResult`. The result also lists the package of each caller
+/// (`DEVC/K`), which is not a caller, so every package entry is dropped; a repeated object
+/// counts once.
+pub fn parse_callers(xml: &str) -> Result<Vec<Caller>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut callers: Vec<Caller> = Vec::new();
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(&element) == "adtObject" =>
+            {
+                let mut caller = Caller::default();
+
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|error| error.to_string())?;
+                    let value = attribute
+                        .normalized_value(XmlVersion::Implicit1_0)
+                        .map_err(|error| error.to_string())?
+                        .into_owned();
+
+                    match attribute.key.local_name().into_inner() {
+                        "name" => caller.name = value,
+                        "type" => caller.kind = value,
+                        _ => {}
+                    }
+                }
+
+                if !caller.name.is_empty()
+                    && !caller.kind.starts_with("DEVC")
+                    && !callers.contains(&caller)
+                {
+                    callers.push(caller);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(callers)
+}
+
 /// One checkrun or activation message, printed as `TYPE row N: MSG`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdtMessage {

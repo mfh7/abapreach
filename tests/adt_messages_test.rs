@@ -1,13 +1,19 @@
 mod common;
 
 use abapreach::adt::{
-    AdtMessage, format_messages, function_group_of, function_group_search_uri, parse_messages,
+    AdtMessage, Caller, format_messages, function_group_of, function_group_search_uri,
+    parse_callers, parse_messages, usage_references_uri,
 };
 use common::Fixture;
 use std::fs;
 
 fn exchange_response_body(fixture: &str, uri_part: &str, nth: usize) -> String {
-    let text = fs::read_to_string(common::fixture_path(fixture)).unwrap();
+    let path = if fixture.starts_with("dev-750-http-where-used") {
+        common::fixture_path_in("m3", fixture)
+    } else {
+        common::fixture_path(fixture)
+    };
+    let text = fs::read_to_string(path).unwrap();
     let fixture: Fixture = serde_json::from_str(&text).unwrap();
 
     fixture
@@ -177,4 +183,50 @@ fn a_reference_that_is_not_a_function_module_uri_has_no_group() {
 #[test]
 fn malformed_xml_is_an_error_not_an_empty_result() {
     assert!(function_group_of("<a><b></a>", "ZFM").is_err());
+}
+
+#[test]
+fn recorded_where_used_lists_the_caller_and_drops_the_package_entry() {
+    let found = exchange_response_body("dev-750-http-where-used.json", "usageReferences", 0);
+
+    assert!(found.contains(r#"adtcore:type="DEVC/K""#));
+    assert_eq!(
+        parse_callers(&found),
+        Ok(vec![Caller {
+            kind: "PROG/P".to_owned(),
+            name: "YTEST_ABAPREACH_P3".to_owned(),
+        }])
+    );
+}
+
+#[test]
+fn recorded_empty_where_used_has_no_callers() {
+    let empty = exchange_response_body("dev-750-http-where-used.json", "usageReferences", 1);
+
+    assert_eq!(parse_callers(&empty), Ok(Vec::new()));
+}
+
+#[test]
+fn where_used_counts_a_repeated_caller_once_and_rejects_broken_xml() {
+    let twice = r#"<r:result xmlns:r="x" xmlns:adtcore="y"><r:o><r:adtObject adtcore:name="ZA" adtcore:type="PROG/P"/></r:o><r:o><r:adtObject adtcore:name="ZA" adtcore:type="PROG/P"/></r:o><r:o><r:adtObject adtcore:name="ZB" adtcore:type="CLAS/OC"/></r:o><r:o><r:adtObject adtcore:name="" adtcore:type="PROG/P"/></r:o></r:result>"#;
+    let names: Vec<String> = parse_callers(twice)
+        .unwrap()
+        .into_iter()
+        .map(|caller| caller.name)
+        .collect();
+
+    assert_eq!(names, ["ZA", "ZB"]);
+    assert!(parse_callers("<a><b></a>").is_err());
+}
+
+#[test]
+fn the_where_used_uri_keeps_slashes_literal_and_encodes_the_rest() {
+    assert_eq!(
+        usage_references_uri("/sap/bc/adt/functions/groups/yfg/fmodules/yfm"),
+        "/sap/bc/adt/repository/informationsystem/usageReferences?uri=/sap/bc/adt/functions/groups/yfg/fmodules/yfm"
+    );
+    assert_eq!(
+        usage_references_uri("/sap/bc/adt/x/a b&c=d?e#f"),
+        "/sap/bc/adt/repository/informationsystem/usageReferences?uri=/sap/bc/adt/x/a%20b%26c%3Dd%3Fe%23f"
+    );
 }

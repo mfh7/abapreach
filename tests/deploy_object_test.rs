@@ -509,6 +509,282 @@ fn inactive_siblings_in_the_function_group_warn_without_rejecting() {
     assert!(!result.outcome.stderr.contains("ZOTHER"));
 }
 
+// ---------------------------------------------------------------- FUNC where-used
+
+const RUNTIME_WARNING: &str = "W: callers' syntax check does not catch missing CALL FUNCTION parameters; they dump at runtime";
+
+fn where_used_uri() -> String {
+    abapreach::adt::usage_references_uri(FM_URI)
+}
+
+/// The file with another parameter type: an interface change against `func_rendered`.
+fn func_changed_interface(version: &str) -> Vec<String> {
+    lines(&format!(
+        "FUNCTION ytest_abapreach_fm\n  IMPORTING\n    VALUE(iv_in) TYPE string.\n\n  WRITE / '{version}'.\nENDFUNCTION."
+    ))
+}
+
+/// A where-used answer with `count` callers and the package entry the server adds.
+fn callers(count: usize) -> String {
+    let objects: String = (1..=count)
+        .map(|number| {
+            format!(
+                concat!(
+                    r#"<u:referencedObject uri="/x"><u:adtObject adtcore:name="ZCALLER{:02}" "#,
+                    r#"adtcore:type="PROG/P"/></u:referencedObject>"#,
+                ),
+                number
+            )
+        })
+        .collect();
+
+    format!(
+        concat!(
+            r#"<u:usageReferenceResult xmlns:u="x" xmlns:adtcore="y"><u:referencedObjects>{}"#,
+            r#"<u:referencedObject uri="/p"><u:adtObject adtcore:name="$TMP" adtcore:type="DEVC/K"/>"#,
+            r#"</u:referencedObject></u:referencedObjects></u:usageReferenceResult>"#,
+        ),
+        objects
+    )
+}
+
+fn simulate_interface_change(where_used: Fake) -> (Fake, DeployResult) {
+    let mut fake = where_used.post(&format!("{FM_URI}?_action=UNLOCK&{HANDLE_QUERY}"), 200, "");
+    let result = run(
+        &mut fake,
+        FM,
+        func_scope(),
+        input(&func_changed_interface("v2"), true, None),
+        ForeignInactive::Reject,
+    );
+
+    (fake, result)
+}
+
+fn interface_change_script(answer: Reply) -> Fake {
+    let live = func_rendered("v1");
+
+    func_locked_phase(func_before_lock(&live, &empty_worklist()), &live).on(
+        "POST",
+        &where_used_uri(),
+        answer,
+    )
+}
+
+#[test]
+fn an_interface_change_prints_the_parameter_diff_the_callers_and_the_runtime_warning() {
+    let recorded = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/m3/dev-750-http-where-used.json"),
+    )
+    .unwrap();
+    let recorded: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+    let body = recorded["exchanges"][0]["response"]["body"]
+        .as_str()
+        .unwrap();
+    let (fake, result) =
+        simulate_interface_change(interface_change_script(Ok(Response::text(200, body))));
+    let stdout = stdout_of(&result);
+    let changed = stdout.iter().position(|line| *line == "INTERFACE CHANGED");
+    let changed = changed.unwrap_or_else(|| panic!("{stdout:?}"));
+
+    assert_eq!(result.outcome.status, Some(Status::SimulatedOk));
+    assert_eq!(&stdout[changed + 1..changed + 3], ["--- live", "+++ file"]);
+    assert!(stdout.contains(&"-VALUE(IV_IN) TYPE I"), "{stdout:?}");
+    assert!(stdout.contains(&"+VALUE(IV_IN) TYPE STRING"), "{stdout:?}");
+    // One caller; the package entry of the result is not a caller.
+    let used: Vec<&&str> = stdout
+        .iter()
+        .filter(|line| line.starts_with("WHERE-USED"))
+        .collect();
+    assert_eq!(used, [&"WHERE-USED PROG YTEST_ABAPREACH_P3"]);
+    assert!(
+        stdout
+            .iter()
+            .position(|line| line.starts_with("WHERE-USED"))
+            > Some(changed),
+        "{stdout:?}"
+    );
+    assert!(
+        result
+            .outcome
+            .stderr
+            .lines()
+            .any(|line| line == RUNTIME_WARNING),
+        "{}",
+        result.outcome.stderr
+    );
+    // The request is the recorded one: POST, empty affected objects, slashes literal.
+    let request = &fake.calls[fake.position("POST", "usageReferences")];
+    assert_eq!(request.uri, where_used_uri());
+    assert_eq!(request.body, abapreach::adt::USAGE_REQUEST_XML.as_bytes());
+    assert_eq!(
+        request.headers.get("Content-Type").map(String::as_str),
+        Some("application/*")
+    );
+    assert_eq!(
+        request.headers.get("Accept").map(String::as_str),
+        Some("application/*")
+    );
+    assert_eq!(fake.unlocks(), 1);
+    fake.assert_finished();
+}
+
+#[test]
+fn an_interface_change_without_callers_says_none() {
+    let (_, result) =
+        simulate_interface_change(interface_change_script(Ok(Response::text(200, callers(0)))));
+
+    assert!(
+        stdout_of(&result).contains(&"WHERE-USED: none"),
+        "{}",
+        result.outcome.stdout
+    );
+    assert!(result.outcome.stderr.contains(RUNTIME_WARNING));
+}
+
+#[test]
+fn more_than_fifty_callers_print_fifty_and_the_remainder() {
+    let (_, result) = simulate_interface_change(interface_change_script(Ok(Response::text(
+        200,
+        callers(53),
+    ))));
+    let stdout = stdout_of(&result);
+    let used: Vec<&&str> = stdout
+        .iter()
+        .filter(|line| line.starts_with("WHERE-USED"))
+        .collect();
+
+    assert_eq!(used.len(), 51, "{used:?}");
+    assert_eq!(*used[0], "WHERE-USED PROG ZCALLER01");
+    assert_eq!(*used[49], "WHERE-USED PROG ZCALLER50");
+    assert_eq!(*used[50], "WHERE-USED ... 3 more");
+
+    // Exactly fifty is not a remainder.
+    let (_, result) = simulate_interface_change(interface_change_script(Ok(Response::text(
+        200,
+        callers(50),
+    ))));
+
+    assert_eq!(
+        result.outcome.stdout.matches("WHERE-USED").count(),
+        50,
+        "{}",
+        result.outcome.stdout
+    );
+    assert!(!result.outcome.stdout.contains("more"));
+}
+
+#[test]
+fn a_failing_where_used_warns_and_neither_rejects_nor_falls_back() {
+    for answer in [
+        Ok(Response::text(500, "boom")),
+        Ok(Response::text(200, "<a><b></a>")),
+        Err(TransportError::NoResponse("lost".to_owned())),
+        Err(TransportError::RequestNotAllowed("x".to_owned())),
+    ] {
+        let (fake, result) = simulate_interface_change(interface_change_script(answer));
+
+        assert_eq!(
+            result.outcome.status,
+            Some(Status::SimulatedOk),
+            "{}",
+            result.outcome.stdout
+        );
+        assert_eq!(result.outcome.exit, 0);
+        assert!(result.failure.is_none() && !result.fallback_allowed);
+        assert!(
+            result
+                .outcome
+                .stderr
+                .lines()
+                .any(|line| line.starts_with("W: where-used unavailable: ")),
+            "{}",
+            result.outcome.stderr
+        );
+        assert!(!result.outcome.stdout.contains("WHERE-USED"));
+        assert!(result.outcome.stderr.contains(RUNTIME_WARNING));
+        assert!(result.outcome.stdout.contains("INTERFACE CHANGED"));
+        assert_eq!(fake.unlocks(), 1);
+    }
+}
+
+#[test]
+fn a_deploy_with_an_interface_change_and_a_failed_where_used_still_activates() {
+    let rendered = func_rendered("v2").replace("TYPE I.", "TYPE STRING.");
+    let mut fake = interface_change_script(Ok(Response::text(503, "down")))
+        .put(
+            &format!("{FM_URI}/source/main?{HANDLE_QUERY}"),
+            200,
+            &rendered,
+        )
+        .post(&format!("{FM_URI}?_action=UNLOCK&{HANDLE_QUERY}"), 200, "")
+        .post(ACTIVATE, 200, "")
+        .get(
+            &format!("{FM_URI}/source/main?version=active"),
+            200,
+            &rendered,
+        );
+    let result = run(
+        &mut fake,
+        FM,
+        func_scope(),
+        input(&func_changed_interface("v2"), false, None),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(
+        result.outcome.status,
+        Some(Status::Active),
+        "{}",
+        result.outcome.stdout
+    );
+    assert!(result.outcome.stdout.contains("INTERFACE CHANGED"));
+    assert!(
+        result
+            .outcome
+            .stderr
+            .contains("W: where-used unavailable: HTTP 503")
+    );
+    // The where-used request neither locks nor writes: lock, PUT and activation stay one each.
+    assert_eq!(fake.count("POST", "_action=LOCK"), 1);
+    assert_eq!(fake.count("PUT", ""), 1);
+    assert_eq!(fake.count("POST", "activation?"), 1);
+    assert!(
+        fake.position("POST", "usageReferences") < fake.position("POST", "_action=LOCK"),
+        "{:?}",
+        fake.uris()
+    );
+}
+
+#[test]
+fn a_body_only_func_change_asks_no_where_used() {
+    let live = func_rendered("v1");
+    let mut fake = func_locked_phase(func_before_lock(&live, &empty_worklist()), &live).post(
+        &format!("{FM_URI}?_action=UNLOCK&{HANDLE_QUERY}"),
+        200,
+        "",
+    );
+    let result = run(
+        &mut fake,
+        FM,
+        func_scope(),
+        input(&func_source("v2"), true, None),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(result.outcome.status, Some(Status::SimulatedOk));
+    assert_eq!(fake.count("POST", "usageReferences"), 0);
+    assert!(!result.outcome.stdout.contains("INTERFACE CHANGED"));
+    assert!(!result.outcome.stdout.contains("WHERE-USED"));
+    assert!(
+        !result
+            .outcome
+            .stderr
+            .contains("syntax check does not catch")
+    );
+}
+
 #[test]
 fn a_supplied_group_that_differs_from_the_resolved_one_stops_after_the_resolution() {
     let mut fake = Fake::new().get(&func_search(), 200, &search_reply());

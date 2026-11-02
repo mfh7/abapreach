@@ -1,0 +1,106 @@
+use abapreach::signature::interface_diff;
+
+fn lines(text: &str) -> Vec<String> {
+    text.lines().map(str::to_owned).collect()
+}
+
+const LIVE: &str = "FUNCTION YTEST_FM\n  IMPORTING\n    VALUE(IV_IN) TYPE I\n  EXPORTING\n    VALUE(EV_OUT) TYPE I\n  EXCEPTIONS\n    NOT_FOUND.\n\n\n\n  ev_out = iv_in.\nENDFUNCTION.";
+
+fn diff(file: &str) -> Option<Vec<String>> {
+    interface_diff(&lines(LIVE), &lines(file))
+}
+
+#[test]
+fn equivalent_signatures_are_not_a_change() {
+    // Keyword case, spacing, line layout, comments and the body do not matter.
+    let file = "function ytest_fm importing value( iv_in ) type i \" the input\n  exporting\n*  a comment line\n    value(ev_out)   type i\n  exceptions not_found.\n  ev_out = iv_in + 1.\nENDFUNCTION.";
+
+    assert_eq!(diff(file), None);
+    assert_eq!(diff(LIVE), None);
+}
+
+#[test]
+fn a_body_only_change_is_not_a_change() {
+    let file = LIVE.replace("ev_out = iv_in.", "ev_out = iv_in * 2.");
+
+    assert_eq!(diff(&file), None);
+}
+
+#[test]
+fn a_changed_parameter_type_is_shown_as_a_unified_diff() {
+    let file = LIVE.replace("VALUE(IV_IN) TYPE I", "VALUE(IV_IN) TYPE STRING");
+    let diff = diff(&file).expect("changed");
+
+    assert_eq!(&diff[..2], ["--- live", "+++ file"]);
+    assert!(
+        diff.contains(&"-VALUE(IV_IN) TYPE I".to_owned()),
+        "{diff:?}"
+    );
+    assert!(
+        diff.contains(&"+VALUE(IV_IN) TYPE STRING".to_owned()),
+        "{diff:?}"
+    );
+}
+
+#[test]
+fn a_changed_direction_name_or_exception_is_a_change() {
+    for file in [
+        LIVE.replace("EXPORTING", "CHANGING"),
+        LIVE.replace("IV_IN", "IV_INPUT"),
+        LIVE.replace("    NOT_FOUND.", "    NOT_FOUND\n    OTHER."),
+        LIVE.replace("  EXCEPTIONS\n    NOT_FOUND.", "."),
+        LIVE.replace("VALUE(IV_IN) TYPE I", "VALUE(IV_IN) TYPE I OPTIONAL"),
+        LIVE.replace("VALUE(IV_IN)", "IV_IN"),
+    ] {
+        assert!(diff(&file).is_some(), "{file}");
+    }
+}
+
+#[test]
+fn a_removed_parameter_shows_only_the_removed_line() {
+    let file = LIVE.replace("  EXPORTING\n    VALUE(EV_OUT) TYPE I\n", "");
+    let diff = diff(&file).expect("changed");
+
+    assert!(
+        diff.contains(&"-VALUE(EV_OUT) TYPE I".to_owned()),
+        "{diff:?}"
+    );
+    assert!(diff.iter().all(|line| !line.starts_with("+V")), "{diff:?}");
+}
+
+#[test]
+fn string_literals_keep_their_case_and_their_dots() {
+    let live = "FUNCTION YTEST_FM\n  IMPORTING\n    VALUE(IV_IN) TYPE C DEFAULT 'a. b'.\n  WRITE 'x'.\nENDFUNCTION.";
+
+    assert_eq!(
+        interface_diff(&lines(live), &lines(&live.replace("DEFAULT", "default"))),
+        None
+    );
+    assert!(interface_diff(&lines(live), &lines(&live.replace("'a. b'", "'A. b'"))).is_some());
+    // The first dot inside the literal does not end the signature.
+    assert!(interface_diff(&lines(live), &lines(&live.replace("'a. b'", "'a. c'"))).is_some());
+}
+
+#[test]
+fn a_source_without_a_readable_signature_is_not_compared() {
+    let unreadable = [
+        "",
+        "WRITE 'x'.",
+        "FUNCTION YTEST_FM",
+        "FUNCTION YTEST_FM\n  IMPORTING",
+    ];
+
+    for text in unreadable {
+        assert_eq!(interface_diff(&lines(LIVE), &lines(text)), None, "{text:?}");
+        assert_eq!(interface_diff(&lines(text), &lines(LIVE)), None, "{text:?}");
+    }
+}
+
+#[test]
+fn the_server_rendering_with_crlf_and_upper_case_equals_an_adt_file() {
+    let rendered = "FUNCTION YTEST_FM\r\n  IMPORTING\r\n    VALUE(IV_IN) TYPE I\r\n  EXPORTING\r\n    VALUE(EV_OUT) TYPE I\r\n  EXCEPTIONS\r\n    NOT_FOUND.\r\n\r\n\r\n\r\n  ev_out = iv_in.\r\nENDFUNCTION.";
+    let file = "FUNCTION ytest_fm\n  IMPORTING\n    VALUE(iv_in) TYPE i\n  EXPORTING\n    VALUE(ev_out) TYPE i\n  EXCEPTIONS\n    not_found.\n\n  ev_out = iv_in.\nENDFUNCTION.";
+    let rendered: Vec<String> = rendered.split('\n').map(str::to_owned).collect();
+
+    assert_eq!(interface_diff(&rendered, &lines(file)), None);
+}
