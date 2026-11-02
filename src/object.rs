@@ -47,7 +47,7 @@ impl PackageScope {
 }
 
 /// The request goes into a query string, so only a plain TRKORR is accepted.
-fn check_request(request: &str) -> Result<(), String> {
+pub(crate) fn check_request(request: &str) -> Result<(), String> {
     let valid = !request.is_empty()
         && request.len() <= MAX_REQUEST
         && request.bytes().all(|byte| byte.is_ascii_alphanumeric());

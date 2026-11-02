@@ -43,7 +43,7 @@ fn lock_body(corrnr: &str, local: bool) -> Step {
                 r#"<LOCK_HANDLE>h+1/=</LOCK_HANDLE><CORRNR>{}</CORRNR><IS_LOCAL>{}</IS_LOCAL>"#,
                 r#"</DATA></asx:values></asx:abap>"#,
             ),
-            corrnr,
+            corrnr.replace('&', "&amp;"),
             if local { "X" } else { "" }
         ),
     )))
@@ -133,6 +133,12 @@ fn transport_request_rules_apply_right_after_the_lock_in_simulate_and_deploy() {
             "DEVK000001",
             Some("DEVK000002"),
             "--tr DEVK000002 does not match",
+        ),
+        (
+            false,
+            "DEVK000001&foo=bar",
+            None,
+            "the lock returned an invalid transport request",
         ),
     ];
 

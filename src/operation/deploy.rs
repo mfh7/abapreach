@@ -8,7 +8,7 @@ use crate::cli::{IncludeKind, ObjectKind};
 use crate::config::{Connection, tls_warning};
 use crate::domain::{Outcome, Status};
 use crate::hash::{normalize, source_hash};
-use crate::object::check_deploy_source;
+use crate::object::{check_deploy_source, check_request};
 use crate::operation::read::{ReadError, resolve_group};
 use crate::policy::{Confirmer, Decision, InactiveVersion, Policies, Prompt, Terminal};
 use crate::signature::{interface_diff, validate_signature};
@@ -89,11 +89,11 @@ impl Default for DeployScope {
     }
 }
 
-/// Exit code of an interrupt (128 + SIGINT): at once when no lock is held, after the unlock
-/// when one is.
+/// Exit code of an interrupt (128 + SIGINT): at once when no lock or create POST is in flight,
+/// otherwise after the safe operation outcome is known.
 pub const INTERRUPT_EXIT_CODE: i32 = 130;
 
-/// What a SIGINT means right now: leave at once, or let the lock holder unlock first.
+/// What a SIGINT means right now: leave at once, or let a critical operation finish safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InterruptAction {
     ExitNow,
@@ -105,6 +105,7 @@ pub enum InterruptAction {
 pub struct CancelFlag {
     cancelled: Arc<AtomicBool>,
     lock_held: Arc<AtomicBool>,
+    write_in_flight: Arc<AtomicBool>,
 }
 
 impl CancelFlag {
@@ -131,10 +132,19 @@ impl CancelFlag {
         self.lock_held.load(Ordering::SeqCst)
     }
 
-    /// A SIGINT must not end the process while a lock is held: the flag then makes the deploy
-    /// unlock before it reports. Without a lock there is nothing to clean up, so exit at once.
+    /// Marks the one-shot create POST and its reconciliation. A signal in this window must wait
+    /// until the outcome is known: a server may have created the object even when its reply races
+    /// with Ctrl-C.
+    pub fn hold_write(&self) -> WriteScope<'_> {
+        self.write_in_flight.store(true, Ordering::SeqCst);
+
+        WriteScope(self)
+    }
+
+    /// A SIGINT must not end the process while a lock is held or a create write is unresolved.
+    /// The flag then makes the operation settle safely before it reports.
     pub fn on_interrupt(&self) -> InterruptAction {
-        if !self.lock_held() {
+        if !self.lock_held() && !self.write_in_flight.load(Ordering::SeqCst) {
             return InterruptAction::ExitNow;
         }
 
@@ -150,6 +160,15 @@ pub struct LockScope<'a>(&'a CancelFlag);
 impl Drop for LockScope<'_> {
     fn drop(&mut self) {
         self.0.lock_held.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Clears the create POST window after its reply or read-only reconciliation has settled.
+pub struct WriteScope<'a>(&'a CancelFlag);
+
+impl Drop for WriteScope<'_> {
+    fn drop(&mut self) {
+        self.0.write_in_flight.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1288,6 +1307,11 @@ impl Run<'_> {
                 "--tr {tr} does not match the transport request {corrnr} of the lock"
             ))),
             (false, _) => {
+                check_request(corrnr).map_err(|_| {
+                    Finish::stop(format!(
+                        "the lock returned an invalid transport request {corrnr}"
+                    ))
+                })?;
                 self.stdout.push(format!("transport request {corrnr}"));
 
                 Ok(Some(corrnr.to_owned()))

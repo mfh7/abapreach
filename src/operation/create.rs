@@ -8,7 +8,7 @@ use crate::cli::CreateKind;
 use crate::config::Connection;
 use crate::domain::{Outcome, Status};
 use crate::object::{DEFAULT_PACKAGE, PackageScope};
-use crate::operation::deploy::{DeployResult, leaf_texts};
+use crate::operation::deploy::{CancelFlag, DeployResult, INTERRUPT_EXIT_CODE, leaf_texts};
 use crate::operation::read::OBJECT_STRUCTURE;
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use quick_xml::escape::escape;
@@ -167,8 +167,20 @@ impl CreateProg {
         selection: Option<&Selection>,
         connection: Option<&Connection>,
     ) -> DeployResult {
+        Self::run_with_cancel(transport, input, selection, connection, &CancelFlag::new())
+    }
+
+    /// Runs one create while deferring Ctrl-C only for its unresolved one-shot POST.
+    pub fn run_with_cancel(
+        transport: &mut dyn SadtTransport,
+        input: CreateInput,
+        selection: Option<&Selection>,
+        connection: Option<&Connection>,
+        cancel: &CancelFlag,
+    ) -> DeployResult {
         let mut run = Run {
             transport,
+            cancel,
             input,
             pinned: selection
                 .is_some_and(|selection| selection.reason == SelectionReason::ExplicitBackend),
@@ -319,6 +331,7 @@ impl End {
 
 struct Run<'a> {
     transport: &'a mut dyn SadtTransport,
+    cancel: &'a CancelFlag,
     input: CreateInput,
     /// `--backend` named the backend, so no other one may take over.
     pinned: bool,
@@ -454,57 +467,77 @@ impl Run<'_> {
             .headers
             .insert("Content-Type".to_owned(), ANY.to_owned());
 
-        let response = match self.transport.request(request) {
-            Ok(response) => response,
+        // Keep Ctrl-C deferred until this reply, and any required read-only reconciliation, has
+        // settled. The POST is never retried.
+        let _write_scope = self.cancel.hold_write();
+        let end = match self.transport.request(request) {
             // Sent, but the reply never settled it: read back, never send again.
             Err(error) if error.was_sent() => {
                 self.write_sent = true;
 
-                return Ok(self.reconcile("reply was lost"));
+                Ok(self.reconcile("reply was lost"))
             }
-            Err(error) => return Err(End::error(&error, true)),
+            Err(error) => Err(End::error(&error, true)),
+            Ok(response) => {
+                self.write_sent = true;
+
+                if let Some(error) = response.authorization_failure() {
+                    Err(End::error(&error, false))
+                } else {
+                    match response.status {
+                        200..=299 => Ok(End::with(
+                            Status::Active,
+                            "CREATE: ACTIVE",
+                            format!(
+                                "{} {} created (empty skeleton; deploy supplies the source)",
+                                self.input.kind.token(),
+                                self.input.name.to_ascii_uppercase()
+                            ),
+                        )),
+                        // The class create without a request answered 500 and still formed the object.
+                        500..=599 => {
+                            Ok(self.reconcile(&format!("answered HTTP {}", response.status)))
+                        }
+                        status => {
+                            let body = String::from_utf8_lossy(&response.body);
+                            let detail = leaf_texts(&body)
+                                .ok()
+                                .and_then(|fields| {
+                                    fields
+                                        .get("localizedMessage")
+                                        .or_else(|| fields.get("message"))
+                                        .map(|text| text.trim().to_owned())
+                                })
+                                .filter(|text| !text.is_empty());
+
+                            Err(End::rejected(match detail {
+                                Some(detail) => format!("HTTP {status}: {detail}"),
+                                None => format!("HTTP {status}"),
+                            }))
+                        }
+                    }
+                }
+            }
         };
 
-        self.write_sent = true;
+        end.map(|end| self.after_create_interrupt(end))
+            .map_err(|end| self.after_create_interrupt(end))
+    }
 
-        if let Some(error) = response.authorization_failure() {
-            return Err(End::error(&error, false));
+    fn after_create_interrupt(&self, mut end: End) -> End {
+        if self.cancel.is_set() {
+            end.exit = INTERRUPT_EXIT_CODE;
+            end.warn_first(
+                "CANCELED: interrupted during the create POST; result follows".to_owned(),
+            );
         }
 
-        match response.status {
-            200..=299 => Ok(End::with(
-                Status::Active,
-                "CREATE: ACTIVE",
-                format!(
-                    "{} {} created (empty skeleton; deploy supplies the source)",
-                    self.input.kind.token(),
-                    self.input.name.to_ascii_uppercase()
-                ),
-            )),
-            // The class create without a request answered 500 and still formed the object.
-            500..=599 => Ok(self.reconcile(&format!("answered HTTP {}", response.status))),
-            status => {
-                let body = String::from_utf8_lossy(&response.body);
-                let detail = leaf_texts(&body)
-                    .ok()
-                    .and_then(|fields| {
-                        fields
-                            .get("localizedMessage")
-                            .or_else(|| fields.get("message"))
-                            .map(|text| text.trim().to_owned())
-                    })
-                    .filter(|text| !text.is_empty());
-
-                Err(End::rejected(match detail {
-                    Some(detail) => format!("HTTP {status}: {detail}"),
-                    None => format!("HTTP {status}"),
-                }))
-            }
-        }
+        end
     }
 
     /// A read-only GET settles an uncertain create: the object is there (`PARTIAL`), not there
-    /// (`REJECTED`, a new run is safe), or unreadable (`PARTIAL`). There is no second POST.
+    /// (`REJECTED`, but a slow commit must be checked before another run), or unreadable
+    /// (`PARTIAL`). There is no second POST.
     fn reconcile(&mut self, cause: &str) -> End {
         let kind = self.input.kind;
         let name = self.input.name.to_ascii_uppercase();
@@ -530,8 +563,8 @@ impl Run<'_> {
                     kind.token()
                 )),
                 404 => End::rejected(format!(
-                    "the create POST {cause} and {} {name} does not exist; nothing was created, \
-                     the run can be repeated",
+                    "the create POST {cause} and {} {name} was not found at read-back; verify \
+                     before repeating",
                     kind.token()
                 )),
                 status => End::partial(format!(

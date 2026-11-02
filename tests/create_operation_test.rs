@@ -8,7 +8,9 @@ use abapreach::config::Connection;
 use abapreach::domain::Status;
 use abapreach::object::PackageScope;
 use abapreach::operation::create::{CreateInput, CreateProg};
-use abapreach::operation::deploy::DeployResult;
+use abapreach::operation::deploy::{
+    CancelFlag, DeployResult, INTERRUPT_EXIT_CODE, InterruptAction,
+};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use std::collections::VecDeque;
 
@@ -31,6 +33,7 @@ struct Fake {
     calls: Vec<Request>,
     closes: usize,
     stateful: Option<bool>,
+    interrupt_on_create: Option<CancelFlag>,
 }
 
 impl Fake {
@@ -40,6 +43,7 @@ impl Fake {
             calls: Vec::new(),
             closes: 0,
             stateful: None,
+            interrupt_on_create: None,
         }
     }
 
@@ -68,6 +72,12 @@ impl Fake {
 
     fn stateful(mut self, supported: bool) -> Self {
         self.stateful = Some(supported);
+
+        self
+    }
+
+    fn interrupt_on_create(mut self, cancel: CancelFlag) -> Self {
+        self.interrupt_on_create = Some(cancel);
 
         self
     }
@@ -105,6 +115,13 @@ impl Fake {
 impl SadtTransport for Fake {
     fn request(&mut self, request: Request) -> Result<Response, TransportError> {
         self.calls.push(request.clone());
+
+        if request.method == "POST"
+            && !request.uri.contains("/validation")
+            && let Some(cancel) = &self.interrupt_on_create
+        {
+            assert_eq!(cancel.on_interrupt(), InterruptAction::Deferred);
+        }
 
         self.rules
             .iter_mut()
@@ -233,6 +250,10 @@ fn selection() -> Selection {
 
 fn run(fake: &mut Fake, input: CreateInput) -> DeployResult {
     CreateProg::run(fake, input, Some(&selection()), Some(&connection()))
+}
+
+fn run_with_cancel(fake: &mut Fake, input: CreateInput, cancel: &CancelFlag) -> DeployResult {
+    CreateProg::run_with_cancel(fake, input, Some(&selection()), Some(&connection()), cancel)
 }
 
 /// A fake that accepts a clean create of the kind in a local or transportable package: the group
@@ -727,7 +748,36 @@ fn a_lost_post_reply_with_the_object_absent_is_rejected_and_never_repeated() {
             result.outcome.stdout
         );
         assert_eq!(fake.posts().len(), 1, "{kind:?}");
+        assert!(
+            result
+                .outcome
+                .stdout
+                .contains("not found at read-back; verify before repeating"),
+            "{kind:?}: {}",
+            result.outcome.stdout
+        );
     }
+}
+
+#[test]
+fn an_interrupt_during_create_post_defers_through_reconciliation_then_exits_130() {
+    let cancel = CancelFlag::new();
+    let mut fake = clean(CreateKind::Fugr, "$TMP", None, 500)
+        .get(GROUP_URI, 200, "<group/>")
+        .interrupt_on_create(cancel.clone());
+
+    let result = run_with_cancel(
+        &mut fake,
+        input(CreateKind::Fugr, None, None, false),
+        &cancel,
+    );
+
+    assert_eq!(result.outcome.status, Some(Status::Partial));
+    assert_eq!(result.outcome.exit, INTERRUPT_EXIT_CODE);
+    assert!(result.outcome.stdout.contains("CREATE: PARTIAL"));
+    assert_eq!(fake.posts().len(), 1);
+    assert!(fake.calls.iter().any(|call| call.method == "GET"));
+    fake.assert_finished();
 }
 
 #[test]

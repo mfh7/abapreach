@@ -407,12 +407,13 @@ fn execute(
                 false,
                 connection,
                 factories,
-                |transport, selection, _| {
-                    let result = CreateProg::run(
+                |transport, selection, cancel| {
+                    let result = CreateProg::run_with_cancel(
                         transport,
                         input.clone(),
                         Some(selection),
                         Some(connection),
+                        cancel,
                     );
 
                     Attempt {
