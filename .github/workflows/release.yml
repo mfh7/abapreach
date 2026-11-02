@@ -101,8 +101,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "mode: $mode, tag: $tag, archive version: $archive_version"
 
-  build:
-    name: build (${{ matrix.runner.target }}, ${{ matrix.variant.artifact }})
+  build-linux:
+    name: Linux build (${{ matrix.runner.target }}, ${{ matrix.variant.artifact }})
     needs: plan
     if: needs.plan.outputs.mode == 'rc'
     runs-on: ${{ matrix.runner.label }}
@@ -112,15 +112,6 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - label: macos-14
-            target: aarch64-apple-darwin
-            ext: tar.gz
-            exe: abapreach
-          - label: windows-latest
-            target: x86_64-pc-windows-msvc
-            ext: zip
-            exe: abapreach.exe
-            rustflags: "-C target-feature=+crt-static"
           - label: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             ext: tar.gz
@@ -239,11 +230,129 @@ jobs:
             dist/${{ env.ARCHIVE_FILE }}.sha256
           if-no-files-found: error
 
+  build-bare:
+    name: bare build (${{ matrix.runner.target }}, ${{ matrix.variant.artifact }})
+    needs: plan
+    if: needs.plan.outputs.mode == 'rc'
+    runs-on: ${{ matrix.runner.label }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - label: macos-14
+            target: aarch64-apple-darwin
+            ext: tar.gz
+            exe: abapreach
+          - label: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+            exe: abapreach.exe
+            rustflags: "-C target-feature=+crt-static"
+        variant:
+          - artifact: release
+            flags: ""
+            suffix: ""
+          - artifact: fault-injection
+            flags: "--features fault-injection"
+            suffix: "-fault-injection"
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.runner.target }}
+      EXE: ${{ matrix.runner.exe }}
+      FLAGS: ${{ matrix.variant.flags }}
+      RUSTFLAGS: ${{ matrix.runner.rustflags }}
+      ARCHIVE_FILE: abapreach-${{ needs.plan.outputs.version }}-${{ matrix.runner.target }}${{ matrix.variant.suffix }}.${{ matrix.runner.ext }}
+    steps:
+      - name: Check out the tag commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # aws-lc-sys assembles on Windows and has no NASM here, so install it before the build.
+      - name: Install NASM
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          echo "C:\\Program Files\\NASM" >> $env:GITHUB_PATH
+
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # RUSTFLAGS from the job environment links the CRT statically on Windows only.
+      - name: Build the executable
+        run: cargo build --release --locked --target "$TARGET" $FLAGS
+
+      - name: Package the archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir dist
+          tar -C "target/$TARGET/release" -czf "dist/$ARCHIVE_FILE" "$EXE"
+
+      - name: Package the archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -LiteralPath "target\\$env:TARGET\\release\\$env:EXE" -DestinationPath "dist\\$env:ARCHIVE_FILE"
+
+      - name: Record the archive SHA256
+        run: |
+          printf '%s  %s\n' "$(bash .github/scripts/sha256.sh "dist/$ARCHIVE_FILE")" "$ARCHIVE_FILE" > "dist/$ARCHIVE_FILE.sha256"
+          cat "dist/$ARCHIVE_FILE.sha256"
+
+      # Everything below inspects the file that a user extracts from the archive, never
+      # target/release.
+      - name: Extract the archive for inspection (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir inspect
+          tar -xzf "dist/$ARCHIVE_FILE" -C inspect
+
+      - name: Extract the archive for inspection (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Expand-Archive -LiteralPath "dist\\$env:ARCHIVE_FILE" -DestinationPath inspect
+
+      - name: Check the import table of the packaged executable
+        if: runner.os == 'Windows'
+        run: |
+          rustup component add llvm-tools
+          host="$(rustc -vV | tr -d '\r' | sed -n 's/^host: //p')"
+          sysroot="$(cygpath -u "$(rustc --print sysroot | tr -d '\r')")"
+          readobj="$sysroot/lib/rustlib/$host/bin/llvm-readobj.exe"
+          test -x "$readobj"
+          "$readobj" --coff-imports "inspect/$EXE" | bash .github/scripts/check-imports.sh
+
+      - name: Record the executable SHA256
+        run: |
+          {
+            echo "### $ARCHIVE_FILE"
+            echo
+            echo "- archive SHA256: \`$(cut -d' ' -f1 "dist/$ARCHIVE_FILE.sha256")\`"
+            echo "- executable SHA256: \`$(bash .github/scripts/sha256.sh "inspect/$EXE")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the archive as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.variant.artifact }}-${{ matrix.runner.target }}
+          path: |
+            dist/${{ env.ARCHIVE_FILE }}
+            dist/${{ env.ARCHIVE_FILE }}.sha256
+          if-no-files-found: error
+
   publish-rc:
     name: publish the rc prerelease
     needs:
       - plan
-      - build
+      - build-bare
+      - build-linux
     if: needs.plan.outputs.mode == 'rc'
     runs-on: ubuntu-24.04
     timeout-minutes: 15

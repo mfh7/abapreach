@@ -34,7 +34,7 @@ impl ConfigPaths {
 }
 
 /// The read-only permission assessment of `connections.local.json`, which holds credentials.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocalCredentialsPermission {
     /// No local credentials file, so there is nothing to protect.
     NotPresent,
@@ -42,13 +42,15 @@ pub enum LocalCredentialsPermission {
     UserOnly,
     /// A group or other user holds a permission bit on a file that stores credentials.
     GroupOrOtherReadable { mode: u32 },
+    /// The file exists but its metadata could not be inspected.
+    MetadataError { error: String },
     /// The platform reports no portable permission bits (Windows ACLs), so nothing was checked.
     NotChecked,
 }
 
 impl LocalCredentialsPermission {
     /// The doctor line for this assessment; it names the file mode, never the file content.
-    pub fn label(self) -> String {
+    pub fn label(&self) -> String {
         match self {
             Self::NotPresent => "local credentials: not present".to_owned(),
             Self::UserOnly => "local credentials: user-only permission".to_owned(),
@@ -56,6 +58,9 @@ impl LocalCredentialsPermission {
                 "WARNING: local credentials are readable by group or other (mode {mode:04o}); \
                  restrict the file to the owner (see docs/getting-started.md)."
             ),
+            Self::MetadataError { error } => {
+                format!("ERROR: local credentials metadata could not be read: {error}")
+            }
             Self::NotChecked => concat!(
                 "local credentials: permission not checked; restrict the file to a user-only ",
                 "ACL (see docs/getting-started.md)"
@@ -68,11 +73,13 @@ impl LocalCredentialsPermission {
 /// Assesses the local credentials file without opening it: only its metadata is read, so the
 /// assessment never touches the secret content. A missing file stays optional.
 pub fn local_credentials_permission(path: &Path) -> LocalCredentialsPermission {
-    if !path.exists() {
-        return LocalCredentialsPermission::NotPresent;
+    match fs::metadata(path) {
+        Ok(metadata) => classify_credentials_mode(platform_mode(&metadata)),
+        Err(error) if error.kind() == ErrorKind::NotFound => LocalCredentialsPermission::NotPresent,
+        Err(error) => LocalCredentialsPermission::MetadataError {
+            error: error.to_string(),
+        },
     }
-
-    classify_credentials_mode(platform_mode(path))
 }
 
 /// The portable rule: `None` means the platform exposes no mode bits, and any group or other bit
@@ -86,17 +93,15 @@ pub fn classify_credentials_mode(mode: Option<u32>) -> LocalCredentialsPermissio
 }
 
 #[cfg(unix)]
-fn platform_mode(path: &Path) -> Option<u32> {
+fn platform_mode(metadata: &fs::Metadata) -> Option<u32> {
     use std::os::unix::fs::PermissionsExt;
 
-    fs::metadata(path)
-        .ok()
-        .map(|metadata| metadata.permissions().mode() & 0o777)
+    Some(metadata.permissions().mode() & 0o777)
 }
 
 /// Windows ACLs carry no mode bits, so the assessment reports that it did not check.
 #[cfg(not(unix))]
-fn platform_mode(_: &Path) -> Option<u32> {
+fn platform_mode(_: &fs::Metadata) -> Option<u32> {
     None
 }
 

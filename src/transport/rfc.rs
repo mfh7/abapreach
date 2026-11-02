@@ -1568,15 +1568,26 @@ pub fn load_candidate(candidate: &Candidate) -> Result<Loaded, String> {
 /// install names, so neither platform preloads anything.
 #[cfg(target_os = "linux")]
 fn platform_dependencies(candidate: &Candidate) -> Result<Vec<Library>, String> {
-    let dynamic = fs::File::open(&candidate.path)
-        .ok()
-        .and_then(|file| elf_dynamic(file).ok());
-    let dependencies = dependency_preload(
-        &candidate.path,
-        candidate.family,
-        dynamic.as_ref(),
-        &SystemFs,
-    );
+    let library = candidate.path.canonicalize().map_err(|error| {
+        format!(
+            "could not resolve {} before reading ELF dependencies: {error}",
+            candidate.path.display()
+        )
+    })?;
+    let file = fs::File::open(&library).map_err(|error| {
+        format!(
+            "could not open {} to read ELF dependencies: {error}",
+            library.display()
+        )
+    })?;
+    let dynamic = elf_dynamic(file).map_err(|error| {
+        format!(
+            "could not read ELF dependencies from {}: {error}",
+            library.display()
+        )
+    })?;
+    let dependencies = dependency_preload(&library, candidate.family, Some(&dynamic), &SystemFs)?;
+    let dependencies = exclude_library_aliases(&library, dependencies)?;
 
     preload_dependencies(&dependencies, |path| map_library(path))
 }
@@ -1618,31 +1629,60 @@ pub fn sibling_dependencies(
     let Some(directory) = library.parent() else {
         return Vec::new();
     };
+    if !directory.is_absolute() {
+        return Vec::new();
+    }
 
     needed
         .iter()
-        .map(|name| directory.join(name))
-        .filter(|path| path != library && fs.is_file(path))
+        .filter_map(|name| {
+            let name = Path::new(name);
+            if name.components().count() != 1 || name.file_name().is_none() {
+                return None;
+            }
+            let path = directory.join(name);
+            (path != library && fs.is_file(&path)).then_some(path)
+        })
         .collect()
 }
 
 /// The dependencies to preload for one library: the origin rule selects whether the sibling step
-/// runs at all, and an image whose dynamic section could not be read leaves nothing to preload.
+/// runs at all, and an image whose dynamic section could not be read rejects the candidate.
 pub fn dependency_preload(
     library: &Path,
     family: Family,
     dynamic: Option<&ElfDynamic>,
     fs: &dyn CandidateFs,
-) -> Vec<PathBuf> {
-    let Some(dynamic) = dynamic else {
-        return Vec::new();
-    };
+) -> Result<Vec<PathBuf>, String> {
+    let dynamic = dynamic.ok_or_else(|| {
+        "could not read ELF dynamic section; dependencies cannot be read".to_owned()
+    })?;
 
     if !needs_dependency_preload(family, dynamic.declares_origin()) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    sibling_dependencies(library, dynamic.needed(), fs)
+    Ok(sibling_dependencies(library, dynamic.needed(), fs))
+}
+
+/// Drops a dependency path that resolves to the library itself. A symlink alias is still the
+/// library, so it must not be mapped before the real library; an alias that cannot be resolved
+/// fails the candidate instead of guessing what would be loaded.
+pub fn exclude_library_aliases(
+    library: &Path,
+    dependencies: Vec<PathBuf>,
+) -> Result<Vec<PathBuf>, String> {
+    dependencies
+        .into_iter()
+        .filter_map(|path| match path.canonicalize() {
+            Ok(target) if target == library => None,
+            Ok(_) => Some(Ok(path)),
+            Err(error) => Some(Err(format!(
+                "could not resolve dependency {} before preload: {error}",
+                path.display()
+            ))),
+        })
+        .collect()
 }
 
 /// Maps every dependency by absolute path, in order, before the library that needs them. A failure

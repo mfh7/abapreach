@@ -331,6 +331,27 @@ fn an_absent_local_credentials_file_has_no_permission_to_check() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn local_credentials_metadata_errors_are_reported_to_doctor() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("not-a-directory");
+    fs::write(&file, "not credentials").unwrap();
+    let inaccessible = file.join("connections.local.json");
+
+    let permission = local_credentials_permission(&inaccessible);
+
+    assert!(matches!(
+        permission,
+        LocalCredentialsPermission::MetadataError { .. }
+    ));
+    assert!(
+        permission.label().contains("metadata"),
+        "{}",
+        permission.label()
+    );
+}
+
 #[test]
 fn a_platform_without_a_permission_check_reports_it_and_points_at_the_documentation() {
     let label = LocalCredentialsPermission::NotChecked.label();

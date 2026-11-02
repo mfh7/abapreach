@@ -1,6 +1,6 @@
 # Getting started
 
-ABAPReach 0.11.1 is a macOS arm64-tested CLI for reading and deploying the active
+ABAPReach 0.12.0 is a macOS arm64-tested CLI for reading and deploying the active
 source of **existing ABAP programs** (`PROG`). Release 0.12.0 targets Windows x64,
 Linux x64 and Linux arm64 as well; see [Platforms and release binaries](#platforms-and-release-binaries)
 and the [0.12.0 test matrix](#tested-environment) for what is verified so far. You need a Rust toolchain that
@@ -116,6 +116,8 @@ On Linux, when a library does not declare `$ORIGIN` in its search path, or belon
 NW RFC SDK, ABAPReach first maps the sibling dependencies from the same folder by absolute
 path. The parent process's `LD_LIBRARY_PATH` is not changed. On Windows, the loader searches
 the folder of the library for its dependencies.
+
+SAP GUI for Java libraries declare `$ORIGIN`, so they are loaded without a preload step.
 
 ### Local credentials file permission
 
@@ -360,7 +362,7 @@ response. Deploy can leave an inactive version after failed activation. Read
 [Deploy safety](deploy-safety.md) and [Behavior differences](behavior-differences.md)
 before the first write.
 
-ABAPReach 0.11.1 has no MCP server yet; it is part of 1.0.0 (see the
+ABAPReach 0.12.0 has no MCP server yet; it is part of 1.0.0 (see the
 [roadmap](roadmap.md#mcp-server)). An AI tool may invoke the CLI as part of a
 user-controlled workflow, but the CLI does not grant the AI any SAP
 permissions of its own.

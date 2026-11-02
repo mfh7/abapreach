@@ -10,6 +10,8 @@ mod yaml_subset;
 use yaml_subset::{Block, find, get, items, keys, map, parse, scalar, scalars};
 
 const WORKFLOW_PATH: &str = ".github/workflows/release.yml";
+const BARE_BUILD_JOB: &str = "build-bare";
+const LINUX_BUILD_JOB: &str = "build-linux";
 
 /// Target triple, runner label, archive extension, executable name.
 const TARGETS: [(&str, &str, &str, &str); 4] = [
@@ -139,7 +141,8 @@ fn release_workflow_grants_write_access_only_to_the_two_publish_jobs() {
         keys(get(&document, "jobs")),
         [
             "plan",
-            "build",
+            "build-linux",
+            "build-bare",
             "publish-rc",
             "promote-verify",
             "publish-final"
@@ -162,32 +165,29 @@ fn release_workflow_stays_offline_from_sap_and_uses_only_the_default_token() {
 #[test]
 fn release_workflow_builds_the_four_targets_with_the_release_environments() {
     let document = document();
-    let build = job(&document, "build");
-    assert_eq!(scalar(get(build, "runs-on")), "${{ matrix.runner.label }}");
+    let bare = job(&document, BARE_BUILD_JOB);
+    assert_eq!(scalar(get(bare, "runs-on")), "${{ matrix.runner.label }}");
     assert_eq!(
-        scalar(get(build, "container")),
+        find(bare, "container"),
+        None,
+        "macOS and Windows must build on their bare hosted runners"
+    );
+
+    let linux = job(&document, LINUX_BUILD_JOB);
+    assert_eq!(scalar(get(linux, "runs-on")), "${{ matrix.runner.label }}");
+    assert_eq!(
+        scalar(get(linux, "container")),
         "${{ matrix.runner.image }}"
     );
 
-    let matrix = get(get(build, "strategy"), "matrix");
-    let runners = items(get(matrix, "runner"));
-    assert_eq!(runners.len(), TARGETS.len());
-    for (entry, (target, label, extension, executable)) in runners.iter().zip(TARGETS) {
+    let bare_runners = items(get(get(get(bare, "strategy"), "matrix"), "runner"));
+    assert_eq!(bare_runners.len(), 2);
+    for (entry, (target, label, extension, executable)) in bare_runners.iter().zip(TARGETS) {
         assert_eq!(scalar(get(entry, "target")), target);
         assert_eq!(scalar(get(entry, "label")), label);
         assert_eq!(scalar(get(entry, "ext")), extension);
         assert_eq!(scalar(get(entry, "exe")), executable);
-
-        let image = find(entry, "image").map(scalar);
-        if target.contains("linux") {
-            let arch = target.split('-').next().unwrap();
-            assert_eq!(
-                image,
-                Some(format!("quay.io/pypa/manylinux_2_28_{arch}").as_str())
-            );
-        } else {
-            assert_eq!(image, None, "{target} must build on the bare runner");
-        }
+        assert_eq!(find(entry, "image"), None, "{target} must stay bare");
 
         let flags = find(entry, "rustflags").map(scalar);
         if target.contains("windows") {
@@ -196,33 +196,54 @@ fn release_workflow_builds_the_four_targets_with_the_release_environments() {
             assert_eq!(flags, None, "{target} must not carry static CRT flags");
         }
     }
+
+    let linux_runners = items(get(get(get(linux, "strategy"), "matrix"), "runner"));
+    assert_eq!(linux_runners.len(), 2);
+    for (entry, &(target, label, extension, executable)) in
+        linux_runners.iter().zip(TARGETS[2..].iter())
+    {
+        assert_eq!(scalar(get(entry, "target")), target);
+        assert_eq!(scalar(get(entry, "label")), label);
+        assert_eq!(scalar(get(entry, "ext")), extension);
+        assert_eq!(scalar(get(entry, "exe")), executable);
+        let arch = target.split('-').next().unwrap();
+        assert_eq!(
+            find(entry, "image").map(scalar),
+            Some(format!("quay.io/pypa/manylinux_2_28_{arch}").as_str())
+        );
+        assert_eq!(
+            find(entry, "rustflags"),
+            None,
+            "{target} must not carry CRT flags"
+        );
+    }
 }
 
 #[test]
 fn release_workflow_builds_an_ordinary_and_a_separate_fault_injection_variant() {
     let document = document();
-    let matrix = get(get(job(&document, "build"), "strategy"), "matrix");
-    let variants = items(get(matrix, "variant"));
-    assert_eq!(variants.len(), 2);
+    for name in [BARE_BUILD_JOB, LINUX_BUILD_JOB] {
+        let matrix = get(get(job(&document, name), "strategy"), "matrix");
+        let variants = items(get(matrix, "variant"));
+        assert_eq!(variants.len(), 2, "{name}");
 
-    let ordinary = &variants[0];
-    assert_eq!(scalar(get(ordinary, "artifact")), "release");
-    assert_eq!(scalar(get(ordinary, "flags")), "");
-    assert_eq!(scalar(get(ordinary, "suffix")), "");
+        let ordinary = &variants[0];
+        assert_eq!(scalar(get(ordinary, "artifact")), "release");
+        assert_eq!(scalar(get(ordinary, "flags")), "");
+        assert_eq!(scalar(get(ordinary, "suffix")), "");
 
-    let fault = &variants[1];
-    assert_eq!(scalar(get(fault, "artifact")), "fault-injection");
-    assert_eq!(scalar(get(fault, "flags")), "--features fault-injection");
-    assert_eq!(scalar(get(fault, "suffix")), "-fault-injection");
+        let fault = &variants[1];
+        assert_eq!(scalar(get(fault, "artifact")), "fault-injection");
+        assert_eq!(scalar(get(fault, "flags")), "--features fault-injection");
+        assert_eq!(scalar(get(fault, "suffix")), "-fault-injection");
 
-    let scripts = run_scripts(&document, "build");
-    assert!(
-        scripts
-            .iter()
-            .any(|script| script
+        let scripts = run_scripts(&document, name);
+        assert!(
+            scripts.iter().any(|script| script
                 .contains("cargo build --release --locked --target \"$TARGET\" $FLAGS")),
-        "{scripts:?}"
-    );
+            "{name}: {scripts:?}"
+        );
+    }
     assert!(
         !workflow_text().contains("--all-features"),
         "a release build must never turn on every feature"
@@ -238,66 +259,81 @@ fn release_workflow_builds_an_ordinary_and_a_separate_fault_injection_variant() 
 #[test]
 fn release_workflow_inspects_the_executable_extracted_from_the_packaged_archive() {
     let document = document();
-    let build = "build";
-    let package = step_index(&document, build, "Package");
-    let checksum = step_index(&document, build, "sha256.sh");
-    let extract = step_index(&document, build, "Extract");
-    let upload = step_index(&document, build, "actions/upload-artifact");
-    let glibc = step_index(&document, build, "check-glibc.sh");
-    let imports = step_index(&document, build, "check-imports.sh");
+    for build in [BARE_BUILD_JOB, LINUX_BUILD_JOB] {
+        let package = step_index(&document, build, "Package");
+        let checksum = step_index(&document, build, "sha256.sh");
+        let extract = step_index(&document, build, "Extract");
+        let upload = step_index(&document, build, "actions/upload-artifact");
 
-    assert!(
-        package < checksum && checksum < extract,
-        "package, hash, extract"
-    );
-    assert!(
-        extract < glibc && extract < imports,
-        "inspect after extraction"
-    );
-    assert!(
-        glibc < upload && imports < upload,
-        "upload only after inspection"
-    );
-
-    let steps = steps(&document, build);
-    let inspect_glibc = scalar(get(&steps[glibc], "run"));
-    assert!(
-        inspect_glibc
-            .contains("objdump -T \"inspect/$EXE\" | bash .github/scripts/check-glibc.sh 2.28"),
-        "{inspect_glibc}"
-    );
-    assert_eq!(
-        scalar(get(&steps[glibc], "if")),
-        "runner.os == 'Linux'",
-        "the glibc baseline applies to Linux only"
-    );
-
-    let inspect_imports = scalar(get(&steps[imports], "run"));
-    assert!(
-        inspect_imports
-            .contains("--coff-imports \"inspect/$EXE\" | bash .github/scripts/check-imports.sh"),
-        "{inspect_imports}"
-    );
-    assert_eq!(scalar(get(&steps[imports], "if")), "runner.os == 'Windows'");
-
-    // The inspected path is the extracted file; no build output directory is ever inspected.
-    for step in [glibc, imports] {
-        let script = scalar(get(&steps[step], "run"));
-        assert!(!script.contains("target/"), "{script}");
-        assert!(!script.contains("target\\"), "{script}");
-    }
-    let extraction = steps
-        .iter()
-        .filter(|step| find(step, "name").is_some_and(|name| scalar(name).contains("Extract")))
-        .map(|step| scalar(get(step, "run")))
-        .collect::<Vec<_>>();
-    assert_eq!(extraction.len(), 2, "one extraction step per OS family");
-    for script in extraction {
         assert!(
-            script.contains("dist/") || script.contains("dist\\"),
-            "{script}"
+            package < checksum && checksum < extract,
+            "{build}: package, hash, extract"
         );
-        assert!(script.contains("inspect"), "{script}");
+
+        let steps = steps(&document, build);
+        let extraction = steps
+            .iter()
+            .filter(|step| find(step, "name").is_some_and(|name| scalar(name).contains("Extract")))
+            .map(|step| scalar(get(step, "run")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            extraction.len(),
+            2,
+            "{build}: one extraction step per OS family"
+        );
+        for script in extraction {
+            assert!(
+                script.contains("dist/") || script.contains("dist\\"),
+                "{script}"
+            );
+            assert!(script.contains("inspect"), "{script}");
+        }
+
+        let inspected = steps
+            .iter()
+            .filter(|step| {
+                find(step, "run").is_some_and(|run| scalar(run).contains("inspect/$EXE"))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !inspected.is_empty(),
+            "{build} has no packaged-binary inspection"
+        );
+        for step in inspected {
+            let script = scalar(get(step, "run"));
+            assert!(!script.contains("target/"), "{script}");
+            assert!(!script.contains("target\\"), "{script}");
+        }
+
+        if build == LINUX_BUILD_JOB {
+            let glibc = step_index(&document, build, "check-glibc.sh");
+            assert!(
+                extract < glibc && glibc < upload,
+                "{build}: inspect before upload"
+            );
+            let script = scalar(get(&steps[glibc], "run"));
+            assert!(
+                script.contains(
+                    "objdump -T \"inspect/$EXE\" | bash .github/scripts/check-glibc.sh 2.28"
+                ),
+                "{script}"
+            );
+            assert_eq!(scalar(get(&steps[glibc], "if")), "runner.os == 'Linux'");
+        } else {
+            let imports = step_index(&document, build, "check-imports.sh");
+            assert!(
+                extract < imports && imports < upload,
+                "{build}: inspect before upload"
+            );
+            let script = scalar(get(&steps[imports], "run"));
+            assert!(
+                script.contains(
+                    "--coff-imports \"inspect/$EXE\" | bash .github/scripts/check-imports.sh"
+                ),
+                "{script}"
+            );
+            assert_eq!(scalar(get(&steps[imports], "if")), "runner.os == 'Windows'");
+        }
     }
 }
 
@@ -347,10 +383,12 @@ fn release_workflow_attaches_only_ordinary_archives_to_a_prerelease() {
 #[test]
 fn release_workflow_runs_the_promotion_only_for_a_final_tag_or_a_dry_run() {
     let document = document();
-    assert_eq!(
-        scalar(get(job(&document, "build"), "if")),
-        "needs.plan.outputs.mode == 'rc'"
-    );
+    for name in [BARE_BUILD_JOB, LINUX_BUILD_JOB] {
+        assert_eq!(
+            scalar(get(job(&document, name), "if")),
+            "needs.plan.outputs.mode == 'rc'"
+        );
+    }
     assert_eq!(
         scalar(get(job(&document, "publish-rc"), "if")),
         "needs.plan.outputs.mode == 'rc'"

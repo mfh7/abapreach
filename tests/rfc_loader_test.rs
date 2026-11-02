@@ -1516,20 +1516,74 @@ fn dependency_preload_applies_the_origin_rule_and_keeps_the_order() {
 
     assert_eq!(
         dependency_preload(&library, Family::Sdk, Some(&without_origin), &fs),
-        vec![sibling.clone()]
+        Ok(vec![sibling.clone()])
     );
     assert_eq!(
         dependency_preload(&library, Family::Gui, Some(&without_origin), &fs),
-        vec![sibling],
+        Ok(vec![sibling]),
         "a GUI library without $ORIGIN needs the same preload"
     );
     assert!(
-        dependency_preload(&library, Family::Gui, Some(&with_origin), &fs).is_empty(),
+        dependency_preload(&library, Family::Gui, Some(&with_origin), &fs)
+            .unwrap()
+            .is_empty(),
         "a library that resolves its own folder needs no preload"
     );
+    let error = dependency_preload(&library, Family::Sdk, None, &fs)
+        .expect_err("an unreadable dynamic section rejects the candidate before it is mapped");
+    assert!(error.contains("dependencies cannot be read"), "{error}");
+}
+
+#[test]
+fn sibling_preload_paths_stay_absolute_and_inside_the_gui_layout() {
+    let directory = Path::new("/opt/sapgui/bin/unicode");
+    let library = directory.join("libsapnwrfc.so");
+    let sibling = directory.join("libicuuc.so.50");
+    let outside = Path::new("/opt/sapgui/bin/liboutside.so");
+    let fs = FakeFs::new(&[&library, &sibling, outside], &[]);
+    let needed = vec![
+        "libicuuc.so.50".to_owned(),
+        "../liboutside.so".to_owned(),
+        "/opt/sapgui/bin/liboutside.so".to_owned(),
+    ];
+
+    assert_eq!(sibling_dependencies(&library, &needed, &fs), vec![sibling]);
+
+    let relative_library = Path::new("gui/bin/unicode/libsapnwrfc.so");
+    let relative_sibling = Path::new("gui/bin/unicode/libicuuc.so.50");
+    let relative_fs = FakeFs::new(&[relative_library, relative_sibling], &[]);
+
     assert!(
-        dependency_preload(&library, Family::Sdk, None, &fs).is_empty(),
-        "an unreadable dynamic section leaves nothing to preload"
+        sibling_dependencies(
+            relative_library,
+            &["libicuuc.so.50".to_owned()],
+            &relative_fs,
+        )
+        .is_empty(),
+        "a relative library path cannot produce a non-absolute preload"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn library_aliases_never_reach_preload() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let library = directory.path().join("libsapnwrfc.so");
+    let alias = directory.path().join("library-alias.so");
+    let dependency = directory.path().join("libsapucum.so");
+    std::fs::write(&library, "library").unwrap();
+    std::fs::write(&dependency, "dependency").unwrap();
+    symlink(&library, &alias).unwrap();
+
+    assert_eq!(
+        abapreach::transport::rfc::exclude_library_aliases(
+            &library.canonicalize().unwrap(),
+            vec![alias, dependency.clone()]
+        )
+        .unwrap(),
+        vec![dependency]
     );
 }
 
@@ -1625,6 +1679,24 @@ fn linux_adapter_preloads_a_sibling_dependency_by_absolute_path() {
         error.contains(&sibling.display().to_string()),
         "the preload must name the absolute sibling path: {error}"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_adapter_rejects_an_unreadable_dynamic_section_before_mapping() {
+    use abapreach::transport::rfc::load_candidate;
+
+    let directory = tempfile::tempdir().unwrap();
+    let library = directory.path().join("libsapnwrfc.so");
+    let mut image = elf_with_dynamic(&["libsapucum.so"], None, None);
+    image[0x38..0x3a].copy_from_slice(&0u16.to_le_bytes());
+    std::fs::write(&library, image).unwrap();
+
+    let error = load_candidate(&discovered_sdk(&library))
+        .map(|_| ())
+        .expect_err("a required dynamic read failure stops this candidate before dlopen");
+
+    assert!(error.contains("dependencies cannot be read"), "{error}");
 }
 
 #[cfg(target_os = "linux")]
