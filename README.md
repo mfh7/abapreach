@@ -5,7 +5,7 @@
 **Read and deploy ABAP source from the command line, over ADT HTTP or RFC, including
 systems you can only reach through SAProuter.**
 
-![version](https://img.shields.io/badge/version-0.12.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows-not_tested_yet-lightgrey) ![Linux](https://img.shields.io/badge/Linux-not_tested_yet-lightgrey) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
+![version](https://img.shields.io/badge/version-0.12.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
 
 ```text
 $ abapreach deploy PROG ZDEMO ZDEMO.abap --base 63886692bf65... --conn A4H_001
@@ -178,7 +178,8 @@ Release 0.12.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The 
 library lookup per OS, the release file checks, the Linux glibc baseline, the credential
 file permission rules and the test matrix are in
 [Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
-The test matrix stays `pending` until the release-candidate run records each cell.
+The 0.12.0 test matrix passed on every supported cell; see
+[Tested environment](docs/getting-started.md#tested-environment).
 
 An explicit `ABAPREACH_RFC_LIBRARY` that cannot be loaded stops the command with an
 error. ABAPReach does not fall back to another library in that case.
@@ -231,7 +232,9 @@ has the details.
 
 Scripts can rely on four exit codes. Any result that needs a human look exits 1, including a
 write that turned out active only after a read-back. An interrupt (Ctrl-C) exits 130; when a
-deploy holds the lock, it exits 130 only after the lock is released.
+deploy holds the lock, it exits 130 only after the lock is released. An interrupt that
+arrives after the lock was released and the activation has started does not stop the
+activation: the command reports the real result (for example `ACTIVE`, exit code 0).
 
 <table>
   <tr>

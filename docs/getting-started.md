@@ -185,7 +185,9 @@ the lock, the interrupt is deferred: the deploy finishes its lock release, print
 `CANCELED: interrupted while the lock was held` (or `CANCELED: interrupted before the
 activation` when the new source was already saved inactive), and exits with code 130. The
 exit code is 130 only after the lock is released; if the release fails, the exit code is 1 and
-the output says the lock may remain. On Unix, SIGTERM
+the output says the lock may remain. An interrupt that arrives after the lock was released
+and the activation has started does not stop the activation: the command reports the real
+result (for example `ACTIVE`, exit code 0). On Unix, SIGTERM
 and SIGHUP (for example a dropped SSH session) take the same path. On
 Windows, CTRL_BREAK does too, but for CTRL_CLOSE, CTRL_LOGOFF and CTRL_SHUTDOWN the OS ends
 the process as soon as the handler returns, so a lock may stay held in SAP.
@@ -400,27 +402,63 @@ permissions of its own.
 
 ## Tested environment
 
-Release 0.12.0 test matrix. Every cell is `pending`: no run has been recorded yet. Each
-cell becomes PASS, UNSUPPORTED (with the reason) or FAIL after the release-candidate
-run on the released artifacts. A FAIL on a supported path blocks the release.
+Release 0.12.0 test matrix, recorded on the release-candidate artifacts. Every cell is
+PASS, or "not available" with the reason. No cell failed. The run covered two systems: a
+7.50 system with a stateful ADT HTTP session, a second developer user and a transport,
+and a 7.40 system that holds only local objects (`$TMP`) and keeps no stateful ADT HTTP
+session.
 
 | Target | Host | ADT HTTP | RFC, SAP GUI library | RFC, NW RFC SDK |
 | :--- | :--- | :--- | :--- | :--- |
-| macOS arm64 | arm64 workstation (regression of 0.11.1) | pending | pending | pending |
-| Windows x64 | x64 binary on an arm64 VM, under emulation; timings labelled `emulated` | pending | pending | pending |
-| Linux x64 | x86_64 host | pending | pending | pending |
-| Linux arm64 | arm64 host | pending | not available: SAP GUI for Java for Linux is built for x86_64 only | pending |
+| macOS arm64 | arm64 workstation (regression of 0.11.1) | PASS | PASS (SAP GUI for Java, library 7.53.1629) | PASS (NW RFC SDK 7.50 PL20) |
+| Windows x64 | x64 VM, native | PASS | PASS (SAP GUI for Windows 8.10, library 7.54.722) | PASS (NW RFC SDK 7.50 PL20) |
+| Windows x64 | x64 binary on an arm64 VM, under emulation; timings labelled `emulated` | PASS | PASS (SAP GUI for Windows 8.00, library 7.53.1524) | PASS (NW RFC SDK 7.50 PL20) |
+| Linux x64 | x86_64 host | PASS | PASS (SAP GUI for Java 8.10, library 7.53.1623) | PASS (NW RFC SDK 7.50 PL20) |
+| Linux arm64 | arm64 host | PASS | not available: SAP GUI for Java for Linux is built for x86_64 only | PASS (NW RFC SDK 7.50 PL20) |
 
 Per cell, the scenarios are `doctor`, three reads, `deploy --simulate`, `deploy`, an
 unchanged deploy, a base hash mismatch, a syntax error, a wrong password, a reset, a
-foreign inactive version under `reject` and `allow`, `ask`, `--tr`, and RFC fault
-injection with the separate fault-injection artifact. Linux and Windows cells also cover
+foreign inactive version under `reject` and `allow`, `--tr`, and RFC fault injection with
+the separate fault-injection artifact. The `ask` prompt and an interrupt (Ctrl-C) while
+the deploy holds the lock ran on the 7.50 system. Linux and Windows cells also cover
 the loader, trace, source-encoding, credential-permission and CA-trust checks described
-above. Each result records the loaded library path, version and architecture.
+above. Each result records the loaded library path, version and architecture. In total the
+core matrix has 758 cells (527 PASS, 231 not applicable or not run, none failed) and the
+interactive group 80 cells (67 PASS, 13 not applicable or not run, none failed).
 
-The Linux x64 SAP GUI cell stays `pending` until a run on a Linux x64 host records the
-library that loads. The library layout in [RFC library lookup](#rfc-library-lookup) comes
-from the SAP GUI for Java install package, not from a run.
+The Linux x64 SAP GUI cell loaded the SAP GUI for Java 8.10 library
+(`bin/unicode/libsapnwrfc.so`) from a versioned install folder below the SAP GUI root, and
+passed on the 7.50 and the 7.40 system. The library layout in
+[RFC library lookup](#rfc-library-lookup) matches what the run found.
+
+Scenarios the run did not cover or could not apply:
+
+- A custom CA: no PEM file was supplied, so `ca_file` was not exercised. The operating
+  system trust store passed on every host. On Linux the state without the
+  `ca-certificates` package was not exercised either; the hosts have the package
+  installed.
+- A system that keeps no stateful ADT HTTP session: `deploy` pinned to `--backend adt`
+  stops before locking and says to use `--backend rfc`, and an unpinned `deploy` runs on
+  RFC and ends `ACTIVE`; both passed. The other ADT write scenarios do not apply there.
+  The ADT deploy scenarios therefore ran on the 7.50 system only.
+- A system with only local objects has no `--tr` cell, and the foreign inactive version
+  scenarios need a second developer user, which exists on the 7.50 system only.
+- ADT HTTP has no fault-injection cell: the test-only build drops RFC replies only.
+- On the emulated Windows host, the `ask` prompt and Ctrl-C cells did not run: its remote
+  execution gives the process no terminal. They ran on every other host, including the
+  native Windows host over a pseudo-terminal. `ask` without a terminal (rejected, exit 1)
+  passed on the emulated host.
+- Signals other than Ctrl-C (SIGTERM, SIGHUP, CTRL_BREAK, CTRL_CLOSE) were not sent; their
+  behavior in [Trace files and interrupts](#trace-files-and-interrupts) comes from the
+  code, not from a run.
+- Windows SmartScreen, the macOS quarantine attribute and the archive permission bits
+  describe how those systems treat a downloaded file; the live run did not exercise them.
+
+Read timing: RFC reads were slower than ADT HTTP reads on the same host. On the macOS
+workstation, the median of three `read` runs was about 0.3 s over ADT HTTP and about
+0.7 s over RFC with either library. Medians from the other hosts include the time of the
+remote launcher and are not published; Windows timings from the emulated host carry the
+label `emulated` and do not compare with the native host.
 
 ### 0.11.1 record (macOS arm64)
 
@@ -497,11 +535,12 @@ revision 11 run.
 
 ### Not tested yet
 
-- Windows and Linux: no result is recorded yet; see the 0.12.0 matrix above.
-  SAP GUI for Java ships per platform, so the Linux package and the RFC
+- Windows and Linux: not part of the 0.11.1 record; the 0.12.0 matrix above covers
+  them. SAP GUI for Java ships per platform, so the Linux package and the RFC
   library inside it are checked separately; the macOS result does not carry over.
 - The `ask` prompt and a transportable deploy over ADT HTTP on 7.50: the ADT
-  HTTP endpoint of that system was unreachable during these runs.
+  HTTP endpoint of that system was unreachable during these runs. The 0.12.0 matrix
+  covers both.
 - `libsapnwrfccm.dylib`, a second RFC library that SAP GUI 8.10 revision 15
   ships next to `libsapnwrfc.dylib`; ABAPReach loads `libsapnwrfc.dylib`.
 
