@@ -19,6 +19,81 @@ pub fn versions_uri(program_uri: &str) -> String {
     format!("{program_uri}/source/main/versions")
 }
 
+/// The quickSearch that resolves the function group of a function module. The untyped search
+/// returns an empty list while the module has only an inactive version, the typed one does not.
+pub fn function_group_search_uri(name: &str) -> String {
+    let query = format!(
+        "operation=quickSearch&query={}&maxResults=10",
+        name.to_ascii_uppercase()
+    );
+
+    format!("/sap/bc/adt/repository/informationsystem/search?{query}&objectType=FUGR%2FFF")
+}
+
+/// The function group of a function module from a quickSearch result. The `adtcore:uri` of the
+/// matching `FUGR/FF` reference is `/sap/bc/adt/functions/groups/<fg>/fmodules/<fm>`; a result
+/// without such a reference has `None`.
+pub fn function_group_of(xml: &str, module: &str) -> Result<Option<String>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut group = None;
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(&element) == "objectReference" =>
+            {
+                if let Some(found) = group_of_reference(&element, module)? {
+                    group = Some(found);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(group)
+}
+
+fn group_of_reference(element: &BytesStart<'_>, module: &str) -> Result<Option<String>, String> {
+    let mut name = String::new();
+    let mut uri = String::new();
+
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        let value = attribute
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|error| error.to_string())?
+            .into_owned();
+
+        match attribute.key.local_name().into_inner() {
+            "name" => name = value,
+            "uri" => uri = value,
+            _ => {}
+        }
+    }
+
+    if !name.eq_ignore_ascii_case(module) {
+        return Ok(None);
+    }
+
+    Ok(group_of_uri(&uri, module))
+}
+
+fn group_of_uri(uri: &str, module: &str) -> Option<String> {
+    let rest = uri.strip_prefix("/sap/bc/adt/functions/groups/")?;
+    let (group, tail) = rest.split_once("/fmodules/")?;
+
+    if group.is_empty() || tail.is_empty() || tail.contains('/') {
+        return None;
+    }
+
+    if !tail.eq_ignore_ascii_case(module) {
+        return None;
+    }
+
+    Some(group.to_ascii_uppercase())
+}
+
 /// One entry of `GET <source>/versions`: the version number and the user who wrote it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VersionEntry {

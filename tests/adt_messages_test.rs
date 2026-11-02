@@ -1,6 +1,8 @@
 mod common;
 
-use abapreach::adt::{AdtMessage, format_messages, parse_messages};
+use abapreach::adt::{
+    AdtMessage, format_messages, function_group_of, function_group_search_uri, parse_messages,
+};
 use common::Fixture;
 use std::fs;
 
@@ -94,4 +96,85 @@ fn empty_and_malformed_bodies() {
         }
         .is_error()
     );
+}
+
+// ---- function-group resolution from a quickSearch result ------------------------------
+
+const SEARCH_RESULT: &str = concat!(
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?><adtcore:objectReferences ",
+    "xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:objectReference ",
+    "adtcore:uri=\"/sap/bc/adt/functions/groups/ytest_abapreach_fg3/fmodules/",
+    "ytest_abapreach_fm3\" adtcore:type=\"FUGR/FF\" ",
+    "adtcore:name=\"YTEST_ABAPREACH_FM3\"/></adtcore:objectReferences>"
+);
+
+#[test]
+fn the_group_resolution_query_is_typed_to_the_function_module() {
+    assert_eq!(
+        function_group_search_uri("YTEST_ABAPREACH_FM3"),
+        concat!(
+            "/sap/bc/adt/repository/informationsystem/search?operation=quickSearch",
+            "&query=YTEST_ABAPREACH_FM3&maxResults=10&objectType=FUGR%2FFF"
+        )
+    );
+}
+
+#[test]
+fn a_typed_search_result_yields_the_group_of_the_module() {
+    assert_eq!(
+        function_group_of(SEARCH_RESULT, "YTEST_ABAPREACH_FM3").unwrap(),
+        Some("YTEST_ABAPREACH_FG3".to_owned())
+    );
+    assert_eq!(
+        function_group_of(SEARCH_RESULT, "ytest_abapreach_fm3").unwrap(),
+        Some("YTEST_ABAPREACH_FG3".to_owned())
+    );
+}
+
+#[test]
+fn an_empty_result_or_another_object_has_no_group() {
+    let empty = concat!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><adtcore:objectReferences ",
+        "xmlns:adtcore=\"http://www.sap.com/adt/core\"/>"
+    );
+
+    assert_eq!(function_group_of(empty, "ZFM").unwrap(), None);
+    assert_eq!(function_group_of(SEARCH_RESULT, "ZOTHER").unwrap(), None);
+}
+
+#[test]
+fn a_reference_that_is_not_a_function_module_uri_has_no_group() {
+    let cases = [
+        concat!(
+            "<adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\">",
+            "<adtcore:objectReference adtcore:uri=\"/sap/bc/adt/functions/groups/zfg\" ",
+            "adtcore:type=\"FUGR/F\" adtcore:name=\"ZFM\"/></adtcore:objectReferences>"
+        ),
+        concat!(
+            "<adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\">",
+            "<adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/zcl_x\" ",
+            "adtcore:type=\"CLAS/OC\" adtcore:name=\"ZFM\"/></adtcore:objectReferences>"
+        ),
+        concat!(
+            "<adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\">",
+            "<adtcore:objectReference ",
+            "adtcore:uri=\"/sap/bc/adt/functions/groups//fmodules/zfm\" ",
+            "adtcore:type=\"FUGR/FF\" adtcore:name=\"ZFM\"/></adtcore:objectReferences>"
+        ),
+        concat!(
+            "<adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\">",
+            "<adtcore:objectReference ",
+            "adtcore:uri=\"/sap/bc/adt/functions/groups/zfg/fmodules/zfm/extra\" ",
+            "adtcore:type=\"FUGR/FF\" adtcore:name=\"ZFM\"/></adtcore:objectReferences>"
+        ),
+    ];
+
+    for xml in cases {
+        assert_eq!(function_group_of(xml, "ZFM").unwrap(), None, "{xml}");
+    }
+}
+
+#[test]
+fn malformed_xml_is_an_error_not_an_empty_result() {
+    assert!(function_group_of("<a><b></a>", "ZFM").is_err());
 }

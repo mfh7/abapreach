@@ -1,0 +1,180 @@
+{
+  "system": "DEV",
+  "release": "750",
+  "backend": "http",
+  "exchanges": [
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/repository/informationsystem/search?operation=quickSearch&query=YTEST_ABAPREACH_FM3&maxResults=10&objectType=FUGR%2FFF",
+        "headers": {
+          "Accept": "application/*"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/xml; charset=utf-8"
+        },
+        "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:objectReference adtcore:uri=\"/sap/bc/adt/functions/groups/ytest_abapreach_fg3/fmodules/ytest_abapreach_fm3\" adtcore:type=\"FUGR/FF\" adtcore:name=\"YTEST_ABAPREACH_FM3\"/></adtcore:objectReferences>"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/functions/groups/ytest_abapreach_fg3/fmodules/ytest_abapreach_fm3/source/main?version=active",
+        "headers": {
+          "Accept": "text/plain"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8"
+        },
+        "body": "FUNCTION YTEST_ABAPREACH_FM3\r\n  IMPORTING\r\n    VALUE(IV_IN) TYPE I\r\n  EXPORTING\r\n    VALUE(EV_OUT) TYPE I.\r\n\r\n\r\n\r\n  ev_out = iv_in.\r\nENDFUNCTION."
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/repository/informationsystem/search?operation=quickSearch&query=YTEST_ABAPREACH_FM4&maxResults=10&objectType=FUGR%2FFF",
+        "headers": {
+          "Accept": "application/*"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/xml; charset=utf-8"
+        },
+        "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:objectReference adtcore:uri=\"/sap/bc/adt/functions/groups/ytest_abapreach_fg4/fmodules/ytest_abapreach_fm4\" adtcore:type=\"FUGR/FF\" adtcore:name=\"YTEST_ABAPREACH_FM4\"/></adtcore:objectReferences>"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/functions/groups/ytest_abapreach_fg4/fmodules/ytest_abapreach_fm4/source/main?version=active",
+        "headers": {
+          "Accept": "text/plain"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8"
+        },
+        "body": ""
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl3/source/main?version=active",
+        "headers": {
+          "Accept": "text/plain"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8"
+        },
+        "body": "class YTEST_ABAPREACH_CL3 definition\r\n  public\r\n  create private .\r\n\r\npublic section.\r\nprotected section.\r\nprivate section.\r\nENDCLASS.\r\n\r\n\r\n\r\nCLASS YTEST_ABAPREACH_CL3 IMPLEMENTATION.\r\nENDCLASS."
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl3/includes/definitions?version=active",
+        "headers": {
+          "Accept": "text/plain"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8"
+        },
+        "body": "*\"* use this source file for any type of declarations\r\n*\"* the class needs in its definition part"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/oo/interfaces/ytest_abapreach_if3/source/main?version=active",
+        "headers": {
+          "Accept": "text/plain"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8"
+        },
+        "body": "interface YTEST_ABAPREACH_IF3\r\n  public .\r\n\r\nendinterface."
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl4/source/main?version=active",
+        "headers": {
+          "Accept": "text/plain"
+        }
+      },
+      "response": {
+        "status": 500,
+        "headers": {
+          "content-type": "application/xml"
+        },
+        "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><exc:exception xmlns:exc=\"http://www.sap.com/abapxml/types/communicationframework\"><namespace id=\"com.sap.adt\"/><type id=\"ExceptionResourceWrongData\"/><message lang=\"EN\">Resource  YTEST_ABAPREACH_CL4: wrong input data for processing</message><localizedMessage lang=\"EN\">Resource  YTEST_ABAPREACH_CL4: wrong input data for processing</localizedMessage><properties/></exc:exception>"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl4/objectstructure?version=active&withShortDescriptions=true"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/vnd.sap.adt.objectstructure+xml"
+        },
+        "body": "<abapsource:objectStructureElement xml:base=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl4/objectstructure?version=active&amp;withShortDescriptions=true\" adtcore:name=\"YTEST_ABAPREACH_CL4\" visibility=\"public\" final=\"true\" adtcore:type=\"CLAS/OC\" xmlns:adtcore=\"http://www.sap.com/adt/core\" xmlns:abapsource=\"http://www.sap.com/adt/abapsource\" xmlns:atom=\"http://www.w3.org/2005/Atom\"><atom:link rel=\"http://www.sap.com/adt/relations/source/definitionBlock\" href=\"./source/main#start=1,0;end=9,8\"/></abapsource:objectStructureElement>"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/repository/informationsystem/search?operation=quickSearch&query=ZFM740&maxResults=10&objectType=FUGR%2FFF",
+        "headers": {
+          "Accept": "application/*"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "application/xml; charset=utf-8"
+        },
+        "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:objectReference adtcore:uri=\"/sap/bc/adt/functions/groups/zfg740/fmodules/zfm740\" adtcore:type=\"FUGR/FF\" adtcore:name=\"ZFM740\"/></adtcore:objectReferences>"
+      }
+    },
+    {
+      "request": {
+        "method": "GET",
+        "uri": "/sap/bc/adt/functions/groups/zfg740/fmodules/zfm740/source/main?version=active",
+        "headers": {
+          "Accept": "text/plain"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8"
+        },
+        "body": "\u0000"
+      }
+    }
+  ]
+}

@@ -873,7 +873,7 @@ fn invalid_combinations_stop_with_exit_2_before_any_transport_is_opened() {
 }
 
 #[test]
-fn valid_new_kind_commands_stop_before_any_transport_until_their_task_lands() {
+fn valid_new_kind_commands_that_are_not_implemented_yet_stop_before_any_transport() {
     let directory = tempfile::tempdir().unwrap();
     let dir = directory.path();
     let file = dir.join("source.abap");
@@ -887,8 +887,6 @@ fn valid_new_kind_commands_stop_before_any_transport_until_their_task_lands() {
     let file = file.to_str().unwrap();
 
     for args in [
-        vec!["read", "FUNC", "ZFM", "o"],
-        vec!["read", "PROG", "ZP", "-", "--lines", "1-2"],
         vec!["deploy", "FUNC", "ZFM", file],
         vec![
             "deploy",

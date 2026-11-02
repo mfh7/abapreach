@@ -1464,3 +1464,205 @@ fn router_hosts_without_a_route_password_are_scrubbed() {
         assert!(!exit.stderr.contains(host), "{}", exit.stderr);
     }
 }
+
+// ---- M3 reads through the CLI: kinds, `--lines`, and the pre-connection rules ----------
+
+const CLAS_HASH: &str = "637bb4092dc9670f5d76a3a2c7f6426d697b31cdb39952cd69452041ff6451a3";
+const CLAS_BODY: &str = concat!(
+    "class YTEST_ABAPREACH_CL3 definition\r\n  public\r\n  create private .\r\n\r\n",
+    "public section.\r\nprotected section.\r\nprivate section.\r\nENDCLASS.\r\n\r\n\r\n\r\n",
+    "CLASS YTEST_ABAPREACH_CL3 IMPLEMENTATION.\r\nENDCLASS."
+);
+
+fn read_kind_args<'a>(kind: &'a str, name: &'a str, out: &'a str, conn: &'a str) -> Vec<&'a str> {
+    vec!["abapreach", "read", kind, name, out, "--conn", conn]
+}
+
+#[test]
+fn a_class_read_runs_on_adt_and_writes_the_active_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("clas.abap");
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(200, CLAS_BODY))]));
+
+    let exit = go(
+        &read_kind_args(
+            "CLAS",
+            "YTEST_ABAPREACH_CL3",
+            out.to_str().unwrap(),
+            "dev_100",
+        ),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        exit.stdout,
+        format!("{WARNING}\n13 lines -> {}\nhash {CLAS_HASH}", out.display())
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert!(fs::read_to_string(out).unwrap().contains("ENDCLASS."));
+}
+
+#[test]
+fn a_lines_read_prints_the_interval_and_writes_no_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(200, CLAS_BODY))]));
+
+    let exit = go(
+        &[
+            "abapreach",
+            "read",
+            "CLAS",
+            "YTEST_ABAPREACH_CL3",
+            "-",
+            "--lines",
+            "1-2",
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(exit.stderr, "");
+    assert_eq!(
+        exit.stdout,
+        format!(
+            "{WARNING}\nclass YTEST_ABAPREACH_CL3 definition\n  public\n\
+             2 lines -> - (lines 1-2)\nhash {CLAS_HASH}"
+        )
+    );
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+}
+
+#[test]
+fn a_lines_read_to_a_file_path_stops_before_any_transport() {
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("partial.abap");
+    let mut fake = Fake::default();
+
+    let exit = go(
+        &[
+            "abapreach",
+            "read",
+            "PROG",
+            "ZTEST",
+            out.to_str().unwrap(),
+            "--lines",
+            "1-2",
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2);
+    assert_eq!(exit.stdout, WARNING);
+    assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+    assert!(exit.stderr.contains("stdout"), "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+    assert!(!out.exists());
+}
+
+#[test]
+fn a_supplied_group_that_does_not_match_the_resolution_stops_with_exit_2() {
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("fm.abap");
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![Ok(Response::text(
+        200,
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><adtcore:objectReferences ",
+            "xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:objectReference ",
+            "adtcore:uri=\"/sap/bc/adt/functions/groups/ytest_abapreach_fg3/fmodules/",
+            "ytest_abapreach_fm3\" adtcore:type=\"FUGR/FF\" ",
+            "adtcore:name=\"YTEST_ABAPREACH_FM3\"/></adtcore:objectReferences>"
+        ),
+    ))]));
+
+    let exit = go(
+        &[
+            "abapreach",
+            "read",
+            "FUNC",
+            "YTEST_ABAPREACH_FM3",
+            out.to_str().unwrap(),
+            "--fugr",
+            "ZOTHER",
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert_eq!(exit.stdout, WARNING, "a stop prints no result line");
+    assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+    assert!(exit.stderr.contains("--fugr ZOTHER"), "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert!(!out.exists());
+}
+
+#[test]
+fn a_read_of_a_fresh_class_reports_the_unreadable_state_and_exits_1() {
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("clas.abap");
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        Ok(Response::empty(500)),
+        Ok(Response::empty(200)),
+    ]));
+
+    let exit = go(
+        &read_kind_args(
+            "CLAS",
+            "YTEST_ABAPREACH_CL4",
+            out.to_str().unwrap(),
+            "dev_100",
+        ),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1, "{}", exit.stdout);
+    assert!(exit.stderr.starts_with("ERROR: "), "{}", exit.stderr);
+    assert!(
+        exit.stderr.contains("no readable source yet"),
+        "{}",
+        exit.stderr
+    );
+    assert!(!out.exists());
+}
+
+#[test]
+fn an_existing_output_stops_before_any_transport() {
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("out.abap");
+
+    fs::write(&out, "do not overwrite\n").unwrap();
+
+    let mut fake = Fake::default();
+    let exit = go(
+        &read_args(out.to_str().unwrap(), "dev_100"),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2);
+    assert!(exit.stderr.contains("--force"), "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+    assert_eq!(fs::read_to_string(&out).unwrap(), "do not overwrite\n");
+}

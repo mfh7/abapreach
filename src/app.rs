@@ -9,7 +9,7 @@ use crate::hash::local_source_lines;
 use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg};
 use crate::operation::doctor::Doctor;
-use crate::operation::read::ReadProg;
+use crate::operation::read::{ReadProg, ReadTarget};
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
     DynamicRfcApi, Env, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
@@ -319,16 +319,18 @@ fn execute(
                 return stop(message);
             }
 
-            if kind != ObjectKind::Prog || lines.is_some() {
-                return stop(format!("read {} is not available yet", kind.token()));
-            }
-
-            if out.exists() && !force {
+            // A local overwrite rule: it stops before the connection, like every other option rule.
+            if lines.is_none() && out.exists() && !force {
                 return stop(format!(
                     "{} already exists; use --force to overwrite",
                     out.display()
                 ));
             }
+
+            let target = ReadTarget::new(kind, &name)
+                .group(fugr.as_deref())
+                .include(include)
+                .lines(lines);
 
             route(
                 OperationKind::Read(kind),
@@ -337,7 +339,8 @@ fn execute(
                 connection,
                 factories,
                 |transport, _, _| {
-                    let read = ReadProg::run_classified(transport, &name, &out, force, None);
+                    let read =
+                        ReadProg::run_target_classified(transport, target, &out, force, None);
 
                     // A read holds no lock, so a failed session end changes nothing here.
                     let _ = transport.close();
@@ -345,6 +348,17 @@ fn execute(
                     match read {
                         Ok(outcome) => Attempt {
                             outcome,
+                            failure: None,
+                            fallback_allowed: false,
+                            detail: None,
+                        },
+                        Err(error) if error.stop => Attempt {
+                            outcome: Outcome {
+                                status: None,
+                                exit: 2,
+                                stdout: String::new(),
+                                stderr: format!("STOP: {}", error.message),
+                            },
                             failure: None,
                             fallback_allowed: false,
                             detail: None,
