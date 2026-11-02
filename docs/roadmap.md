@@ -12,7 +12,7 @@ moves to the [changelog](../CHANGELOG.md).
 | :--- | :--- |
 | 0.11.0 | Programs: read and deploy over ADT HTTP and RFC, `doctor` (released) |
 | 0.11.1 | Fixes from the three-path live test, SAProuter route outside the shared config (released) |
-| 0.12.0 | Windows and Linux: RFC library lookup per platform, live tests on every path, CI builds |
+| 0.12.0 | Windows and Linux: RFC library lookup per platform, live tests on every path, CI builds (released) |
 | 0.13.0 | Function modules, classes, interfaces |
 | 0.14.0 | MCP server |
 | later | The remaining features below, one milestone at a time |
@@ -118,9 +118,9 @@ listed as not available.
 | Platform | ADT HTTP | RFC, SAP GUI library | RFC, NW RFC SDK | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | macOS arm64 | yes | yes | yes | **0.11.0**, tested live in 0.11.1 |
-| Windows x64 | yes | yes | yes | 0.12.0 |
-| Linux x64 | yes | yes | yes | 0.12.0 |
-| Linux arm64 | yes | not available ¹ | yes | 0.12.0 |
+| Windows x64 | yes | yes | yes | **0.12.0**, tested live |
+| Linux x64 | yes | yes | yes | **0.12.0**, tested live |
+| Linux arm64 | yes | not available ¹ | yes | **0.12.0**, tested live |
 
 ¹ SAP GUI for Java for Linux is built for x86_64 only.
 

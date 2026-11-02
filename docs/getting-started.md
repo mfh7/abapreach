@@ -1,9 +1,9 @@
 # Getting started
 
-ABAPReach 0.12.0 is a macOS arm64-tested CLI for reading and deploying the active
-source of **existing ABAP programs** (`PROG`). Release 0.12.0 targets Windows x64,
-Linux x64 and Linux arm64 as well; see [Platforms and release binaries](#platforms-and-release-binaries)
-and the [0.12.0 test matrix](#tested-environment) for what is verified so far. You need a Rust toolchain that
+ABAPReach 0.12.0 is a CLI for reading and deploying the active source of **existing
+ABAP programs** (`PROG`) on macOS arm64, Windows x64, Linux x64 and Linux arm64; see
+[Platforms and release binaries](#platforms-and-release-binaries) and the
+[0.12.0 test matrix](#tested-environment) for what was tested. You need a Rust toolchain that
 supports edition 2024, an SAP user allowed to access the relevant ADT or RFC
 services, and a reachable SAP system. Deploy also needs the SAP-side permissions
 and transport state required for the target program. Check those with your SAP
