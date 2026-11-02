@@ -622,3 +622,23 @@ fn the_system_route_comes_from_env_then_local_then_config() {
     );
     assert_eq!(resolve_route(paths, &env, "qas_100"), (None, None));
 }
+
+#[test]
+fn secrets_hide_the_password_the_route_and_only_its_host_and_password_fragments() {
+    let mut connection = Connection::test_insecure();
+
+    connection.password = "password-x".to_owned();
+
+    assert_eq!(connection.secrets(), ["password-x"]);
+
+    let route = "/H/router.example.com/S/3299/H/ab/W/secret";
+
+    connection.rfc.saprouter = Some(route.to_owned());
+
+    // Only the value after an `H` or `W` marker counts, and only from three characters on: the
+    // port after `S` and the short value after `H` stay readable. Longest first.
+    assert_eq!(
+        connection.secrets(),
+        [route, "router.example.com", "password-x", "secret"]
+    );
+}

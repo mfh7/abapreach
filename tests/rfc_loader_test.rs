@@ -1753,3 +1753,203 @@ fn a_windows_full_path_is_drive_qualified_or_a_unc_share() {
         assert_eq!(windows_load_flags(Path::new(path)), 0, "{path}");
     }
 }
+
+fn icu_files(directory: &Path, names: &[&str]) -> Vec<PathBuf> {
+    names.iter().map(|name| directory.join(name)).collect()
+}
+
+#[test]
+fn icu_selection_ranks_versions_numerically_and_orders_data_uc_i18n() {
+    let directory = Path::new("/opt/sap/nwrfcsdk/lib");
+    let library = directory.join("libsapnwrfc.so");
+    // Lexicographic order would pick `9`; the numeric rank picks `100`. Both spellings are read
+    // and the files arrive out of dependency order.
+    let files = icu_files(
+        directory,
+        &[
+            "libicui18n.so.100",
+            "libicui18n9.so",
+            "libicuuc9.so",
+            "libicudata9.so",
+            "libicuuc.so.100",
+            "libicui18n57.so",
+            "libicudata.so.100",
+            "libicuuc57.so",
+            "libicudata57.so",
+        ],
+    );
+
+    assert_eq!(
+        icu_dependencies(&library, &files),
+        Some(icu_files(
+            directory,
+            &["libicudata.so.100", "libicuuc.so.100", "libicui18n.so.100"]
+        ))
+    );
+}
+
+#[test]
+fn icu_selection_compares_every_numeric_part_of_a_version() {
+    let directory = Path::new("/opt/sap/nwrfcsdk/lib");
+    let library = directory.join("libsapnwrfc.so");
+    let set = |version: &str| {
+        ["libicudata", "libicuuc", "libicui18n"].map(|prefix| format!("{prefix}{version}.so"))
+    };
+    let files = |versions: &[&str]| {
+        versions
+            .iter()
+            .flat_map(|version| set(version))
+            .map(|name| directory.join(name))
+            .collect::<Vec<_>>()
+    };
+    let expected = |version: &str| Some(set(version).map(|name| directory.join(name)).to_vec());
+
+    // `57.10` outranks `57.2`, and `57.2` outranks `57`.
+    assert_eq!(
+        icu_dependencies(&library, &files(&["57", "57.10", "57.2"])),
+        expected("57.10")
+    );
+    // A version without digits ranks below any numbered one, wherever it sorts as text.
+    assert_eq!(
+        icu_dependencies(&library, &files(&["57", "abc"])),
+        expected("57")
+    );
+    assert_eq!(
+        icu_dependencies(&library, &files(&["abc"])),
+        expected("abc")
+    );
+}
+
+#[test]
+fn icu_selection_skips_incomplete_sets_and_other_directories() {
+    let directory = Path::new("/opt/sap/nwrfcsdk/lib");
+    let library = directory.join("libsapnwrfc.so");
+    let mut files = icu_files(
+        directory,
+        &[
+            "libicudata60.so",
+            "libicuuc60.so",
+            "libicudata57.so",
+            "libicuuc57.so",
+            "libicui18n57.so",
+            "libicui18n.so.59.dll",
+            "libicuuc.so59",
+            "libsapucum.so",
+        ],
+    );
+
+    // Version 60 lacks its i18n file, so the complete 57 wins.
+    assert_eq!(
+        icu_dependencies(&library, &files),
+        Some(icu_files(
+            directory,
+            &["libicudata57.so", "libicuuc57.so", "libicui18n57.so"]
+        ))
+    );
+
+    // A complete set in another folder is not this library's.
+    files.extend(icu_files(
+        Path::new("/elsewhere"),
+        &["libicudata70.so", "libicuuc70.so", "libicui18n70.so"],
+    ));
+    assert_eq!(
+        icu_dependencies(&library, &files),
+        Some(icu_files(
+            directory,
+            &["libicudata57.so", "libicuuc57.so", "libicui18n57.so"]
+        ))
+    );
+    assert_eq!(icu_dependencies(&library, &files[..2]), None);
+    assert_eq!(icu_dependencies(&library, &[]), None);
+}
+
+#[test]
+fn icu_files_without_a_version_never_form_a_set() {
+    let directory = Path::new("/opt/sap/nwrfcsdk/lib");
+    let library = directory.join("libsapnwrfc.so");
+
+    for names in [
+        ["libicudata.so", "libicuuc.so", "libicui18n.so"],
+        ["libicudata.so.", "libicuuc.so.", "libicui18n.so."],
+    ] {
+        assert_eq!(
+            icu_dependencies(&library, &icu_files(directory, &names)),
+            None,
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn one_icu_file_per_version_and_prefix_is_chosen_by_the_smallest_path() {
+    let directory = Path::new("/opt/sap/nwrfcsdk/lib");
+    let library = directory.join("libsapnwrfc.so");
+    // Both spellings name version 57; `libicuuc.so.57` sorts before `libicuuc57.so`.
+    let spellings = ["libicuuc57.so", "libicuuc.so.57"];
+    let expected = Some(icu_files(
+        directory,
+        &["libicudata57.so", "libicuuc.so.57", "libicui18n57.so"],
+    ));
+
+    for names in [spellings, [spellings[1], spellings[0]]] {
+        let mut files = icu_files(directory, &["libicudata57.so", "libicui18n57.so"]);
+
+        files.extend(icu_files(directory, &names));
+        assert_eq!(icu_dependencies(&library, &files), expected);
+    }
+}
+
+/// A real, loadable shared object for this host: an empty `cdylib` built by the same toolchain
+/// that builds the tests, so no SAP library is needed to exercise the whole load path.
+fn built_shared_object(directory: &Path) -> PathBuf {
+    let source = directory.join("empty.rs");
+    let library = directory.join("libempty_fixture");
+
+    std::fs::write(&source, "").unwrap();
+
+    let status = std::process::Command::new(std::env::var_os("RUSTC").unwrap_or("rustc".into()))
+        .args(["--crate-type", "cdylib", "--crate-name", "empty_fixture"])
+        .arg("-o")
+        .arg(&library)
+        .arg(&source)
+        .status()
+        .expect("rustc must be on the PATH to build the shared object fixture");
+
+    assert!(status.success(), "rustc could not build the fixture");
+
+    library
+}
+
+const MISSING_ICU_WARNING: &str = "WARNING: RFC ICU libraries were not found beside the RFC library; the NW RFC SDK may still find them through LD_LIBRARY_PATH.";
+
+#[test]
+fn a_loaded_library_surfaces_the_loader_notes_of_its_platform() {
+    let directory = tempfile::tempdir().unwrap();
+    let library = built_shared_object(directory.path());
+    let loaded = RfcLibrary::load(&Env::test_paths(library.to_str().unwrap(), "", ""))
+        .unwrap_or_else(|error| panic!("the fixture must load: {error}"));
+
+    // Only Linux preloads dependencies, and there the fixture has no ICU set beside it.
+    if cfg!(target_os = "linux") {
+        assert_eq!(loaded.notes(), [MISSING_ICU_WARNING]);
+    } else {
+        assert!(loaded.notes().is_empty(), "{:?}", loaded.notes());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_adapter_reports_no_note_when_the_icu_set_is_beside_the_library() {
+    let directory = tempfile::tempdir().unwrap();
+    let library = built_shared_object(directory.path());
+
+    // The preloaded files only have to be mappable shared objects.
+    for name in ["libicudata57.so", "libicuuc57.so", "libicui18n57.so"] {
+        std::fs::copy(&library, directory.path().join(name)).unwrap();
+    }
+
+    let loaded = RfcLibrary::load(&Env::test_paths(library.to_str().unwrap(), "", ""))
+        .unwrap_or_else(|error| panic!("the fixture must load: {error}"));
+
+    assert!(loaded.notes().is_empty(), "{:?}", loaded.notes());
+}
