@@ -14,6 +14,8 @@ pub fn local_source_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The empty source of a fresh object is an empty body on 7.50 and a single NUL character on
+/// 7.40; both normalize to no lines, so read and hash agree on one canonical empty source.
 pub fn normalize(lines: Vec<String>) -> Vec<String> {
     let mut normalized = lines
         .into_iter()
@@ -22,6 +24,10 @@ pub fn normalize(lines: Vec<String>) -> Vec<String> {
 
     while normalized.last().is_some_and(String::is_empty) {
         normalized.pop();
+    }
+
+    if normalized == ["\0"] {
+        normalized.clear();
     }
 
     normalized
@@ -37,19 +43,25 @@ pub fn source_hash(lines: &[String]) -> String {
 /// The program grammar: `NAME`, optionally prefixed by a namespace `/NAMESPACE/`. Names are
 /// compared uppercased; only A-Z, 0-9 and `_` are allowed.
 pub fn validate_name(name: &str) -> Result<(), String> {
+    validate_name_within(name, MAX_NAME)
+}
+
+/// `validate_name` with the length limit of the object type (SAP limit: PROG 40, FUNC/CLAS/INTF
+/// 30, FUGR 26).
+pub fn validate_name_within(name: &str, max: usize) -> Result<(), String> {
     let normalized = name.to_ascii_uppercase();
 
     if normalized.is_empty() {
         return Err("object name must not be empty".to_owned());
     }
 
-    if normalized.chars().count() > MAX_NAME {
-        return Err(format!("object name > {MAX_NAME} characters: {name}"));
+    if normalized.chars().count() > max {
+        return Err(format!("object name > {max} characters: {name}"));
     }
 
     if !is_name(&normalized) {
         return Err(format!(
-            "object name must be {MAX_NAME} characters or less of A-Z 0-9 _ with an optional \
+            "object name must be {max} characters or less of A-Z 0-9 _ with an optional \
              /NAMESPACE/ prefix: {name}"
         ));
     }
@@ -74,7 +86,12 @@ fn is_name_part(part: &str) -> bool {
 }
 
 pub fn validate_prog(name: &str, lines: &[String]) -> Result<(), String> {
-    validate_name(name)?;
+    validate_source(name, MAX_NAME, lines)
+}
+
+/// A deploy file for an object whose name may be `max` characters long.
+pub fn validate_source(name: &str, max: usize, lines: &[String]) -> Result<(), String> {
+    validate_name_within(name, max)?;
 
     let normalized = normalize(lines.to_vec());
 

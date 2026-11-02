@@ -1,11 +1,12 @@
 use crate::backend::{BackendKind, Failure, OperationKind, Router, Selection, SelectionReason};
-use crate::cli::{Backend, Cli, Command};
+use crate::cli::{Backend, Cli, Command, ObjectKind};
 use crate::config::{
     Config, ConfigPaths, Connection, LocalCredentialsPermission, local_credentials_permission,
     scrub, tls_warning,
 };
 use crate::domain::Outcome;
-use crate::hash::{local_source_lines, validate_name, validate_prog};
+use crate::hash::local_source_lines;
+use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg};
 use crate::operation::doctor::Doctor;
 use crate::operation::read::ReadProg;
@@ -240,9 +241,10 @@ fn stop(message: impl std::fmt::Display) -> Exit {
 
 fn connection_id(command: &Command) -> &str {
     match command {
-        Command::Read { conn, .. } | Command::Deploy { conn, .. } | Command::Doctor { conn } => {
-            conn
-        }
+        Command::Read { conn, .. }
+        | Command::Deploy { conn, .. }
+        | Command::Create { conn, .. }
+        | Command::Doctor { conn } => conn,
     }
 }
 
@@ -304,10 +306,21 @@ fn execute(
             }
         }
         Command::Read {
-            name, out, force, ..
+            kind,
+            name,
+            out,
+            force,
+            include,
+            fugr,
+            lines,
+            ..
         } => {
-            if let Err(message) = validate_name(&name) {
+            if let Err(message) = check_read(kind, &name, &out, include, fugr.as_deref(), lines) {
                 return stop(message);
+            }
+
+            if kind != ObjectKind::Prog || lines.is_some() {
+                return stop(format!("read {} is not available yet", kind.token()));
             }
 
             if out.exists() && !force {
@@ -318,7 +331,7 @@ fn execute(
             }
 
             route(
-                OperationKind::ReadProg,
+                OperationKind::Read(kind),
                 None,
                 false,
                 connection,
@@ -341,23 +354,59 @@ fn execute(
                 },
             )
         }
+        Command::Create {
+            kind,
+            name,
+            text,
+            package,
+            fugr,
+            tr,
+            ..
+        } => {
+            if let Err(message) = check_create(
+                kind,
+                &name,
+                &text,
+                package.as_deref(),
+                fugr.as_deref(),
+                tr.as_deref(),
+            ) {
+                return stop(message);
+            }
+
+            stop(format!("create {} is not available yet", kind.token()))
+        }
         Command::Deploy {
+            kind,
             name,
             file,
             simulate,
             base,
             tr,
             backend,
+            include,
+            create_include,
+            fugr,
             ..
         } => {
+            if let Err(message) =
+                check_deploy_options(kind, &name, include, create_include, fugr.as_deref())
+            {
+                return stop(message);
+            }
+
             let text = match fs::read_to_string(&file) {
                 Ok(text) => text,
                 Err(error) => return stop(format!("cannot read {}: {error}", file.display())),
             };
             let source = local_source_lines(&text);
 
-            if let Err(message) = validate_prog(&name, &source) {
+            if let Err(message) = check_deploy_source(kind, &name, &source) {
                 return stop(message);
+            }
+
+            if kind != ObjectKind::Prog {
+                return stop(format!("deploy {} is not available yet", kind.token()));
             }
 
             let base_given = base.is_some();
@@ -370,7 +419,7 @@ fn execute(
             };
 
             route(
-                OperationKind::DeployProg,
+                OperationKind::Deploy(kind),
                 backend.map(backend_kind),
                 base_given,
                 connection,
