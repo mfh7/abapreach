@@ -2040,7 +2040,7 @@ fn parse_lock(xml: &str) -> Result<LockInfo, String> {
 }
 
 /// Text of every element by local name; the last occurrence wins.
-fn leaf_texts(xml: &str) -> Result<BTreeMap<String, String>, String> {
+pub(crate) fn leaf_texts(xml: &str) -> Result<BTreeMap<String, String>, String> {
     let mut reader = Reader::from_str(xml);
     let mut texts = BTreeMap::new();
     let mut current: Option<String> = None;

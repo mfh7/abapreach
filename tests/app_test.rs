@@ -1742,3 +1742,124 @@ fn deploy_of_the_m3_kinds_reaches_the_transport_instead_of_the_not_available_sto
         exit.stderr
     );
 }
+
+// ---- create ----------------------------------------------------------------------------
+
+const CREATE_VALIDATION: &str = "<asx:abap xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA><SEVERITY>OK</SEVERITY><SHORT_TEXT/></DATA></asx:values></asx:abap>";
+
+fn create_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "abapreach",
+        "create",
+        "FUGR",
+        "YTEST_ABAPREACH_FG",
+        "--text",
+        "probe",
+    ];
+
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&["--conn", "dev_100"]);
+
+    args
+}
+
+#[test]
+fn create_runs_on_adt_and_reports_the_backend_and_the_token() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        source(CREATE_VALIDATION),
+        Ok(Response::empty(200)),
+    ]));
+
+    let exit = go(&create_args(&[]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        exit.stdout.contains("backend: adt\nreason: default ADT"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stdout.lines().any(|line| line == "CREATE: ACTIVE"),
+        "{}",
+        exit.stdout
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+}
+
+#[test]
+fn create_simulate_prints_its_token_and_a_pre_send_failure_falls_back_to_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc
+        .push_back(scripted(vec![source(CREATE_VALIDATION)]));
+
+    let exit = go(&create_args(&["--simulate"]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        exit.stdout
+            .lines()
+            .any(|line| line == "CREATE_SIM: SIMULATED_OK"),
+        "{}",
+        exit.stdout
+    );
+    assert!(exit.stdout.contains("backend: rfc"), "{}", exit.stdout);
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn an_uncertain_create_never_falls_back_to_the_other_backend() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        source(CREATE_VALIDATION),
+        Err(TransportError::PostSendUncertain("dropped".to_owned())),
+        Ok(Response::empty(200)),
+    ]));
+
+    let exit = go(&create_args(&[]), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(
+        exit.stdout.lines().any(|line| line == "CREATE: PARTIAL"),
+        "{}",
+        exit.stdout
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+}
+
+#[test]
+fn create_with_a_transportable_package_and_no_request_stops_before_any_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let exit = go(
+        &create_args(&["--package", "ZABAPTEST"]),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2);
+    assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+
+    let exit = go(
+        &create_args(&["--package", "ZABAPTEST", "--tr", "DEVK9&x"]),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2);
+    assert!(exit.stderr.contains("invalid --tr"), "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}

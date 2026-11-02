@@ -871,18 +871,3 @@ fn invalid_combinations_stop_with_exit_2_before_any_transport_is_opened() {
 
     assert!(message.contains("stdout"), "{message}");
 }
-
-#[test]
-fn valid_create_commands_that_are_not_implemented_yet_stop_before_any_transport() {
-    let directory = tempfile::tempdir().unwrap();
-    let dir = directory.path();
-
-    for args in [
-        vec!["create", "FUGR", "ZFG", "--text", "t"],
-        vec!["create", "FUNC", "ZFM", "--text", "t", "--fugr", "ZFG"],
-    ] {
-        let message = stops(dir, &args);
-
-        assert!(message.contains("not available yet"), "{message}");
-    }
-}

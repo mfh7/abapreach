@@ -11,6 +11,53 @@ pub const DEFAULT_PACKAGE: &str = "$TMP";
 
 const MAX_GROUP: usize = 26;
 const MAX_PACKAGE: usize = 30;
+/// TRKORR is a CHAR 20 field.
+const MAX_REQUEST: usize = 20;
+
+/// Where a created object lives. A transportable package always carries its request, so a create
+/// POST without `corrNr` cannot be built for it: SAP would generate a request of its own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PackageScope {
+    /// A `$` package: nothing is transported.
+    Local,
+    Transportable {
+        request: String,
+    },
+}
+
+impl PackageScope {
+    /// The scope of `package` with the `--tr` of the command; every mismatch is a `STOP`.
+    pub fn of(package: &str, tr: Option<&str>) -> Result<Self, String> {
+        // Packages that start with $ are local; nothing in them is transported.
+        match (package.starts_with('$'), tr) {
+            (true, Some(_)) => Err(format!("--tr is not valid for the local package {package}")),
+            (true, None) => Ok(Self::Local),
+            (false, None) => Err(format!(
+                "package {package} is transportable: --tr is required"
+            )),
+            (false, Some(request)) => {
+                check_request(request)?;
+
+                Ok(Self::Transportable {
+                    request: request.to_owned(),
+                })
+            }
+        }
+    }
+}
+
+/// The request goes into a query string, so only a plain TRKORR is accepted.
+fn check_request(request: &str) -> Result<(), String> {
+    let valid = !request.is_empty()
+        && request.len() <= MAX_REQUEST
+        && request.bytes().all(|byte| byte.is_ascii_alphanumeric());
+
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("invalid --tr: {request}"))
+    }
+}
 
 impl ObjectKind {
     pub fn token(self) -> &'static str {
@@ -150,6 +197,46 @@ impl CreateKind {
                 Ok(format!(
                     "/sap/bc/adt/functions/groups/{}/fmodules",
                     path_segment(ObjectKind::Func, group)?
+                ))
+            }
+        }
+    }
+
+    /// The create POST of the scope: a transportable package adds its `corrNr`, which SAP needs
+    /// to record the object in that request instead of generating one.
+    pub fn creation_request_uri(
+        self,
+        group: Option<&str>,
+        scope: &PackageScope,
+    ) -> Result<String, String> {
+        let uri = self.creation_uri(group)?;
+
+        Ok(match scope {
+            PackageScope::Local => uri,
+            PackageScope::Transportable { request } => format!("{uri}?corrNr={request}"),
+        })
+    }
+
+    /// The metadata URI of the created object, which the reconciliation of an uncertain create
+    /// reads. A FUNC needs its function group.
+    pub fn object_uri(self, name: &str, group: Option<&str>) -> Result<String, String> {
+        let kind = match self {
+            Self::Fugr | Self::Func => ObjectKind::Func,
+            Self::Clas => ObjectKind::Clas,
+            Self::Intf => ObjectKind::Intf,
+        };
+        let segment = path_segment(kind, name)?;
+
+        match self {
+            Self::Fugr => Ok(format!("/sap/bc/adt/functions/groups/{segment}")),
+            Self::Clas => Ok(format!("/sap/bc/adt/oo/classes/{segment}")),
+            Self::Intf => Ok(format!("/sap/bc/adt/oo/interfaces/{segment}")),
+            Self::Func => {
+                let group = group.ok_or("create FUNC needs its function group")?;
+
+                Ok(format!(
+                    "/sap/bc/adt/functions/groups/{}/fmodules/{segment}",
+                    path_segment(kind, group)?
                 ))
             }
         }
@@ -346,7 +433,7 @@ pub fn check_create(
                             package of its function group"
                     .to_owned(),
             ),
-            None => Ok(()),
+            None => tr.map_or(Ok(()), check_request),
         };
     }
 
@@ -361,12 +448,5 @@ pub fn check_create(
         return Err(format!("invalid --package: {package}"));
     }
 
-    // Packages that start with $ are local; nothing in them is transported.
-    match (package.starts_with('$'), tr) {
-        (true, Some(_)) => Err(format!("--tr is not valid for the local package {package}")),
-        (false, None) => Err(format!(
-            "package {package} is transportable: --tr is required"
-        )),
-        _ => Ok(()),
-    }
+    PackageScope::of(package, tr).map(drop)
 }

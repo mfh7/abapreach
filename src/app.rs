@@ -7,6 +7,7 @@ use crate::config::{
 use crate::domain::Outcome;
 use crate::hash::local_source_lines;
 use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
+use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::doctor::Doctor;
 use crate::operation::read::{ReadProg, ReadTarget};
@@ -375,6 +376,8 @@ fn execute(
             package,
             fugr,
             tr,
+            simulate,
+            backend,
             ..
         } => {
             if let Err(message) = check_create(
@@ -388,7 +391,38 @@ fn execute(
                 return stop(message);
             }
 
-            stop(format!("create {} is not available yet", kind.token()))
+            let input = CreateInput {
+                kind,
+                name,
+                text,
+                package,
+                group: fugr,
+                tr,
+                simulate,
+            };
+
+            route(
+                OperationKind::Create(kind),
+                backend.map(backend_kind),
+                false,
+                connection,
+                factories,
+                |transport, selection, _| {
+                    let result = CreateProg::run(
+                        transport,
+                        input.clone(),
+                        Some(selection),
+                        Some(connection),
+                    );
+
+                    Attempt {
+                        outcome: result.outcome,
+                        failure: result.failure,
+                        fallback_allowed: result.fallback_allowed,
+                        detail: result.detail,
+                    }
+                },
+            )
         }
         Command::Deploy {
             kind,

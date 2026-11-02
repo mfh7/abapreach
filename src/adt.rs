@@ -94,6 +94,35 @@ fn group_of_uri(uri: &str, module: &str) -> Option<String> {
     Some(group.to_ascii_uppercase())
 }
 
+/// The package of an object from its metadata: the name of `adtcore:packageRef`. A document
+/// without one has `None`.
+pub fn package_of(xml: &str) -> Result<Option<String>, String> {
+    let mut reader = Reader::from_str(xml);
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(&element) == "packageRef" =>
+            {
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|error| error.to_string())?;
+
+                    if attribute.key.local_name().into_inner() == "name" {
+                        let name = attribute
+                            .normalized_value(XmlVersion::Implicit1_0)
+                            .map_err(|error| error.to_string())?
+                            .into_owned();
+
+                        return Ok(Some(name).filter(|name| !name.is_empty()));
+                    }
+                }
+            }
+            Event::Eof => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
 /// One entry of `GET <source>/versions`: the version number and the user who wrote it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VersionEntry {

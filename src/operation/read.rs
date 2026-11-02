@@ -18,7 +18,8 @@ const SEARCH_ACCEPT: &str = "application/*";
 
 /// The class-state probe of a freshly created class: its source and metadata answer HTTP 500
 /// until the first PUT, while `objectstructure` answers 200 in that state.
-const OBJECT_STRUCTURE: &str = "objectstructure?version=active&withShortDescriptions=true";
+pub(crate) const OBJECT_STRUCTURE: &str =
+    "objectstructure?version=active&withShortDescriptions=true";
 
 /// A failed read with the routing class that decides whether a fallback is allowed.
 #[derive(Clone, Debug, Eq, PartialEq)]
