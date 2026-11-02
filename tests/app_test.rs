@@ -1666,3 +1666,79 @@ fn an_existing_output_stops_before_any_transport() {
     assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
     assert_eq!(fs::read_to_string(&out).unwrap(), "do not overwrite\n");
 }
+
+#[test]
+fn deploy_of_the_m3_kinds_reaches_the_transport_instead_of_the_not_available_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("src.abap");
+
+    fs::write(&file, "CLASS ltc_a DEFINITION FOR TESTING.\nENDCLASS.\n").unwrap();
+
+    // A class include that is absent while the class exists: no flag, so nothing is written.
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        Ok(Response::empty(404)),
+        Ok(Response::text(200, "<structure/>")),
+    ]));
+
+    let exit = go(
+        &[
+            "abapreach",
+            "deploy",
+            "CLAS",
+            "YTEST_ABAPREACH_CL",
+            file.to_str().unwrap(),
+            "--include",
+            "CCAU",
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stdout
+            .ends_with("INCLUDE_MISSING: CCAU (re-run with --create-include)"),
+        "{}",
+        exit.stdout
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+
+    // A FUNC whose --fugr names another group than the server resolves stops after the lookup.
+    let mut fake = Fake::default();
+    let search = concat!(
+        r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">"#,
+        r#"<adtcore:objectReference adtcore:uri="/sap/bc/adt/functions/groups/YTEST_FG/fmodules/YTEST_FM" "#,
+        r#"adtcore:type="FUGR/FF" adtcore:name="YTEST_FM"/></adtcore:objectReferences>"#,
+    );
+
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(200, search))]));
+
+    let exit = go(
+        &[
+            "abapreach",
+            "deploy",
+            "FUNC",
+            "YTEST_FM",
+            file.to_str().unwrap(),
+            "--fugr",
+            "OTHER_FG",
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .contains("--fugr OTHER_FG does not match function group YTEST_FG"),
+        "{}",
+        exit.stderr
+    );
+}

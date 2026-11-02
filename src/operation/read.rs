@@ -238,7 +238,7 @@ impl ReadProg {
 
 /// The function group of a FUNC: `--fugr` when it was supplied, otherwise the server resolution.
 /// A supplied group that differs from the resolved one is a `STOP`, never a fallback.
-fn resolve_group(
+pub(crate) fn resolve_group(
     transport: &mut dyn SadtTransport,
     name: &str,
     supplied: Option<&str>,

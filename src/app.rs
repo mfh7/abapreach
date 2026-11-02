@@ -1,5 +1,5 @@
 use crate::backend::{BackendKind, Failure, OperationKind, Router, Selection, SelectionReason};
-use crate::cli::{Backend, Cli, Command, ObjectKind};
+use crate::cli::{Backend, Cli, Command};
 use crate::config::{
     Config, ConfigPaths, Connection, LocalCredentialsPermission, local_credentials_permission,
     scrub, tls_warning,
@@ -7,7 +7,7 @@ use crate::config::{
 use crate::domain::Outcome;
 use crate::hash::local_source_lines;
 use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
-use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg};
+use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::doctor::Doctor;
 use crate::operation::read::{ReadProg, ReadTarget};
 use crate::transport::http::{HttpConfig, HttpTransport};
@@ -419,11 +419,11 @@ fn execute(
                 return stop(message);
             }
 
-            if kind != ObjectKind::Prog {
-                return stop(format!("deploy {} is not available yet", kind.token()));
-            }
-
             let base_given = base.is_some();
+            let scope = DeployScope::new(kind)
+                .group(fugr.as_deref())
+                .include(include)
+                .create_include(create_include);
             let input = DeployInput {
                 name,
                 source,
@@ -439,10 +439,11 @@ fn execute(
                 connection,
                 factories,
                 |transport, selection, cancel| {
-                    let result = DeployProg::run_selected(
+                    let result = DeployProg::run_scoped(
                         transport,
                         input.clone(),
-                        selection,
+                        scope.clone(),
+                        Some(selection),
                         Some(connection),
                         cancel,
                     );

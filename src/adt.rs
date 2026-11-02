@@ -181,6 +181,100 @@ enum Field {
     Author,
 }
 
+/// What the body of an activation answer is. The status is 200 in every case, so the root of the
+/// body decides: nothing, a worklist that activated nothing, or messages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActivationBody {
+    Empty,
+    /// `ioc:inactiveObjects`: the objects SAP still wants activated; nothing was activated.
+    Worklist,
+    /// `chkl:messages`.
+    Messages,
+    Other,
+}
+
+pub fn classify_activation(body: &str) -> ActivationBody {
+    if body.trim().is_empty() {
+        return ActivationBody::Empty;
+    }
+
+    let mut reader = Reader::from_str(body);
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                return match local_name(&element) {
+                    "inactiveObjects" => ActivationBody::Worklist,
+                    "messages" => ActivationBody::Messages,
+                    _ => ActivationBody::Other,
+                };
+            }
+            Ok(Event::Eof) | Err(_) => return ActivationBody::Other,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// An object reference of a worklist (`ioc:object/ioc:ref`), kept as listed.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ObjectRef {
+    pub uri: String,
+    pub kind: String,
+    pub name: String,
+    pub parent_uri: Option<String>,
+}
+
+/// The object references of an `ioc:inactiveObjects` list. An entry without `ioc:object` carries
+/// only its transport request, and a reference inside `ioc:transport` is the request, so neither
+/// is an object.
+pub fn parse_object_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut refs = Vec::new();
+    let mut in_object = false;
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) => match local_name(&element) {
+                "object" => in_object = true,
+                "ref" if in_object => refs.push(object_ref(&element)?),
+                _ => {}
+            },
+            Event::Empty(element) if in_object && local_name(&element) == "ref" => {
+                refs.push(object_ref(&element)?);
+            }
+            Event::End(element) if element.local_name().into_inner() == "object" => {
+                in_object = false;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(refs)
+}
+
+fn object_ref(element: &BytesStart<'_>) -> Result<ObjectRef, String> {
+    let mut found = ObjectRef::default();
+
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        let value = attribute
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|error| error.to_string())?
+            .into_owned();
+
+        match attribute.key.local_name().into_inner() {
+            "uri" => found.uri = value,
+            "type" => found.kind = value,
+            "name" => found.name = value,
+            "parentUri" => found.parent_uri = Some(value),
+            _ => {}
+        }
+    }
+
+    Ok(found)
+}
+
 /// One checkrun or activation message, printed as `TYPE row N: MSG`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdtMessage {
