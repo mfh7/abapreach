@@ -639,6 +639,70 @@ fn a_class_worklist_resend_must_exactly_match_the_first_rfc_response_and_is_cons
 }
 
 #[test]
+fn a_class_worklist_resend_rejects_changed_or_missing_reference_metadata() {
+    let member = format!("{CLASS}/source/main#type=CLAS%2FOM;name=PROBE");
+    let first = activation(true, activation_request_xml("zcl_a", CLASS));
+    let resend = |body: String| activation(false, body);
+    let response = format!(
+        r#"<ioc:inactiveObjects xmlns:ioc="http://www.sap.com/abapxml/inactiveCtsObjects"><ioc:entry><ioc:object><ioc:ref adtcore:uri="{member}" adtcore:type="CLAS/OM/public" adtcore:name="ZCL_A           PROBE" adtcore:parentUri="{CLASS}" xmlns:adtcore="http://www.sap.com/adt/core"/></ioc:object></ioc:entry></ioc:inactiveObjects>"#
+    );
+    let body = |kind: Option<&str>, name: Option<&str>, parent: Option<&str>| {
+        let mut reference = format!(r#"<adtcore:objectReference adtcore:uri="{member}""#);
+        if let Some(kind) = kind {
+            reference.push_str(&format!(r#" adtcore:type="{kind}""#));
+        }
+        if let Some(name) = name {
+            reference.push_str(&format!(r#" adtcore:name="{name}""#));
+        }
+        if let Some(parent) = parent {
+            reference.push_str(&format!(r#" adtcore:parentUri="{parent}""#));
+        }
+        reference.push_str(r#"/>"#);
+        format!(
+            r#"<?xml version="1.0"?><adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">{reference}</adtcore:objectReferences>"#
+        )
+    };
+
+    let mut transport = with_activation_response(response.clone());
+    assert!(admits(&mut transport, &first));
+    assert!(
+        admits(
+            &mut transport,
+            &resend(body(
+                Some("CLAS/OM/public"),
+                Some("ZCL_A           PROBE"),
+                Some(CLASS)
+            ))
+        ),
+        "the exact reference set must be admitted"
+    );
+
+    for actual in [
+        body(
+            Some("CLAS/OM/private"),
+            Some("ZCL_A           PROBE"),
+            Some(CLASS),
+        ),
+        body(None, Some("ZCL_A           PROBE"), Some(CLASS)),
+        body(Some("CLAS/OM/public"), Some("OTHER"), Some(CLASS)),
+        body(Some("CLAS/OM/public"), None, Some(CLASS)),
+        body(
+            Some("CLAS/OM/public"),
+            Some("ZCL_A           PROBE"),
+            Some("/sap/bc/adt/oo/classes/zcl_b"),
+        ),
+        body(Some("CLAS/OM/public"), Some("ZCL_A           PROBE"), None),
+    ] {
+        let mut transport = with_activation_response(response.clone());
+        assert!(admits(&mut transport, &first));
+        assert!(
+            !admits(&mut transport, &resend(actual.clone())),
+            "must refuse an attribute-only worklist mutation: {actual}"
+        );
+    }
+}
+
+#[test]
 fn the_first_activation_step_names_exactly_one_object_of_a_supported_kind() {
     let two = worklist(&[CLASS, "/sap/bc/adt/oo/classes/zcl_b"]);
     let fragment = worklist(&[&format!("{CLASS}/source/main#type=CLAS%2FOM;name=P")]);

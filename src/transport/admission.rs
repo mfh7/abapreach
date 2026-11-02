@@ -5,7 +5,7 @@
 //! parameter is refused. Pure logic with no platform dependency.
 
 use super::Request;
-use crate::adt::{ActivationBody, classify_activation, parse_object_refs};
+use crate::adt::{ActivationBody, ObjectRef, classify_activation, parse_object_refs};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
@@ -62,7 +62,7 @@ struct Path {
 #[derive(Debug, Default)]
 pub struct Admission {
     awaiting_first_response: bool,
-    expected_worklist: Option<Vec<String>>,
+    expected_worklist: Option<Vec<ObjectRef>>,
 }
 
 impl Admission {
@@ -114,7 +114,7 @@ impl Admission {
         let [reference] = references.as_slice() else {
             return false;
         };
-        let Some(parsed) = parse_path(reference) else {
+        let Some(parsed) = parse_path(&reference.uri) else {
             return false;
         };
 
@@ -151,8 +151,7 @@ impl Admission {
             && classify_activation(&String::from_utf8_lossy(body)) == ActivationBody::Worklist)
             .then(|| parse_object_refs(&String::from_utf8_lossy(body)).ok())
             .flatten()
-            .filter(|entries| !entries.is_empty())
-            .map(|entries| entries.into_iter().map(|entry| entry.uri).collect());
+            .filter(|entries| !entries.is_empty());
     }
 
     /// No error or terminal path may leave a resend capability behind.
@@ -510,9 +509,9 @@ fn is_encoded(value: &str) -> bool {
     true
 }
 
-/// The `uri` of every `objectReference` of an activation body. A body that is not an
-/// `objectReferences` document of references with a `uri` has `None`.
-fn references(body: &[u8]) -> Option<Vec<String>> {
+/// Every `objectReference` of an activation body with all its fields, so a resend is compared
+/// whole. A body that is not an `objectReferences` document of references with a `uri` has `None`.
+fn references(body: &[u8]) -> Option<Vec<ObjectRef>> {
     let text = std::str::from_utf8(body).ok()?;
     let mut reader = Reader::from_str(text);
     let mut found = Vec::new();
@@ -530,7 +529,7 @@ fn references(body: &[u8]) -> Option<Vec<String>> {
                         return None;
                     }
                 } else if name.into_inner() == "objectReference" {
-                    found.push(uri_of(&element)?);
+                    found.push(reference_of(&element)?);
                 } else {
                     return None;
                 }
@@ -541,20 +540,31 @@ fn references(body: &[u8]) -> Option<Vec<String>> {
     }
 }
 
-fn uri_of(element: &BytesStart<'_>) -> Option<String> {
+/// The reference of an element; an absent `type` or `name` stays empty and an absent `parentUri`
+/// stays `None`, so any difference from the first response is unequal.
+fn reference_of(element: &BytesStart<'_>) -> Option<ObjectRef> {
+    let mut uri = None;
+    let mut found = ObjectRef::default();
+
     for attribute in element.attributes() {
         let attribute = attribute.ok()?;
+        let value = attribute
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+            .ok()?
+            .into_owned();
 
-        if attribute.key.local_name().into_inner() == "uri" {
-            let value = attribute
-                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                .ok()?;
-
-            return Some(value.into_owned());
+        match attribute.key.local_name().into_inner() {
+            "uri" => uri = Some(value),
+            "type" => found.kind = value,
+            "name" => found.name = value,
+            "parentUri" => found.parent_uri = Some(value),
+            _ => {}
         }
     }
 
-    None
+    found.uri = uri?;
+
+    Some(found)
 }
 
 #[cfg(test)]
