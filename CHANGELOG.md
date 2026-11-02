@@ -4,13 +4,46 @@ All notable changes to ABAPReach are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-**Current Rust CLI:** version `0.11.0` supports existing `PROG` objects only.
+**Current Rust CLI:** version `0.12.0` supports existing `PROG` objects only.
 Versions `0.1.0` to `0.10.0` below describe the earlier Python implementation,
 not features available in the current Rust CLI. Their tags live in the
 internal repository where that implementation was developed. See the
 [roadmap](docs/roadmap.md) for the path to 1.0.0, which brings all of them to Rust.
 
 ## [Unreleased]
+
+## [0.12.0] - 2026-11-02
+
+### Added
+- Release binaries for Windows x64 (`x86_64-pc-windows-msvc`), Linux x64 (`x86_64-unknown-linux-gnu`),
+  Linux arm64 (`aarch64-unknown-linux-gnu`) and macOS arm64 (`aarch64-apple-darwin`), one archive per
+  target with a `.sha256` file: `.zip` for Windows, `.tar.gz` for macOS and Linux.
+- Per-OS RFC library discovery. The SAP GUI library (family `SAP GUI`) is tried first, highest
+  version first; then the NW RFC SDK library (family `NW RFC SDK`). Lookup per OS is documented in
+  `docs/getting-started.md` (RFC library lookup).
+- `ABAPREACH_RFC_LIBRARY` sets an explicit library path. If that path cannot be loaded, ABAPReach
+  stops and reports it; it never falls back to the discovered candidates.
+- Architecture check before a library is loaded: a library built for another architecture is
+  refused with `architecture mismatch: the library is <found> but this binary is <expected>`.
+- Linux: ICU libraries beside the SDK library are preloaded; if they are missing, a
+  `WARNING: RFC ICU libraries were not found beside the RFC library` line is printed.
+- `doctor` prints the loaded library as `RFC library: <path> version <version> architecture
+  <architecture> family <family> source <explicit ABAPREACH_RFC_LIBRARY or discovered>`, and the
+  outcome of `RfcSetTraceDir` (exported and set, not exported and environment only, or returned rc).
+- `doctor` reports the local credentials file permission: `local credentials: user-only permission`,
+  or `local credentials: permission not checked` with a hint to restrict the file to the user.
+- Deploy input accepts a UTF-8 BOM and CRLF line endings.
+- TLS: HTTPS verification uses the operating system trust store. `ca_file` in an `adt` block adds
+  PEM certificates on top of it; an unreadable file stops with `cannot read CA file <path>: <reason>`,
+  and a file without certificates with `no certificate found in CA file <path>`.
+- CI workflow `ci` and tag release workflow `release` (tags `v*`): native verification on four
+  runners, packaged-binary checks, and release candidate promotion.
+
+### Changed
+- Ctrl-C, SIGTERM and SIGHUP are handled the same way. An interrupt while the lock is held unlocks
+  first, then exits with code 130 (`INTERRUPT_EXIT_CODE`).
+- The RFC trace environment is set before the signal handlers are registered, while the process
+  still has one thread; `RfcSetTraceDir` then points the trace directory at the OS temp directory.
 
 ## [0.11.1] - 2026-11-01
 
