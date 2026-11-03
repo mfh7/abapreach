@@ -1,7 +1,7 @@
 use crate::adt::{
     ActivationBody, AdtMessage, Caller, ObjectRef, USAGE_REQUEST_XML, classify_activation,
-    parse_callers, parse_messages, parse_object_refs, parse_versions, prog_uri,
-    usage_references_uri,
+    parse_callers, parse_inactive_feed_refs, parse_messages, parse_object_refs, parse_versions,
+    prog_uri, usage_references_uri,
 };
 use crate::backend::{Failure, Selection, SelectionReason};
 use crate::cli::{IncludeKind, ObjectKind};
@@ -1019,7 +1019,7 @@ impl Run<'_> {
         let refs = (response.status == 200)
             .then(|| String::from_utf8(response.body).ok())
             .flatten()
-            .and_then(|text| parse_object_refs(&text).ok());
+            .and_then(|text| parse_inactive_feed_refs(&text).ok());
         let Some(refs) = refs else {
             return;
         };

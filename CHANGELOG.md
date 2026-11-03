@@ -37,6 +37,9 @@ internal repository where that implementation was developed. See the
   comma-separated `ABAPREACH_FAULT` list, to test uncertain create outcomes.
 
 ### Fixed
+- The inactive-sibling warning for function groups (`W: inactive objects in function group ...`)
+  now works on SAP 7.40, whose inactive-objects feed is a flat `adtcore:objectReferences` list.
+  RFC admission and the activation worklist keep reading only the 7.50 shape.
 - Windows, SAP GUI 8.00 `sapnwrfccm.dll`: the library is a single-byte build, so the UTF-16 strings
   ABAPReach passed were read as one character (`RFC_INVALID_PARAMETER` from `RfcSetTraceDir` and
   `RfcOpenConnection`). The character width is now detected from the library and every string is

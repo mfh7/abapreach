@@ -2,7 +2,8 @@ mod common;
 
 use abapreach::adt::{
     AdtMessage, Caller, format_messages, function_group_of, function_group_search_uri,
-    parse_callers, parse_messages, parse_object_refs, usage_references_uri,
+    parse_callers, parse_inactive_feed_refs, parse_messages, parse_object_refs,
+    usage_references_uri,
 };
 use common::Fixture;
 use std::fs;
@@ -253,4 +254,36 @@ fn only_references_inside_an_object_element_are_listed_as_objects() {
         .collect();
 
     assert_eq!(uris, ["/a", "/b", "/c"]);
+}
+
+const FLAT_740: &str = include_str!("fixtures/m3/fed-740-inactive-flat.xml");
+
+#[test]
+fn flat_740_feed_lists_objects_only_in_the_inactive_feed_mode() {
+    let names = |refs: Vec<abapreach::adt::ObjectRef>| -> Vec<String> {
+        refs.into_iter().map(|object| object.name).collect()
+    };
+
+    // Empty elements (the fixture) and Start/End elements.
+    assert_eq!(
+        names(parse_inactive_feed_refs(FLAT_740).unwrap()),
+        ["YTEST_ABAPREACH_RCAG", "YTEST_ABAPREACH_RCAF2"]
+    );
+    let with_body = r#"<adtcore:objectReferences xmlns:adtcore="a"><adtcore:objectReference adtcore:name="A"></adtcore:objectReference></adtcore:objectReferences>"#;
+    assert_eq!(names(parse_inactive_feed_refs(with_body).unwrap()), ["A"]);
+
+    // The 750 reader and its callers (RFC admission, activation worklist) still see nothing.
+    assert!(parse_object_refs(FLAT_740).unwrap().is_empty());
+    assert!(parse_object_refs(with_body).unwrap().is_empty());
+}
+
+#[test]
+fn inactive_feed_mode_keeps_the_750_shape_and_the_transport_exclusion() {
+    let xml = r#"<ioc:inactiveObjects xmlns:ioc="i" xmlns:adtcore="a"><ioc:entry><ioc:object><ioc:ref adtcore:uri="/a"/></ioc:object><ioc:transport><ioc:ref adtcore:uri="/r"/></ioc:transport></ioc:entry></ioc:inactiveObjects>"#;
+
+    assert_eq!(
+        parse_inactive_feed_refs(xml).unwrap(),
+        parse_object_refs(xml).unwrap()
+    );
+    assert_eq!(parse_object_refs(xml).unwrap().len(), 1);
 }

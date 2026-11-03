@@ -1894,3 +1894,39 @@ fn only_the_object_references_of_a_worklist_are_listed() {
     assert_eq!(refs[1].parent_uri.as_deref(), Some(CLAS_URI));
     assert_eq!(refs[2].name, "YTEST_ABAPREACH_CL           PROBE");
 }
+
+#[test]
+fn flat_740_inactive_feed_warns_about_function_group_siblings() {
+    let live = func_rendered("v1");
+    let worklist = format!(
+        concat!(
+            r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">"#,
+            r#"<adtcore:objectReference adtcore:uri="{group}" adtcore:type="FUGR/F" adtcore:name="YTEST_ABAPREACH_FG"/>"#,
+            r#"<adtcore:objectReference adtcore:uri="{group}/fmodules/ytest_abapreach_fm2" "#,
+            r#"adtcore:type="FUGR/FF" adtcore:name="YTEST_ABAPREACH_FM2" adtcore:parentUri="{group}"></adtcore:objectReference>"#,
+            r#"</adtcore:objectReferences>"#,
+        ),
+        group = GROUP_URI
+    );
+    let mut fake = func_locked_phase(func_before_lock(&live, &worklist), &live).post(
+        &format!("{FM_URI}?_action=UNLOCK&{HANDLE_QUERY}"),
+        200,
+        "",
+    );
+    let result = run(
+        &mut fake,
+        FM,
+        func_scope(),
+        input(&func_source("v2"), true, None),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(result.outcome.status, Some(Status::SimulatedOk));
+    assert!(
+        result.outcome.stderr.contains(
+            "W: inactive objects in function group YTEST_ABAPREACH_FG: YTEST_ABAPREACH_FM2\n"
+        ),
+        "{}",
+        result.outcome.stderr
+    );
+}

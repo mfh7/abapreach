@@ -257,6 +257,17 @@ pub struct ObjectRef {
 /// only its transport request, and a reference inside `ioc:transport` is the request, so neither
 /// is an object.
 pub fn parse_object_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
+    collect_refs(xml, false)
+}
+
+/// Like [`parse_object_refs`], but also reads the flat 7.40 feed, where every
+/// `adtcore:objectReference` is an object. Only for the advisory inactive-sibling warning: the
+/// admission and activation callers keep the strict reader.
+pub fn parse_inactive_feed_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
+    collect_refs(xml, true)
+}
+
+fn collect_refs(xml: &str, flat: bool) -> Result<Vec<ObjectRef>, String> {
     let mut reader = Reader::from_str(xml);
     let mut refs = Vec::new();
     let mut in_object = false;
@@ -266,9 +277,13 @@ pub fn parse_object_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
             Event::Start(element) => match local_name(&element) {
                 "object" => in_object = true,
                 "ref" if in_object => refs.push(object_ref(&element)?),
+                "objectReference" if flat => refs.push(object_ref(&element)?),
                 _ => {}
             },
-            Event::Empty(element) if in_object && local_name(&element) == "ref" => {
+            Event::Empty(element)
+                if (in_object && local_name(&element) == "ref")
+                    || (flat && local_name(&element) == "objectReference") =>
+            {
                 refs.push(object_ref(&element)?);
             }
             Event::End(element) if element.local_name().into_inner() == "object" => {
