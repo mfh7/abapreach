@@ -1,4 +1,4 @@
-use abapreach::signature::interface_diff;
+use abapreach::signature::{SignatureError, interface_diff, validate_signature};
 
 fn lines(text: &str) -> Vec<String> {
     text.lines().map(str::to_owned).collect()
@@ -117,4 +117,61 @@ fn the_server_rendering_with_crlf_and_upper_case_equals_an_adt_file() {
     let rendered: Vec<String> = rendered.split('\n').map(str::to_owned).collect();
 
     assert_eq!(interface_diff(&rendered, &lines(file)).unwrap(), None);
+}
+
+#[test]
+fn only_a_readable_signature_validates_and_the_error_names_the_problem() {
+    assert_eq!(validate_signature(&lines(LIVE)), Ok(()));
+
+    for text in ["", "WRITE 'x'.", "FUNCTION YTEST_FM\n  IMPORTING"] {
+        assert_eq!(
+            validate_signature(&lines(text)),
+            Err(SignatureError::Unreadable),
+            "{text:?}"
+        );
+    }
+
+    assert_eq!(
+        SignatureError::Unreadable.to_string(),
+        "FUNCTION statement is missing or unterminated"
+    );
+}
+
+#[test]
+fn a_dot_inside_a_word_does_not_end_the_signature() {
+    let live = "FUNCTION YTEST_FM\n  IMPORTING\n    VALUE(IV_IN) TYPE P DEFAULT 1.5.\n  WRITE 'x'.\nENDFUNCTION.";
+
+    assert!(
+        interface_diff(&lines(live), &lines(&live.replace("1.5", "1.6")))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn a_literal_may_be_followed_by_the_end_of_the_statement() {
+    let live = "FUNCTION YTEST_FM\n  IMPORTING\n    VALUE(IV_IN) TYPE C DEFAULT 'a'.\n  WRITE 'x'.\nENDFUNCTION.";
+
+    // The dot after the closing quote ends the statement, so the body is not compared.
+    assert_eq!(
+        interface_diff(
+            &lines(live),
+            &lines(&live.replace("WRITE 'x'", "WRITE 'y'"))
+        )
+        .unwrap(),
+        None
+    );
+
+    // A doubled quote stays inside the literal.
+    let doubled = live.replace("'a'", "'it''s'");
+
+    assert_eq!(
+        interface_diff(&lines(&doubled), &lines(&doubled)).unwrap(),
+        None
+    );
+    assert!(
+        interface_diff(&lines(&doubled), &lines(&doubled.replace("it''s", "it''t")))
+            .unwrap()
+            .is_some()
+    );
 }

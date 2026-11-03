@@ -1,5 +1,5 @@
 use abapreach::adt::{prog_uri, versions_uri};
-use abapreach::hash::validate_prog;
+use abapreach::hash::{validate_name, validate_prog};
 use abapreach::operation::deploy::{activation_request_xml, checkrun_xml};
 
 fn source() -> Vec<String> {
@@ -121,4 +121,15 @@ fn a_namespace_name_is_used_encoded_and_escaped_in_the_checkrun() {
         checkrun.contains("/sap/bc/adt/programs/programs/%2fabc%2fzprog/source/main"),
         "{checkrun}"
     );
+}
+
+#[test]
+fn the_default_name_limit_is_the_program_limit() {
+    for name in ["Z", "ZTEST_01", "/NS/ZPROG", &"X".repeat(40)] {
+        assert_eq!(validate_name(name), Ok(()), "{name:?}");
+    }
+
+    for name in ["", "Z PROG", "/ZPROG", &"X".repeat(41)] {
+        assert!(validate_name(name).is_err(), "{name:?}");
+    }
 }

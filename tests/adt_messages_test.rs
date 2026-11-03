@@ -2,7 +2,7 @@ mod common;
 
 use abapreach::adt::{
     AdtMessage, Caller, format_messages, function_group_of, function_group_search_uri,
-    parse_callers, parse_messages, usage_references_uri,
+    parse_callers, parse_messages, parse_object_refs, usage_references_uri,
 };
 use common::Fixture;
 use std::fs;
@@ -229,4 +229,28 @@ fn the_where_used_uri_keeps_slashes_literal_and_encodes_the_rest() {
         usage_references_uri("/sap/bc/adt/x/a b&c=d?e#f"),
         "/sap/bc/adt/repository/informationsystem/usageReferences?uri=/sap/bc/adt/x/a%20b%26c%3Dd%3Fe%23f"
     );
+}
+
+#[test]
+fn only_references_inside_an_object_element_are_listed_as_objects() {
+    let xml = concat!(
+        r#"<ioc:inactiveObjects xmlns:ioc="i" xmlns:adtcore="a">"#,
+        // A reference that has a body, as `Start` and `End` events rather than one empty element.
+        r#"<ioc:entry><ioc:object><ioc:ref adtcore:uri="/a"></ioc:ref>"#,
+        // An unrelated element closing inside the object does not end it.
+        r#"<ioc:note></ioc:note><ioc:ref adtcore:uri="/b"/><ioc:ref adtcore:uri="/c"></ioc:ref>"#,
+        r#"</ioc:object>"#,
+        // After the object closes, a reference is the transport request, not an object.
+        r#"<ioc:transport><ioc:ref adtcore:uri="/request"></ioc:ref>"#,
+        r#"<ioc:ref adtcore:uri="/request2"/></ioc:transport></ioc:entry>"#,
+        r#"<ioc:ref adtcore:uri="/outside"></ioc:ref><ioc:ref adtcore:uri="/outside2"/>"#,
+        r#"</ioc:inactiveObjects>"#,
+    );
+    let uris: Vec<String> = parse_object_refs(xml)
+        .unwrap()
+        .into_iter()
+        .map(|object| object.uri)
+        .collect();
+
+    assert_eq!(uris, ["/a", "/b", "/c"]);
 }

@@ -1126,3 +1126,86 @@ fn direct_delete_mcp_function_module_fallback_and_unrelated_endpoints_are_refuse
         Request::get(""),
     ]);
 }
+
+fn with_response(status: u16, body: String) -> RfcTransport<FakeRfcApi> {
+    RfcTransport::new(FakeRfcApi::with_responses(vec![RfcEndpointResponse {
+        status,
+        headers: BTreeMap::new(),
+        body: body.into_bytes(),
+    }]))
+}
+
+#[test]
+fn a_resend_needs_a_successful_worklist_answer_to_the_first_step() {
+    let first = activation(true, activation_request_xml("zcl_a", CLASS));
+    let resend = activation(false, worklist(&[CLASS]));
+    let reply_of_entries = activation_worklist_response(&[CLASS]);
+    // Parses to the same reference as a worklist, but its root is not `inactiveObjects`.
+    let foreign_root = reply_of_entries.replace("ioc:inactiveObjects", "ioc:other");
+
+    // The control: a 200 worklist makes exactly this resend legal.
+    let mut transport = with_response(200, reply_of_entries.clone());
+    assert!(admits(&mut transport, &first));
+    assert!(admits(&mut transport, &resend));
+
+    for (status, body) in [
+        (500, reply_of_entries.clone()),
+        (404, reply_of_entries.clone()),
+        (200, foreign_root),
+    ] {
+        let mut transport = with_response(status, body.clone());
+        assert!(admits(&mut transport, &first), "HTTP {status}");
+        assert!(
+            !admits(&mut transport, &resend),
+            "HTTP {status} must not arm a resend: {body}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_request_or_a_closed_session_discards_the_pending_resend() {
+    let first = activation(true, activation_request_xml("zcl_a", CLASS));
+    let resend = activation(false, worklist(&[CLASS]));
+    let armed = || {
+        let mut transport = with_response(200, activation_worklist_response(&[CLASS]));
+        assert!(admits(&mut transport, &first));
+        transport
+    };
+
+    let mut transport = armed();
+    assert!(!admits(
+        &mut transport,
+        &Request::get("/sap/bc/adt/programs/programs/../source/main?version=active")
+    ));
+    assert!(
+        !admits(&mut transport, &resend),
+        "a refused request must clear the worklist"
+    );
+
+    let mut transport = armed();
+    transport.close().unwrap();
+    assert!(
+        !admits(&mut transport, &resend),
+        "closing the session must clear the worklist"
+    );
+
+    // The control: nothing in between keeps the worklist.
+    assert!(admits(&mut armed(), &resend));
+}
+
+#[test]
+fn a_program_name_that_is_empty_or_a_dot_segment_is_refused() {
+    let uri =
+        |name: &str| format!("/sap/bc/adt/programs/programs/{name}/source/main?version=active");
+
+    assert_refused(&[
+        Request::get(uri("")),
+        Request::get(uri(".")),
+        Request::get(uri("..")),
+    ]);
+    assert_admitted(&[
+        Request::get(uri("zprog")),
+        Request::get(uri("z.prog")),
+        Request::get(uri("%2fns%2fprog")),
+    ]);
+}

@@ -679,3 +679,40 @@ fn without_the_variable_nothing_is_printed_or_dropped() {
         exit.stderr
     );
 }
+
+const CHILD_MARKER: &str = "ABAPREACH_FAULT_TEST_CHILD";
+
+/// The environment is process-wide and `set_var` is unsafe in a threaded test run, so the check
+/// runs in a child process that inherits the variable.
+#[test]
+fn the_process_environment_selects_the_faults() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "the_faults_of_the_inherited_environment",
+            "--nocapture",
+        ])
+        .env(abapreach::fault::ENV, "drop-reply:PUT,fail-read:RECONCILE")
+        .env(CHILD_MARKER, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("1 passed"),
+        "the child test did not run: {stdout}"
+    );
+}
+
+#[test]
+fn the_faults_of_the_inherited_environment() {
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        return;
+    }
+
+    assert_eq!(
+        Fault::from_env(),
+        [Fault::DropReply(Target::Put), Fault::FailReconcileRead]
+    );
+}

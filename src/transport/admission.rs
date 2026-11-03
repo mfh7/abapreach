@@ -580,6 +580,10 @@ mod tests {
         assert!(!is_name("%2fns%2fcl", false));
         assert!(is_name("%2fns%2fprog", true));
         assert!(!is_name("é", true));
+        assert!(!is_name("", true));
+        assert!(!is_name(".", true));
+        assert!(!is_name("..", true));
+        assert!(is_name("z.prog-1$", true));
     }
 
     #[test]
@@ -596,5 +600,39 @@ mod tests {
 
         assert_eq!((path.kind, path.part), (Kind::Func, Part::Source));
         assert!(parse_path("/sap/bc/adt/oo/classes/zcl/includes/main").is_none());
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_fault_target_is_a_write_of_the_exact_method_and_shape() {
+        use super::{is_create_post, is_put_request};
+        use crate::transport::Request;
+
+        let source = "/sap/bc/adt/programs/programs/zprog/source/main?lockHandle=a%2B";
+        let create = "/sap/bc/adt/oo/classes?corrNr=DEVK900001";
+
+        assert!(is_put_request(&Request::put(source, Vec::new())));
+        assert!(!is_put_request(&Request::post(source, Vec::new())));
+        assert!(!is_put_request(&Request::get(source)));
+        assert!(!is_put_request(&Request::put(
+            "/sap/bc/adt/discovery",
+            Vec::new()
+        )));
+        assert!(!is_put_request(&Request::put(
+            format!("{source}#frag"),
+            Vec::new()
+        )));
+
+        assert!(is_create_post(&Request::post(create, Vec::new())));
+        assert!(!is_create_post(&Request::put(create, Vec::new())));
+        assert!(!is_create_post(&Request::get(create)));
+        assert!(!is_create_post(&Request::post(
+            "/sap/bc/adt/discovery",
+            Vec::new()
+        )));
+        assert!(!is_create_post(&Request::post(
+            format!("{create}#frag"),
+            Vec::new()
+        )));
     }
 }

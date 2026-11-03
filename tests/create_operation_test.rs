@@ -856,6 +856,15 @@ fn a_post_that_was_never_sent_is_an_error_that_still_allows_a_fallback() {
     assert_eq!(result.outcome.exit, 1);
     assert_eq!(result.outcome.status, None);
     assert_eq!(result.failure, Some(Failure::PreSendConnectivity));
+    assert!(result.fallback_allowed);
+    assert_eq!(
+        result.outcome.stderr,
+        "ERROR: pre-send connectivity failure: no route"
+    );
+    assert_eq!(
+        result.detail.as_deref(),
+        Some("pre-send connectivity failure: no route")
+    );
     assert_eq!(fake.posts().len(), 1);
 }
 
@@ -867,8 +876,54 @@ fn a_refused_logon_on_the_post_is_not_reconciled_or_retried() {
     assert_eq!(result.outcome.exit, 1);
     assert_eq!(result.failure, Some(Failure::Authorization));
     assert!(!result.fallback_allowed);
+    assert_eq!(
+        result.outcome.stderr,
+        "ERROR: authorization failed: HTTP 401"
+    );
+    assert_eq!(
+        result.detail.as_deref(),
+        Some("authorization failed: HTTP 401")
+    );
     assert_eq!(fake.posts().len(), 1);
     assert_eq!(fake.calls.last().unwrap().method, "POST");
+}
+
+#[test]
+fn a_status_the_create_does_not_define_is_an_error_without_fallback() {
+    // The group read of a FUNC answers something other than 200 or 404.
+    let mut fake = Fake::new().get(GROUP_URI, 500, "");
+    let result = run(&mut fake, input(CreateKind::Func, None, None, false));
+
+    assert_eq!(result.outcome.exit, 1);
+    assert_eq!(result.outcome.status, None);
+    assert_eq!(result.failure, Some(Failure::Validation));
+    assert!(!result.fallback_allowed);
+    assert_eq!(
+        result.outcome.stderr,
+        "ERROR: read function group: HTTP 500"
+    );
+    assert_eq!(
+        result.detail.as_deref(),
+        Some("read function group: HTTP 500")
+    );
+    assert_eq!(fake.writes(), 0);
+
+    // The validation answers a status it does not define.
+    let mut fake = Fake::new().post(&validation_uri(CreateKind::Fugr, "$TMP"), 503, "");
+    let result = run(&mut fake, input(CreateKind::Fugr, None, None, false));
+
+    assert_eq!(result.outcome.exit, 1);
+    assert_eq!(result.failure, Some(Failure::Validation));
+    assert!(!result.fallback_allowed);
+    assert_eq!(
+        result.outcome.stderr,
+        "ERROR: create validation failed: HTTP 503"
+    );
+    assert_eq!(
+        result.detail.as_deref(),
+        Some("create validation failed: HTTP 503")
+    );
+    assert_eq!(fake.writes(), 0);
 }
 
 // ---- backend capability ----------------------------------------------------------------
@@ -887,6 +942,14 @@ fn a_backend_without_a_stateful_session_creates_nothing() {
     assert_eq!(result.outcome.exit, 1);
     assert_eq!(result.failure, Some(Failure::CapabilityUnavailable));
     assert!(result.fallback_allowed);
+    assert_eq!(
+        result.outcome.stderr,
+        "ERROR: ADT HTTP stateful session unavailable (no sap-contextid)"
+    );
+    assert_eq!(
+        result.detail.as_deref(),
+        Some("ADT HTTP stateful session unavailable (no sap-contextid)")
+    );
     assert_eq!(fake.writes(), 0);
 
     // Pinned by --backend: no fallback exists, so the run stops.

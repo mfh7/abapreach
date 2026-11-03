@@ -3,6 +3,7 @@
 //! handle encoding and the `corrNr` rules are part of what the tests assert.
 
 use abapreach::adt::{ActivationBody, classify_activation, parse_object_refs};
+use abapreach::backend::Failure;
 use abapreach::cli::{IncludeKind, ObjectKind};
 use abapreach::config::Connection;
 use abapreach::domain::Status;
@@ -862,6 +863,35 @@ fn a_func_group_that_cannot_be_resolved_before_any_write_may_fall_back() {
 
     assert!(result.fallback_allowed);
     assert_eq!(result.outcome.exit, 1);
+    assert_eq!(
+        result.outcome.stderr,
+        "ERROR: pre-send connectivity failure: no route"
+    );
+    assert_eq!(result.failure, Some(Failure::PreSendConnectivity));
+    assert_eq!(
+        result.detail.as_deref(),
+        Some("pre-send connectivity failure: no route")
+    );
+}
+
+#[test]
+fn a_func_group_search_answered_with_an_error_status_is_a_failure_without_fallback() {
+    let mut fake = Fake::new().get(&func_search(), 500, "");
+    let result = run(
+        &mut fake,
+        FM,
+        func_scope(),
+        input(&func_source("v2"), false, None),
+        ForeignInactive::Reject,
+    );
+    let message = format!("cannot resolve the function group of {FM}: HTTP 500");
+
+    assert_eq!(result.outcome.exit, 1);
+    assert_eq!(result.outcome.stderr, format!("ERROR: {message}"));
+    assert_eq!(result.failure, Some(Failure::Validation));
+    assert!(!result.fallback_allowed);
+    assert_eq!(result.detail.as_deref(), Some(message.as_str()));
+    assert_eq!(fake.calls.len(), 1);
 }
 
 // ---------------------------------------------------------------- CLAS
@@ -1571,6 +1601,8 @@ fn an_include_of_a_class_that_does_not_exist_is_the_plain_404() {
         result.outcome.stderr,
         "STOP: cannot read live source: HTTP 404"
     );
+    assert_eq!(result.failure, Some(Failure::Validation));
+    assert!(!result.fallback_allowed);
 }
 
 #[test]
