@@ -770,6 +770,10 @@ impl Run<'_> {
         // have created the lock, so every path from that request onward must clean it up.
         let lock = self.lock()?;
 
+        // Test-only: keeps the lock held so a harness can interrupt inside the window.
+        #[cfg(feature = "fault-injection")]
+        crate::fault::hold_lock(cancel);
+
         match self.locked(&lock, input, &file, &live_hash, cancel) {
             Locked::Finished(finish) => Ok(self.release(&lock, &input.name, finish)),
             Locked::Checked => Ok(match self.unlock(&lock) {

@@ -13,6 +13,9 @@ pub const ENV: &str = "ABAPREACH_FAULT";
 const DROP_REPLY: &str = "drop-reply";
 const FAIL_READ: &str = "fail-read";
 const RECONCILE: &str = "RECONCILE";
+const HOLD_LOCK: &str = "hold-lock";
+/// Upper bound of a `hold-lock` pause, so a forgotten variable cannot stall a run for long.
+const HOLD_LOCK_MAX_MS: u64 = 60_000;
 const UNKNOWN: &str = "unknown ABAPREACH_FAULT value";
 
 /// The write whose reply is dropped.
@@ -51,6 +54,8 @@ pub enum Fault {
     DropReply(Target),
     /// The read-only reconciliation GET that follows a create `POST` fails without being sent.
     FailReconcileRead,
+    /// The deploy pauses this many milliseconds right after its LOCK succeeded.
+    HoldLock(u64),
 }
 
 impl Fault {
@@ -60,6 +65,11 @@ impl Fault {
         match (action, target) {
             (DROP_REPLY, _) => Some(Self::DropReply(Target::parse(target)?)),
             (FAIL_READ, RECONCILE) => Some(Self::FailReconcileRead),
+            (HOLD_LOCK, ms) if !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()) => ms
+                .parse()
+                .ok()
+                .filter(|ms| (1..=HOLD_LOCK_MAX_MS).contains(ms))
+                .map(Self::HoldLock),
             _ => None,
         }
     }
@@ -88,7 +98,7 @@ impl Fault {
     pub fn target(self) -> Option<Target> {
         match self {
             Self::DropReply(target) => Some(target),
-            Self::FailReconcileRead => None,
+            Self::FailReconcileRead | Self::HoldLock(_) => None,
         }
     }
 
@@ -96,6 +106,7 @@ impl Fault {
         match self {
             Self::DropReply(target) => format!("{DROP_REPLY}:{}", target.name()),
             Self::FailReconcileRead => format!("{FAIL_READ}:{RECONCILE}"),
+            Self::HoldLock(ms) => format!("{HOLD_LOCK}:{ms}"),
         }
     }
 
@@ -129,9 +140,67 @@ impl Fault {
     }
 }
 
+/// Runs right after a successful LOCK when `hold-lock:<ms>` is set: prints a marker on stderr,
+/// then waits until the time is up or Ctrl-C set the flag. The cancel checks that follow decide.
+pub fn hold_lock(cancel: &crate::operation::deploy::CancelFlag) {
+    let Some(ms) = Fault::from_env().into_iter().find_map(|fault| match fault {
+        Fault::HoldLock(ms) => Some(ms),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    eprintln!("FAULT: lock held, pausing {ms} ms");
+    pause(ms, cancel);
+}
+
+fn pause(ms: u64, cancel: &crate::operation::deploy::CancelFlag) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+
+    while !cancel.is_set() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Fault;
+    use super::{Fault, pause};
+    use crate::operation::deploy::CancelFlag;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn hold_lock_combines_with_the_other_faults() {
+        assert_eq!(
+            Fault::from_lookup(Some("drop-reply:CREATE,hold-lock:1500")),
+            Ok(vec![
+                Fault::DropReply(super::Target::parse("CREATE").unwrap()),
+                Fault::HoldLock(1500)
+            ])
+        );
+        assert_eq!(
+            Fault::from_lookup(Some("hold-lock:60000")),
+            Ok(vec![Fault::HoldLock(60_000)])
+        );
+    }
+
+    #[test]
+    fn the_pause_ends_early_on_cancel_and_otherwise_runs_its_time() {
+        let cancel = CancelFlag::new();
+        let started = Instant::now();
+        pause(150, &cancel);
+        assert!(started.elapsed() >= Duration::from_millis(150));
+
+        let cancel = CancelFlag::new();
+        let signal = cancel.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            signal.set();
+        });
+        let started = Instant::now();
+        pause(20_000, &cancel);
+        thread.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn a_lookup_without_a_value_injects_nothing() {
@@ -194,6 +263,35 @@ mod tests {
             Fault::warning(&faults).unwrap(),
             "WARNING: fault injection active (drop-reply:CREATE,fail-read:RECONCILE)"
         );
+    }
+
+    #[test]
+    fn hold_lock_takes_a_bounded_millisecond_count_and_drops_no_reply() {
+        let faults = Fault::from_lookup(Some("hold-lock:5000")).unwrap();
+
+        assert_eq!(faults, vec![Fault::HoldLock(5000)]);
+        assert_eq!(faults[0].target(), None);
+        assert_eq!(faults[0].drop_reply(true), None);
+        assert_eq!(faults[0].fail_read(true), None);
+        assert_eq!(
+            Fault::warning(&faults).unwrap(),
+            "WARNING: fault injection active (hold-lock:5000)"
+        );
+
+        for value in [
+            "hold-lock",
+            "hold-lock:",
+            "hold-lock:0",
+            "hold-lock:60001",
+            "hold-lock:+5",
+            "hold-lock:5s",
+        ] {
+            assert_eq!(
+                Fault::from_lookup(Some(value)),
+                Err("unknown ABAPREACH_FAULT value".to_owned()),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]

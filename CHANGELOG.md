@@ -33,8 +33,9 @@ internal repository where that implementation was developed. See the
   pre-audit, only when every entry is under the class URI; an error message fails the deploy and a
   warning-only response is verified by rereading the source.
 - RFC admission allow-list covers the new object kinds.
-- Fault-injection builds accept `drop-reply:CREATE` and `fail-read:RECONCILE`, combinable as a
-  comma-separated `ABAPREACH_FAULT` list, to test uncertain create outcomes.
+- Fault-injection builds accept `drop-reply:CREATE`, `fail-read:RECONCILE` and `hold-lock:<ms>`
+  (1-60000; pauses after the LOCK until the time is up or Ctrl-C), combinable as a
+  comma-separated `ABAPREACH_FAULT` list, to test uncertain create outcomes and interrupts.
 
 ### Fixed
 - The inactive-sibling warning for function groups (`W: inactive objects in function group ...`)
