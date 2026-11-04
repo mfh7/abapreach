@@ -847,3 +847,89 @@ fn a_create_asks_the_human_under_confirm_with_the_name_to_type() {
     assert!(form.label.contains("ZTESTFG"), "{}", form.label);
     assert_eq!(rig.opened(), (0, 0));
 }
+
+fn create_validation_ok() -> String {
+    concat!(
+        r#"<asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA>"#,
+        r#"<SEVERITY>OK</SEVERITY><SHORT_TEXT></SHORT_TEXT><LONG_TEXT/>"#,
+        r#"</DATA></asx:values></asx:abap>"#,
+    )
+    .to_owned()
+}
+
+fn fugr_create_arguments() -> serde_json::Value {
+    json!({"conn": "DEV_100", "type": "FUGR", "name": "ZTESTFG", "text": "T", "package": "$TMP"})
+}
+
+#[test]
+fn a_successful_create_simulation_issues_a_token_that_the_create_redeems() {
+    let mut rig = rig(TOKEN);
+    let mut session = FakeSession::new(false);
+    let requests = log();
+    let validation = abapreach::cli::CreateKind::Fugr.validation_uri("ZTESTFG", "T", "$TMP");
+    let ok = create_validation_ok();
+
+    // One transport per opened connection: the simulation, then the create.
+    rig.adt(Script::new(&requests).post(&validation, 200, &ok));
+    rig.adt(Script::new(&requests).post(&validation, 200, &ok).post(
+        "/sap/bc/adt/functions/groups",
+        200,
+        "",
+    ));
+
+    let simulated = rig.call(
+        &mut session,
+        "abap_create_simulate",
+        fugr_create_arguments(),
+    );
+
+    assert!(!simulated.is_error, "{}", simulated.text);
+
+    let token = token_of(&simulated);
+
+    assert_eq!(requests.borrow().len(), 1, "a simulation only validates");
+
+    let created = rig.call(
+        &mut session,
+        "abap_create",
+        with_token(fugr_create_arguments(), &token),
+    );
+
+    assert!(!created.is_error, "{}", created.text);
+    assert!(
+        any(&requests, "POST /sap/bc/adt/functions/groups "),
+        "{:?}",
+        requests.borrow()
+    );
+
+    let again = rig.call(
+        &mut session,
+        "abap_create",
+        with_token(fugr_create_arguments(), &token),
+    );
+    let sent = requests.borrow().len();
+
+    assert!(again.is_error);
+    assert!(again.text.contains("unknown"), "{}", again.text);
+    assert_eq!(requests.borrow().len(), sent, "a spent token sends nothing");
+}
+
+#[test]
+fn a_failed_create_simulation_issues_no_token() {
+    let mut rig = rig(TOKEN);
+    let mut session = FakeSession::new(false);
+    let requests = log();
+    let validation = abapreach::cli::CreateKind::Fugr.validation_uri("ZTESTFG", "T", "$TMP");
+    let rejected = r#"<asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA><SEVERITY>ERROR</SEVERITY><SHORT_TEXT>exists</SHORT_TEXT><LONG_TEXT/></DATA></asx:values></asx:abap>"#;
+
+    rig.adt(Script::new(&requests).post(&validation, 200, rejected));
+
+    let simulated = rig.call(
+        &mut session,
+        "abap_create_simulate",
+        fugr_create_arguments(),
+    );
+
+    assert!(simulated.is_error, "{}", simulated.text);
+    assert!(simulated.structured.get("plan_token").is_none());
+}
