@@ -587,7 +587,7 @@ fn an_unknown_value_stops_before_anything_is_opened() {
             .iter()
             .map(|arg| (*arg).to_owned())
             .collect(),
-        env(directory.path(), Some("drop-reply:DELETE")),
+        env(directory.path(), Some("drop-reply:ROLLBACK")),
         &mut fake,
     );
 
@@ -715,4 +715,101 @@ fn the_faults_of_the_inherited_environment() {
         Fault::from_env(),
         [Fault::DropReply(Target::Put), Fault::FailReconcileRead]
     );
+}
+
+#[test]
+fn the_delete_is_dropped_after_it_ran_and_nothing_else_is() {
+    let delete = |uri: &str| Request::delete(format!("{uri}?lockHandle=a%2Bb&corrNr=DEVK900001"));
+
+    for uri in [
+        "/sap/bc/adt/programs/programs/zprog",
+        "/sap/bc/adt/functions/groups/zfg",
+        "/sap/bc/adt/functions/groups/zfg/fmodules/zfm",
+        "/sap/bc/adt/oo/classes/zcl_a",
+        "/sap/bc/adt/oo/interfaces/zif_a",
+    ] {
+        let mut transport =
+            RfcTransport::with_fault(FakeRfcApi::ok(), Some(injection("drop-reply:DELETE")));
+        let reply = transport.request(delete(uri));
+
+        assert_eq!(
+            reply.unwrap_err(),
+            TransportError::PostSendUncertain(
+                "injected fault: reply dropped after DELETE".to_owned()
+            ),
+            "{uri}"
+        );
+        // The request ran: only its reply is gone.
+        assert_eq!(transport.api().counts(), (1, 0, 1), "{uri}");
+    }
+
+    let mut transport =
+        RfcTransport::with_fault(FakeRfcApi::ok(), Some(injection("drop-reply:DELETE")));
+
+    assert!(
+        transport
+            .request(Request::get("/sap/bc/adt/programs/programs/zprog"))
+            .is_ok()
+    );
+    assert!(
+        transport
+            .request(put(PUT_URI, b"REPORT z.\n".to_vec()))
+            .is_ok()
+    );
+    assert!(transport.request(activation()).is_ok());
+}
+
+#[test]
+fn the_other_faults_leave_a_delete_alone() {
+    for value in ["drop-reply:PUT", "drop-reply:CREATE", "drop-reply:ACTIVATE"] {
+        let mut transport = RfcTransport::with_fault(FakeRfcApi::ok(), Some(injection(value)));
+
+        assert!(
+            transport
+                .request(Request::delete(
+                    "/sap/bc/adt/programs/programs/zprog?lockHandle=a%2Bb"
+                ))
+                .is_ok(),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn a_dropped_delete_reply_is_uncertain_and_reconciles_from_a_new_session() {
+    use abapreach::cli::DeleteKind;
+    use abapreach::operation::delete::{DeleteBackend, DeleteReply, Reconcile};
+    use abapreach::operation::delete_adt::AdtDelete;
+
+    let reply = |status: u16, body: &str| RfcEndpointResponse {
+        status,
+        headers: BTreeMap::new(),
+        body: body.as_bytes().to_vec(),
+    };
+    let lock =
+        "<DATA><LOCK_HANDLE>a/b+c=</LOCK_HANDLE><CORRNR></CORRNR><IS_LOCAL>X</IS_LOCAL></DATA>";
+    let mut main = RfcTransport::with_fault(
+        FakeRfcApi::with_responses(vec![reply(200, lock), reply(200, "")]),
+        Some(injection("drop-reply:DELETE")),
+    );
+    let mut open = || -> Result<Box<dyn SadtTransport>, TransportError> {
+        Ok(Box::new(RfcTransport::new(FakeRfcApi::with_responses(
+            vec![reply(404, "<exc/>")],
+        ))))
+    };
+    let mut backend = AdtDelete::new(&mut main, "TESTUSER", &mut open);
+    let outcome = backend.delete(DeleteKind::Prog, "ZPROG", None);
+
+    assert!(
+        matches!(&outcome, DeleteReply::Uncertain(reason)
+            if reason.contains("reply dropped after DELETE") && !reason.contains("a/b+c=")),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        backend.reconcile(DeleteKind::Prog, "ZPROG"),
+        Reconcile::Gone
+    );
+    // The lock and the DELETE ran once each; nothing was repeated.
+    drop(backend);
+    assert_eq!(main.api().counts(), (1, 0, 2));
 }

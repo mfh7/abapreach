@@ -79,7 +79,7 @@ impl<'a> ReadTools<'a> {
             false,
             &connection,
             &mut *self.factories,
-            |transport, _, _| {
+            |transport, _, _, _| {
                 let read = ReadProg::fetch_lines(transport, target);
 
                 // A read holds no lock, so a failed session end changes nothing here.
@@ -198,7 +198,7 @@ impl<'a> ReadTools<'a> {
             false,
             &connection,
             &mut *self.factories,
-            |transport, _, _| {
+            |transport, _, _, _| {
                 let read = ReadTable::run(transport, &query, &connection.policies);
 
                 // A read holds no lock, so a failed session end changes nothing here.

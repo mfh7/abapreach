@@ -123,6 +123,67 @@ pub fn package_of(xml: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// The `adtcore:responsible` of an object from its metadata: the user who owns it. A document
+/// without one has `None`.
+pub fn responsible_of(xml: &str) -> Result<Option<String>, String> {
+    let mut reader = Reader::from_str(xml);
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element) => {
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|error| error.to_string())?;
+
+                    if attribute.key.local_name().into_inner() == "responsible" {
+                        let owner = attribute
+                            .normalized_value(XmlVersion::Implicit1_0)
+                            .map_err(|error| error.to_string())?
+                            .into_owned();
+
+                        return Ok(Some(owner).filter(|owner| !owner.is_empty()));
+                    }
+                }
+            }
+            Event::Eof => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
+/// The function modules a function group document links to: every attribute value that holds
+/// `/fmodules/<name>`, upper-cased, each module once and sorted.
+pub fn group_members(xml: &str) -> Result<Vec<String>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut members = std::collections::BTreeSet::new();
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element) => {
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|error| error.to_string())?;
+                    let value = attribute
+                        .normalized_value(XmlVersion::Implicit1_0)
+                        .map_err(|error| error.to_string())?;
+
+                    if let Some((_, tail)) = value.rsplit_once("/fmodules/") {
+                        let name = tail.split(['/', '?']).next().unwrap_or_default();
+
+                        if !name.is_empty()
+                            && name
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                        {
+                            members.insert(name.to_ascii_uppercase());
+                        }
+                    }
+                }
+            }
+            Event::Eof => return Ok(members.into_iter().collect()),
+            _ => {}
+        }
+    }
+}
+
 /// One entry of `GET <source>/versions`: the version number and the user who wrote it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VersionEntry {

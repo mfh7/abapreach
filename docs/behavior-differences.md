@@ -178,3 +178,27 @@ only after verifying the lock response.
   `REJECTED` (exit 1) and nothing is read.
 - Each command uses a fresh connection; the data preview over RFC fails on
   the 37th call of one connection.
+
+## `delete` (shared operation, M4)
+
+The Rust delete operation ports the cases of `tools/test_rfc_deploy.py` that apply to
+the ADT route (`tests/delete_operation_test.rs`). Intentional differences:
+
+- The plan hash also covers the active source of every source object (`CLAS` main
+  source plus each local include, `FUNC`, `INTF`, `PROG`), or the marker `NO_ACTIVE`. The
+  Python plan hash covers only the plan lines. Where-used is reported and never hashed.
+- A real delete reads each object again and compares its plan hash itself, because there
+  is no function module to do it. A changed object is `REJECTED` with "Plan changed since
+  simulate; simulate again", and the batch continues.
+- `foreign_inactive` applies to delete (`reject` by default; `ask` prompts on a terminal
+  and counts as `reject` under MCP). Python has no such guard for delete.
+- Not ported because there is no function-module call on the ADT route: the batch list
+  (`IT_SOURCE`) sent to the function module, and the "empty plan hash" case (a hash is
+  always computed locally).
+- Not ported here because the CLI grammar is not part of this operation: duplicate-object
+  and `--tr` syntax are checked by the operation, option combinations by `clap`.
+- A lost delete reply is reconciled once from a new session and never retried
+  (`DELETED (reconciled)` exits 1); Python reports an unknown status and stops.
+- `delete --simulate` prints the guards that apply and the function-module guards that
+  do not apply on the ADT route (system change option, `CCNOCLIIND`, SE06 and software
+  component, server-side self-guard).

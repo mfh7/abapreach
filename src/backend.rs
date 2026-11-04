@@ -71,6 +71,7 @@ pub enum OperationKind {
     Deploy(ObjectKind),
     Create(CreateKind),
     ReadTable,
+    Delete,
     Doctor,
 }
 
@@ -81,6 +82,7 @@ impl fmt::Display for OperationKind {
             Self::Deploy(kind) => write!(formatter, "deploy {}", kind.token()),
             Self::Create(kind) => write!(formatter, "create {}", kind.token()),
             Self::ReadTable => write!(formatter, "read-table"),
+            Self::Delete => write!(formatter, "delete"),
             Self::Doctor => write!(formatter, "doctor"),
         }
     }

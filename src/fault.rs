@@ -27,6 +27,8 @@ pub enum Target {
     Activate,
     /// The create `POST` of a function group, function module, class or interface.
     Create,
+    /// The `DELETE` of an object under its lock.
+    Delete,
 }
 
 impl Target {
@@ -35,6 +37,7 @@ impl Target {
             "PUT" => Some(Self::Put),
             "ACTIVATE" => Some(Self::Activate),
             "CREATE" => Some(Self::Create),
+            "DELETE" => Some(Self::Delete),
             _ => None,
         }
     }
@@ -44,6 +47,7 @@ impl Target {
             Self::Put => "PUT",
             Self::Activate => "ACTIVATE",
             Self::Create => "CREATE",
+            Self::Delete => "DELETE",
         }
     }
 }
@@ -214,6 +218,7 @@ mod tests {
             ("drop-reply:PUT", "PUT"),
             ("drop-reply:ACTIVATE", "ACTIVATE"),
             ("drop-reply:CREATE", "CREATE"),
+            ("drop-reply:DELETE", "DELETE"),
         ];
 
         for (value, name) in cases {
@@ -302,6 +307,7 @@ mod tests {
             "drop-reply:",
             "drop-reply:put",
             "drop-reply:create",
+            "drop-reply:delete",
             "drop-reply:INCLUDE",
             "drop-reply:GET",
             "drop-reply:RECONCILE",
