@@ -21,6 +21,11 @@ const GROUPS: &str = "/sap/bc/adt/functions/groups";
 const CLASSES: &str = "/sap/bc/adt/oo/classes";
 const INTERFACES: &str = "/sap/bc/adt/oo/interfaces";
 const PROGRAMS: &str = "/sap/bc/adt/programs/programs";
+const DATA_PREVIEW: &str = "/sap/bc/adt/datapreview/ddic";
+/// The row limit of the 740 data preview.
+const MAX_PREVIEW_ROWS: u32 = 5000;
+/// A DDIC identifier is at most 30 characters, `/NAMESPACE/` included.
+const MAX_ENTITY: usize = 30;
 const OBJECT_STRUCTURE: &str = "version=active&withShortDescriptions=true";
 const SEARCH_TAIL: &str = "&maxResults=10&objectType=FUGR%2FFF";
 const LOCK: &str = "_action=LOCK&accessMode=MODIFY";
@@ -241,6 +246,12 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
         return has_content_type(request, "application/*");
     }
 
+    if path == DATA_PREVIEW {
+        return has_content_type(request, "text/plain")
+            && has_header(request, "Accept", "application/*")
+            && query.is_some_and(|query| is_data_preview(query, &request.body));
+    }
+
     if path == USAGE_REFERENCES {
         return query.is_some_and(is_where_used_object);
     }
@@ -278,10 +289,72 @@ fn is_delete(path: &str, query: Option<&str>) -> bool {
 }
 
 fn has_content_type(request: &Request, expected: &str) -> bool {
+    has_header(request, "Content-Type", expected)
+}
+
+fn has_header(request: &Request, name: &str, expected: &str) -> bool {
     request
         .headers
-        .get("Content-Type")
+        .get(name)
         .is_some_and(|value| value == expected)
+}
+
+/// `rowNumber=<1..5000>&ddicEntityName=<entity>` with one `SELECT` line that reads that entity.
+/// The body is never SQL of its own choosing: a second statement or another table is refused.
+fn is_data_preview(query: &str, body: &[u8]) -> bool {
+    let Some((rows, entity)) = query.split_once("&ddicEntityName=") else {
+        return false;
+    };
+    let Some(rows) = rows.strip_prefix("rowNumber=") else {
+        return false;
+    };
+    let rows_valid = !rows.starts_with('0')
+        && rows.bytes().all(|byte| byte.is_ascii_digit())
+        && rows
+            .parse::<u32>()
+            .is_ok_and(|rows| (1..=MAX_PREVIEW_ROWS).contains(&rows));
+    // Only the `/` of a namespace is escaped, as `%2F`; a raw one is refused.
+    let decoded = entity.replace("%2F", "/");
+
+    rows_valid && !entity.contains('/') && is_entity(&decoded) && reads_entity(body, &decoded)
+}
+
+/// `NAME` or `/NAMESPACE/NAME` of letters, digits and `_`.
+fn is_entity(entity: &str) -> bool {
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+
+    entity.len() <= MAX_ENTITY
+        && match entity.strip_prefix('/') {
+            Some(rest) => rest
+                .split_once('/')
+                .is_some_and(|(space, local)| plain(space) && plain(local)),
+            None => plain(entity),
+        }
+}
+
+/// One line `SELECT <list> FROM <entity>[ WHERE <condition>]`: the first `FROM` names the entity.
+// shortcut: the condition grammar is enforced where the request is built (`read_table`), not
+// here; upgrade if another caller ever builds data preview requests.
+fn reads_entity(body: &[u8], entity: &str) -> bool {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return false;
+    };
+    let Some((_, tail)) = text
+        .strip_prefix("SELECT ")
+        .and_then(|rest| rest.split_once(" FROM "))
+    else {
+        return false;
+    };
+
+    !text.contains(['\n', '\r'])
+        && tail
+            .strip_prefix(entity)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(" WHERE "))
 }
 
 /// `lockHandle=<handle>[&corrNr=<request>]`, the query of a write under a lock. A lock itself

@@ -5,6 +5,7 @@ use abapreach::cli::{Cli, Command, DeleteKind};
 use abapreach::config::Connection;
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::transport::http::HttpTransport;
+use abapreach::transport::rfc::{FakeRfcApi, RfcEndpointResponse, RfcTransport};
 use abapreach::transport::{Response, SadtTransport, TransportError};
 use abapreach::{Exit, Factories, RfcLibraryIdentity, RfcLibraryInfo, run};
 use clap::Parser;
@@ -2146,6 +2147,41 @@ fn read_table_prints_a_tab_separated_table_over_adt() {
         String::from_utf8(calls.calls[1].body.clone()).unwrap(),
         "SELECT BUKRS, BUTXT FROM T001 WHERE BUKRS <> '0001'"
     );
+}
+
+#[test]
+fn read_table_over_the_rfc_backend_passes_admission_with_the_fake() {
+    let reply = |xml: String| RfcEndpointResponse {
+        status: 200,
+        headers: BTreeMap::new(),
+        body: xml.into_bytes(),
+    };
+    let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(vec![
+        reply(common::preview(&[
+            ("TABNAME", &[Some("T001")]),
+            ("TABCLASS", &[Some("TRANSP")]),
+            ("VIEWCLASS", &[None]),
+        ])),
+        reply(common::preview(&[
+            ("BUKRS", &[Some("1000"), Some("2000")]),
+            ("BUTXT", &[Some("Alpha"), Some("Beta")]),
+        ])),
+    ])));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(rfc);
+
+    let exit = read_table(
+        &["t001", "--fields", "bukrs,butxt", "--conn", "dev_100"],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "BUKRS\tBUTXT\n1000\tAlpha\n2000\tBeta");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    // Both previews (the DD02L lookup and the read) left the process.
+    assert_eq!(api.borrow().api().counts().2, 2);
 }
 
 #[test]
