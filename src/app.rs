@@ -6,9 +6,9 @@ use crate::config::{
 };
 use crate::domain::Outcome;
 use crate::hash::local_source_lines;
-use crate::mcp::{Server, serve};
+use crate::mcp::{Server, serve_with};
 use crate::mcp_read::ReadTools;
-use crate::mcp_write::{ClosedGate, McpTools};
+use crate::mcp_write::{McpTools, TokenGate};
 use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
 use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::delete::{self, Context};
@@ -272,13 +272,17 @@ fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories) -> Exit {
     match loaded {
         Ok(config) => {
             let writable = config.mcp_writable();
-            let tools = McpTools::new(ReadTools::new(config, env, factories), ClosedGate);
+            // The flag a signal handler sets: it ends the server once a write has settled.
+            let cancel = factories.cancel();
+            let tools = McpTools::new(ReadTools::new(config, env, factories), TokenGate::new());
             let mut server = Server::new(tools, false).with_writable(writable);
-            let served = serve(
+            // Not the locked handles: the reader thread owns stdin, and stdout is shared.
+            let served = serve_with(
                 &mut server,
-                std::io::stdin().lock(),
-                std::io::stdout().lock(),
+                std::io::BufReader::new(std::io::stdin()),
+                std::io::stdout(),
                 std::io::stderr().lock(),
+                cancel,
             );
 
             match served {

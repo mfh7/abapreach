@@ -11,6 +11,7 @@ use crate::domain::{Outcome, Status};
 use crate::hash::source_hash;
 use crate::mcp::{ToolHandler, ToolResult};
 use crate::object::check_read;
+use crate::operation::deploy::known_lock_handles;
 use crate::operation::read::{ReadProg, ReadTarget, project_lines};
 use crate::operation::read_table::{
     MAX_OUTPUT_BYTES, MCP_MAX_ROWS, Query, ReadTable, ReadTableError, ReadTableRequest, mcp_rows,
@@ -330,6 +331,8 @@ pub(crate) fn diagnostic(connection: &Connection, text: &str) -> String {
     let mut secrets = connection.secrets();
 
     secrets.extend(connection.hosts());
+    // A lock handle is not bound to the session: it never leaves the process.
+    secrets.extend(known_lock_handles());
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
 
     scrub(text, &secrets)

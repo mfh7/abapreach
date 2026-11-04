@@ -5,7 +5,7 @@
 use abapreach::cli::{DeleteKind, DeleteTarget};
 use abapreach::operation::delete::{
     Context, DeleteBackend, DeleteReply, DeleteReport, DeleteStatus, InactiveFact, ObjectFacts,
-    Plan, Reconcile, SourceFact, TrLock, execute, run, simulate,
+    Plan, Reconcile, SourceFact, TrLock, execute, execute_until, run, simulate,
 };
 use abapreach::policy::{Confirmer, ForeignInactive, Policies};
 use std::collections::BTreeMap;
@@ -1116,4 +1116,86 @@ fn absent_object_at_delete_time_is_not_found_without_a_delete_call() {
     assert_eq!(fake.names_deleted(), ["ZCL_B"]);
     assert_eq!(status_of(&report, "ZCL_A"), DeleteStatus::NotFound);
     assert_eq!(report.outcome.exit, 1);
+}
+
+// ---------- Task 10: safe points and contents ----------
+
+#[test]
+fn a_simulation_reports_the_contents_of_a_group_for_the_confirmation() {
+    let mut fake = Fake::default().with(
+        "ZFG",
+        ObjectFacts {
+            contents: vec!["FUNC ZF1".to_owned(), "FUNC ZF2".to_owned()],
+            ..facts_of("ZFG")
+        },
+    );
+    let report = sim(&mut fake, &["FUGR:ZFG", "PROG:ZP"], None);
+    let contents = |name: &str| {
+        report
+            .results
+            .iter()
+            .find(|result| result.name == name)
+            .unwrap()
+            .contents
+            .clone()
+    };
+
+    assert_eq!(contents("ZFG"), ["FUNC ZF1", "FUNC ZF2"]);
+    assert!(contents("ZP").is_empty());
+}
+
+#[test]
+fn execute_until_skips_the_objects_from_the_first_stop_and_never_interrupts_a_request() {
+    let mut fake = Fake::default();
+    let plan = plan_of(&sim(&mut fake, &["PROG:ZP1", "PROG:ZP2", "PROG:ZP3"], None));
+    let policies = Policies::default();
+    let mut asked = 0;
+    // The stop answer comes before the second object, after the first was deleted.
+    let report = execute_until(
+        &mut fake,
+        &context(&policies, &Yes(false)),
+        &targets(&["PROG:ZP1", "PROG:ZP2", "PROG:ZP3"]),
+        None,
+        &plan,
+        &mut || {
+            asked += 1;
+
+            asked > 1
+        },
+    )
+    .expect("execute");
+
+    assert_eq!(fake.names_deleted(), ["ZP1"]);
+    assert_eq!(status_of(&report, "ZP1"), DeleteStatus::Deleted);
+    assert_eq!(status_of(&report, "ZP2"), DeleteStatus::Skipped);
+    assert_eq!(status_of(&report, "ZP3"), DeleteStatus::Skipped);
+    assert_eq!(report.outcome.exit, 1);
+    assert!(
+        report
+            .outcome
+            .stdout
+            .contains("SUMMARY: 1 OK, 0 FAILED, 2 SKIPPED"),
+        "{}",
+        report.outcome.stdout
+    );
+    assert!(report.outcome.stdout.contains("W: stopped before PROG ZP2"));
+}
+
+#[test]
+fn execute_until_with_a_stop_before_the_first_object_deletes_nothing() {
+    let mut fake = Fake::default();
+    let plan = plan_of(&sim(&mut fake, &["PROG:ZP1"], None));
+    let policies = Policies::default();
+    let report = execute_until(
+        &mut fake,
+        &context(&policies, &Yes(false)),
+        &targets(&["PROG:ZP1"]),
+        None,
+        &plan,
+        &mut || true,
+    )
+    .expect("execute");
+
+    assert!(fake.deleted.is_empty());
+    assert_eq!(status_of(&report, "ZP1"), DeleteStatus::Skipped);
 }

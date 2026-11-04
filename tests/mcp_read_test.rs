@@ -126,6 +126,28 @@ fn lines_of(text: &str) -> Vec<String> {
     text.lines().map(str::to_owned).collect()
 }
 
+/// Server stdout the test can read back after the server ended: the server owns its writer.
+#[derive(Clone, Default)]
+struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Capture {
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
 const PROGRAM: &str = "REPORT ytest.\nWRITE 'a'.\nWRITE 'b'.";
 
 #[test]
@@ -403,17 +425,17 @@ fn a_tools_call_over_the_wire_returns_content_structured_content_and_is_error() 
         "name": "abap_read_source",
         "arguments": {"conn": "DEV_100", "type": "PROG", "name": "YTEST"},
     }});
-    let (mut out, mut log) = (Vec::new(), Vec::new());
+    let (out, mut log) = (Capture::default(), Vec::new());
 
     serve(
         &mut server,
-        format!("{request}\n").as_bytes(),
-        &mut out,
+        std::io::Cursor::new(format!("{request}\n").into_bytes()),
+        out.clone(),
         &mut log,
     )
     .unwrap();
 
-    let frame: Value = serde_json::from_slice(&out).unwrap();
+    let frame: Value = serde_json::from_slice(&out.bytes()).unwrap();
     let result = &frame["result"];
 
     assert_eq!(result["isError"], false);

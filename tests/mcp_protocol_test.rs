@@ -18,6 +18,28 @@ impl ToolHandler for Panicking {
     }
 }
 
+/// Server stdout the test can read back after the server ended: the server owns its writer.
+#[derive(Clone, Default)]
+struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Capture {
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
 struct Run {
     frames: Vec<Value>,
     stdout: String,
@@ -25,11 +47,17 @@ struct Run {
 }
 
 fn exchange<H: ToolHandler>(mut server: Server<H>, input: &[u8]) -> Run {
-    let (mut stdout, mut log) = (Vec::new(), Vec::new());
+    let (stdout, mut log) = (Capture::default(), Vec::new());
 
-    serve(&mut server, input, &mut stdout, &mut log).unwrap();
+    serve(
+        &mut server,
+        std::io::Cursor::new(input.to_vec()),
+        stdout.clone(),
+        &mut log,
+    )
+    .unwrap();
 
-    let stdout = String::from_utf8(stdout).unwrap();
+    let stdout = String::from_utf8(stdout.bytes()).unwrap();
 
     Run {
         frames: stdout
@@ -468,8 +496,8 @@ fn a_failing_stdout_ends_the_serve_loop_with_an_error() {
     assert!(
         serve(
             &mut Server::new(NoTools, true),
-            &input[..],
-            &mut Closed,
+            std::io::Cursor::new(input),
+            Closed,
             &mut log
         )
         .is_err()

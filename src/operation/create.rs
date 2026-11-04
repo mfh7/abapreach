@@ -225,6 +225,9 @@ impl CreateProg {
             failure: end.failure,
             fallback_allowed: end.fallback_allowed,
             detail: end.detail,
+            group: None,
+            base: None,
+            change: None,
         }
     }
 }

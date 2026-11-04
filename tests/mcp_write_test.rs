@@ -7,9 +7,11 @@ mod replay;
 
 use abapreach::backend::BackendKind;
 use abapreach::config::{Config, ConfigPaths, Connection};
-use abapreach::mcp::{Server, ToolHandler, ToolResult, serve, tool_list_for};
+use abapreach::mcp::{
+    Answer, Form, Server, Session, ToolHandler, ToolResult, serve, tool_list_for,
+};
 use abapreach::mcp_read::ReadTools;
-use abapreach::mcp_write::{ClosedGate, McpTools, Operation, Ticket, WriteGate};
+use abapreach::mcp_write::{McpTools, Operation, Ticket, TokenGate, WriteGate};
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use abapreach::{Factories, RfcLibraryInfo, run};
@@ -20,6 +22,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::rc::Rc;
+use std::time::Duration;
 
 const PASSWORD: &str = "secret-pw";
 const HOST: &str = "example.com";
@@ -42,6 +45,46 @@ const ENCODED: &str = "a%2Fb%2Bc%3D";
 type Reply = Result<Response, TransportError>;
 type Opened = Result<Box<dyn SadtTransport>, TransportError>;
 type Log = Rc<RefCell<Vec<String>>>;
+
+/// Server stdout the test can read back after the server ended: the server owns its writer.
+#[derive(Clone, Default)]
+struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A client that can elicit and types `text` into every form.
+struct Typing(&'static str);
+
+impl Session for Typing {
+    fn can_elicit(&self) -> bool {
+        true
+    }
+
+    fn cancel(&self) -> CancelFlag {
+        CancelFlag::new()
+    }
+
+    fn elicit(
+        &mut self,
+        _: &Form,
+        _: Duration,
+        _: &mut dyn FnMut(&str, &Map<String, Value>) -> ToolResult,
+    ) -> Answer {
+        Answer::Accepted(self.0.to_owned())
+    }
+
+    fn log(&mut self, _: &str) {}
+}
 
 /// A scripted ADT: replies per method and exact URI, a fallback status for everything else, and a
 /// log of every request with its body.
@@ -285,6 +328,15 @@ impl Rig {
         tools.call(name, arguments.as_object().unwrap())
     }
 
+    fn call_as(&mut self, session: &mut dyn Session, name: &str, arguments: Value) -> ToolResult {
+        let mut tools = McpTools::new(
+            ReadTools::new(self.config(), self.env.clone(), &mut self.fake),
+            self.gate.clone(),
+        );
+
+        tools.call_in(name, arguments.as_object().unwrap(), session)
+    }
+
     fn opened(&self) -> (usize, usize) {
         (self.fake.adt_opened.get(), self.fake.rfc_opened.get())
     }
@@ -378,17 +430,17 @@ fn an_all_off_configuration_lists_reads_only_and_a_write_tool_is_unknown() {
     let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
         "name": "abap_simulate", "arguments": valid_arguments("abap_simulate", "DEV_100"),
     }});
-    let (mut out, mut sink) = (Vec::new(), Vec::new());
+    let (out, mut sink) = (Capture::default(), Vec::new());
 
     serve(
         &mut server,
-        format!("{request}\n").as_bytes(),
-        &mut out,
+        std::io::Cursor::new(format!("{request}\n").into_bytes()),
+        out.clone(),
         &mut sink,
     )
     .unwrap();
 
-    let frame: Value = serde_json::from_slice(&out).unwrap();
+    let frame: Value = serde_json::from_slice(&out.0.lock().unwrap()).unwrap();
 
     assert_eq!(frame["error"]["code"], -32602);
     assert_eq!(rig.opened(), (0, 0));
@@ -470,7 +522,7 @@ fn nothing_a_client_sends_authorizes_a_write() {
     let mut rig = rig();
     let mut closed = McpTools::new(
         ReadTools::new(rig.config(), rig.env.clone(), &mut rig.fake),
-        ClosedGate,
+        TokenGate::new(),
     );
 
     for tool in ["abap_deploy", "abap_create", "abap_delete"] {
@@ -494,7 +546,7 @@ fn nothing_a_client_sends_authorizes_a_write() {
 }
 
 #[test]
-fn the_closed_gate_issues_no_token_after_a_simulation() {
+fn a_simulation_that_found_nothing_issues_no_token() {
     let mut rig = rig();
     let requests = log();
 
@@ -502,7 +554,7 @@ fn the_closed_gate_issues_no_token_after_a_simulation() {
 
     let mut closed = McpTools::new(
         ReadTools::new(rig.config(), rig.env.clone(), &mut rig.fake),
-        ClosedGate,
+        TokenGate::new(),
     );
     let arguments = valid_arguments("abap_delete_simulate", "DEV_100");
     let result = closed.call("abap_delete_simulate", arguments.as_object().unwrap());
@@ -799,22 +851,27 @@ fn a_failed_simulation_and_a_partly_failed_delete_plan_issue_no_token() {
 
 fn deploy_ticket(backend: BackendKind) -> Ticket {
     Ticket {
-        operation: Operation::Deploy,
-        conn: "DEV_100".to_owned(),
-        fields: BTreeMap::from([
-            ("type".to_owned(), "PROG".to_owned()),
-            ("name".to_owned(), "YTEST".to_owned()),
-            ("source_sha256".to_owned(), sha256(PROGRAM)),
-            ("create_include".to_owned(), "false".to_owned()),
-        ]),
         backend: Some(backend),
-        plan: None,
+        ..Ticket::new(
+            Operation::Deploy,
+            "DEV_100",
+            BTreeMap::from([
+                ("type".to_owned(), "PROG".to_owned()),
+                ("name".to_owned(), "YTEST".to_owned()),
+                ("source_sha256".to_owned(), sha256(PROGRAM)),
+                ("create_include".to_owned(), "false".to_owned()),
+            ]),
+        )
     }
 }
 
 #[test]
 fn an_admitted_write_runs_on_the_backend_the_ticket_names() {
-    let mut rig = rig();
+    // `token`: a deploy under `confirm` would first need a client that can elicit.
+    let mut rig = rig_with(&servers(
+        r#"{"mcp_write":"token"}"#,
+        r#"{"mcp_write":"token"}"#,
+    ));
     let requests = log();
 
     rig.gate
@@ -842,7 +899,11 @@ fn an_admitted_write_runs_on_the_backend_the_ticket_names() {
 
 #[test]
 fn a_token_for_other_arguments_runs_nothing() {
-    let mut rig = rig();
+    // `token`: the gate answers before any question to a human.
+    let mut rig = rig_with(&servers(
+        r#"{"mcp_write":"token"}"#,
+        r#"{"mcp_write":"token"}"#,
+    ));
 
     rig.gate
         .0
@@ -935,7 +996,9 @@ fn a_delete_plan_is_simulated_then_executed_from_the_plan_the_ticket_holds() {
     );
     rig.adt(Script::new(&requests).get(PROG, 404, ""));
 
-    let deleted = rig.call(
+    // A delete always asks the human, whatever the policy: here the human types the name.
+    let deleted = rig.call_as(
+        &mut Typing("ZPROG"),
         "abap_delete",
         json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"], "plan_token": "tok-1"}),
     );

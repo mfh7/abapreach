@@ -222,6 +222,9 @@ pub struct ObjectResult {
     pub status: DeleteStatus,
     pub hash: Option<String>,
     pub reason: Option<String>,
+    /// What goes with the object: `FUNC <name>` per function module of a group, `INCLUDE <name>`
+    /// per local include of a class. Set by a simulation.
+    pub contents: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -318,6 +321,7 @@ struct Ready {
     lines: Vec<String>,
     hash: String,
     tr: Option<String>,
+    contents: Vec<String>,
 }
 
 fn self_rejection(kind: DeleteKind, name: &str) -> String {
@@ -502,6 +506,7 @@ fn evaluate(
         lines,
         hash: sha256_hex(&hashed.join("\n")),
         tr,
+        contents: facts.contents.clone(),
     })
 }
 
@@ -551,6 +556,7 @@ impl Batch {
             status,
             hash,
             reason,
+            contents: Vec::new(),
         });
     }
 
@@ -570,6 +576,7 @@ impl Batch {
                 status: DeleteStatus::Skipped,
                 hash: None,
                 reason: None,
+                contents: Vec::new(),
             });
         }
     }
@@ -652,6 +659,10 @@ pub fn simulate(
                 plan.objects
                     .push((row.0.token().to_owned(), row.1.clone(), ready.hash.clone()));
                 batch.finish(row, DeleteStatus::SimulatedOk, Some(ready.hash), None);
+
+                if let Some(result) = batch.results.last_mut() {
+                    result.contents = ready.contents;
+                }
             }
         }
     }
@@ -667,6 +678,19 @@ pub fn execute(
     targets: &[DeleteTarget],
     tr: Option<&str>,
     plan: &Plan,
+) -> Result<DeleteReport, String> {
+    execute_until(backend, context, targets, tr, plan, &mut || false)
+}
+
+/// Like [`execute`], but `stop` is asked before each object: once it says yes, that object and
+/// the rest are `SKIPPED`. A delete request in flight is never interrupted.
+pub fn execute_until(
+    backend: &mut dyn DeleteBackend,
+    context: &Context,
+    targets: &[DeleteTarget],
+    tr: Option<&str>,
+    plan: &Plan,
+    stop: &mut dyn FnMut() -> bool,
 ) -> Result<DeleteReport, String> {
     let (rows, tr) = prepare(targets, tr)?;
     let wanted: BTreeSet<(&str, &str)> = rows
@@ -692,6 +716,15 @@ pub fn execute(
     let mut batch = Batch::new("DELETE");
 
     for (index, row) in rows.iter().enumerate() {
+        if stop() {
+            batch.out.push(format!(
+                "W: stopped before {} {}: the time limit or a cancellation; the rest is SKIPPED",
+                row.0, row.1
+            ));
+            batch.skip_rest(&rows[index..]);
+            break;
+        }
+
         batch.start(row);
 
         let ready = match evaluate(backend, context, row, tr.as_deref(), &rows) {
