@@ -6,6 +6,7 @@
 
 use super::Request;
 use crate::adt::{ActivationBody, ObjectRef, classify_activation, parse_object_refs};
+use crate::operation::read_table::validate_preview_body;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
@@ -337,24 +338,14 @@ fn is_entity(entity: &str) -> bool {
         }
 }
 
-/// One line `SELECT <list> FROM <entity>[ WHERE <condition>]`: the first `FROM` names the entity.
-// shortcut: the condition grammar is enforced where the request is built (`read_table`), not
-// here; upgrade if another caller ever builds data preview requests.
+/// Only the exact canonical `read-table` rendering is admitted. SAP runs data-preview bodies as
+/// is, so this boundary reuses the operation parser rather than trusting a caller's body.
 fn reads_entity(body: &[u8], entity: &str) -> bool {
     let Ok(text) = std::str::from_utf8(body) else {
         return false;
     };
-    let Some((_, tail)) = text
-        .strip_prefix("SELECT ")
-        .and_then(|rest| rest.split_once(" FROM "))
-    else {
-        return false;
-    };
 
-    !text.contains(['\n', '\r'])
-        && tail
-            .strip_prefix(entity)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(" WHERE "))
+    validate_preview_body(entity, text).is_ok()
 }
 
 /// `lockHandle=<handle>[&corrNr=<request>]`, the query of a write under a lock. A lock itself

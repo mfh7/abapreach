@@ -62,17 +62,11 @@ impl Query {
         max_rows: u32,
         policies: &Policies,
     ) -> Result<Self, String> {
-        let table = identifier("table", &request.table)?;
-        let mut fields = Vec::new();
-
-        for field in &request.fields {
-            fields.push(field_name(field.trim_matches(' '))?);
-        }
-
-        let condition = match request.where_clause.as_deref() {
-            Some(text) => Some(canonical_where(text)?),
-            None => None,
-        };
+        let (table, fields, condition) = query_tokens(
+            &request.table,
+            &request.fields,
+            request.where_clause.as_deref(),
+        )?;
 
         if request.rows == 0 || request.rows > max_rows {
             return Err(format!("rows must be between 1 and {max_rows}"));
@@ -82,17 +76,7 @@ impl Query {
             return Err(format!("table {table} is on the read_table_denied list"));
         }
 
-        let list = if fields.is_empty() {
-            "*".to_owned()
-        } else {
-            fields.join(", ")
-        };
-        let mut body = format!("SELECT {list} FROM {table}");
-
-        if let Some(condition) = condition {
-            body.push_str(" WHERE ");
-            body.push_str(&condition);
-        }
+        let body = render_body(&table, &fields, condition.as_deref());
 
         Ok(Self {
             table,
@@ -157,6 +141,39 @@ fn field_name(text: &str) -> Result<String, String> {
     }
 
     Ok(name)
+}
+
+/// Parse the tokens shared by normal `read-table` validation and the transport boundary. The
+/// caller decides separately whether the table is denied by a policy.
+fn query_tokens(
+    table: &str,
+    fields: &[String],
+    where_clause: Option<&str>,
+) -> Result<(String, Vec<String>, Option<String>), String> {
+    let table = identifier("table", table)?;
+    let fields = fields
+        .iter()
+        .map(|field| field_name(field.trim_matches(' ')))
+        .collect::<Result<Vec<_>, _>>()?;
+    let condition = where_clause.map(canonical_where).transpose()?;
+
+    Ok((table, fields, condition))
+}
+
+fn render_body(table: &str, fields: &[String], condition: Option<&str>) -> String {
+    let list = if fields.is_empty() {
+        "*".to_owned()
+    } else {
+        fields.join(", ")
+    };
+    let mut body = format!("SELECT {list} FROM {table}");
+
+    if let Some(condition) = condition {
+        body.push_str(" WHERE ");
+        body.push_str(condition);
+    }
+
+    body
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -493,40 +510,27 @@ fn canonical_where(text: &str) -> Result<String, String> {
     Ok(parser.out)
 }
 
-/// A body is sent only when it reads the entity it names and is exactly what the validated
-/// tokens produce: `SELECT <fields|*> FROM <entity> [WHERE <canonical condition>]`.
-fn check_body(entity: &str, body: &str) -> Result<(), String> {
+/// Parse a data-preview body with the same grammar as `Query` and require its exact canonical
+/// rendering. The transport admission boundary uses this without a deny list: policy belongs to
+/// the operation layer, while all admitted SQL-like syntax must still come from these tokens.
+pub fn validate_preview_body(entity: &str, body: &str) -> Result<(), String> {
     let mismatch = || format!("data preview body does not read {entity}: refusing to send it");
     let rest = body.strip_prefix("SELECT ").ok_or_else(mismatch)?;
     let (list, tail) = rest.split_once(" FROM ").ok_or_else(mismatch)?;
-
-    if identifier("entity", entity)? != entity {
-        return Err(mismatch());
-    }
-
-    if list != "*" {
-        for field in list.split(", ") {
-            if field_name(field)? != field {
-                return Err(mismatch());
-            }
-        }
-    }
-
-    let (name, condition) = match tail.split_once(' ') {
-        Some((name, condition)) => (name, Some(condition)),
+    let (table, where_clause) = match tail.split_once(" WHERE ") {
+        Some((table, condition)) => (table, Some(condition)),
         None => (tail, None),
     };
+    let fields: Vec<String> = if list == "*" {
+        Vec::new()
+    } else {
+        list.split(", ").map(str::to_owned).collect()
+    };
+    let (entity, fields, condition) =
+        query_tokens(entity, &fields, where_clause).map_err(|_| mismatch())?;
 
-    if name != entity {
+    if table != entity || render_body(&entity, &fields, condition.as_deref()) != body {
         return Err(mismatch());
-    }
-
-    if let Some(condition) = condition {
-        let text = condition.strip_prefix("WHERE ").ok_or_else(mismatch)?;
-
-        if canonical_where(text).map_err(|_| mismatch())? != text {
-            return Err(mismatch());
-        }
     }
 
     Ok(())
@@ -538,7 +542,7 @@ pub fn preview_request(entity: &str, body: &str, rows: u32) -> Result<Request, S
         return Err("data preview needs at least one row".to_owned());
     }
 
-    check_body(entity, body)?;
+    validate_preview_body(entity, body)?;
 
     let mut request = Request::post(
         format!(

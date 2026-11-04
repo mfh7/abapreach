@@ -345,8 +345,11 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
     ) -> Result<Ticket, String> {
         let delete = presented.operation == Operation::Delete;
         let confirm = delete || connection.policies.mcp_write == McpWrite::Confirm;
+        let token = required(arguments, "plan_token")?;
+        let stored = self.gate.admit(token, presented)?;
 
-        // Refused before the token is touched: a client that can ask may still redeem it.
+        // A matching presented token is terminal, including an incapable or old client. Missing
+        // or mismatched tokens fail in `admit` without touching any other ticket.
         if confirm && !session.can_elicit() {
             let blind = "this client cannot answer a confirmation (it did not advertise \
                          elicitation, or its protocol is older than 2025-06-18)";
@@ -357,9 +360,6 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                 format!("mcp_write is confirm for {} and {blind}", connection.id)
             });
         }
-
-        let token = required(arguments, "plan_token")?;
-        let stored = self.gate.admit(token, presented)?;
 
         if !confirm {
             return Ok(stored);

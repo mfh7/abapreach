@@ -216,3 +216,24 @@ fn the_body_is_one_select_line_that_reads_the_entity() {
     not_utf8.body = b"SELECT * FROM T001 WHERE X = '\xff'".to_vec();
     assert_refused(&[not_utf8]);
 }
+
+#[test]
+fn only_the_canonical_read_table_rendering_is_admitted() {
+    let uri = format!("{BASE}?rowNumber=1&ddicEntityName=T001");
+
+    assert_refused(&[
+        valid(&uri, "SELECT * FROM T001 WHERE EXISTS (SELECT * FROM T002)"),
+        valid(
+            &uri,
+            "SELECT * FROM T001 JOIN T002 ON T001~BUKRS = T002~BUKRS",
+        ),
+        valid(&uri, "SELECT BUKRS + 1 FROM T001"),
+        valid(&uri, "SELECT * FROM T001 WHERE BUKRS = '0001' \" comment"),
+        valid(&uri, "SELECT * FROM T001, T002"),
+        valid(&uri, "SELECT * FROM T001 UNION SELECT * FROM T002"),
+        valid(&uri, "SELECT * FROM T001 WHERE BUKRS = '0001' trailing"),
+        valid(&uri, "select * from t001"),
+        valid(&uri, "SELECT  * FROM T001"),
+        valid(&uri, "SELECT * FROM T001 WHERE bukrs = '0001'"),
+    ]);
+}

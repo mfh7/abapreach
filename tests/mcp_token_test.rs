@@ -405,7 +405,7 @@ fn a_token_of_another_connection_is_refused() {
 // ---- policies and the human ------------------------------------------------------------------
 
 #[test]
-fn confirm_without_an_elicitation_capability_refuses_naming_the_policy_and_keeps_the_token() {
+fn confirm_without_elicitation_burns_the_presented_token_before_refusing() {
     let mut rig = rig(CONFIRM);
     let mut blind = FakeSession::new(false);
 
@@ -426,7 +426,7 @@ fn confirm_without_an_elicitation_capability_refuses_naming_the_policy_and_keeps
     assert_eq!(blind.asked(), 0);
     assert_eq!(rig.opened(), opened);
 
-    // The refusal was not the human's decline: a client that can ask still redeems the token.
+    // A presented matching token is terminal even when the client cannot confirm it.
     rig.adt(replay(FIXTURE, execute_steps()));
 
     let mut able = FakeSession::typing("YTEST_ABAPREACH01");
@@ -436,7 +436,10 @@ fn confirm_without_an_elicitation_capability_refuses_naming_the_policy_and_keeps
         with_token(deploy_arguments(), &token),
     );
 
-    assert!(!result.is_error, "{}", result.text);
+    assert!(result.is_error);
+    assert!(result.text.contains("unknown"), "{}", result.text);
+    assert_eq!(able.asked(), 0);
+    assert_eq!(rig.opened(), opened);
 }
 
 #[test]
@@ -574,7 +577,7 @@ fn a_create_is_confirmed_like_a_deploy_under_confirm() {
 }
 
 #[test]
-fn delete_always_asks_even_when_the_policy_is_token_and_refuses_a_blind_client() {
+fn delete_capability_refusal_burns_its_token_under_every_policy() {
     for policy in [TOKEN, CONFIRM] {
         let mut rig = rig(policy);
         let requests = log();
@@ -596,7 +599,8 @@ fn delete_always_asks_even_when_the_policy_is_token_and_refuses_a_blind_client()
         assert!(refused.text.contains("elicitation"), "{}", refused.text);
         assert!(!any(&requests, "DELETE "), "{policy}");
 
-        // Refused before the token was spent: a client that can answer still deletes.
+        // Delete always requires confirmation. A failed capability check consumes only this
+        // matching ticket, so a retry cannot send a SAP request.
         rig.adt(
             prog_reads(&requests, "OWNER")
                 .post(
@@ -615,9 +619,14 @@ fn delete_always_asks_even_when_the_policy_is_token_and_refuses_a_blind_client()
         let mut able = FakeSession::typing("ZPROG");
         let deleted = rig.call(&mut able, "abap_delete", with_token(delete, &token));
 
-        assert!(!deleted.is_error, "{policy}: {}", deleted.text);
-        assert_eq!(able.asked(), 1, "{policy}");
-        assert_eq!(deleted.structured["objects"][0]["status"], "DELETED");
+        assert!(deleted.is_error, "{policy}: {}", deleted.text);
+        assert!(
+            deleted.text.contains("unknown"),
+            "{policy}: {}",
+            deleted.text
+        );
+        assert_eq!(able.asked(), 0, "{policy}");
+        assert!(!any(&requests, "DELETE "), "{policy}");
     }
 }
 
