@@ -24,9 +24,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use crate::adt::format_messages;
 
-const LOCK_ACCEPT: &str =
+pub(crate) const LOCK_ACCEPT: &str =
     "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result";
-const VERSIONS_ACCEPT: &str = "application/atom+xml;type=feed";
+pub(crate) const VERSIONS_ACCEPT: &str = "application/atom+xml;type=feed";
 const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET without a version returns it; restore only by deploying the base source again on your order";
 const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
 const INACTIVE_OBJECTS_ACCEPT: &str =
@@ -557,10 +557,10 @@ enum IncludePost {
     Uncertain,
 }
 
-struct LockInfo {
-    handle: String,
-    corrnr: String,
-    is_local: bool,
+pub(crate) struct LockInfo {
+    pub(crate) handle: String,
+    pub(crate) corrnr: String,
+    pub(crate) is_local: bool,
 }
 
 /// What the locked phase decided; the lock is released afterwards in every case.
@@ -2072,7 +2072,7 @@ pub fn encode_lock_handle(handle: &str) -> String {
     encoded
 }
 
-fn parse_lock(xml: &str) -> Result<LockInfo, String> {
+pub(crate) fn parse_lock(xml: &str) -> Result<LockInfo, String> {
     let fields = leaf_texts(xml)?;
     let handle = fields
         .get("LOCK_HANDLE")

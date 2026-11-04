@@ -2037,3 +2037,148 @@ fn mcp_takes_no_arguments_and_stops_on_an_invalid_policy_with_exit_2() {
     );
     assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
 }
+
+// ---- delete ----------------------------------------------------------------------------------
+
+const DELETE_PROG: &str = "/sap/bc/adt/programs/programs/ztest_del";
+const DELETE_LOCK: &str = "<DATA><LOCK_HANDLE>a/b+c=</LOCK_HANDLE><CORRNR></CORRNR>\
+    <IS_LOCAL>X</IS_LOCAL></DATA>";
+
+fn delete_facts() -> Vec<Result<Response, TransportError>> {
+    vec![
+        source(
+            "<x xmlns:adtcore=\"http://www.sap.com/adt/core\" adtcore:responsible=\"OWNER\">\
+             <adtcore:packageRef adtcore:name=\"$TMP\"/></x>",
+        ),
+        source("REPORT ztest_del."),
+        source("<feed xmlns=\"http://www.w3.org/2005/Atom\"/>"),
+    ]
+}
+
+fn delete_args(plan: &str, simulate: bool) -> Vec<&str> {
+    let mut args = vec!["abapreach", "delete", "PROG:ZTEST_DEL", "--plan", plan];
+
+    if simulate {
+        args.push("--simulate");
+    }
+
+    args.extend_from_slice(&["--conn", "dev_100"]);
+
+    args
+}
+
+#[test]
+fn delete_simulates_then_deletes_on_adt_and_proves_it_from_a_fresh_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(delete_facts()));
+
+    let simulated = go(&delete_args(plan, true), directory.path(), &mut fake);
+
+    assert_eq!(simulated.code, 0, "{}", simulated.stderr);
+    assert!(
+        simulated.stdout.contains("SIMULATED_OK"),
+        "{}",
+        simulated.stdout
+    );
+
+    let mut replies = delete_facts();
+
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Ok(Response::empty(200)));
+    fake.adt.push_back(scripted(replies));
+
+    let (cell, session) = shared(ScriptedTransport::replies(vec![Ok(Response::text(
+        404, "<exc/>",
+    ))]));
+
+    fake.adt.push_back(session);
+
+    let deleted = go(&delete_args(plan, false), directory.path(), &mut fake);
+
+    assert_eq!(deleted.code, 0, "{} {}", deleted.stdout, deleted.stderr);
+    assert!(deleted.stdout.contains("DELETED"), "{}", deleted.stdout);
+    assert_eq!(fake.adt_opened, 3);
+    assert_eq!(cell.borrow().calls[0].uri, DELETE_PROG);
+    assert!(!deleted.stdout.contains("a/b+c="));
+    assert!(!deleted.stderr.contains("a/b+c="));
+}
+
+#[test]
+fn a_lost_delete_reply_is_reconciled_once_and_the_batch_exits_1() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(delete_facts()));
+    assert_eq!(
+        go(&delete_args(plan, true), directory.path(), &mut fake).code,
+        0
+    );
+
+    let mut replies = delete_facts();
+
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Err(TransportError::PostSendUncertain(
+        "reply lost".to_owned(),
+    )));
+    fake.adt.push_back(scripted(replies));
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(404, "<exc/>"))]));
+
+    let exit = go(&delete_args(plan, false), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1, "{} {}", exit.stdout, exit.stderr);
+    assert!(
+        exit.stdout.contains("DELETED (reconciled)"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stdout.contains("check before retrying"),
+        "{}",
+        exit.stdout
+    );
+    assert!(exit.stdout.contains("a lock may remain"), "{}", exit.stdout);
+    // The DELETE was sent once; the only other session is the read-only look.
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (3, 0));
+}
+
+#[test]
+fn delete_on_a_session_without_state_falls_back_to_rfc_before_anything_is_sent() {
+    struct Stateless;
+
+    impl SadtTransport for Stateless {
+        fn request(
+            &mut self,
+            request: abapreach::transport::Request,
+        ) -> Result<Response, TransportError> {
+            panic!("nothing may be sent: {request:?}");
+        }
+
+        fn close(&mut self) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn stateful_supported(&self) -> Option<bool> {
+            Some(false)
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(Ok(Box::new(Stateless)));
+    fake.rfc.push_back(scripted(delete_facts()));
+
+    let exit = go(&delete_args(plan, true), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0, "{} {}", exit.stdout, exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}

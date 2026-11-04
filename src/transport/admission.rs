@@ -36,7 +36,7 @@ enum Kind {
     Func,
     Clas,
     Intf,
-    /// A function group: readable as metadata, never locked or written.
+    /// A function group: readable as metadata, locked only for a delete, never written.
     Group,
 }
 
@@ -79,6 +79,7 @@ impl Admission {
 
         match request.method.as_str() {
             "GET" => is_read(uri, path, query),
+            "DELETE" => request.body.is_empty() && is_delete(path, query),
             "PUT" => is_put(path, query) && has_content_type(request, "text/plain; charset=utf-8"),
             "POST" => {
                 if let Some(preaudit) = uri.strip_prefix(ACTIVATION) {
@@ -178,6 +179,14 @@ pub fn is_put_request(request: &Request) -> bool {
     request.method == "PUT" && !request.uri.contains('#') && is_put(path, query)
 }
 
+/// Whether `request` is a `DELETE` of an object under its lock.
+#[cfg(feature = "fault-injection")]
+pub fn is_delete_request(request: &Request) -> bool {
+    let (path, query) = split_query(&request.uri);
+
+    request.method == "DELETE" && !request.uri.contains('#') && is_delete(path, query)
+}
+
 fn split_query(uri: &str) -> (&str, Option<&str>) {
     match uri.split_once('?') {
         Some((path, query)) => (path, Some(query)),
@@ -202,8 +211,9 @@ fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
         (Part::Source | Part::IncludeSource, Some("version=active" | "version=inactive")) => true,
         (Part::SourceVersions | Part::IncludeVersions, None) => true,
         (Part::Structure, Some(OBJECT_STRUCTURE)) => true,
-        // The metadata the create reconciliation and the group package lookup read.
-        (Part::Object, None) => matches!(parsed.kind, Kind::Group | Kind::Func | Kind::Intf),
+        // The metadata the create reconciliation and the group package lookup read, and the
+        // read that proves a delete (404 from a fresh session).
+        (Part::Object, None) => true,
         _ => false,
     }
 }
@@ -248,7 +258,8 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
     };
 
     match parsed.part {
-        Part::Object if parsed.kind != Kind::Group => query.is_some_and(|query| {
+        // The group lock only serves the delete of a function group.
+        Part::Object => query.is_some_and(|query| {
             query == LOCK || query.strip_prefix(UNLOCK).is_some_and(is_encoded_handle)
         }),
         // The include POST runs under the class lock.
@@ -257,6 +268,13 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
         }
         _ => false,
     }
+}
+
+/// `DELETE <object>?lockHandle=<handle>[&corrNr=<request>]`: one object of the five delete kinds,
+/// under its lock, never a part, a collection or another endpoint.
+fn is_delete(path: &str, query: Option<&str>) -> bool {
+    parse_path(path).is_some_and(|parsed| parsed.part == Part::Object)
+        && query.is_some_and(is_lock_and_request)
 }
 
 fn has_content_type(request: &Request, expected: &str) -> bool {

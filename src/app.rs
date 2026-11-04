@@ -8,9 +8,12 @@ use crate::domain::Outcome;
 use crate::hash::local_source_lines;
 use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
 use crate::operation::create::{CreateInput, CreateProg};
+use crate::operation::delete::{self, Context};
+use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::doctor::Doctor;
 use crate::operation::read::{ReadProg, ReadTarget};
+use crate::policy::Terminal;
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
     DynamicRfcApi, Env, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
@@ -328,7 +331,63 @@ fn execute(
             }
         }
         Command::ReadTable { .. } => stop("read-table is not available in this build yet"),
-        Command::Delete { .. } => stop("delete is not available in this build yet"),
+        Command::Delete {
+            targets,
+            simulate,
+            tr,
+            plan,
+            ..
+        } => route(
+            OperationKind::Delete,
+            None,
+            false,
+            connection,
+            factories,
+            |transport, _, _, fresh| {
+                // The server would answer the LOCK and then refuse the DELETE, so nothing is sent
+                // and the router may try RFC.
+                if transport.stateful_supported() == Some(false) {
+                    let _ = transport.close();
+
+                    return Attempt {
+                        fallback_allowed: true,
+                        ..Attempt::failed(
+                            NO_STATEFUL_SESSION.to_owned(),
+                            Failure::CapabilityUnavailable,
+                        )
+                    };
+                }
+
+                let context = Context {
+                    conn: &connection.id,
+                    user: &connection.user,
+                    policies: &connection.policies,
+                    confirmer: &Terminal,
+                };
+                let outcome = {
+                    let mut backend = AdtDelete::new(&mut *transport, &connection.user, fresh);
+
+                    delete::run(
+                        &mut backend,
+                        &context,
+                        &targets,
+                        tr.as_deref(),
+                        simulate,
+                        &plan,
+                    )
+                };
+
+                // The batch is over and the lock, if any, is reported by the outcome.
+                let _ = transport.close();
+
+                Attempt {
+                    outcome,
+                    failure: None,
+                    fallback_allowed: false,
+                    detail: None,
+                }
+            },
+        ),
         Command::Mcp => stop("the MCP server needs no connection"),
         Command::Read {
             kind,
@@ -363,7 +422,7 @@ fn execute(
                 false,
                 connection,
                 factories,
-                |transport, _, _| {
+                |transport, _, _, _| {
                     let read =
                         ReadProg::run_target_classified(transport, target, &out, force, None);
 
@@ -431,7 +490,7 @@ fn execute(
                 false,
                 connection,
                 factories,
-                |transport, selection, cancel| {
+                |transport, selection, cancel, _| {
                     let result = CreateProg::run_with_cancel(
                         transport,
                         input.clone(),
@@ -497,7 +556,7 @@ fn execute(
                 base_given,
                 connection,
                 factories,
-                |transport, selection, cancel| {
+                |transport, selection, cancel, _| {
                     let result = DeployProg::run_scoped(
                         transport,
                         input.clone(),
@@ -534,7 +593,12 @@ fn route(
     base_given: bool,
     connection: &Connection,
     factories: &mut dyn Factories,
-    mut attempt: impl FnMut(&mut dyn SadtTransport, &Selection, &CancelFlag) -> Attempt,
+    mut attempt: impl FnMut(
+        &mut dyn SadtTransport,
+        &Selection,
+        &CancelFlag,
+        &mut dyn FnMut() -> Opened,
+    ) -> Attempt,
 ) -> Exit {
     let router = Router::new(connection.adt.is_some(), true);
     let cancel = factories.cancel();
@@ -575,7 +639,15 @@ fn route(
             BackendKind::RfcSadt => factories.rfc(connection),
         };
         let done = match opened {
-            Ok(mut transport) => attempt(&mut *transport, &selection, &cancel),
+            Ok(mut transport) => {
+                // A new session of the same backend, for the read that settles a lost reply.
+                let mut fresh = || match backend {
+                    BackendKind::AdtHttp => factories.adt(connection),
+                    BackendKind::RfcSadt => factories.rfc(connection),
+                };
+
+                attempt(&mut *transport, &selection, &cancel, &mut fresh)
+            }
             Err(error) => Attempt::from_error(&error),
         };
 
