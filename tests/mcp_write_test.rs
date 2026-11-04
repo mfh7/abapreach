@@ -86,6 +86,60 @@ impl Session for Typing {
     fn log(&mut self, _: &str) {}
 }
 
+struct CancelTyping {
+    cancel: CancelFlag,
+}
+
+impl CancelTyping {
+    fn new() -> Self {
+        Self {
+            cancel: CancelFlag::new(),
+        }
+    }
+}
+
+impl Session for CancelTyping {
+    fn can_elicit(&self) -> bool {
+        true
+    }
+
+    fn cancel(&self) -> CancelFlag {
+        self.cancel.clone()
+    }
+
+    fn elicit(
+        &mut self,
+        _: &Form,
+        _: Duration,
+        _: &mut dyn FnMut(&str, &Map<String, Value>) -> ToolResult,
+    ) -> Answer {
+        Answer::Accepted("ZPROG".to_owned())
+    }
+
+    fn log(&mut self, _: &str) {}
+}
+
+struct CancelDuringInspection {
+    inner: Script,
+    cancel: CancelFlag,
+    fired: bool,
+}
+
+impl SadtTransport for CancelDuringInspection {
+    fn request(&mut self, request: Request) -> Reply {
+        if !self.fired && request.method == "GET" && request.uri == PROG {
+            self.fired = true;
+            self.cancel.set();
+        }
+
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
+    }
+}
+
 /// A scripted ADT: replies per method and exact URI, a fallback status for everything else, and a
 /// log of every request with its body.
 struct Script {
@@ -1009,6 +1063,51 @@ fn a_delete_plan_is_simulated_then_executed_from_the_plan_the_ticket_holds() {
     assert!(deleted.structured.get("plan_token").is_none());
 }
 
+#[test]
+fn an_mcp_cancel_during_delete_inspection_sends_no_lock_or_delete() {
+    let mut rig = rig();
+    let requests = log();
+    let mut session = CancelTyping::new();
+
+    rig.adt(prog_reads(&requests, "OWNER"));
+    let simulated = rig.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+    let token = simulated.structured["plan_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let cancel = session.cancel();
+    rig.adt(CancelDuringInspection {
+        inner: prog_reads(&requests, "OWNER"),
+        cancel,
+        fired: false,
+    });
+    let result = rig.call_as(
+        &mut session,
+        "abap_delete",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"], "plan_token": token}),
+    );
+
+    assert!(result.is_error, "{}", result.text);
+    assert_eq!(result.structured["objects"][0]["status"], "SKIPPED");
+    assert!(result.text.contains("W: stopped before PROG ZPROG"));
+    assert!(
+        !requests
+            .borrow()
+            .iter()
+            .any(|request| request.contains("_action=LOCK"))
+    );
+    assert!(
+        !requests
+            .borrow()
+            .iter()
+            .any(|request| request.starts_with("DELETE "))
+    );
+}
+
 // ---- diagnostics and payload -----------------------------------------------------------------
 
 #[test]
@@ -1030,6 +1129,33 @@ fn diagnostics_hide_the_secret_and_the_host() {
     for text in [result.text.clone(), result.structured.to_string()] {
         assert!(!text.contains(PASSWORD), "{text}");
         assert!(!text.contains(HOST), "{text}");
+    }
+}
+
+#[test]
+fn delete_diagnostics_scrub_host_password_and_route_in_every_client_field() {
+    let route = "/H/router.example.net/S/3299/H/target.example.net/W/route-password";
+    let mut rig = rig();
+    rig.env.insert("DEV_SAPROUTER".to_owned(), route.to_owned());
+    let requests = log();
+    let leak = format!("cannot reach {HOST} with {PASSWORD} through {route}");
+
+    rig.adt(Script::new(&requests).on("GET", PROG, Err(TransportError::PreSendConnectivity(leak))));
+
+    let result = rig.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+
+    assert!(result.is_error);
+    for text in [
+        result.text.clone(),
+        result.structured["output"].to_string(),
+        result.structured["objects"][0]["reason"].to_string(),
+    ] {
+        for secret in [HOST, PASSWORD, route] {
+            assert!(!text.contains(secret), "{text}");
+        }
     }
 }
 

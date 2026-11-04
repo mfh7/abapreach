@@ -11,28 +11,34 @@ matrix does not test.
 
 ## Intentional differences
 
-### 1. Function modules use the ADT server-rendered format
+### 1. ADT delete transport selection happens at execute time
+
+ADT simulation is read-only and cannot report which request currently owns a transportable
+object. The execute-time LOCK reply decides the request; an explicit `--tr` must match it.
+Matrix: not exercised (requires a transportable delete fixture).
+
+### 2. Function modules use the ADT server-rendered format
 
 The source of a `FUNC` is the ADT format: `FUNCTION <name> IMPORTING ... .` followed by the body.
 The Python tooling uses the `*"` interface header in the file. A Python-format file is refused with
 exit 2 (`STOP`). After a PUT, SAP re-renders the signature; ABAPReach compares the text of the PUT
 reply, not the file bytes. Matrix: `func-python-file-rejected`, `func-deploy`, `bom-crlf-deploy`.
 
-### 2. `CLAS` simulation does not save
+### 3. `CLAS` simulation does not save
 
 `deploy CLAS --simulate` runs the syntax check through the checkrun and does not save. The matrix
 checks that the active and inactive source are unchanged and that the output has one `live hash`
 line. The Python function module writes the inactive version and then discards it. The transport
 request entry is recorded as unobserved. Matrix: `clas-simulate-no-save`.
 
-### 3. Source-free create
+### 4. Source-free create
 
 `create` makes an empty object (a skeleton) from the name, the text and the package or function
 group. The Python `create` takes the file as an argument and writes the source with it. In
 ABAPReach the source comes with `deploy`, after `create` and a simulation. Matrix: `create-*`
 and `create-simulate`.
 
-### 4. Uncertain create tokens
+### 5. Uncertain create tokens
 
 When a create POST outcome is unknown, ABAPReach reads the object and reports one of:
 
@@ -43,7 +49,7 @@ The Python tooling prints `CREATE status unknown` with no status token and does 
 back. Matrix: `create-uncertain-present`, `create-uncertain-unreadable`, `fault-create-drop` (RFC
 paths). The `does not exist` branch is not exercised live.
 
-### 5. Stricter name limits
+### 6. Stricter name limits
 
 ABAPReach checks the SAP limits per kind, before the create request:
 
@@ -57,14 +63,14 @@ ABAPReach checks the SAP limits per kind, before the create request:
 Names for `create` must start with `Z` or `Y`. The Python tooling checks a single name limit of
 40 for all kinds; its text limits are the same as above. Not exercised: the live matrix does not run the name or text limits.
 
-### 6. `read --lines` writes to stdout only
+### 7. `read --lines` writes to stdout only
 
 `read ... --lines A-B` requires the output to be `-`. Any other value stops with exit 2
 (`STOP: --lines requires OUT to be '-' (stdout)`). The Python `rfc-read source --lines` prints to
 stdout with no output argument. The full source is read and hashed before the range is taken.
 Matrix: `read-lines` and `read-lines-grammar`, both on `FUNC` only.
 
-### 7. `--create-include`
+### 8. `--create-include`
 
 The Python ADT tooling (`deploy_hunks.py`) stops at an empty include. ABAPReach stops
 with `INCLUDE_MISSING: <kind> (re-run with --create-include)`, exit 1, before any write. With
@@ -72,14 +78,14 @@ with `INCLUDE_MISSING: <kind> (re-run with --create-include)`, exit 1, before an
 repeats it. The Python `rfc-deploy` has no local-include writer at all. Matrix: `include-missing`
 and `include-create` (`CCAU`). The uncertain-POST branches are not exercised live.
 
-### 8. Exit code 3 is unused
+### 9. Exit code 3 is unused
 
 ABAPReach 0.13.0 never returns exit 3. Its exit codes are 0 (done), 1 (inspect the SAP state), 2
 (`STOP`) and 130 (interrupt). The class metadata condition that would use exit 3
 (`CLASS_METADATA_INCOMPLETE`) is not implemented, because the Class Builder check in the matrix
 (`clas-verify4`) passed on the SAP 7.50 system.
 
-### 9. Server-rendered FUNC compare and empty source
+### 10. Server-rendered FUNC compare and empty source
 
 For a `FUNC`, the comparison is against the text SAP returns from the PUT, because SAP re-renders
 the source (upper-case signature, blank lines). A fresh object's empty source is an empty body on
@@ -87,7 +93,7 @@ the SAP 7.50 system and a single NUL character on the SAP 7.40 system; both read
 read and hash agree. A local file with no lines is refused (`STOP: source file is empty`), and no
 empty PUT is sent. Matrix: `read-empty-canonical`, `func-deploy`, `bom-crlf-deploy`.
 
-### 10. Where-used cap and package filter
+### 11. Where-used cap and package filter
 
 A changed `FUNC` interface lists at most 50 callers, then `WHERE-USED ... <n> more`. Package entries
 (`DEVC`) are not callers and are dropped; a caller that appears twice is listed once. Not exercised:

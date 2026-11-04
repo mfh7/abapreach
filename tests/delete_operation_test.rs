@@ -365,7 +365,7 @@ fn simulate_states_active_and_absent_guards() {
     for active in [
         "Z/Y scope",
         "self-guard",
-        "TR ownership",
+        "lock request agreement at execute",
         "foreign_inactive",
         "plan hash",
     ] {
@@ -813,13 +813,10 @@ fn two_locking_requests_are_rejected() {
 }
 
 #[test]
-fn unlocked_transportable_object_needs_tr_and_uses_it() {
-    let reason = rejected_reason(&["PROG:ZP"], with_tr("ZP", TrLock::Unlocked), "ZP");
-
-    assert!(reason.contains("--tr"), "{reason}");
-
+fn unlocked_transportable_object_defers_the_request_to_lock_and_binds_an_explicit_tr() {
     let mut fake = with_tr("ZP", TrLock::Unlocked);
 
+    assert!(sim(&mut fake, &["PROG:ZP"], None).all_simulated_ok());
     assert!(sim(&mut fake, &["PROG:ZP"], Some("DEVK1")).all_simulated_ok());
 }
 
@@ -1160,7 +1157,7 @@ fn execute_until_skips_the_objects_from_the_first_stop_and_never_interrupts_a_re
         &mut || {
             asked += 1;
 
-            asked > 1
+            asked > 2
         },
     )
     .expect("execute");
@@ -1198,4 +1195,60 @@ fn execute_until_with_a_stop_before_the_first_object_deletes_nothing() {
 
     assert!(fake.deleted.is_empty());
     assert_eq!(status_of(&report, "ZP1"), DeleteStatus::Skipped);
+}
+
+#[test]
+fn execute_until_stops_after_the_inspection_before_the_first_lock() {
+    let mut fake = Fake::default();
+    let plan = plan_of(&sim(&mut fake, &["PROG:ZP1", "PROG:ZP2"], None));
+    let policies = Policies::default();
+    let mut checks = 0;
+    let report = execute_until(
+        &mut fake,
+        &context(&policies, &Yes(false)),
+        &targets(&["PROG:ZP1", "PROG:ZP2"]),
+        None,
+        &plan,
+        &mut || {
+            checks += 1;
+            checks > 1
+        },
+    )
+    .expect("execute");
+
+    assert!(fake.deleted.is_empty());
+    assert_eq!(status_of(&report, "ZP1"), DeleteStatus::Skipped);
+    assert_eq!(status_of(&report, "ZP2"), DeleteStatus::Skipped);
+    assert!(report.outcome.stdout.contains("W: stopped before PROG ZP1"));
+}
+
+#[test]
+fn adt_simulation_without_a_tr_leaves_the_request_to_the_later_lock() {
+    let mut fake = with_tr("ZP", TrLock::Unlocked);
+
+    let report = sim(&mut fake, &["PROG:ZP"], None);
+
+    assert!(report.all_simulated_ok(), "{}", report.outcome.stdout);
+    assert!(
+        report.outcome.stdout.contains("TR -"),
+        "{}",
+        report.outcome.stdout
+    );
+    assert!(
+        report
+            .outcome
+            .stdout
+            .contains("TR: decided by the lock at execute"),
+        "{}",
+        report.outcome.stdout
+    );
+}
+
+#[test]
+fn adt_simulation_does_not_claim_a_transport_ownership_guard() {
+    let mut fake = Fake::default();
+
+    let report = sim(&mut fake, &["PROG:ZP"], None);
+
+    assert!(!report.outcome.stdout.contains("TR ownership"));
 }

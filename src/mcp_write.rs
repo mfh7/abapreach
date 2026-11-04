@@ -724,7 +724,12 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                     confirmer: &NoTerminal,
                 };
                 let result = {
-                    let mut backend = AdtDelete::new(&mut *transport, &connection.user, fresh);
+                    let mut backend = AdtDelete::with_cancel(
+                        &mut *transport,
+                        &connection.user,
+                        fresh,
+                        cancel.clone(),
+                    );
 
                     match &plan {
                         Some(plan) => delete::execute_until(
@@ -823,6 +828,10 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         let leaked = holds_secret(connection, &exit.stdout);
         let output = if leaked {
             SECRET_REJECTED.to_owned()
+        } else if structured.get("objects").is_some() {
+            // Delete output is diagnostics, never a source or table payload, and its error
+            // reasons echo the transport text: scrub hosts and the route as diagnostics are.
+            diagnostic(connection, exit.stdout.trim_end())
         } else {
             scrub(exit.stdout.trim_end(), &known_lock_handles())
         };
@@ -961,7 +970,18 @@ fn typed_text(ticket: &Ticket) -> String {
 fn sanitize(text: &str, limit: usize) -> String {
     let clean: String = text
         .chars()
-        .filter(|character| !character.is_control())
+        .filter(|character| {
+            !character.is_control()
+                && !matches!(
+                    character,
+                    '\u{200b}'..='\u{200f}'
+                        | '\u{2028}'
+                        | '\u{2029}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2060}'..='\u{2069}'
+                        | '\u{feff}'
+                )
+        })
         .collect();
 
     if clean.chars().count() <= limit {

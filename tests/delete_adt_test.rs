@@ -233,11 +233,12 @@ fn a_local_program_reads_package_author_source_and_no_inactive_version() {
 
 #[test]
 fn a_transportable_package_is_not_locked_until_the_delete_asks_for_the_lock() {
-    let (result, _, _) = with_backend(prog_reads("ZABAPTEST"), vec![], |backend| {
+    let (result, calls, _) = with_backend(prog_reads("ZABAPTEST"), vec![], |backend| {
         backend.inspect(DeleteKind::Prog, "ZPROG")
     });
 
     assert_eq!(facts(result).tr, TrLock::Unlocked);
+    assert_eq!(count(&calls, "POST"), 0);
 }
 
 #[test]
@@ -484,6 +485,55 @@ fn a_transportable_delete_carries_the_request_of_the_lock() {
 
     assert_eq!(reply, DeleteReply::Deleted);
     assert_eq!(count(&calls, "DELETE"), 1);
+}
+
+#[test]
+fn a_transportable_delete_without_an_explicit_tr_uses_the_request_of_the_lock() {
+    let main = Fake::default().lock(CLAS, false, TR).delete(
+        &format!("{CLAS}?lockHandle={ENCODED}&corrNr={TR}"),
+        Ok(Response::empty(200)),
+    );
+    let (reply, calls, _) = with_backend(main, vec![gone(CLAS)], |backend| {
+        backend.delete(DeleteKind::Clas, "ZCL_A", None)
+    });
+
+    assert_eq!(reply, DeleteReply::Deleted);
+    assert!(uris(&calls).contains(&format!("DELETE {CLAS}?lockHandle={ENCODED}&corrNr={TR}")));
+}
+
+#[test]
+fn a_different_explicit_tr_unlocks_and_never_deletes() {
+    let main = Fake::default().lock(PROG, false, TR).post(
+        &format!("{PROG}?_action=UNLOCK&lockHandle={ENCODED}"),
+        200,
+        "",
+    );
+    let (reply, calls, _) = with_backend(main, vec![], |backend| {
+        backend.delete(DeleteKind::Prog, "ZPROG", Some("DEVK900002"))
+    });
+
+    assert!(
+        matches!(reply, DeleteReply::Rejected(ref reason) if reason.contains("does not match"))
+    );
+    assert_eq!(count(&calls, "DELETE"), 0);
+    assert_eq!(count(&calls, "POST"), 2);
+}
+
+#[test]
+fn a_transportable_lock_without_a_request_unlocks_and_never_deletes() {
+    let main = Fake::default().lock(PROG, false, "").post(
+        &format!("{PROG}?_action=UNLOCK&lockHandle={ENCODED}"),
+        200,
+        "",
+    );
+    let (reply, calls, _) = with_backend(main, vec![], |backend| {
+        backend.delete(DeleteKind::Prog, "ZPROG", None)
+    });
+
+    assert!(
+        matches!(reply, DeleteReply::Rejected(ref reason) if reason.contains("no transport request"))
+    );
+    assert_eq!(count(&calls, "DELETE"), 0);
 }
 
 #[test]

@@ -219,7 +219,10 @@ fn an_excerpt_deploy_is_shown_as_a_large_deletion() {
 
 #[test]
 fn the_summary_is_bounded_and_strips_control_characters_from_sap_strings() {
-    let hostile = format!("-line\u{1b}[31m red\r\nsecond\u{0}{}", "x".repeat(2000));
+    let hostile = format!(
+        "-line\u{1b}[31m red\r\nsecond\u{0}\u{202a}\u{202e}\u{2066}\u{2069}\u{200b}\u{200f}\u{feff}\u{2028}\u{2029}{}",
+        "x".repeat(2000)
+    );
     let change = Change {
         added: 500,
         removed: 400,
@@ -235,9 +238,19 @@ fn the_summary_is_bounded_and_strips_control_characters_from_sap_strings() {
         summary.len()
     );
     assert!(
-        summary
-            .chars()
-            .all(|character| character == '\n' || !character.is_control()),
+        summary.chars().all(|character| {
+            character == '\n'
+                || (!character.is_control()
+                    && !matches!(
+                        character,
+                        '\u{200b}'..='\u{200f}'
+                            | '\u{202a}'..='\u{202e}'
+                            | '\u{2060}'..='\u{2069}'
+                            | '\u{feff}'
+                            | '\u{2028}'
+                            | '\u{2029}'
+                    ))
+        }),
         "{summary:?}"
     );
     // The 1234 the excerpt left out and the 170 of its lines the summary does not show.

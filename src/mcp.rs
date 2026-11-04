@@ -287,9 +287,18 @@ impl<H: ToolHandler> Server<H> {
             Some(_) => return Some(error(id, INVALID_PARAMS, "arguments must be an object")),
         };
 
+        let write = WRITE_TOOLS.contains(&name);
+
         // The client cancelled this request before it started: nothing runs, nothing is sent.
-        if !link.begin(id) {
-            return None;
+        // A shutdown stops a write that has not begun, and the client still gets an answer.
+        if !link.begin(id, write) {
+            return link.cancel.is_shutdown().then(|| {
+                let refused = ToolResult::error(
+                    "CANCELED: the request was cancelled before anything was sent".to_owned(),
+                );
+
+                ok(id, refused.to_value())
+            });
         }
 
         link.elicitation = self.elicitation;
@@ -475,6 +484,8 @@ fn read_loop(
     }
 
     // A write in flight cannot be answered any more: it settles its lock and writes no further.
+    // A write still queued behind it sees the EOF in `Link::begin`; requests already received
+    // are still answered.
     if shared.busy.load(Ordering::SeqCst) {
         cancel.set();
     }
@@ -503,8 +514,10 @@ impl Link<'_> {
             .unwrap_or(Event::Eof)
     }
 
-    /// Marks `id` as the request in flight; `false` when the client cancelled it already.
-    fn begin(&mut self, id: &Value) -> bool {
+    /// Marks `id` as the request in flight; `false` when the client cancelled it already, or
+    /// when a shutdown (EOF queued behind it, SIGTERM) stops a write that has not begun. Reads
+    /// and every other request are still served.
+    fn begin(&mut self, id: &Value, write: bool) -> bool {
         let key = id.to_string();
         let mut calls = lock(&self.shared.calls);
 
@@ -512,11 +525,41 @@ impl Link<'_> {
             return false;
         }
 
-        calls.current = Some(key);
+        drop(calls);
+
+        if write {
+            // The reader can already have queued EOF behind this write.
+            while let Ok(event) = self.events.try_recv() {
+                self.deferred.push_back(event);
+            }
+
+            if self
+                .deferred
+                .iter()
+                .any(|event| matches!(event, Event::Eof))
+            {
+                self.cancel.request_shutdown();
+            }
+
+            if self.cancel.is_shutdown() {
+                return false;
+            }
+        }
+
+        lock(&self.shared.calls).current = Some(key);
         // A cancellation belongs to one request; a shutdown stays.
         self.cancel.reset();
 
         true
+    }
+
+    /// Whether a request or an EOF is already waiting.
+    fn has_pending(&mut self) -> bool {
+        while let Ok(event) = self.events.try_recv() {
+            self.deferred.push_back(event);
+        }
+
+        !self.deferred.is_empty()
     }
 
     fn end(&mut self) {
@@ -733,7 +776,8 @@ pub fn serve_with<H: ToolHandler>(
             link.emit(&reply)?;
         }
 
-        if link.cancel.is_shutdown() {
+        // A shutdown ends the loop once every request already received is answered.
+        if link.cancel.is_shutdown() && !link.has_pending() {
             break;
         }
     }
@@ -892,4 +936,159 @@ fn build_tools(write_offered: bool, writable: &[String]) -> Vec<Value> {
     }
 
     tools
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Event, Link, Server, Shared, SharedOutput, ToolHandler, ToolResult};
+    use crate::operation::deploy::CancelFlag;
+    use serde_json::{Map, Value, json};
+    use std::collections::VecDeque;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex, mpsc};
+
+    #[test]
+    fn begin_refuses_a_queued_write_after_eof_without_resetting_shutdown() {
+        let (sender, events) = mpsc::channel();
+        sender.send(Event::Eof).unwrap();
+        let output: SharedOutput = Arc::new(Mutex::new(Vec::new()));
+        let shared = Shared::default();
+        let cancel = CancelFlag::new();
+        cancel.request_shutdown();
+        let mut log = Vec::new();
+        let mut link = Link {
+            events: &events,
+            deferred: VecDeque::new(),
+            output: &output,
+            shared: &shared,
+            cancel: cancel.clone(),
+            log: &mut log,
+            elicitation: false,
+            asked: 0,
+        };
+
+        assert!(!link.begin(&json!(4), true));
+        assert!(cancel.is_shutdown());
+        assert!(cancel.is_set());
+    }
+
+    struct Counting(usize);
+
+    impl ToolHandler for Counting {
+        fn call(&mut self, name: &str, _: &Map<String, Value>) -> ToolResult {
+            self.0 += 1;
+
+            ToolResult::error(format!("ran {name}"))
+        }
+    }
+
+    fn call_message(id: u64, name: &str) -> Value {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": name}})
+    }
+
+    /// Runs `message` on a server whose input already holds a queued EOF.
+    fn call_after_eof(message: &Value) -> (Option<Value>, usize, bool) {
+        let (sender, events) = mpsc::channel();
+        sender.send(Event::Eof).unwrap();
+        let output: SharedOutput = Arc::new(Mutex::new(Vec::new()));
+        let shared = Shared::default();
+        let cancel = CancelFlag::new();
+        let mut log = Vec::new();
+        let mut link = Link {
+            events: &events,
+            deferred: VecDeque::new(),
+            output: &output,
+            shared: &shared,
+            cancel: cancel.clone(),
+            log: &mut log,
+            elicitation: false,
+            asked: 0,
+        };
+        let mut server = Server::new(Counting(0), true).with_writable(vec!["DEV".to_owned()]);
+        let reply = server.handle(message, &mut link);
+
+        (reply, server.handler.0, cancel.is_shutdown())
+    }
+
+    #[test]
+    fn a_queued_eof_still_answers_a_read_call() {
+        let (reply, calls, shutdown) = call_after_eof(&call_message(5, "abap_read_source"));
+
+        assert_eq!(calls, 1);
+        assert_eq!(
+            reply.unwrap()["result"]["content"][0]["text"],
+            "ran abap_read_source"
+        );
+        assert!(!shutdown);
+    }
+
+    #[test]
+    fn a_queued_eof_refuses_a_write_call_with_an_answer_and_runs_nothing() {
+        let (reply, calls, shutdown) = call_after_eof(&call_message(6, "abap_deploy"));
+        let reply = reply.unwrap();
+
+        assert_eq!(calls, 0, "the handler must not see the write");
+        assert_eq!(reply["id"], 6);
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("CANCELED: ")
+        );
+        assert!(shutdown);
+    }
+
+    #[test]
+    fn requests_before_an_eof_and_a_write_after_it_all_get_one_answer() {
+        let input = [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+            call_message(2, "abap_read_source"),
+            call_message(3, "abap_deploy"),
+            json!({"jsonrpc": "2.0", "id": 4, "method": "ping"}),
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat();
+        let output = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().write(bytes)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut server = Server::new(Counting(0), true).with_writable(vec!["DEV".to_owned()]);
+
+        super::serve_with(
+            &mut server,
+            std::io::Cursor::new(input.into_bytes()),
+            Sink(output.clone()),
+            Vec::new(),
+            CancelFlag::new(),
+        )
+        .unwrap();
+
+        let bytes = output.lock().unwrap().clone();
+        // The reader answers a ping while a write is in flight, so the order may differ.
+        let mut ids: Vec<u64> = String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["id"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 3, 4]);
+        // The write ran or was refused, depending on whether EOF was read first; reads always ran.
+        assert!(server.handler.0 >= 1);
+    }
 }

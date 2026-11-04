@@ -3,7 +3,7 @@ mod replay;
 
 use abapreach::cli::{Cli, Command, DeleteKind};
 use abapreach::config::Connection;
-use abapreach::operation::deploy::CancelFlag;
+use abapreach::operation::deploy::{CancelFlag, InterruptAction};
 use abapreach::transport::http::HttpTransport;
 use abapreach::transport::rfc::{FakeRfcApi, RfcEndpointResponse, RfcTransport};
 use abapreach::transport::{Response, SadtTransport, TransportError};
@@ -39,6 +39,30 @@ impl<T: SadtTransport> SadtTransport for Shared<T> {
 
     fn stateful_supported(&self) -> Option<bool> {
         self.0.borrow().stateful_supported()
+    }
+}
+
+/// Raises Ctrl-C when DELETE has entered its lock scope, as the real signal handler does.
+struct InterruptOnLock {
+    inner: ScriptedTransport,
+    cancel: CancelFlag,
+    actions: Vec<InterruptAction>,
+}
+
+impl SadtTransport for InterruptOnLock {
+    fn request(
+        &mut self,
+        request: abapreach::transport::Request,
+    ) -> Result<Response, TransportError> {
+        if request.uri.contains("_action=LOCK") {
+            self.actions.push(self.cancel.on_interrupt());
+        }
+
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
     }
 }
 
@@ -2359,6 +2383,50 @@ fn delete_simulates_then_deletes_on_adt_and_proves_it_from_a_fresh_session() {
     assert_eq!(cell.borrow().calls[0].uri, DELETE_PROG);
     assert!(!deleted.stdout.contains("a/b+c="));
     assert!(!deleted.stderr.contains("a/b+c="));
+}
+
+#[test]
+fn ctrl_c_during_a_cli_delete_lock_unlocks_and_exits_130() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(delete_facts()));
+    assert_eq!(
+        go(&delete_args(plan, true), directory.path(), &mut fake).code,
+        0
+    );
+
+    let mut replies = delete_facts();
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Ok(Response::empty(200))); // UNLOCK after deferred interrupt
+    let (cell, opened) = shared(InterruptOnLock {
+        inner: ScriptedTransport::replies(replies),
+        cancel: fake.cancel.clone(),
+        actions: Vec::new(),
+    });
+    fake.adt.push_back(opened);
+
+    let exit = go(&delete_args(plan, false), directory.path(), &mut fake);
+    let transport = cell.borrow();
+
+    assert_eq!(exit.code, 130, "{} {}", exit.stdout, exit.stderr);
+    assert_eq!(transport.actions, [InterruptAction::Deferred]);
+    assert!(
+        transport
+            .inner
+            .calls
+            .iter()
+            .any(|request| request.uri.contains("_action=UNLOCK"))
+    );
+    assert!(
+        transport
+            .inner
+            .calls
+            .iter()
+            .all(|request| request.method != "DELETE")
+    );
 }
 
 #[test]

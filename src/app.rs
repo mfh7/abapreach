@@ -438,7 +438,7 @@ fn execute(
             false,
             connection,
             factories,
-            |transport, _, _, fresh| {
+            |transport, _, cancel, fresh| {
                 // The server would answer the LOCK and then refuse the DELETE, so nothing is sent
                 // and the router may try RFC.
                 if transport.stateful_supported() == Some(false) {
@@ -459,8 +459,13 @@ fn execute(
                     policies: &connection.policies,
                     confirmer: &Terminal,
                 };
-                let outcome = {
-                    let mut backend = AdtDelete::new(&mut *transport, &connection.user, fresh);
+                let mut outcome = {
+                    let mut backend = AdtDelete::with_cancel(
+                        &mut *transport,
+                        &connection.user,
+                        fresh,
+                        cancel.clone(),
+                    );
 
                     delete::run(
                         &mut backend,
@@ -471,6 +476,9 @@ fn execute(
                         &plan,
                     )
                 };
+                if !simulate && cancel.is_set() {
+                    outcome.exit = 130;
+                }
 
                 // The batch is over and the lock, if any, is reported by the outcome.
                 let _ = transport.close();

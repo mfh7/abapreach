@@ -19,7 +19,7 @@ use std::path::Path;
 const NO_ACTIVE: &str = "NO_ACTIVE";
 const PLAN_CHANGED: &str = "Plan changed since simulate; simulate again";
 const LOCK_MAY_REMAIN: &str = "W: a lock may remain on the object";
-const GUARDS_ACTIVE: &str = "guards active: Z/Y scope, self-guard, TR ownership, \
+const GUARDS_ACTIVE: &str = "guards active: Z/Y scope, self-guard, lock request agreement at execute, \
 foreign_inactive (policy {policy}), plan hash";
 const GUARDS_ABSENT: &str = "guards not applied on the ADT route: system change option, \
 client CCNOCLIIND, SE06/software component, server-side self-guard";
@@ -378,10 +378,18 @@ fn resolve_tr(
 
             Ok(None)
         }
-        TrLock::Unlocked => match tr {
-            Some(request) => Ok(Some(request.to_owned())),
-            None => Err("object is transportable and not locked: --tr is required".to_owned()),
-        },
+        // ADT simulation is read-only, so the owning request only becomes known from the
+        // execute-time LOCK reply. An explicit request is checked against that reply later.
+        TrLock::Unlocked => {
+            if tr.is_none() {
+                lines.push(
+                    "TR: decided by the lock at execute; simulation cannot see the owning request"
+                        .to_owned(),
+                );
+            }
+
+            Ok(tr.map(str::to_owned))
+        }
         TrLock::Locked {
             request,
             owner,
@@ -750,6 +758,15 @@ pub fn execute_until(
         }
 
         batch.out.extend(ready.lines);
+
+        if stop() {
+            batch.out.push(format!(
+                "W: stopped before {} {}: the time limit or a cancellation; the rest is SKIPPED",
+                row.0, row.1
+            ));
+            batch.skip_rest(&rows[index..]);
+            break;
+        }
 
         match backend.delete(row.0, &row.1, ready.tr.as_deref()) {
             DeleteReply::Deleted => batch.finish(row, DeleteStatus::Deleted, None, None),

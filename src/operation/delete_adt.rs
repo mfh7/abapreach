@@ -16,7 +16,7 @@ use crate::operation::delete::{
     DeleteBackend, DeleteReply, InactiveFact, ObjectFacts, Reconcile, SourceFact, TrLock,
 };
 use crate::operation::deploy::{
-    LOCK_ACCEPT, LockInfo, VERSIONS_ACCEPT, encode_lock_handle, leaf_texts, parse_lock,
+    CancelFlag, LOCK_ACCEPT, LockInfo, VERSIONS_ACCEPT, encode_lock_handle, leaf_texts, parse_lock,
 };
 use crate::operation::read::resolve_group;
 use crate::transport::{Request, Response, SadtTransport, TransportError};
@@ -43,6 +43,7 @@ pub struct AdtDelete<'a> {
     /// The logon user: another user's inactive version outranks the user's own.
     user: String,
     open: &'a mut Opener<'a>,
+    cancel: Option<CancelFlag>,
 }
 
 impl<'a> AdtDelete<'a> {
@@ -51,6 +52,22 @@ impl<'a> AdtDelete<'a> {
             transport,
             user: user.to_owned(),
             open,
+            cancel: None,
+        }
+    }
+
+    /// Like [`Self::new`], while a write owns the interrupt scope.
+    pub fn with_cancel(
+        transport: &'a mut dyn SadtTransport,
+        user: &str,
+        open: &'a mut Opener<'a>,
+        cancel: CancelFlag,
+    ) -> Self {
+        Self {
+            transport,
+            user: user.to_owned(),
+            open,
+            cancel: Some(cancel),
         }
     }
 
@@ -399,10 +416,17 @@ impl DeleteBackend for AdtDelete<'_> {
             Ok(None) => return DeleteReply::NotFound,
             Err(reason) => return DeleteReply::Rejected(reason),
         };
+        // A successful LOCK may already have side effects, so interruption is deferred until the
+        // handle is consumed or explicitly released.
+        let cancel = self.cancel.clone();
+        let _lock_scope = cancel.as_ref().map(CancelFlag::hold_lock);
         let lock = match self.lock(&uri) {
             Ok(lock) => lock,
             Err(reply) => return reply,
         };
+        if cancel.as_ref().is_some_and(CancelFlag::is_set) {
+            return self.refuse(&uri, &lock, "CANCELED: stopped after the lock".to_owned());
+        }
         let request = match transport_request(&lock, tr) {
             Ok(request) => request,
             Err(reason) => return self.refuse(&uri, &lock, reason),
