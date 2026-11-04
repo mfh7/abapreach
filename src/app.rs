@@ -6,7 +6,8 @@ use crate::config::{
 };
 use crate::domain::Outcome;
 use crate::hash::local_source_lines;
-use crate::mcp::{NoTools, Server, serve};
+use crate::mcp::{Server, serve};
+use crate::mcp_read::ReadTools;
 use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
 use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
@@ -188,7 +189,7 @@ pub fn run(
     };
     let is_doctor = matches!(cli.command, Command::Doctor { .. });
     let Some(conn) = connection_id(&cli.command) else {
-        return with_warning(mcp(&env), warning.as_deref());
+        return with_warning(mcp(env, factories), warning.as_deref());
     };
     let (connection, local_credentials) = match resolve(conn, &env) {
         Ok(resolved) => resolved,
@@ -261,12 +262,13 @@ fn connection_id(command: &Command) -> Option<&str> {
 
 /// `mcp` loads every policy once, then serves stdio until EOF; an invalid policy stops the start
 /// with exit 2 before anything is written to stdout.
-fn mcp(env: &BTreeMap<String, String>) -> Exit {
-    let loaded = ConfigPaths::from_env(env).and_then(|paths| Config::load(paths, env));
+fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories) -> Exit {
+    let loaded = ConfigPaths::from_env(&env).and_then(|paths| Config::load(paths, &env));
 
     match loaded {
         Ok(config) => {
-            let mut server = Server::new(NoTools, config.mcp_policies().write_offered());
+            let write_offered = config.mcp_policies().write_offered();
+            let mut server = Server::new(ReadTools::new(config, env, factories), write_offered);
             let served = serve(
                 &mut server,
                 std::io::stdin().lock(),
@@ -300,12 +302,12 @@ fn resolve(
 }
 
 /// One finished try on one backend: what to print and whether a switch is still allowed.
-struct Attempt {
-    outcome: Outcome,
-    failure: Option<Failure>,
-    fallback_allowed: bool,
+pub(crate) struct Attempt {
+    pub(crate) outcome: Outcome,
+    pub(crate) failure: Option<Failure>,
+    pub(crate) fallback_allowed: bool,
     /// The failure message, quoted as the reason when the next backend is a fallback.
-    detail: Option<String>,
+    pub(crate) detail: Option<String>,
 }
 
 impl Attempt {
@@ -313,7 +315,7 @@ impl Attempt {
         Self::failed(error.to_string(), Failure::from(error))
     }
 
-    fn failed(message: String, failure: Failure) -> Self {
+    pub(crate) fn failed(message: String, failure: Failure) -> Self {
         Self {
             outcome: Outcome {
                 status: None,
@@ -615,7 +617,7 @@ fn backend_kind(backend: Backend) -> BackendKind {
 
 /// Runs the operation on the backend the router picks. A second backend is tried only when the
 /// first one failed before it sent a write request and neither `--backend` nor `--base` pins it.
-fn route(
+pub(crate) fn route(
     operation: OperationKind,
     explicit: Option<BackendKind>,
     base_given: bool,

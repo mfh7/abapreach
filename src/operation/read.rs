@@ -156,6 +156,25 @@ impl ReadProg {
             .map_err(|error| error.message)
     }
 
+    /// The normalized active source of the target; `target.lines` is not applied.
+    pub fn fetch_lines(
+        transport: &mut dyn SadtTransport,
+        target: ReadTarget<'_>,
+    ) -> Result<Vec<String>, ReadError> {
+        let name = target.name;
+        let group = match target.kind {
+            ObjectKind::Func => Some(resolve_group(transport, name, target.group)?),
+            _ => None,
+        };
+        let uri = target
+            .kind
+            .source_uri(name, group.as_deref(), target.include)
+            .map_err(ReadError::validation)?;
+        let response = read_source(transport, &uri, target.kind, name, target.include)?;
+
+        normalize_of(response, target.kind, name, target.include)
+    }
+
     pub fn run_target_classified(
         transport: &mut dyn SadtTransport,
         target: ReadTarget<'_>,
@@ -179,17 +198,7 @@ impl ReadProg {
             )));
         }
 
-        let name = target.name;
-        let group = match target.kind {
-            ObjectKind::Func => Some(resolve_group(transport, name, target.group)?),
-            _ => None,
-        };
-        let uri = target
-            .kind
-            .source_uri(name, group.as_deref(), target.include)
-            .map_err(ReadError::validation)?;
-        let response = read_source(transport, &uri, target.kind, name, target.include)?;
-        let lines = normalize_of(response, target.kind, name, target.include)?;
+        let lines = Self::fetch_lines(transport, target)?;
 
         let projected = project_lines(&lines, target.lines);
 
