@@ -1,11 +1,13 @@
 mod common;
 mod replay;
 
+use abapreach::cli::{Cli, Command, DeleteKind};
 use abapreach::config::Connection;
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::transport::http::HttpTransport;
 use abapreach::transport::{Response, SadtTransport, TransportError};
 use abapreach::{Exit, Factories, RfcLibraryIdentity, RfcLibraryInfo, run};
+use clap::Parser;
 use common::ScriptedTransport;
 use replay::{Step, fx, no_inactive, replay};
 use std::cell::RefCell;
@@ -1863,5 +1865,175 @@ fn create_with_a_transportable_package_and_no_request_stops_before_any_connectio
 
     assert_eq!(exit.code, 2);
     assert!(exit.stderr.contains("invalid --tr"), "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+fn assert_stops_locally(args: &[&str]) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let exit = go(args, directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 2, "{args:?}: {}", exit.stderr);
+    assert!(
+        exit.stderr.starts_with("STOP: "),
+        "{args:?}: {}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0), "{args:?}");
+}
+
+#[test]
+fn read_table_accepts_its_grammar_and_rejects_bad_rows_locally() {
+    let cli = |extra: &[&str]| {
+        let mut args = vec!["abapreach", "read-table", "T001"];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["--conn", "dev_100"]);
+
+        Cli::try_parse_from(args)
+    };
+
+    match cli(&[
+        "--fields",
+        "BUKRS,BUTXT",
+        "--where",
+        "BUKRS = '1000'",
+        "--rows",
+        "5000",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::ReadTable {
+            table,
+            fields,
+            where_clause,
+            rows,
+            ..
+        } => {
+            assert_eq!(table, "T001");
+            assert_eq!(fields, ["BUKRS", "BUTXT"]);
+            assert_eq!(where_clause.as_deref(), Some("BUKRS = '1000'"));
+            assert_eq!(rows, 5000);
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&[]).unwrap().command {
+        Command::ReadTable {
+            fields,
+            where_clause,
+            rows,
+            ..
+        } => {
+            assert!(fields.is_empty() && where_clause.is_none());
+            assert_eq!(rows, 100);
+        }
+        other => panic!("{other:?}"),
+    }
+    for rows in ["0", "5001", "-1", "x"] {
+        assert!(cli(&["--rows", rows]).is_err(), "{rows}");
+        assert_stops_locally(&[
+            "abapreach",
+            "read-table",
+            "T001",
+            "--rows",
+            rows,
+            "--conn",
+            "dev_100",
+        ]);
+    }
+    assert!(Cli::try_parse_from(["abapreach", "read-table", "--conn", "dev_100"]).is_err());
+    assert!(Cli::try_parse_from(["abapreach", "read-table", "T001"]).is_err());
+}
+
+#[test]
+fn delete_accepts_type_name_targets_and_rejects_bad_ones_locally() {
+    let parse = |args: &[&str]| {
+        let mut full = vec!["abapreach", "delete"];
+        full.extend_from_slice(args);
+
+        Cli::try_parse_from(full)
+    };
+
+    match parse(&[
+        "--simulate",
+        "FUNC:ZFM_A",
+        "CLAS:ZCL_A",
+        "--tr",
+        "DEVK900001",
+        "--plan",
+        "p.txt",
+        "--conn",
+        "dev_100",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::Delete {
+            targets,
+            simulate,
+            tr,
+            plan,
+            ..
+        } => {
+            assert!(simulate);
+            assert_eq!(targets.len(), 2);
+            assert_eq!(targets[0].kind, DeleteKind::Func);
+            assert_eq!(targets[1].name, "ZCL_A");
+            assert_eq!(tr.as_deref(), Some("DEVK900001"));
+            assert_eq!(plan, std::path::PathBuf::from("p.txt"));
+        }
+        other => panic!("{other:?}"),
+    }
+    for kinds in ["PROG", "FUGR", "FUNC", "CLAS", "INTF"] {
+        assert!(parse(&[&format!("{kinds}:ZX"), "--plan", "p", "--conn", "dev_100"]).is_ok());
+    }
+    // No target, no plan, no conn, an unknown or unsupported type, an empty name, no colon.
+    for bad in [
+        &["--plan", "p", "--conn", "dev_100"][..],
+        &["PROG:ZX", "--conn", "dev_100"],
+        &["PROG:ZX", "--plan", "p"],
+        &["TABL:ZX", "--plan", "p", "--conn", "dev_100"],
+        &["PROG:", "--plan", "p", "--conn", "dev_100"],
+        &["ZX", "--plan", "p", "--conn", "dev_100"],
+    ] {
+        assert!(parse(bad).is_err(), "{bad:?}");
+        let mut args = vec!["abapreach", "delete"];
+        args.extend_from_slice(bad);
+        assert_stops_locally(&args);
+    }
+}
+
+#[test]
+fn mcp_takes_no_arguments_and_stops_on_an_invalid_policy_with_exit_2() {
+    assert!(matches!(
+        Cli::try_parse_from(["abapreach", "mcp"]).unwrap().command,
+        Command::Mcp
+    ));
+    assert!(Cli::try_parse_from(["abapreach", "mcp", "--conn", "dev_100"]).is_err());
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = |policies: &str| {
+        format!(
+            r#"{{"policies":{policies},"servers":[{{"systemId":"DEV","clients":["100"],"rfc":{{"ashost":"example.com","sysnr":"00"}}}}]}}"#
+        )
+    };
+    let mut fake = Fake::default();
+    let exit = run(
+        ["abapreach", "mcp"].map(str::to_owned).to_vec(),
+        env_with(directory.path(), &config(r#"{"mcp_write":"always"}"#)),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2);
+    assert!(
+        exit.stderr.starts_with("STOP: cannot parse"),
+        "{}",
+        exit.stderr
+    );
+    assert!(
+        exit.stderr.contains("unknown variant `always`"),
+        "{}",
+        exit.stderr
+    );
     assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
 }

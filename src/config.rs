@@ -216,6 +216,19 @@ impl SaprouterSource {
     }
 }
 
+/// The per-system policies the MCP server loaded at start; nothing re-reads the file afterwards.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct McpPolicies {
+    by_system: BTreeMap<String, Policies>,
+}
+
+impl McpPolicies {
+    /// The policies of `system_id` (case-insensitive), `None` for an unknown system.
+    pub fn get(&self, system_id: &str) -> Option<&Policies> {
+        self.by_system.get(&system_id.to_ascii_uppercase())
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     servers: Vec<Server>,
@@ -249,6 +262,25 @@ impl Config {
             servers: connections.servers,
             local,
         })
+    }
+
+    /// The policies of every server as the MCP server starts with them: one immutable snapshot,
+    /// so a later edit of `connections.json` changes nothing until the next start.
+    pub fn mcp_policies(&self) -> McpPolicies {
+        McpPolicies {
+            by_system: self
+                .servers
+                .iter()
+                .map(|server| {
+                    let policies = server.policies.as_ref().map_or_else(
+                        || self.policies.clone(),
+                        |document| document.apply(&self.policies),
+                    );
+
+                    (server.system_id.to_ascii_uppercase(), policies.for_mcp())
+                })
+                .collect(),
+        }
     }
 
     pub fn resolve(

@@ -64,6 +64,7 @@ fn connection(policy: ForeignInactive) -> Connection {
     connection.user = USER.to_owned();
     connection.policies = Policies {
         foreign_inactive: policy,
+        ..Policies::default()
     };
     // Verified TLS keeps the output free of the insecure-connection warning.
     if let Some(adt) = connection.adt.as_mut() {

@@ -208,6 +208,7 @@ fn connection(policy: ForeignInactive) -> Connection {
     connection.user = USER.to_owned();
     connection.policies = Policies {
         foreign_inactive: policy,
+        ..Policies::default()
     };
 
     if let Some(adt) = connection.adt.as_mut() {

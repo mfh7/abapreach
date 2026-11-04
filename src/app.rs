@@ -183,7 +183,10 @@ pub fn run(
         }
     };
     let is_doctor = matches!(cli.command, Command::Doctor { .. });
-    let (connection, local_credentials) = match resolve(connection_id(&cli.command), &env) {
+    let Some(conn) = connection_id(&cli.command) else {
+        return with_warning(mcp(&env), warning.as_deref());
+    };
+    let (connection, local_credentials) = match resolve(conn, &env) {
         Ok(resolved) => resolved,
         Err(message) => return with_warning(stop(message), warning.as_deref()),
     };
@@ -240,12 +243,30 @@ fn stop(message: impl std::fmt::Display) -> Exit {
     }
 }
 
-fn connection_id(command: &Command) -> &str {
+fn connection_id(command: &Command) -> Option<&str> {
     match command {
         Command::Read { conn, .. }
         | Command::Deploy { conn, .. }
         | Command::Create { conn, .. }
-        | Command::Doctor { conn } => conn,
+        | Command::ReadTable { conn, .. }
+        | Command::Delete { conn, .. }
+        | Command::Doctor { conn } => Some(conn),
+        Command::Mcp => None,
+    }
+}
+
+/// `mcp` loads every policy once; an invalid policy stops the start with exit 2.
+fn mcp(env: &BTreeMap<String, String>) -> Exit {
+    let loaded = ConfigPaths::from_env(env).and_then(|paths| Config::load(paths, env));
+
+    match loaded {
+        // shortcut: the stdio server is a later task; the policy snapshot is only validated here.
+        Ok(config) => {
+            let _ = config.mcp_policies();
+
+            stop("the MCP server is not available in this build yet")
+        }
+        Err(message) => stop(message),
     }
 }
 
@@ -306,6 +327,9 @@ fn execute(
                 stderr: String::new(),
             }
         }
+        Command::ReadTable { .. } => stop("read-table is not available in this build yet"),
+        Command::Delete { .. } => stop("delete is not available in this build yet"),
+        Command::Mcp => stop("the MCP server needs no connection"),
         Command::Read {
             kind,
             name,
