@@ -1,4 +1,4 @@
-use crate::policy::{Policies, PolicyDocument};
+use crate::policy::{McpWrite, Policies, PolicyDocument};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -223,6 +223,13 @@ pub struct McpPolicies {
 }
 
 impl McpPolicies {
+    /// Whether any server allows MCP writes; only then does `tools/list` offer the write tools.
+    pub fn write_offered(&self) -> bool {
+        self.by_system
+            .values()
+            .any(|policies| policies.mcp_write != McpWrite::Off)
+    }
+
     /// The policies of `system_id` (case-insensitive), `None` for an unknown system.
     pub fn get(&self, system_id: &str) -> Option<&Policies> {
         self.by_system.get(&system_id.to_ascii_uppercase())

@@ -6,6 +6,7 @@ use crate::config::{
 };
 use crate::domain::Outcome;
 use crate::hash::local_source_lines;
+use crate::mcp::{NoTools, Server, serve};
 use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
 use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
@@ -258,16 +259,29 @@ fn connection_id(command: &Command) -> Option<&str> {
     }
 }
 
-/// `mcp` loads every policy once; an invalid policy stops the start with exit 2.
+/// `mcp` loads every policy once, then serves stdio until EOF; an invalid policy stops the start
+/// with exit 2 before anything is written to stdout.
 fn mcp(env: &BTreeMap<String, String>) -> Exit {
     let loaded = ConfigPaths::from_env(env).and_then(|paths| Config::load(paths, env));
 
     match loaded {
-        // shortcut: the stdio server is a later task; the policy snapshot is only validated here.
         Ok(config) => {
-            let _ = config.mcp_policies();
+            let mut server = Server::new(NoTools, config.mcp_policies().write_offered());
+            let served = serve(
+                &mut server,
+                std::io::stdin().lock(),
+                std::io::stdout().lock(),
+                std::io::stderr().lock(),
+            );
 
-            stop("the MCP server is not available in this build yet")
+            match served {
+                Ok(()) => Exit {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                Err(error) => stop(format!("MCP stdio failed: {error}")),
+            }
         }
         Err(message) => stop(message),
     }
