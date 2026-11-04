@@ -11,6 +11,9 @@ use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::doctor::Doctor;
 use crate::operation::read::{ReadProg, ReadTarget};
+use crate::operation::read_table::{
+    CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableError, ReadTableRequest,
+};
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
     DynamicRfcApi, Env, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
@@ -327,7 +330,77 @@ fn execute(
                 stderr: String::new(),
             }
         }
-        Command::ReadTable { .. } => stop("read-table is not available in this build yet"),
+        Command::ReadTable {
+            table,
+            fields,
+            where_clause,
+            rows,
+            ..
+        } => {
+            let request = ReadTableRequest {
+                table,
+                fields,
+                where_clause,
+                rows,
+            };
+            let query = match Query::new(&request, CLI_MAX_ROWS, &connection.policies) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            route(
+                OperationKind::ReadTable,
+                None,
+                false,
+                connection,
+                factories,
+                |transport, _, _| {
+                    let read = ReadTable::run(transport, &query, &connection.policies);
+
+                    // A read holds no lock, so a failed session end changes nothing here.
+                    let _ = transport.close();
+
+                    match read {
+                        Ok(data) => {
+                            let (stdout, omitted) = data.render(MAX_OUTPUT_BYTES);
+                            let stderr = if omitted == 0 {
+                                String::new()
+                            } else {
+                                format!(
+                                    "W: output cut at {MAX_OUTPUT_BYTES} bytes; {omitted} rows left out"
+                                )
+                            };
+
+                            Attempt {
+                                outcome: Outcome {
+                                    status: None,
+                                    exit: 0,
+                                    stdout,
+                                    stderr,
+                                },
+                                failure: None,
+                                fallback_allowed: false,
+                                detail: None,
+                            }
+                        }
+                        Err(ReadTableError::Rejected(message)) => Attempt {
+                            outcome: Outcome {
+                                status: None,
+                                exit: 1,
+                                stdout: String::new(),
+                                stderr: format!("REJECTED: {message}"),
+                            },
+                            failure: None,
+                            fallback_allowed: false,
+                            detail: None,
+                        },
+                        Err(ReadTableError::Failed { failure, message }) => {
+                            Attempt::failed(message, failure)
+                        }
+                    }
+                },
+            )
+        }
         Command::Delete { .. } => stop("delete is not available in this build yet"),
         Command::Mcp => stop("the MCP server needs no connection"),
         Command::Read {

@@ -129,3 +129,45 @@ impl SadtTransport for ScriptedTransport {
         Ok(())
     }
 }
+
+pub const NS: &str = "http://www.sap.com/adt/dataPreview";
+
+/// A data preview answer: column-major, `None` is the empty value `<data/>`.
+pub fn preview(columns: &[(&str, &[Option<&str>])]) -> String {
+    let mut xml = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?><dataPreview:tableData xmlns:dataPreview=\"{NS}\">\
+         <dataPreview:name>X</dataPreview:name><dataPreview:isHanaAnalyticalView>false</dataPreview:isHanaAnalyticalView>"
+    );
+
+    for (name, values) in columns {
+        xml.push_str(&format!(
+            "<dataPreview:columns><dataPreview:metadata dataPreview:name=\"{name}\" dataPreview:type=\"C\" \
+             dataPreview:description=\"d\" dataPreview:keyAttribute=\"false\" dataPreview:colType=\"\" \
+             dataPreview:isKeyFigure=\"false\"/>"
+        ));
+
+        if values.is_empty() {
+            xml.push_str("<dataPreview:dataSet/>");
+        } else {
+            xml.push_str("<dataPreview:dataSet>");
+
+            for value in *values {
+                match value {
+                    Some(text) => xml.push_str(&format!(
+                        "<dataPreview:data>{}</dataPreview:data>",
+                        text.replace('&', "&amp;").replace('<', "&lt;")
+                    )),
+                    None => xml.push_str("<dataPreview:data/>"),
+                }
+            }
+
+            xml.push_str("</dataPreview:dataSet>");
+        }
+
+        xml.push_str("</dataPreview:columns>");
+    }
+
+    xml.push_str("</dataPreview:tableData>");
+
+    xml
+}

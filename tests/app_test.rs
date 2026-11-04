@@ -2037,3 +2037,221 @@ fn mcp_takes_no_arguments_and_stops_on_an_invalid_policy_with_exit_2() {
     );
     assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
 }
+
+fn dd02l(name: &str, class: &str, view_class: Option<&str>) -> Result<Response, TransportError> {
+    source(&common::preview(&[
+        ("TABNAME", &[Some(name)]),
+        ("TABCLASS", &[Some(class)]),
+        ("VIEWCLASS", &[view_class]),
+    ]))
+}
+
+fn t001_rows() -> Result<Response, TransportError> {
+    source(&common::preview(&[
+        ("BUKRS", &[Some("1000"), Some("2000")]),
+        ("BUTXT", &[Some("Alpha"), Some("Beta")]),
+    ]))
+}
+
+/// The stdout without the insecure-TLS warning line the DEV test server adds.
+fn table_of(exit: &Exit) -> String {
+    exit.stdout
+        .lines()
+        .filter(|line| *line != WARNING)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn read_table(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "read-table"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+#[test]
+fn read_table_stops_locally_on_a_denied_table_or_a_bad_grammar() {
+    for args in [
+        vec!["usr02", "--conn", "dev_100"],
+        vec![
+            "T001",
+            "--where",
+            "BUKRS IN ( SELECT BNAME FROM USR02 )",
+            "--conn",
+            "dev_100",
+        ],
+        vec!["T001", "--where", "BUKRS = 'open", "--conn", "dev_100"],
+        vec!["T001", "--fields", "BUKRS,COUNT(*)", "--conn", "dev_100"],
+        vec!["T001~X", "--conn", "dev_100"],
+    ] {
+        let mut fake = Fake::default();
+        let exit = read_table(&args, &mut fake);
+
+        assert_eq!(exit.code, 2, "{args:?}: {}", exit.stderr);
+        assert!(
+            exit.stderr.starts_with("STOP: "),
+            "{args:?}: {}",
+            exit.stderr
+        );
+        assert_eq!(table_of(&exit), "", "{args:?}");
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0), "{args:?}");
+    }
+
+    let mut fake = Fake::default();
+    let exit = read_table(&["usr02", "--conn", "dev_100"], &mut fake);
+
+    assert!(exit.stderr.contains("USR02") && exit.stderr.contains("read_table_denied"));
+}
+
+#[test]
+fn read_table_prints_a_tab_separated_table_over_adt() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![
+        dd02l("T001", "TRANSP", None),
+        t001_rows(),
+    ]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = read_table(
+        &[
+            "t001",
+            "--fields",
+            "bukrs,butxt",
+            "--where",
+            "bukrs <> '0001'",
+            "--rows",
+            "2",
+            "--conn",
+            "dev_100",
+        ],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "BUKRS\tBUTXT\n1000\tAlpha\n2000\tBeta");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert_eq!(calls.borrow().closes, 1);
+
+    let calls = calls.borrow();
+
+    assert_eq!(calls.calls.len(), 2);
+    assert_eq!(
+        calls.calls[1].uri,
+        "/sap/bc/adt/datapreview/ddic?rowNumber=2&ddicEntityName=T001"
+    );
+    assert_eq!(
+        String::from_utf8(calls.calls[1].body.clone()).unwrap(),
+        "SELECT BUKRS, BUTXT FROM T001 WHERE BUKRS <> '0001'"
+    );
+}
+
+#[test]
+fn an_emptied_deny_list_lets_read_table_through_the_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = concat!(
+        r#"{"policies":{"read_table_denied":[]},"servers":[{"systemId":"DEV","host":"example.com","#,
+        r#""port":443,"clients":["100"],"rfc":{"ashost":"example.com","sysnr":"00"},"adt":{"insecure":true}}]}"#,
+    );
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("USR02", "TRANSP", None),
+        source(&common::preview(&[("BNAME", &[Some("X")])])),
+    ]));
+
+    let exit = run(
+        ["abapreach", "read-table", "usr02", "--conn", "dev_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        env_with(directory.path(), config),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(table_of(&exit).starts_with("BNAME"));
+}
+
+#[test]
+fn a_view_over_a_denied_table_is_rejected_after_the_lookups_only() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![
+        dd02l("ZV_USERS", "VIEW", Some("D")),
+        source(&common::preview(&[
+            ("VIEWNAME", &[Some("ZV_USERS")]),
+            ("TABNAME", &[Some("USR02")]),
+            ("TABPOS", &[Some("0001")]),
+        ])),
+    ]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = read_table(&["zv_users", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(exit.stderr.starts_with("REJECTED: "), "{}", exit.stderr);
+    assert!(exit.stderr.contains("USR02"), "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "");
+    assert_eq!(calls.borrow().calls.len(), 2);
+    assert_eq!(fake.rfc_opened, 0, "a rejection never falls back");
+}
+
+#[test]
+fn a_failed_data_read_is_an_error_without_fallback() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("T001", "TRANSP", None),
+        Ok(Response::text(400, "<exc:exception><localizedMessage>Unknown column name \"NOPE\"</localizedMessage></exc:exception>")),
+    ]));
+
+    let exit = read_table(&["T001", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(exit.stderr.starts_with("ERROR: "), "{}", exit.stderr);
+    assert!(
+        exit.stderr.contains("Unknown column name"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn read_table_falls_back_to_rfc_only_before_anything_was_read() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc
+        .push_back(scripted(vec![dd02l("T001", "TRANSP", None), t001_rows()]));
+
+    let exit = read_table(&["T001", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        table_of(&exit).starts_with("BUKRS\tBUTXT\n1000\tAlpha"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn an_rfc_only_connection_reads_over_a_fresh_rfc_connection() {
+    let mut fake = Fake::default();
+
+    fake.rfc
+        .push_back(scripted(vec![dd02l("T001", "TRANSP", None), t001_rows()]));
+
+    let exit = read_table(&["T001", "--conn", "qas_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+}

@@ -158,3 +158,23 @@ only after verifying the lock response.
 - `GET <source>?version=inactive` without an inactive version can answer
   200 with the active source, so reconciliation compares content rather than
   relying on that HTTP status alone.
+
+### `read-table` against the Python `rfc-read table`
+
+- `--rows 0` is refused (STOP, exit 2); the Python tool reads every row for
+  `rows=0`. The ADT data preview has no "all rows" mode, so `--rows` is 1 to
+  5000, the largest value the 7.40 data preview honours (MCP: 1 to 1000).
+- The backend is the ADT data preview, on ADT HTTP and over RFC. The Python
+  tool calls `RFC_READ_TABLE`; its 72-character `split_where` is ported
+  (`split_where`, literal-safe) but not on the default path.
+- `--where` accepts only the tokenized grammar: `field op literal` with
+  `= <> < > <= >= LIKE IN BETWEEN IS [NOT] NULL`, `AND`/`OR`/`NOT` and
+  parentheses. The Python tool sends the text through unchanged. Fields,
+  second tables, `~`, `@`, comments, subqueries and joins are refused before
+  any connection, because SAP runs a data preview body as written.
+- A view is read only when it is a database view and none of its base tables
+  (`DD26S`) is on the `read_table_denied` list. A name missing from `DD02L`,
+  a failed dictionary lookup, a CDS/DDLS entity or another view type is
+  `REJECTED` (exit 1) and nothing is read.
+- Each command uses a fresh connection; the data preview over RFC fails on
+  the 37th call of one connection.
