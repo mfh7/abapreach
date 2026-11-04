@@ -145,8 +145,9 @@ impl CancelFlag {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
+    /// A shutdown counts even if a racing `reset` cleared `cancelled` after it.
     pub fn is_set(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.cancelled.load(Ordering::SeqCst) || self.is_shutdown()
     }
 
     /// Marks the window in which the deploy holds a lock; the guard of the caller's scope ends it.
@@ -2280,4 +2281,24 @@ pub(crate) fn leaf_texts(xml: &str) -> Result<BTreeMap<String, String>, String> 
     }
 
     Ok(texts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shutdown_is_seen_even_when_a_reset_cleared_the_cancel_after_it() {
+        let flag = CancelFlag::new();
+
+        // The lost interleaving: `reset` read no shutdown, the shutdown landed, then `reset` cleared the cancel.
+        flag.shutdown.store(true, Ordering::SeqCst);
+        flag.cancelled.store(false, Ordering::SeqCst);
+
+        assert!(flag.is_set());
+
+        flag.request_shutdown();
+        flag.reset();
+        assert!(flag.is_set());
+    }
 }

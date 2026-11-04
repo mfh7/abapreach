@@ -218,7 +218,7 @@ fn an_excerpt_deploy_is_shown_as_a_large_deletion() {
 }
 
 /// Every Unicode format character (Cf) the summary must drop, as inclusive ranges.
-const INVISIBLE: [(u32, u32); 21] = [
+const INVISIBLE: [(u32, u32); 22] = [
     (0x00ad, 0x00ad),
     (0x0600, 0x0605),
     (0x061c, 0x061c),
@@ -240,6 +240,7 @@ const INVISIBLE: [(u32, u32); 21] = [
     (0xe0001, 0xe0001),
     (0xe0020, 0xe007f),
     (0x0890, 0x0891),
+    (0x08e2, 0x08e2),
 ];
 
 #[test]
