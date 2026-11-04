@@ -13,6 +13,18 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-04
+
+### Added
+- `read-table` command: reads an SAP table through the ADT data preview, with view resolution and
+  routing between the ADT HTTP and RFC backends.
+- `delete` command: planned delete of PROG, FUGR, FUNC, CLAS and INTF objects through a batch state machine, with ADT delete
+  transport, admission checks and reconciliation of the outcome.
+- MCP stdio server: JSON-RPC MCP protocol with read tools (untrusted payload and scrub rules) and
+  write tools.
+- `mcp_write` policy per connection (`off` by default, `confirm`, `token`) for the MCP write tools.
+- `read_table_denied` deny list for `read-table`.
+
 ## [0.13.0] - 2026-11-03
 
 ### Added
