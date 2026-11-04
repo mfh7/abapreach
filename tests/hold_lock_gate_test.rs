@@ -2,7 +2,8 @@
 
 #[test]
 fn the_hold_lock_call_is_compiled_only_with_the_fault_injection_feature() {
-    let deploy = include_str!("../src/operation/deploy.rs");
+    // Windows checkouts use CRLF, so line endings are normalized before matching.
+    let deploy = include_str!("../src/operation/deploy.rs").replace("\r\n", "\n");
     let call = deploy.find("crate::fault::hold_lock(").expect("call site");
     let before = &deploy[..call];
     assert!(
@@ -11,6 +12,6 @@ fn the_hold_lock_call_is_compiled_only_with_the_fault_injection_feature() {
             .ends_with("#[cfg(feature = \"fault-injection\")]")
     );
 
-    let lib = include_str!("../src/lib.rs");
+    let lib = include_str!("../src/lib.rs").replace("\r\n", "\n");
     assert!(lib.contains("#[cfg(feature = \"fault-injection\")]\npub mod fault;"));
 }
