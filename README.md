@@ -5,7 +5,7 @@
 **Read and deploy ABAP source from the command line, over ADT HTTP or RFC, including
 systems you can only reach through SAProuter.**
 
-![version](https://img.shields.io/badge/version-0.12.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
+![version](https://img.shields.io/badge/version-0.13.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
 
 ```text
 $ abapreach deploy PROG ZDEMO ZDEMO.abap --base 63886692bf65... --conn A4H_001
@@ -38,8 +38,10 @@ ACTIVE
 - **Same commands on both backends.** ADT HTTP is tried first. ABAPReach moves to RFC only
   when nothing has been sent yet, and never after an authorization error.
 
-Version 0.12.0 covers existing programs (`PROG`). Every other feature of the earlier Python
-tooling is scheduled for 1.0.0; see the [roadmap](#roadmap).
+ABAPReach reads and deploys existing programs (`PROG`), function modules (`FUNC`), classes with
+their local includes (`CLAS`) and interfaces (`INTF`), and creates function groups, function
+modules, classes and interfaces. Every other feature of the earlier Python tooling is scheduled
+for 1.0.0; see the [roadmap](#roadmap).
 
 ## Quick start
 
@@ -170,15 +172,19 @@ before it locks and deploys over RFC instead.
 RFC sends the ADT requests through `SADT_REST_RFC_ENDPOINT` and keeps lock, write and
 activation on one connection. The RFC library is loaded at run time and is not included
 in ABAPReach; installing and licensing it is up to you. Pick a backend with `--backend adt|rfc`; without it ADT HTTP runs
-first, and a connection without `host` and `port` runs on RFC only.
+first, and a connection without `host` and `port` runs on RFC only. `FUNC`, `CLAS` and `INTF`
+use the same two paths; the result of each path is in
+[Getting started: Tested environment](docs/getting-started.md#tested-environment).
 
 ## Platforms
 
-Release 0.12.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
+Release 0.13.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
 library lookup per OS, the release file checks, the Linux glibc baseline, the credential
 file permission rules and the test matrix are in
 [Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
-The 0.12.0 test matrix passed on every supported cell; see
+The release matrix has no FAIL cell on any path, and it lists every UNSUPPORTED cell with its
+reason. Interrupt-while-locked cells were proven on `v0.13.0-rc.4` with the fault-injection build;
+the other groups ran on `v0.13.0-rc.2`. See
 [Tested environment](docs/getting-started.md#tested-environment).
 
 An explicit `ABAPREACH_RFC_LIBRARY` that cannot be loaded stops the command with an
@@ -225,8 +231,9 @@ Every write goes through the same guards, on both backends.
 
 `--base` is checked again after the lock, in the same session. `foreign_inactive` is `reject`
 by default and can be set to `ask` or `allow` per system. After a timeout the tool reads the
-active and inactive source and reports what it finds. [Deploy safety](docs/deploy-safety.md)
-has the details.
+active and inactive source and reports what it finds. Creating an object whose outcome is
+uncertain is handled the same way: a read-only check, no second POST, and no automatic rollback.
+[Deploy safety](docs/deploy-safety.md) has the details.
 
 ### Exit codes
 
@@ -247,6 +254,10 @@ activation: the command reports the real result (for example `ACTIVE`, exit code
   </tr>
   <tr>
     <td align="left"><code>INACTIVE</code>, <code>REJECTED</code>, <code>PARTIAL</code>, <code>ACTIVE (reconciled)</code></td>
+    <td align="center">1</td>
+  </tr>
+  <tr>
+    <td align="left"><code>INCLUDE_MISSING: ...</code> (a class include that does not exist)</td>
     <td align="center">1</td>
   </tr>
   <tr>
@@ -276,11 +287,11 @@ and passes a live test.
   </tr>
   <tr>
     <td align="left">Function modules, classes, interfaces</td>
-    <td align="left">planned</td>
+    <td align="left"><b>0.13.0</b> (read and deploy)</td>
   </tr>
   <tr>
-    <td align="left">Create and delete objects</td>
-    <td align="left">planned</td>
+    <td align="left">Create objects</td>
+    <td align="left"><b>0.13.0</b> for function groups, function modules, classes and interfaces; programs, includes and delete planned</td>
   </tr>
   <tr>
     <td align="left">DDIC, messages, text pools, CDS, enhancements</td>
@@ -314,14 +325,20 @@ Every planned row is part of 1.0.0. The full list, with the path each feature us
 ## Command reference
 
 ```text
-abapreach read PROG <NAME> <OUT_FILE> [--force] --conn <SID>_<client>
-abapreach deploy PROG <NAME> <FILE> [--simulate] [--base <hash>] [--tr <request>]
+abapreach read PROG|FUNC|CLAS|INTF <NAME> <OUT_FILE> [--force] [--include CCIMP|CCDEF|CCMAC|CCAU]
+    [--fugr <GROUP>] [--lines A-B] --conn <SID>_<client>
+abapreach deploy PROG|FUNC|CLAS|INTF <NAME> <FILE> [--simulate] [--base <hash>] [--tr <request>]
+    [--include CCIMP|CCDEF|CCMAC|CCAU] [--create-include] [--fugr <GROUP>]
     [--backend adt|rfc] --conn <SID>_<client>
+abapreach create FUGR|FUNC|CLAS|INTF <NAME> --text '<text>' [--package <PACKAGE>] [--fugr <GROUP>]
+    [--tr <request>] [--simulate] [--backend adt|rfc] --conn <SID>_<client>
 abapreach doctor --conn <SID>_<client>
 ```
 
-`read` refuses to overwrite an existing file unless `--force` is set. `--base` and
-`--backend` both pin the backend, so a failed attempt never switches to the other one.
+`read` refuses to overwrite an existing file unless `--force` is set; with `--lines`, the output
+must be `-` (stdout). `--base` and `--backend` both pin the backend, so a failed attempt never
+switches to the other one. `--include` and `--create-include` apply to `CLAS` only.
+[Getting started](docs/getting-started.md#other-source-objects) has examples.
 
 ## Documentation
 
