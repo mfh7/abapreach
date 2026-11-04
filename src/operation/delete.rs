@@ -20,7 +20,7 @@ const NO_ACTIVE: &str = "NO_ACTIVE";
 const PLAN_CHANGED: &str = "Plan changed since simulate; simulate again";
 const LOCK_MAY_REMAIN: &str = "W: a lock may remain on the object";
 const GUARDS_ACTIVE: &str = "guards active: Z/Y scope, self-guard, lock request agreement at execute, \
-foreign_inactive (policy {policy}), plan hash";
+request owner when the lock names it, foreign_inactive (policy {policy}), plan hash";
 const GUARDS_ABSENT: &str = "guards not applied on the ADT route: system change option, \
 client CCNOCLIIND, SE06/software component, server-side self-guard";
 
@@ -829,6 +829,27 @@ pub fn run(
     simulate_only: bool,
     plan_path: &Path,
 ) -> Outcome {
+    run_until(
+        backend,
+        context,
+        targets,
+        tr,
+        simulate_only,
+        plan_path,
+        &mut || false,
+    )
+}
+
+/// Like [`run`]; a real delete asks `stop` before each object, as [`execute_until`] does.
+pub fn run_until(
+    backend: &mut dyn DeleteBackend,
+    context: &Context,
+    targets: &[DeleteTarget],
+    tr: Option<&str>,
+    simulate_only: bool,
+    plan_path: &Path,
+    stop: &mut dyn FnMut() -> bool,
+) -> Outcome {
     let result = if simulate_only {
         simulate(backend, context, targets, tr).and_then(|mut report| {
             if let Some(plan) = &report.plan {
@@ -856,7 +877,7 @@ pub fn run(
                     format!("plan file cannot be read: {}: {error}", plan_path.display())
                 })
             })
-            .and_then(|plan| execute(backend, context, targets, tr, &plan))
+            .and_then(|plan| execute_until(backend, context, targets, tr, &plan, stop))
     };
 
     match result {

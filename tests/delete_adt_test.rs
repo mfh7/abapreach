@@ -71,7 +71,15 @@ impl Fake {
     }
 
     fn lock(self, uri: &str, local: bool, corrnr: &str) -> Self {
-        self.post(&format!("{uri}{LOCK}"), 200, &lock_xml(local, corrnr))
+        self.lock_by(uri, local, corrnr, "")
+    }
+
+    fn lock_by(self, uri: &str, local: bool, corrnr: &str, corruser: &str) -> Self {
+        self.post(
+            &format!("{uri}{LOCK}"),
+            200,
+            &lock_xml(local, corrnr, corruser),
+        )
     }
 }
 
@@ -102,11 +110,11 @@ impl SadtTransport for Fake {
     }
 }
 
-fn lock_xml(local: bool, corrnr: &str) -> String {
+fn lock_xml(local: bool, corrnr: &str, corruser: &str) -> String {
     format!(
         "<asx:abap xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA>\
          <LOCK_HANDLE>{HANDLE}</LOCK_HANDLE><CORRNR>{corrnr}</CORRNR>\
-         <IS_LOCAL>{}</IS_LOCAL></DATA></asx:values></asx:abap>",
+         <CORRUSER>{corruser}</CORRUSER><IS_LOCAL>{}</IS_LOCAL></DATA></asx:values></asx:abap>",
         if local { "X" } else { "" }
     )
 }
@@ -517,6 +525,63 @@ fn a_different_explicit_tr_unlocks_and_never_deletes() {
     );
     assert_eq!(count(&calls, "DELETE"), 0);
     assert_eq!(count(&calls, "POST"), 2);
+}
+
+#[test]
+fn an_own_request_of_the_lock_is_followed() {
+    let main = Fake::default().lock_by(CLAS, false, TR, USER).delete(
+        &format!("{CLAS}?lockHandle={ENCODED}&corrNr={TR}"),
+        Ok(Response::empty(200)),
+    );
+    let (reply, calls, _) = with_backend(main, vec![gone(CLAS)], |backend| {
+        backend.delete(DeleteKind::Clas, "ZCL_A", None)
+    });
+
+    assert_eq!(reply, DeleteReply::Deleted);
+    assert!(uris(&calls).contains(&format!("DELETE {CLAS}?lockHandle={ENCODED}&corrNr={TR}")));
+}
+
+#[test]
+fn a_request_of_another_user_unlocks_and_never_deletes() {
+    let main = Fake::default().lock_by(PROG, false, TR, "OTHERUSR").post(
+        &format!("{PROG}?_action=UNLOCK&lockHandle={ENCODED}"),
+        200,
+        "",
+    );
+    let (reply, calls, _) = with_backend(main, vec![], |backend| {
+        backend.delete(DeleteKind::Prog, "ZPROG", None)
+    });
+
+    let DeleteReply::Rejected(reason) = reply else {
+        panic!("{reply:?}");
+    };
+
+    assert!(
+        reason.contains(TR) && reason.contains("another user"),
+        "{reason}"
+    );
+    assert!(!reason.contains("OTHERUSR"), "{reason}");
+    assert_eq!(count(&calls, "DELETE"), 0);
+    assert_eq!(
+        uris(&calls),
+        [
+            format!("POST {PROG}{LOCK}"),
+            format!("POST {PROG}?_action=UNLOCK&lockHandle={ENCODED}"),
+        ]
+    );
+}
+
+#[test]
+fn an_empty_owner_on_a_local_object_changes_nothing() {
+    let main = Fake::default().lock_by(PROG, true, "", "").delete(
+        &format!("{PROG}?lockHandle={ENCODED}"),
+        Ok(Response::empty(200)),
+    );
+    let (reply, _, _) = with_backend(main, vec![gone(PROG)], |backend| {
+        backend.delete(DeleteKind::Prog, "ZPROG", None)
+    });
+
+    assert_eq!(reply, DeleteReply::Deleted);
 }
 
 #[test]

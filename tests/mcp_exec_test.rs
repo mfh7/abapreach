@@ -217,6 +217,50 @@ fn an_excerpt_deploy_is_shown_as_a_large_deletion() {
     assert!(message.contains("removes 2 of 3 live lines"), "{message}");
 }
 
+/// Every Unicode format character (Cf) the summary must drop, as inclusive ranges.
+const INVISIBLE: [(u32, u32); 21] = [
+    (0x00ad, 0x00ad),
+    (0x0600, 0x0605),
+    (0x061c, 0x061c),
+    (0x06dd, 0x06dd),
+    (0x070f, 0x070f),
+    (0x180e, 0x180e),
+    (0x200b, 0x200f),
+    (0x2028, 0x2029),
+    (0x202a, 0x202e),
+    (0x2060, 0x2064),
+    (0x2066, 0x206f),
+    (0xfeff, 0xfeff),
+    (0xfff9, 0xfffb),
+    (0x110bd, 0x110bd),
+    (0x110cd, 0x110cd),
+    (0x13430, 0x1343f),
+    (0x1bca0, 0x1bca3),
+    (0x1d173, 0x1d17a),
+    (0xe0001, 0xe0001),
+    (0xe0020, 0xe007f),
+    (0x0890, 0x0891),
+];
+
+#[test]
+fn the_summary_drops_every_format_character_at_each_range_boundary() {
+    for (first, last) in INVISIBLE {
+        for code in [first, last, first + (last - first) / 2] {
+            let hidden = char::from_u32(code).unwrap();
+            let change = Change {
+                added: 1,
+                removed: 1,
+                live_lines: 2,
+                excerpt: vec![format!("+a{hidden}b")],
+                omitted: 0,
+            };
+            let summary = confirmation_summary(&connection(), &deploy_ticket(change));
+
+            assert!(summary.contains("+ab"), "U+{code:04X} kept: {summary:?}");
+        }
+    }
+}
+
 #[test]
 fn the_summary_is_bounded_and_strips_control_characters_from_sap_strings() {
     let hostile = format!(

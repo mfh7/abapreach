@@ -966,21 +966,41 @@ fn typed_text(ticket: &Ticket) -> String {
     }
 }
 
-/// Control characters and newlines stripped from a string SAP or the client supplied, then cut.
+/// Unicode format characters (category Cf) plus the line and paragraph separators: invisible, yet
+/// able to reorder or hide text in what the human confirms.
+const INVISIBLE: &[(char, char)] = &[
+    ('\u{00ad}', '\u{00ad}'),
+    ('\u{0600}', '\u{0605}'),
+    ('\u{061c}', '\u{061c}'),
+    ('\u{06dd}', '\u{06dd}'),
+    ('\u{070f}', '\u{070f}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08e2}', '\u{08e2}'),
+    ('\u{180e}', '\u{180e}'),
+    ('\u{200b}', '\u{200f}'),
+    ('\u{2028}', '\u{202e}'),
+    ('\u{2060}', '\u{206f}'),
+    ('\u{feff}', '\u{feff}'),
+    ('\u{fff9}', '\u{fffb}'),
+    ('\u{110bd}', '\u{110bd}'),
+    ('\u{110cd}', '\u{110cd}'),
+    ('\u{13430}', '\u{1343f}'),
+    ('\u{1bca0}', '\u{1bca3}'),
+    ('\u{1d173}', '\u{1d17a}'),
+    ('\u{e0001}', '\u{e0001}'),
+    ('\u{e0020}', '\u{e007f}'),
+];
+
+/// Control and format characters and newlines stripped from a string SAP or the client supplied,
+/// then cut.
 fn sanitize(text: &str, limit: usize) -> String {
     let clean: String = text
         .chars()
         .filter(|character| {
             !character.is_control()
-                && !matches!(
-                    character,
-                    '\u{200b}'..='\u{200f}'
-                        | '\u{2028}'
-                        | '\u{2029}'
-                        | '\u{202a}'..='\u{202e}'
-                        | '\u{2060}'..='\u{2069}'
-                        | '\u{feff}'
-                )
+                && !INVISIBLE
+                    .iter()
+                    .any(|(first, last)| (*first..=*last).contains(character))
         })
         .collect();
 

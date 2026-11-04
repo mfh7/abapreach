@@ -2430,6 +2430,75 @@ fn ctrl_c_during_a_cli_delete_lock_unlocks_and_exits_130() {
 }
 
 #[test]
+fn ctrl_c_in_a_cli_delete_batch_skips_the_rest_without_a_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan = plan.to_str().unwrap();
+    let args = |simulate: bool| {
+        let mut args = delete_args(plan, simulate);
+
+        args.insert(3, "PROG:ZTEST_DEL2");
+
+        args
+    };
+    let mut fake = Fake::default();
+    let mut both = delete_facts();
+
+    both.extend(delete_facts());
+    fake.adt.push_back(scripted(both));
+
+    let simulated = go(&args(true), directory.path(), &mut fake);
+
+    assert_eq!(
+        simulated.code, 0,
+        "{} {}",
+        simulated.stdout, simulated.stderr
+    );
+
+    // The second object has no replies: any request for it fails the call count below.
+    let mut replies = delete_facts();
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Ok(Response::empty(200))); // UNLOCK after the deferred interrupt
+    let (cell, opened) = shared(InterruptOnLock {
+        inner: ScriptedTransport::replies(replies),
+        cancel: fake.cancel.clone(),
+        actions: Vec::new(),
+    });
+    fake.adt.push_back(opened);
+
+    let exit = go(&args(false), directory.path(), &mut fake);
+    let transport = cell.borrow();
+    let uris: Vec<_> = transport
+        .inner
+        .calls
+        .iter()
+        .map(|request| format!("{} {}", request.method, request.uri))
+        .collect();
+
+    assert_eq!(exit.code, 130, "{} {}", exit.stdout, exit.stderr);
+    assert!(exit.stdout.contains("SKIPPED"), "{}", exit.stdout);
+    assert_eq!(
+        uris.iter()
+            .filter(|uri| uri.contains("_action=LOCK"))
+            .count(),
+        1,
+        "{uris:?}"
+    );
+    assert_eq!(
+        uris.iter()
+            .filter(|uri| uri.contains("_action=UNLOCK"))
+            .count(),
+        1,
+        "{uris:?}"
+    );
+    assert_eq!(uris.len(), 5, "three reads, one lock, one unlock: {uris:?}");
+    assert!(
+        uris.iter().all(|uri| !uri.starts_with("DELETE ")),
+        "{uris:?}"
+    );
+}
+
+#[test]
 fn a_lost_delete_reply_is_reconciled_once_and_the_batch_exits_1() {
     let directory = tempfile::tempdir().unwrap();
     let plan = directory.path().join("plan.json");

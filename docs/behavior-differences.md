@@ -15,7 +15,12 @@ matrix does not test.
 
 ADT simulation is read-only and cannot report which request currently owns a transportable
 object. The execute-time LOCK reply decides the request; an explicit `--tr` must match it.
-Matrix: not exercised (requires a transportable delete fixture).
+The LOCK reply also names the owner of the request (`CORRUSER`). When that owner is not the
+connection user, ABAPReach releases the lock, sends no DELETE and reports `REJECTED` with the
+request number; an owner the reply does not name (empty `CORRUSER`, for example on `$TMP`) is not
+checked by ABAPReach. The 403 that SAP gives for a write with a wrong `corrNr` is a write-time
+fact, not a LOCK reply, so it cannot be relied on to stop a foreign request before the DELETE.
+Matrix: not exercised (requires a transportable delete fixture); covered by fixture tests.
 
 ### 2. Function modules use the ADT server-rendered format
 

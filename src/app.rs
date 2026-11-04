@@ -467,13 +467,14 @@ fn execute(
                         cancel.clone(),
                     );
 
-                    delete::run(
+                    delete::run_until(
                         &mut backend,
                         &context,
                         &targets,
                         tr.as_deref(),
                         simulate,
                         &plan,
+                        &mut || cancel.is_set(),
                     )
                 };
                 if !simulate && cancel.is_set() {

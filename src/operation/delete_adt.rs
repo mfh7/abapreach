@@ -388,7 +388,8 @@ impl DeleteBackend for AdtDelete<'_> {
         let tr = if package.starts_with('$') {
             TrLock::Local
         } else {
-            // The lock of the delete names the request; SAP refuses a request of another user.
+            // The lock of the delete names the request and its owner; `transport_request` refuses
+            // a request of another user after the lock.
             TrLock::Unlocked
         };
 
@@ -427,7 +428,7 @@ impl DeleteBackend for AdtDelete<'_> {
         if cancel.as_ref().is_some_and(CancelFlag::is_set) {
             return self.refuse(&uri, &lock, "CANCELED: stopped after the lock".to_owned());
         }
-        let request = match transport_request(&lock, tr) {
+        let request = match transport_request(&lock, tr, &self.user) {
             Ok(request) => request,
             Err(reason) => return self.refuse(&uri, &lock, reason),
         };
@@ -516,8 +517,13 @@ fn group_uri(name: &str) -> String {
 }
 
 /// The request the DELETE carries: none for a local object, otherwise the request of the lock,
-/// which the plan's request must equal.
-fn transport_request(lock: &LockInfo, wanted: Option<&str>) -> Result<Option<String>, String> {
+/// which the plan's request must equal and which must not belong to another user. An owner the
+/// lock does not name cannot be checked here; SAP then decides at the DELETE.
+fn transport_request(
+    lock: &LockInfo,
+    wanted: Option<&str>,
+    user: &str,
+) -> Result<Option<String>, String> {
     let corrnr = lock.corrnr.as_str();
 
     match (lock.is_local, wanted) {
@@ -525,6 +531,11 @@ fn transport_request(lock: &LockInfo, wanted: Option<&str>) -> Result<Option<Str
         (true, None) => Ok(None),
         (false, _) if corrnr.is_empty() => {
             Err("the object is not local but the lock returned no transport request".to_owned())
+        }
+        (false, _) if !lock.corruser.is_empty() && !lock.corruser.eq_ignore_ascii_case(user) => {
+            Err(format!(
+                "transport request {corrnr} of the lock belongs to another user"
+            ))
         }
         (false, Some(tr)) if !tr.eq_ignore_ascii_case(corrnr) => Err(format!(
             "--tr {tr} does not match the transport request {corrnr} of the lock"
@@ -574,6 +585,7 @@ mod tests {
         LockInfo {
             handle: "h".to_owned(),
             corrnr: corrnr.to_owned(),
+            corruser: String::new(),
             is_local: local,
         }
     }
@@ -589,11 +601,11 @@ mod tests {
 
     #[test]
     fn the_request_comes_from_the_lock() {
-        assert_eq!(transport_request(&lock(true, ""), None), Ok(None));
+        assert_eq!(transport_request(&lock(true, ""), None, "U"), Ok(None));
         assert_eq!(
-            transport_request(&lock(false, "DEVK900001"), Some("devk900001")),
+            transport_request(&lock(false, "DEVK900001"), Some("devk900001"), "U"),
             Ok(Some("DEVK900001".to_owned()))
         );
-        assert!(transport_request(&lock(false, "DEVK 1"), None).is_err());
+        assert!(transport_request(&lock(false, "DEVK 1"), None, "U").is_err());
     }
 }

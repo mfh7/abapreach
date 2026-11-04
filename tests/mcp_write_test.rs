@@ -1159,6 +1159,78 @@ fn delete_diagnostics_scrub_host_password_and_route_in_every_client_field() {
     }
 }
 
+/// The leak holds only the host: no password and no route, so `holds_secret` does not fail the
+/// output closed and only the diagnostic scrub keeps the host from the client.
+fn assert_no_host(result: &ToolResult) {
+    for text in [
+        result.text.clone(),
+        result.structured.to_string(),
+        result.structured["output"].to_string(),
+    ] {
+        assert!(!text.contains(HOST), "{text}");
+    }
+}
+
+#[test]
+fn a_delete_simulation_scrubs_a_host_only_leak() {
+    let mut rig = rig();
+    let requests = log();
+    let leak = format!("cannot reach {HOST}");
+
+    rig.adt(Script::new(&requests).on("GET", PROG, Err(TransportError::PreSendConnectivity(leak))));
+
+    let result = rig.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+
+    assert!(result.is_error);
+    assert!(
+        result.text.contains("cannot reach"),
+        "the diagnostic must stay: {}",
+        result.text
+    );
+    assert_no_host(&result);
+}
+
+#[test]
+fn a_delete_execution_scrubs_a_host_only_leak() {
+    let mut rig = rig();
+    let requests = log();
+
+    rig.adt(prog_reads(&requests, "OWNER"));
+    let simulated = rig.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+    let token = simulated.structured["plan_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    rig.adt(prog_reads(&requests, "OWNER").on(
+        "POST",
+        &format!("{PROG}?_action=LOCK&accessMode=MODIFY"),
+        Err(TransportError::PreSendConnectivity(format!(
+            "cannot reach {HOST}"
+        ))),
+    ));
+
+    let result = rig.call_as(
+        &mut Typing("ZPROG"),
+        "abap_delete",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"], "plan_token": token}),
+    );
+
+    assert!(result.is_error, "{}", result.text);
+    assert!(
+        result.text.contains("cannot reach"),
+        "the diagnostic must stay: {}",
+        result.text
+    );
+    assert_no_host(&result);
+}
+
 #[test]
 fn a_result_payload_with_a_configured_secret_is_rejected_and_issues_no_token() {
     let mut rig = rig();

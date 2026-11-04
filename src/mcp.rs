@@ -484,10 +484,10 @@ fn read_loop(
     }
 
     // A write in flight cannot be answered any more: it settles its lock and writes no further.
-    // A write still queued behind it sees the EOF in `Link::begin`; requests already received
-    // are still answered.
+    // A write not yet begun is refused by the shutdown, also in the window before the EOF event
+    // is queued; requests already received are still answered.
     if shared.busy.load(Ordering::SeqCst) {
-        cancel.set();
+        cancel.request_shutdown();
     }
 
     let _ = events.send(Event::Eof);
@@ -946,6 +946,54 @@ mod tests {
     use std::collections::VecDeque;
     use std::io::Write;
     use std::sync::{Arc, Mutex, mpsc};
+
+    #[test]
+    fn eof_with_a_write_busy_raises_the_shutdown_before_the_event_is_queued() {
+        let (sender, events) = mpsc::channel();
+        let output: SharedOutput = Arc::new(Mutex::new(Vec::new()));
+        let shared = Shared::default();
+        let cancel = CancelFlag::new();
+        let mut log = Vec::new();
+
+        shared.busy.store(true, std::sync::atomic::Ordering::SeqCst);
+        super::read_loop(
+            std::io::Cursor::new(Vec::new()),
+            &sender,
+            &shared,
+            &cancel,
+            &output,
+        );
+        // The interleaving: the main loop looks at the channel before the EOF event is in it.
+        assert!(matches!(events.try_recv(), Ok(Event::Eof)));
+
+        let mut link = Link {
+            events: &events,
+            deferred: VecDeque::new(),
+            output: &output,
+            shared: &shared,
+            cancel: cancel.clone(),
+            log: &mut log,
+            elicitation: false,
+            asked: 0,
+        };
+
+        assert!(!link.begin(&json!(7), true));
+        assert!(cancel.is_shutdown());
+        assert!(cancel.is_set());
+    }
+
+    #[test]
+    fn reset_keeps_a_cancellation_while_a_shutdown_stands() {
+        let cancel = CancelFlag::new();
+
+        cancel.set();
+        cancel.reset();
+        assert!(!cancel.is_set());
+
+        cancel.request_shutdown();
+        cancel.reset();
+        assert!(cancel.is_set());
+    }
 
     #[test]
     fn begin_refuses_a_queued_write_after_eof_without_resetting_shutdown() {

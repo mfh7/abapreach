@@ -127,7 +127,9 @@ impl CancelFlag {
 
     /// Clears a cancellation that belonged to a request that is over. A shutdown stays.
     pub fn reset(&self) {
-        self.cancelled.store(false, Ordering::SeqCst);
+        if !self.is_shutdown() {
+            self.cancelled.store(false, Ordering::SeqCst);
+        }
     }
 
     pub fn request_shutdown(&self) {
@@ -622,6 +624,8 @@ enum IncludePost {
 pub(crate) struct LockInfo {
     pub(crate) handle: String,
     pub(crate) corrnr: String,
+    /// The owner of the request in `corrnr`; empty when the lock reply names none.
+    pub(crate) corruser: String,
     pub(crate) is_local: bool,
 }
 
@@ -2233,6 +2237,7 @@ pub(crate) fn parse_lock(xml: &str) -> Result<LockInfo, String> {
     Ok(LockInfo {
         handle,
         corrnr: fields.get("CORRNR").cloned().unwrap_or_default(),
+        corruser: fields.get("CORRUSER").cloned().unwrap_or_default(),
         is_local: fields.get("IS_LOCAL").is_some_and(|value| value == "X"),
     })
 }
