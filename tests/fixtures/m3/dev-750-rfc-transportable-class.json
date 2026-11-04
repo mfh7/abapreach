@@ -1,0 +1,601 @@
+{
+ "system": "DEV",
+ "release": "750",
+ "backend": "rfc",
+ "exchanges": [
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/oo/classes?corrNr=DEVK900001",
+    "headers": {
+     "Content-Type": "application/*"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/objectstructure?version=active&withShortDescriptions=true",
+    "headers": {},
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6?_action=LOCK&accessMode=MODIFY",
+    "headers": {
+     "Accept": "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "PUT",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D&corrNr=DEVK900001",
+    "headers": {
+     "Content-Type": "text/plain; charset=utf-8"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "PUT",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D&corrNr=DEVK900001",
+    "headers": {
+     "Content-Type": "text/plain; charset=utf-8"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes?lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D&corrNr=DEVK900001",
+    "headers": {
+     "Content-Type": "application/*"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 201
+   }
+  },
+  {
+   "request": {
+    "method": "PUT",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D&corrNr=DEVK900001",
+    "headers": {
+     "Content-Type": "text/plain; charset=utf-8"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6?_action=UNLOCK&lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D",
+    "headers": {},
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/activation/inactiveobjects",
+    "headers": {
+     "Accept": "application/vnd.sap.adt.inactivectsobjects.v1+xml, application/xml;q=0.8"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/activation?method=activate&preauditRequested=true",
+    "headers": {
+     "Content-Type": "application/xml",
+     "Accept": "application/xml"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6\" adtcore:name=\"YTEST_ABAPREACH_CL6\"/></adtcore:objectReferences>"
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/activation/inactiveobjects",
+    "headers": {
+     "Accept": "application/vnd.sap.adt.inactivectsobjects.v1+xml, application/xml;q=0.8"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/activation?method=activate&preauditRequested=false",
+    "headers": {
+     "Content-Type": "application/xml",
+     "Accept": "application/xml"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><adtcore:objectReferences xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6\" adtcore:type=\"CLAS/OC\" adtcore:name=\"YTEST_ABAPREACH_CL6\"/> <adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions\" adtcore:type=\"CLAS/OCN/definitions\" adtcore:name=\"YTEST_ABAPREACH_CL6\" adtcore:parentUri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6\"/> <adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/implementations\" adtcore:type=\"CLAS/OCN/implementations\" adtcore:name=\"YTEST_ABAPREACH_CL6\" adtcore:parentUri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6\"/> <adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/macros\" adtcore:type=\"CLAS/OCN/macros\" adtcore:name=\"YTEST_ABAPREACH_CL6\" adtcore:parentUri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6\"/> <adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses\" adtcore:type=\"CLAS/OCN/testclasses\" adtcore:name=\"YTEST_ABAPREACH_CL6\" adtcore:parentUri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6\"/> <adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main#type=CLAS%2FOM;name=PROBE\" adtcore:type=\"CLAS/OM/public\" adtcore:name=\"YTEST_ABAPREACH_CL6           PROBE\" adtcore:parentUri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6\"/> <adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main#type=CLAS%2FOSI;name=YTEST_ABAPREACH_CL6\" adtcore:type=\"CLAS/OSI\" adtcore:name=\"YTEST_ABAPREACH_CL6\" adtcore:parentUri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6\"/> <adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main#type=CLAS%2FOSO;name=YTEST_ABAPREACH_CL6\" adtcore:type=\"CLAS/OSO\" adtcore:name=\"YTEST_ABAPREACH_CL6\" adtcore:parentUri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6\"/> <adtcore:objectReference adtcore:uri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main#type=CLAS%2FOSU;name=YTEST_ABAPREACH_CL6\" adtcore:type=\"CLAS/OSU\" adtcore:name=\"YTEST_ABAPREACH_CL6\" adtcore:parentUri=\"/sap/bc/adt/oo/classes/ytest_abapreach_cl6\"/></adtcore:objectReferences>"
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?version=active",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?version=inactive",
+    "headers": {
+     "Accept": "text/plain"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/activation/inactiveobjects",
+    "headers": {
+     "Accept": "application/vnd.sap.adt.inactivectsobjects.v1+xml, application/xml;q=0.8"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6?_action=LOCK&accessMode=MODIFY",
+    "headers": {
+     "Accept": "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "DELETE",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6?lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D&corrNr=DEVK900001",
+    "headers": {},
+    "body": ""
+   },
+   "response": {
+    "status": 200
+   }
+  },
+  {
+   "request": {
+    "method": "GET",
+    "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6",
+    "headers": {
+     "Accept": "application/*"
+    },
+    "body": ""
+   },
+   "response": {
+    "status": 404
+   }
+  }
+ ]
+}

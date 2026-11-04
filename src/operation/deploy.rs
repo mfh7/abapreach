@@ -1,9 +1,17 @@
-use crate::adt::{AdtMessage, parse_messages, parse_versions, prog_uri, versions_uri};
+use crate::adt::{
+    ActivationBody, AdtMessage, Caller, ObjectRef, USAGE_REQUEST_XML, classify_activation,
+    parse_callers, parse_inactive_feed_refs, parse_messages, parse_object_refs, parse_versions,
+    prog_uri, usage_references_uri,
+};
 use crate::backend::{Failure, Selection, SelectionReason};
+use crate::cli::{IncludeKind, ObjectKind};
 use crate::config::{Connection, tls_warning};
 use crate::domain::{Outcome, Status};
-use crate::hash::{normalize, source_hash, validate_prog};
+use crate::hash::{normalize, source_hash};
+use crate::object::{check_deploy_source, check_request};
+use crate::operation::read::{ReadError, resolve_group};
 use crate::policy::{Confirmer, Decision, InactiveVersion, Policies, Prompt, Terminal};
+use crate::signature::{interface_diff, validate_signature};
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use quick_xml::escape::{escape, resolve_predefined_entity};
 use quick_xml::events::Event;
@@ -21,6 +29,11 @@ const LOCK_ACCEPT: &str =
 const VERSIONS_ACCEPT: &str = "application/atom+xml;type=feed";
 const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET without a version returns it; restore only by deploying the base source again on your order";
 const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
+const INACTIVE_OBJECTS_ACCEPT: &str =
+    "application/vnd.sap.adt.inactivectsobjects.v1+xml, application/xml;q=0.8";
+const WHERE_USED_LIMIT: usize = 50;
+const RUNTIME_WARNING: &str = "W: callers' syntax check does not catch missing CALL FUNCTION parameters; they dump at runtime";
+const OBJECT_STRUCTURE: &str = "objectstructure?version=active&withShortDescriptions=true";
 
 #[derive(Clone, Debug)]
 pub struct DeployInput {
@@ -31,11 +44,56 @@ pub struct DeployInput {
     pub tr: Option<String>,
 }
 
-/// Exit code of an interrupt (128 + SIGINT): at once when no lock is held, after the unlock
-/// when one is.
+/// What a deploy targets besides its name: the kind, the `--fugr` of a FUNC, the class include
+/// and the opt-in creation of a missing include. The default is the PROG of milestone 1.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeployScope {
+    pub kind: ObjectKind,
+    pub group: Option<String>,
+    pub include: Option<IncludeKind>,
+    pub create_include: bool,
+}
+
+impl DeployScope {
+    pub fn new(kind: ObjectKind) -> Self {
+        Self {
+            kind,
+            group: None,
+            include: None,
+            create_include: false,
+        }
+    }
+
+    pub fn group(mut self, group: Option<&str>) -> Self {
+        self.group = group.map(str::to_owned);
+
+        self
+    }
+
+    pub fn include(mut self, include: Option<IncludeKind>) -> Self {
+        self.include = include;
+
+        self
+    }
+
+    pub fn create_include(mut self, create_include: bool) -> Self {
+        self.create_include = create_include;
+
+        self
+    }
+}
+
+impl Default for DeployScope {
+    fn default() -> Self {
+        Self::new(ObjectKind::Prog)
+    }
+}
+
+/// Exit code of an interrupt (128 + SIGINT): at once when no lock or create POST is in flight,
+/// otherwise after the safe operation outcome is known.
 pub const INTERRUPT_EXIT_CODE: i32 = 130;
 
-/// What a SIGINT means right now: leave at once, or let the lock holder unlock first.
+/// What a SIGINT means right now: leave at once, or let a critical operation finish safely.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InterruptAction {
     ExitNow,
@@ -47,6 +105,7 @@ pub enum InterruptAction {
 pub struct CancelFlag {
     cancelled: Arc<AtomicBool>,
     lock_held: Arc<AtomicBool>,
+    write_in_flight: Arc<AtomicBool>,
 }
 
 impl CancelFlag {
@@ -73,10 +132,19 @@ impl CancelFlag {
         self.lock_held.load(Ordering::SeqCst)
     }
 
-    /// A SIGINT must not end the process while a lock is held: the flag then makes the deploy
-    /// unlock before it reports. Without a lock there is nothing to clean up, so exit at once.
+    /// Marks the one-shot create POST and its reconciliation. A signal in this window must wait
+    /// until the outcome is known: a server may have created the object even when its reply races
+    /// with Ctrl-C.
+    pub fn hold_write(&self) -> WriteScope<'_> {
+        self.write_in_flight.store(true, Ordering::SeqCst);
+
+        WriteScope(self)
+    }
+
+    /// A SIGINT must not end the process while a lock is held or a create write is unresolved.
+    /// The flag then makes the operation settle safely before it reports.
     pub fn on_interrupt(&self) -> InterruptAction {
-        if !self.lock_held() {
+        if !self.lock_held() && !self.write_in_flight.load(Ordering::SeqCst) {
             return InterruptAction::ExitNow;
         }
 
@@ -92,6 +160,15 @@ pub struct LockScope<'a>(&'a CancelFlag);
 impl Drop for LockScope<'_> {
     fn drop(&mut self) {
         self.0.lock_held.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Clears the create POST window after its reply or read-only reconciliation has settled.
+pub struct WriteScope<'a>(&'a CancelFlag);
+
+impl Drop for WriteScope<'_> {
+    fn drop(&mut self) {
+        self.0.write_in_flight.store(false, Ordering::SeqCst);
     }
 }
 
@@ -131,7 +208,15 @@ impl DeployProg {
         connection: Option<&Connection>,
         cancel: &CancelFlag,
     ) -> DeployResult {
-        Self::run_with(transport, input, None, connection, cancel, &Terminal)
+        Self::run_with(
+            transport,
+            input,
+            DeployScope::default(),
+            None,
+            connection,
+            cancel,
+            &Terminal,
+        )
     }
 
     /// Like `run_classified`, but with a replacement for the terminal the `ask` policy prompts on.
@@ -142,7 +227,15 @@ impl DeployProg {
         cancel: &CancelFlag,
         confirmer: &dyn Confirmer,
     ) -> DeployResult {
-        Self::run_with(transport, input, None, connection, cancel, confirmer)
+        Self::run_with(
+            transport,
+            input,
+            DeployScope::default(),
+            None,
+            connection,
+            cancel,
+            confirmer,
+        )
     }
 
     /// Like `run_classified`, but prints the routing decision first; the CLI always has one.
@@ -156,6 +249,7 @@ impl DeployProg {
         Self::run_with(
             transport,
             input,
+            DeployScope::default(),
             Some(selection),
             connection,
             cancel,
@@ -163,9 +257,25 @@ impl DeployProg {
         )
     }
 
+    /// The deploy of any M3 kind: `scope` names the kind, the group, the include and the opt-in
+    /// include creation. The CLI always has a routing decision to print.
+    pub fn run_scoped(
+        transport: &mut dyn SadtTransport,
+        input: DeployInput,
+        scope: DeployScope,
+        selection: Option<&Selection>,
+        connection: Option<&Connection>,
+        cancel: &CancelFlag,
+    ) -> DeployResult {
+        Self::run_with(
+            transport, input, scope, selection, connection, cancel, &Terminal,
+        )
+    }
+
     fn run_with(
         transport: &mut dyn SadtTransport,
         input: DeployInput,
+        scope: DeployScope,
         selection: Option<&Selection>,
         connection: Option<&Connection>,
         cancel: &CancelFlag,
@@ -177,7 +287,16 @@ impl DeployProg {
         let mut run = Run {
             transport,
             name: input.name.clone(),
-            uri: prog_uri(&input.name),
+            kind: scope.kind,
+            include: scope.include,
+            create_include: scope.create_include,
+            supplied_group: scope.group,
+            group: None,
+            uri: String::new(),
+            source_uri: String::new(),
+            feeds: Vec::new(),
+            include_absent: false,
+            rendered: None,
             stdout: selection
                 .map(|selection| selection_report(selection, &policies))
                 .unwrap_or_default(),
@@ -433,6 +552,11 @@ enum PutResult {
     Uncertain,
 }
 
+enum IncludePost {
+    Created,
+    Uncertain,
+}
+
 struct LockInfo {
     handle: String,
     corrnr: String,
@@ -448,6 +572,9 @@ enum Locked {
     Written,
     /// Deploy: the PUT may or may not have reached SAP; the lock is still held.
     PutUncertain,
+    /// Deploy: the include POST may or may not have reached SAP; the lock is still held and the
+    /// POST is never repeated.
+    IncludeUncertain,
 }
 
 /// What the version list said about the inactive version, kept from the check before the lock so
@@ -485,7 +612,23 @@ impl InactiveSeen {
 struct Run<'a> {
     transport: &'a mut dyn SadtTransport,
     name: String,
+    kind: ObjectKind,
+    include: Option<IncludeKind>,
+    create_include: bool,
+    /// The `--fugr` of the command; the resolved group replaces it in `group`.
+    supplied_group: Option<String>,
+    group: Option<String>,
+    /// The object the lock and the activation use: for a class include the class.
     uri: String,
+    /// The source that is read, checked and written.
+    source_uri: String,
+    /// The version feeds the foreign-inactive guard reads.
+    feeds: Vec<String>,
+    /// The class include does not exist yet and `--create-include` will create it: a read of it
+    /// answers 404, which then means empty.
+    include_absent: bool,
+    /// The source as SAP rendered it in the PUT reply; only a FUNC is re-rendered by the server.
+    rendered: Option<Vec<String>>,
     stdout: Vec<String>,
     /// `W:` lines of the guard policies, kept until the verdict is known.
     warnings: Vec<String>,
@@ -524,7 +667,10 @@ impl Run<'_> {
     }
 
     fn call(&mut self, request: Request) -> Result<Response, TransportError> {
-        let mutates = request.method != "GET" && !request.uri.contains("/checkruns");
+        // A checkrun without save and a where-used query are POSTs that write nothing.
+        let mutates = request.method != "GET"
+            && !request.uri.contains("/checkruns")
+            && !request.uri.contains("/usageReferences?");
         let response = self.transport.request(request);
 
         if mutates && (response.is_ok() || response.as_ref().is_err_and(TransportError::was_sent)) {
@@ -554,10 +700,16 @@ impl Run<'_> {
         pinned: bool,
         cancel: &CancelFlag,
     ) -> Result<Finish, Finish> {
-        validate_prog(&input.name, &input.source).map_err(Finish::stop)?;
+        check_deploy_source(self.kind, &input.name, &input.source).map_err(Finish::stop)?;
+        if self.kind == ObjectKind::Func {
+            validate_signature(&input.source).map_err(|error| {
+                Finish::stop(format!("FUNC source signature unreadable: {error}"))
+            })?;
+        }
+        self.resolve_target()?;
 
         let file = normalize(input.source.clone());
-        let live = normalize(self.read_active("read live source")?);
+        let live = normalize(self.read_live()?);
         let live_hash = source_hash(&live);
 
         if let Some(base) = &input.base
@@ -585,7 +737,16 @@ impl Run<'_> {
             .to_string();
 
         self.stdout.push(diff.trim_end().to_owned());
+        self.report_interface_change(&live, &file)?;
         self.stdout.push(format!("live hash {live_hash}"));
+
+        if let Some(include) = self
+            .include
+            .filter(|_| self.include_absent && input.simulate)
+        {
+            self.stdout
+                .push(format!("WILL CREATE INCLUDE {}", include.token()));
+        }
 
         // The server would answer the LOCK and then reject the PUT (423, invalid lock handle),
         // so the capability is checked before the first request that writes.
@@ -602,11 +763,16 @@ impl Run<'_> {
 
         // Still read-only: a refused guard leaves no lock behind and writes nothing.
         self.foreign_inactive(Some(changed))?;
+        self.warn_inactive_siblings();
 
         let _lock_scope = cancel.hold_lock();
         // Ctrl-C is deferred while the LOCK request is in flight too: its 2xx reply may already
         // have created the lock, so every path from that request onward must clean it up.
         let lock = self.lock()?;
+
+        // Test-only: keeps the lock held so a harness can interrupt inside the window.
+        #[cfg(feature = "fault-injection")]
+        crate::fault::hold_lock(cancel);
 
         match self.locked(&lock, input, &file, &live_hash, cancel) {
             Locked::Finished(finish) => Ok(self.release(&lock, &input.name, finish)),
@@ -621,6 +787,15 @@ impl Run<'_> {
             Locked::PutUncertain => {
                 let unlocked = self.unlock(&lock);
                 let finish = self.reconcile(&live_hash, &file);
+
+                Ok(match unlocked {
+                    Ok(()) => finish.lock_released(),
+                    Err(reason) => finish.unlock_failed(&reason, &input.name),
+                })
+            }
+            Locked::IncludeUncertain => {
+                let unlocked = self.unlock(&lock);
+                let finish = self.reconcile_include(&file);
 
                 Ok(match unlocked {
                     Ok(()) => finish.lock_released(),
@@ -655,12 +830,166 @@ impl Run<'_> {
         }
     }
 
-    fn read_active(&mut self, what: &str) -> Result<Vec<String>, Finish> {
-        let mut request = Request::get(format!("{}/source/main?version=active", self.uri));
+    /// A FUNC whose readable signature differs from the live one: the parameter diff, callers,
+    /// and runtime-risk warning are advisory. An unreadable live signature stops before a write.
+    fn report_interface_change(&mut self, live: &[String], file: &[String]) -> Result<(), Finish> {
+        if self.kind != ObjectKind::Func {
+            return Ok(());
+        }
+
+        let Some(diff) = interface_diff(live, file)
+            .map_err(|error| Finish::stop(format!("live FUNC signature unreadable: {error}")))?
+        else {
+            return Ok(());
+        };
+
+        self.stdout.push("INTERFACE CHANGED".to_owned());
+        self.stdout.extend(diff);
+
+        match self.where_used() {
+            Ok(callers) if callers.is_empty() => self.stdout.push("WHERE-USED: none".to_owned()),
+            Ok(callers) => {
+                for caller in callers.iter().take(WHERE_USED_LIMIT) {
+                    let kind = caller.kind.split('/').next().unwrap_or_default();
+
+                    self.stdout
+                        .push(format!("WHERE-USED {kind} {}", caller.name));
+                }
+
+                if callers.len() > WHERE_USED_LIMIT {
+                    self.stdout.push(format!(
+                        "WHERE-USED ... {} more",
+                        callers.len() - WHERE_USED_LIMIT
+                    ));
+                }
+            }
+            Err(reason) => self
+                .warnings
+                .push(format!("W: where-used unavailable: {reason}")),
+        }
+
+        self.warnings.push(RUNTIME_WARNING.to_owned());
+
+        Ok(())
+    }
+
+    fn where_used(&mut self) -> Result<Vec<Caller>, String> {
+        let mut request = Request::post(
+            usage_references_uri(&self.uri),
+            USAGE_REQUEST_XML.as_bytes().to_vec(),
+        );
+
+        for header in ["Content-Type", "Accept"] {
+            request
+                .headers
+                .insert(header.to_owned(), "application/*".to_owned());
+        }
+
+        let response = self.call(request).map_err(|error| error.to_string())?;
+
+        if response.status != 200 {
+            return Err(format!("HTTP {}", response.status));
+        }
+
+        let text = String::from_utf8(response.body).map_err(|error| error.to_string())?;
+
+        parse_callers(&text).map_err(|error| format!("unreadable reply: {error}"))
+    }
+
+    /// Resolves the URIs of the target. A FUNC first asks the server for its function group; a
+    /// supplied `--fugr` that names another group is a `STOP`, like on the read path.
+    fn resolve_target(&mut self) -> Result<(), Finish> {
+        if self.kind == ObjectKind::Func {
+            let resolved = resolve_group(
+                &mut *self.transport,
+                &self.name,
+                self.supplied_group.as_deref(),
+            )
+            .map_err(|error| read_failure(error, !self.write_sent))?;
+
+            self.group = Some(resolved);
+        }
+
+        let group = self.group.as_deref();
+        let uri = |result: Result<String, String>| result.map_err(Finish::stop);
+
+        self.uri = uri(self.kind.object_uri(&self.name, group))?;
+        self.source_uri = uri(self.kind.source_uri(&self.name, group, self.include))?;
+        self.feeds = vec![uri(self.kind.versions_uri(
+            &self.name,
+            group,
+            self.include,
+        ))?];
+
+        // Activating a class activates all of it, so the inactive state of its main source
+        // counts next to the include that is deployed.
+        if self.kind == ObjectKind::Clas && self.include.is_some() {
+            self.feeds
+                .push(uri(self.kind.versions_uri(&self.name, group, None))?);
+        }
+
+        Ok(())
+    }
+
+    /// The first read of the run. A class include that does not exist answers 404 before the
+    /// lock; if the class itself exists the include is missing, which stops the run unless
+    /// `--create-include` was given.
+    fn read_live(&mut self) -> Result<Vec<String>, Finish> {
+        let response = self.get_active()?;
+
+        if response.status == 404
+            && let Some(include) = self.include
+        {
+            self.check_include_missing(include)?;
+        }
+
+        self.source_lines(response, "read live source")
+    }
+
+    /// Whether the class exists, probed with its structure, which answers 200 in every state of
+    /// an existing class. A class include that is not there is `INCLUDE_MISSING`, nothing else.
+    fn check_include_missing(&mut self, include: IncludeKind) -> Result<(), Finish> {
+        let mut request = Request::get(format!("{}/{OBJECT_STRUCTURE}", self.uri));
+        request
+            .headers
+            .insert("Accept".to_owned(), "application/*".to_owned());
+        let structure = self.send(request)?;
+
+        if structure.status != 200 {
+            // The class is not there either: the plain 404 of the read stands.
+            return Ok(());
+        }
+
+        if !self.create_include {
+            return Err(Finish {
+                stdout: vec![format!(
+                    "INCLUDE_MISSING: {} (re-run with --create-include)",
+                    include.token()
+                )],
+                ..Finish::new(None, 1)
+            });
+        }
+
+        self.include_absent = true;
+        // A missing include has no versions to inspect.
+        self.feeds.remove(0);
+
+        Ok(())
+    }
+
+    fn get_active(&mut self) -> Result<Response, Finish> {
+        let mut request = Request::get(format!("{}?version=active", self.source_uri));
         request
             .headers
             .insert("Accept".to_owned(), "text/plain".to_owned());
-        let response = self.send(request)?;
+
+        self.send(request)
+    }
+
+    fn source_lines(&self, response: Response, what: &str) -> Result<Vec<String>, Finish> {
+        if response.status == 404 && self.include_absent {
+            return Ok(Vec::new());
+        }
 
         if response.status != 200 {
             return Err(Finish::stop_http(format!("cannot {what}"), response.status));
@@ -670,6 +999,62 @@ impl Run<'_> {
             .map_err(|error| Finish::stop(format!("cannot {what}: not UTF-8: {error}")))?;
 
         Ok(text.split('\n').map(str::to_owned).collect())
+    }
+
+    fn read_active(&mut self, what: &str) -> Result<Vec<String>, Finish> {
+        let response = self.get_active()?;
+
+        self.source_lines(response, what)
+    }
+
+    /// Other inactive objects of the function group do not stop the deploy, but the syntax check
+    /// of this module can fail because of them. Advisory: an unreadable list says nothing.
+    fn warn_inactive_siblings(&mut self) {
+        let Some(group) = self.group.clone() else {
+            return;
+        };
+        let mut request = Request::get("/sap/bc/adt/activation/inactiveobjects");
+        request
+            .headers
+            .insert("Accept".to_owned(), INACTIVE_OBJECTS_ACCEPT.to_owned());
+        let Ok(response) = self.call(request) else {
+            return;
+        };
+        let refs = (response.status == 200)
+            .then(|| String::from_utf8(response.body).ok())
+            .flatten()
+            .and_then(|text| parse_inactive_feed_refs(&text).ok());
+        let Some(refs) = refs else {
+            return;
+        };
+        let group_uri = format!(
+            "/sap/bc/adt/functions/groups/{}",
+            group.to_ascii_lowercase()
+        );
+        let siblings: Vec<&str> = refs
+            .iter()
+            .filter(|object| {
+                object
+                    .parent_uri
+                    .as_deref()
+                    .is_some_and(|parent| parent.eq_ignore_ascii_case(&group_uri))
+                    && !object.uri.eq_ignore_ascii_case(&self.uri)
+            })
+            .map(|object| object.name.as_str())
+            .collect();
+
+        if siblings.is_empty() {
+            return;
+        }
+
+        self.warnings.push(format!(
+            "W: inactive objects in function group {group}: {}",
+            siblings.join(", ")
+        ));
+        self.warnings.push(format!(
+            "W: the syntax check of {} can fail because of them",
+            self.name.to_ascii_uppercase()
+        ));
     }
 
     /// The `foreign_inactive` guard: the version list says whether the inactive version belongs
@@ -685,6 +1070,20 @@ impl Run<'_> {
             }
             Err(InactiveOwnerError::Unreadable(reason)) => Err(reason),
         };
+
+        // A function module with any inactive version is refused, whoever owns it and whatever
+        // the policy says: SAP derives the interface from the inactive version.
+        if self.kind == ObjectKind::Func && matches!(read, Ok(Some(_))) {
+            return Err(Finish::status(
+                Status::Rejected,
+                format!(
+                    "REJECTED: Function module {} has an inactive version; activate or discard \
+                     it first in SE37",
+                    self.name.to_ascii_uppercase()
+                ),
+            ));
+        }
+
         let seen = InactiveSeen::of(&read);
 
         if changed.is_none() && self.seen.unchanged(&seen) {
@@ -723,9 +1122,35 @@ impl Run<'_> {
         }
     }
 
-    /// The owner of the inactive version, or why the version list could not tell.
+    /// The owner of the inactive version over all feeds of the target: another user's version
+    /// wins, an unreadable feed fails closed, and only then does the user's own version count.
     fn inactive_owner(&mut self) -> Result<Option<String>, InactiveOwnerError> {
-        let mut request = Request::get(versions_uri(&self.uri));
+        let mut own = None;
+        let mut unreadable = None;
+
+        for feed in self.feeds.clone() {
+            match self.feed_owner(&feed) {
+                Ok(Some(owner)) if !owner.eq_ignore_ascii_case(&self.user) => {
+                    return Ok(Some(owner));
+                }
+                Ok(Some(owner)) => own = Some(owner),
+                Ok(None) => {}
+                Err(InactiveOwnerError::Unreadable(reason)) => {
+                    unreadable.get_or_insert(reason);
+                }
+                Err(request) => return Err(request),
+            }
+        }
+
+        match unreadable {
+            Some(reason) => Err(InactiveOwnerError::Unreadable(reason)),
+            None => Ok(own),
+        }
+    }
+
+    /// The owner of the inactive version of one feed, or why the feed could not tell.
+    fn feed_owner(&mut self, feed: &str) -> Result<Option<String>, InactiveOwnerError> {
+        let mut request = Request::get(feed);
         request
             .headers
             .insert("Accept".to_owned(), VERSIONS_ACCEPT.to_owned());
@@ -844,6 +1269,20 @@ impl Run<'_> {
             return Locked::Checked;
         }
 
+        // The checkrun cannot see an include that does not exist yet, so it runs first; the
+        // POST is the only extra write of a deploy and is sent once.
+        if self.include_absent {
+            match self.create_include_post(lock, transport_request.as_deref()) {
+                Ok(IncludePost::Created) => {}
+                Ok(IncludePost::Uncertain) => return Locked::IncludeUncertain,
+                Err(finish) => return Locked::Finished(finish),
+            }
+
+            if cancel.is_set() {
+                return Locked::Finished(Finish::cancelled());
+            }
+        }
+
         match self.put(lock, file, transport_request.as_deref()) {
             Ok(PutResult::Accepted) => Locked::Written,
             Ok(PutResult::Uncertain) => Locked::PutUncertain,
@@ -872,10 +1311,52 @@ impl Run<'_> {
                 "--tr {tr} does not match the transport request {corrnr} of the lock"
             ))),
             (false, _) => {
+                check_request(corrnr).map_err(|_| {
+                    Finish::stop(format!(
+                        "the lock returned an invalid transport request {corrnr}"
+                    ))
+                })?;
                 self.stdout.push(format!("transport request {corrnr}"));
 
                 Ok(Some(corrnr.to_owned()))
             }
+        }
+    }
+
+    /// `POST <class>/includes` under the class lock; it creates the include that the PUT then
+    /// fills. Not idempotent, so any answer but a 2xx leaves the outcome to the reconciliation.
+    fn create_include_post(
+        &mut self,
+        lock: &LockInfo,
+        transport_request: Option<&str>,
+    ) -> Result<IncludePost, Finish> {
+        let Some(include) = self.include else {
+            return Ok(IncludePost::Created);
+        };
+        let mut uri = format!(
+            "{}/includes?lockHandle={}",
+            self.uri,
+            encode_lock_handle(&lock.handle)
+        );
+
+        if let Some(corrnr) = transport_request {
+            uri.push_str(&format!("&corrNr={corrnr}"));
+        }
+
+        let mut request = Request::post(uri, include_xml(include).into_bytes());
+        request
+            .headers
+            .insert("Content-Type".to_owned(), "application/*".to_owned());
+
+        match self.call(request) {
+            Ok(response) if (200..300).contains(&response.status) => {
+                self.include_absent = false;
+
+                Ok(IncludePost::Created)
+            }
+            Ok(_) => Ok(IncludePost::Uncertain),
+            Err(error) if error.was_sent() => Ok(IncludePost::Uncertain),
+            Err(error) => Err(Finish::error(&error, false)),
         }
     }
 
@@ -886,8 +1367,8 @@ impl Run<'_> {
         transport_request: Option<&str>,
     ) -> Result<PutResult, Finish> {
         let mut uri = format!(
-            "{}/source/main?lockHandle={}",
-            self.uri,
+            "{}?lockHandle={}",
+            self.source_uri,
             encode_lock_handle(&lock.handle)
         );
 
@@ -902,7 +1383,18 @@ impl Run<'_> {
         );
 
         match self.call(request) {
-            Ok(response) if (200..300).contains(&response.status) => Ok(PutResult::Accepted),
+            Ok(response) if (200..300).contains(&response.status) => {
+                // SAP re-renders a function module (upper-case signature, blank lines): its reply
+                // is the text that becomes active.
+                if self.kind == ObjectKind::Func {
+                    let text = String::from_utf8_lossy(&response.body);
+                    let rendered = normalize(text.split('\n').map(str::to_owned).collect());
+
+                    self.rendered = (!rendered.is_empty()).then_some(rendered);
+                }
+
+                Ok(PutResult::Accepted)
+            }
             Ok(response) => Err(Finish::http(
                 Status::Rejected,
                 "PUT failed",
@@ -915,38 +1407,20 @@ impl Run<'_> {
 
     /// Runs after the unlock; the verdict is the active content, not the activation status.
     fn activate(&mut self, name: &str, live_hash: &str, file: &[String]) -> Finish {
-        let body = activation_request_xml(name, &self.uri);
-        let mut request = Request::post(
-            "/sap/bc/adt/activation?method=activate&preauditRequested=true",
-            body.into_bytes(),
-        );
-        request
-            .headers
-            .insert("Content-Type".to_owned(), "application/xml".to_owned());
-        request
-            .headers
-            .insert("Accept".to_owned(), "application/xml".to_owned());
-        let response = match self.call(request) {
+        let response = match self.post_activation(name, true, None, live_hash, file) {
             Ok(response) => response,
-            Err(error) if error.was_sent() => {
-                return self.reconcile(live_hash, file);
-            }
-            Err(error) => {
-                return Finish {
-                    failure: Some(Failure::from(&error)),
-                    ..Finish::status(
-                        Status::Inactive,
-                        format!("INACTIVE: the activation was not sent: {error}"),
-                    )
-                };
-            }
+            Err(finish) => return finish,
+        };
+        let response = match self.resend_worklist(name, response, live_hash, file) {
+            Ok(response) => response,
+            Err(finish) => return finish,
         };
         let text = String::from_utf8_lossy(&response.body).into_owned();
 
         self.stdout.extend(format_messages(&text));
 
         if !(200..300).contains(&response.status) {
-            let mut finish = self.reconcile_non_2xx_activation(response.status, file);
+            let mut finish = self.reconcile_non_2xx_activation(response.status, live_hash, file);
             finish.failure = Some(Failure::from(&TransportError::Http {
                 status: response.status,
                 message: String::new(),
@@ -960,13 +1434,7 @@ impl Run<'_> {
         }
 
         match self.read_active("read back the active source") {
-            Ok(active) if source_hash(&active) == source_hash(file) => Finish {
-                stdout: vec![
-                    "ACTIVE".to_owned(),
-                    format!("hash {}", source_hash(&active)),
-                ],
-                ..Finish::new(Some(Status::Active), 0)
-            },
+            Ok(active) if self.wanted(file, live_hash).is(&active) => self.confirmed(&active),
             Ok(_) => Finish::status(
                 Status::Inactive,
                 "INACTIVE: activation reported no error but the active source differs",
@@ -976,9 +1444,143 @@ impl Run<'_> {
         }
     }
 
-    fn reconcile_non_2xx_activation(&mut self, status: u16, file: &[String]) -> Finish {
+    /// The activation request. An error here is already a verdict: a request that was sent is
+    /// reconciled by content, one that was not is `INACTIVE`.
+    fn post_activation(
+        &mut self,
+        name: &str,
+        preaudit: bool,
+        references: Option<&[ObjectRef]>,
+        live_hash: &str,
+        file: &[String],
+    ) -> Result<Response, Finish> {
+        let body = match references {
+            Some(references) => worklist_request_xml(references),
+            None => activation_request_xml(name, &self.uri),
+        };
+        let mut request = Request::post(
+            format!("/sap/bc/adt/activation?method=activate&preauditRequested={preaudit}"),
+            body.into_bytes(),
+        );
+        request
+            .headers
+            .insert("Content-Type".to_owned(), "application/xml".to_owned());
+        request
+            .headers
+            .insert("Accept".to_owned(), "application/xml".to_owned());
+
+        match self.call(request) {
+            Ok(response) => Ok(response),
+            Err(error) if error.was_sent() => Err(self.reconcile(live_hash, file)),
+            Err(error) => Err(Finish {
+                failure: Some(Failure::from(&error)),
+                ..Finish::status(
+                    Status::Inactive,
+                    format!("INACTIVE: the activation was not sent: {error}"),
+                )
+            }),
+        }
+    }
+
+    /// A transportable class answers the activation with a worklist and activates nothing. The
+    /// second request sends every object of the worklist as listed, member entries included,
+    /// without the pre-audit. A list that reaches beyond the class is not touched.
+    fn resend_worklist(
+        &mut self,
+        name: &str,
+        response: Response,
+        live_hash: &str,
+        file: &[String],
+    ) -> Result<Response, Finish> {
+        let is_worklist = |response: &Response| {
+            (200..300).contains(&response.status)
+                && classify_activation(&String::from_utf8_lossy(&response.body))
+                    == ActivationBody::Worklist
+        };
+
+        if self.kind != ObjectKind::Clas || !is_worklist(&response) {
+            return Ok(response);
+        }
+
+        let references =
+            parse_object_refs(&String::from_utf8_lossy(&response.body)).map_err(|error| {
+                Finish::status(
+                    Status::Inactive,
+                    format!("INACTIVE: cannot read the activation worklist: {error}"),
+                )
+            })?;
+
+        if references.is_empty() {
+            return Err(Finish::status(
+                Status::Inactive,
+                "INACTIVE: the activation worklist lists no object",
+            ));
+        }
+
+        if let Some(outside) = references
+            .iter()
+            .find(|object| !under(&self.uri, &object.uri))
+        {
+            return Err(Finish::status(
+                Status::Inactive,
+                format!(
+                    "INACTIVE: the activation worklist lists an object outside the class, \
+                     nothing was resent: {}",
+                    outside.uri
+                ),
+            ));
+        }
+
+        let second = self.post_activation(name, false, Some(&references), live_hash, file)?;
+
+        if is_worklist(&second) {
+            return Err(Finish::status(
+                Status::Inactive,
+                "INACTIVE: the class was not activated after the worklist was resent",
+            ));
+        }
+
+        Ok(second)
+    }
+
+    /// The active source equals what was deployed. A class is also read inactive, because its
+    /// activation covers its includes: a different inactive version means it was not activated.
+    fn confirmed(&mut self, active: &[String]) -> Finish {
+        if self.kind == ObjectKind::Clas {
+            match self.read_inactive() {
+                InactiveRead::Read(inactive) if source_hash(&inactive) != source_hash(active) => {
+                    return Finish::status(
+                        Status::Inactive,
+                        "INACTIVE: the active source equals the file but the inactive source differs",
+                    );
+                }
+                InactiveRead::Unreadable(reason) => {
+                    return Finish::status(
+                        Status::Inactive,
+                        format!(
+                            "INACTIVE: the active source equals the file but the inactive source \
+                             is unreadable ({reason})"
+                        ),
+                    );
+                }
+                InactiveRead::Read(_) | InactiveRead::Absent => {}
+            }
+        }
+
+        Finish {
+            stdout: vec!["ACTIVE".to_owned(), format!("hash {}", source_hash(active))],
+            ..Finish::new(Some(Status::Active), 0)
+        }
+    }
+
+    fn reconcile_non_2xx_activation(
+        &mut self,
+        status: u16,
+        live_hash: &str,
+        file: &[String],
+    ) -> Finish {
         match self.read_active("read back the active source after an activation failure") {
-            Ok(active) if source_hash(&active) == source_hash(file) => Finish::status(
+            Ok(active) if self.wanted(file, live_hash).is(&active) => Finish::status(
                 Status::Active,
                 format!(
                     "ACTIVE (reconciled): the active source equals the file after activation HTTP \
@@ -996,6 +1598,20 @@ impl Run<'_> {
         }
     }
 
+    /// What the active source must equal for the deploy to count as done. A function module is
+    /// re-rendered by SAP, so the text of the PUT reply stands for the file; without that reply
+    /// only a changed source with the same lines (ignoring case and blanks) can be it.
+    fn wanted(&self, file: &[String], live_hash: &str) -> Wanted {
+        match (&self.kind, &self.rendered) {
+            (ObjectKind::Func, Some(rendered)) => Wanted::Hash(source_hash(rendered)),
+            (ObjectKind::Func, None) => Wanted::Rendered {
+                file: file.to_vec(),
+                live_hash: live_hash.to_owned(),
+            },
+            _ => Wanted::Hash(source_hash(file)),
+        }
+    }
+
     /// Read-only classification after a sent write whose outcome is unknown: the content of the
     /// active and the inactive source decides, never a status code. No retry, no fallback.
     fn reconcile(&mut self, live_hash: &str, file: &[String]) -> Finish {
@@ -1004,14 +1620,58 @@ impl Run<'_> {
             Err(finish) => return finish.unreadable(),
         };
         let inactive = self.read_inactive();
-        let (status, message) = reconcile(&active, &inactive, live_hash, file);
+        let wanted = self.wanted(file, live_hash);
+        let (status, message) = reconcile_with(&active, &inactive, live_hash, &wanted);
 
         Finish::status(status, message).exit_one()
     }
 
+    /// The include POST was sent and its reply is unknown. It is never sent again: the inactive
+    /// source of the include tells whether it exists and what it holds.
+    fn reconcile_include(&mut self, file: &[String]) -> Finish {
+        let kind = self.include.map_or("", IncludeKind::token);
+
+        match self.read_inactive() {
+            InactiveRead::Absent => Finish::status(
+                Status::Rejected,
+                format!(
+                    "REJECTED: include {kind} does not exist after the unconfirmed create; \
+                     nothing was written, the run can be repeated"
+                ),
+            ),
+            InactiveRead::Read(inactive) if source_hash(&inactive) == source_hash(file) => {
+                Finish::status(
+                    Status::Partial,
+                    format!(
+                        "PARTIAL: include {kind} exists with the file as its inactive source; \
+                         re-run without --create-include to activate it"
+                    ),
+                )
+            }
+            InactiveRead::Read(_) => {
+                let mut finish = Finish::status(
+                    Status::Partial,
+                    format!(
+                        "PARTIAL: include {kind} exists but its inactive source is not the file"
+                    ),
+                );
+
+                finish.stdout.push("INCLUDE_SOURCE_DIFFERS".to_owned());
+                finish
+            }
+            InactiveRead::Unreadable(reason) => Finish::status(
+                Status::Partial,
+                format!(
+                    "PARTIAL: the include {kind} create is unconfirmed and the include cannot be \
+                     read ({reason}); {RETRY}"
+                ),
+            ),
+        }
+    }
+
     /// The inactive source, or why it cannot be read: a failed read is never "no inactive".
     fn read_inactive(&mut self) -> InactiveRead {
-        let mut request = Request::get(format!("{}/source/main?version=inactive", self.uri));
+        let mut request = Request::get(format!("{}?version=inactive", self.source_uri));
         request
             .headers
             .insert("Accept".to_owned(), "text/plain".to_owned());
@@ -1038,7 +1698,7 @@ impl Run<'_> {
     fn check(&mut self, file: &[String]) -> Result<(), Finish> {
         let mut request = Request::post(
             "/sap/bc/adt/checkruns?reporters=abapCheckRun",
-            checkrun_xml(&self.name, file).into_bytes(),
+            checkrun_xml_for(&self.uri, &self.source_uri, file).into_bytes(),
         );
         request
             .headers
@@ -1096,9 +1756,18 @@ impl Run<'_> {
     }
 }
 
-/// Request body of `POST /sap/bc/adt/checkruns`; `file` is the normalized source.
+/// Request body of `POST /sap/bc/adt/checkruns` for a program; `file` is the normalized source.
 pub fn checkrun_xml(name: &str, file: &[String]) -> String {
-    let uri = escape(prog_uri(name));
+    let uri = prog_uri(name);
+
+    checkrun_xml_for(&uri, &format!("{uri}/source/main"), file)
+}
+
+/// The checkrun of any object: `object_uri` is the object that is checked and `source_uri` the
+/// source that carries `file`, which for a class include is the include of the class.
+pub fn checkrun_xml_for(object_uri: &str, source_uri: &str, file: &[String]) -> String {
+    let uri = escape(object_uri);
+    let source = escape(source_uri);
     let content = base64(join(file).as_bytes());
 
     format!(
@@ -1108,11 +1777,12 @@ pub fn checkrun_xml(name: &str, file: &[String]) -> String {
             r#"xmlns:adtcore="http://www.sap.com/adt/core">"#,
             r#"<chkrun:checkObject adtcore:uri="{uri}" chkrun:version="active">"#,
             r#"<chkrun:artifacts><chkrun:artifact "#,
-            r#"chkrun:contentType="text/plain; charset=utf-8" chkrun:uri="{uri}/source/main">"#,
+            r#"chkrun:contentType="text/plain; charset=utf-8" chkrun:uri="{source}">"#,
             r#"<chkrun:content>{content}</chkrun:content></chkrun:artifact>"#,
             r#"</chkrun:artifacts></chkrun:checkObject></chkrun:checkObjectList>"#,
         ),
         uri = uri,
+        source = source,
         content = content
     )
 }
@@ -1129,6 +1799,69 @@ pub fn activation_request_xml(name: &str, uri: &str) -> String {
         uri = escape(uri),
         name = escape(name.to_ascii_uppercase())
     )
+}
+
+/// The second activation request of a class: every object of the worklist as listed, member
+/// entries with their `#type=` fragment included.
+fn worklist_request_xml(references: &[ObjectRef]) -> String {
+    let mut body = String::from(concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">"#,
+    ));
+
+    for object in references {
+        body.push_str(&format!(
+            r#"<adtcore:objectReference adtcore:uri="{}" adtcore:type="{}" adtcore:name="{}""#,
+            escape(&object.uri),
+            escape(&object.kind),
+            escape(&object.name)
+        ));
+
+        if let Some(parent) = &object.parent_uri {
+            body.push_str(&format!(r#" adtcore:parentUri="{}""#, escape(parent)));
+        }
+
+        body.push_str("/>");
+    }
+
+    body.push_str("</adtcore:objectReferences>");
+    body
+}
+
+/// Whether `uri` is the object or lies below it (`/includes/...`, `/source/main#...`).
+fn under(object_uri: &str, uri: &str) -> bool {
+    let (object, uri) = (object_uri.to_ascii_lowercase(), uri.to_ascii_lowercase());
+
+    uri == object || uri.starts_with(&format!("{object}/"))
+}
+
+/// Body of the include POST: the name is a dummy, the include type decides.
+fn include_xml(include: IncludeKind) -> String {
+    format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+            r#"<class:abapClassInclude xmlns:class="http://www.sap.com/adt/oo/classes" "#,
+            r#"xmlns:adtcore="http://www.sap.com/adt/core" adtcore:name="dummy" "#,
+            r#"class:includeType="{}"/>"#,
+        ),
+        include.segment()
+    )
+}
+
+/// A failed group resolution as the end of the run; before any write only a connectivity failure
+/// may fall back to the other backend.
+fn read_failure(error: ReadError, before_write: bool) -> Finish {
+    if error.stop {
+        return Finish::stop(error.message);
+    }
+
+    Finish {
+        stderr: Some(format!("ERROR: {}", error.message)),
+        failure: Some(error.failure),
+        fallback_allowed: before_write && error.failure == Failure::PreSendConnectivity,
+        detail: Some(error.message),
+        ..Finish::new(None, 1)
+    }
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -1194,10 +1927,58 @@ pub fn reconcile(
     live_hash: &str,
     file: &[String],
 ) -> (Status, String) {
-    let active_hash = source_hash(active);
-    let file_hash = source_hash(file);
+    reconcile_with(
+        active,
+        inactive,
+        live_hash,
+        &Wanted::Hash(source_hash(file)),
+    )
+}
 
-    if active_hash == file_hash {
+/// What the active source must equal after the deploy.
+enum Wanted {
+    /// This hash: the file itself, or for a function module the text SAP rendered.
+    Hash(String),
+    /// A function module whose PUT reply is unknown: a source that changed and whose lines are
+    /// those of the file when case and blank lines are ignored.
+    Rendered {
+        file: Vec<String>,
+        live_hash: String,
+    },
+}
+
+impl Wanted {
+    fn is(&self, lines: &[String]) -> bool {
+        match self {
+            Self::Hash(hash) => source_hash(lines) == *hash,
+            Self::Rendered { file, live_hash } => {
+                source_hash(lines) != *live_hash && same_lines(lines, file)
+            }
+        }
+    }
+}
+
+fn same_lines(left: &[String], right: &[String]) -> bool {
+    let significant = |lines: &[String]| {
+        lines
+            .iter()
+            .map(|line| line.trim().to_ascii_lowercase())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+    };
+
+    significant(left) == significant(right)
+}
+
+fn reconcile_with(
+    active: &[String],
+    inactive: &InactiveRead,
+    live_hash: &str,
+    wanted: &Wanted,
+) -> (Status, String) {
+    let active_hash = source_hash(active);
+
+    if wanted.is(active) {
         return match inactive {
             InactiveRead::Unreadable(reason) => (
                 Status::Active,
@@ -1221,7 +2002,7 @@ pub fn reconcile(
     }
 
     match inactive {
-        InactiveRead::Read(lines) if source_hash(lines) == file_hash => (
+        InactiveRead::Read(lines) if wanted.is(lines) => (
             Status::Inactive,
             format!("INACTIVE: the PUT reached SAP but the activation did not; {RETRY}"),
         ),
@@ -1307,7 +2088,7 @@ fn parse_lock(xml: &str) -> Result<LockInfo, String> {
 }
 
 /// Text of every element by local name; the last occurrence wins.
-fn leaf_texts(xml: &str) -> Result<BTreeMap<String, String>, String> {
+pub(crate) fn leaf_texts(xml: &str) -> Result<BTreeMap<String, String>, String> {
     let mut reader = Reader::from_str(xml);
     let mut texts = BTreeMap::new();
     let mut current: Option<String> = None;

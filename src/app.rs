@@ -5,10 +5,12 @@ use crate::config::{
     scrub, tls_warning,
 };
 use crate::domain::Outcome;
-use crate::hash::{local_source_lines, validate_name, validate_prog};
-use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg};
+use crate::hash::local_source_lines;
+use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
+use crate::operation::create::{CreateInput, CreateProg};
+use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::doctor::Doctor;
-use crate::operation::read::ReadProg;
+use crate::operation::read::{ReadProg, ReadTarget};
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
     DynamicRfcApi, Env, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
@@ -156,7 +158,7 @@ pub fn run(
     #[cfg(feature = "fault-injection")]
     let warning =
         match crate::fault::Fault::from_lookup(env.get(crate::fault::ENV).map(String::as_str)) {
-            Ok(fault) => fault.map(crate::fault::Fault::warning),
+            Ok(faults) => crate::fault::Fault::warning(&faults),
             Err(message) => return stop(message),
         };
     #[cfg(not(feature = "fault-injection"))]
@@ -240,9 +242,10 @@ fn stop(message: impl std::fmt::Display) -> Exit {
 
 fn connection_id(command: &Command) -> &str {
     match command {
-        Command::Read { conn, .. } | Command::Deploy { conn, .. } | Command::Doctor { conn } => {
-            conn
-        }
+        Command::Read { conn, .. }
+        | Command::Deploy { conn, .. }
+        | Command::Create { conn, .. }
+        | Command::Doctor { conn } => conn,
     }
 }
 
@@ -304,27 +307,41 @@ fn execute(
             }
         }
         Command::Read {
-            name, out, force, ..
+            kind,
+            name,
+            out,
+            force,
+            include,
+            fugr,
+            lines,
+            ..
         } => {
-            if let Err(message) = validate_name(&name) {
+            if let Err(message) = check_read(kind, &name, &out, include, fugr.as_deref(), lines) {
                 return stop(message);
             }
 
-            if out.exists() && !force {
+            // A local overwrite rule: it stops before the connection, like every other option rule.
+            if lines.is_none() && out.exists() && !force {
                 return stop(format!(
                     "{} already exists; use --force to overwrite",
                     out.display()
                 ));
             }
 
+            let target = ReadTarget::new(kind, &name)
+                .group(fugr.as_deref())
+                .include(include)
+                .lines(lines);
+
             route(
-                OperationKind::ReadProg,
+                OperationKind::Read(kind),
                 None,
                 false,
                 connection,
                 factories,
                 |transport, _, _| {
-                    let read = ReadProg::run_classified(transport, &name, &out, force, None);
+                    let read =
+                        ReadProg::run_target_classified(transport, target, &out, force, None);
 
                     // A read holds no lock, so a failed session end changes nothing here.
                     let _ = transport.close();
@@ -336,31 +353,112 @@ fn execute(
                             fallback_allowed: false,
                             detail: None,
                         },
+                        Err(error) if error.stop => Attempt {
+                            outcome: Outcome {
+                                status: None,
+                                exit: 2,
+                                stdout: String::new(),
+                                stderr: format!("STOP: {}", error.message),
+                            },
+                            failure: None,
+                            fallback_allowed: false,
+                            detail: None,
+                        },
                         Err(error) => Attempt::failed(error.message, error.failure),
                     }
                 },
             )
         }
+        Command::Create {
+            kind,
+            name,
+            text,
+            package,
+            fugr,
+            tr,
+            simulate,
+            backend,
+            ..
+        } => {
+            if let Err(message) = check_create(
+                kind,
+                &name,
+                &text,
+                package.as_deref(),
+                fugr.as_deref(),
+                tr.as_deref(),
+            ) {
+                return stop(message);
+            }
+
+            let input = CreateInput {
+                kind,
+                name,
+                text,
+                package,
+                group: fugr,
+                tr,
+                simulate,
+            };
+
+            route(
+                OperationKind::Create(kind),
+                backend.map(backend_kind),
+                false,
+                connection,
+                factories,
+                |transport, selection, cancel| {
+                    let result = CreateProg::run_with_cancel(
+                        transport,
+                        input.clone(),
+                        Some(selection),
+                        Some(connection),
+                        cancel,
+                    );
+
+                    Attempt {
+                        outcome: result.outcome,
+                        failure: result.failure,
+                        fallback_allowed: result.fallback_allowed,
+                        detail: result.detail,
+                    }
+                },
+            )
+        }
         Command::Deploy {
+            kind,
             name,
             file,
             simulate,
             base,
             tr,
             backend,
+            include,
+            create_include,
+            fugr,
             ..
         } => {
+            if let Err(message) =
+                check_deploy_options(kind, &name, include, create_include, fugr.as_deref())
+            {
+                return stop(message);
+            }
+
             let text = match fs::read_to_string(&file) {
                 Ok(text) => text,
                 Err(error) => return stop(format!("cannot read {}: {error}", file.display())),
             };
             let source = local_source_lines(&text);
 
-            if let Err(message) = validate_prog(&name, &source) {
+            if let Err(message) = check_deploy_source(kind, &name, &source) {
                 return stop(message);
             }
 
             let base_given = base.is_some();
+            let scope = DeployScope::new(kind)
+                .group(fugr.as_deref())
+                .include(include)
+                .create_include(create_include);
             let input = DeployInput {
                 name,
                 source,
@@ -370,16 +468,17 @@ fn execute(
             };
 
             route(
-                OperationKind::DeployProg,
+                OperationKind::Deploy(kind),
                 backend.map(backend_kind),
                 base_given,
                 connection,
                 factories,
                 |transport, selection, cancel| {
-                    let result = DeployProg::run_selected(
+                    let result = DeployProg::run_scoped(
                         transport,
                         input.clone(),
-                        selection,
+                        scope.clone(),
+                        Some(selection),
                         Some(connection),
                         cancel,
                     );

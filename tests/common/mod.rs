@@ -47,10 +47,15 @@ pub struct ScriptedTransport {
 }
 
 pub fn fixture_path(name: &str) -> PathBuf {
+    fixture_path_in("m1", name)
+}
+
+/// A recorded fixture below `tests/fixtures/<directory>/`, such as the M3 read fixtures.
+pub fn fixture_path_in(directory: &str, name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("m1")
+        .join(directory)
         .join(name)
 }
 
@@ -60,7 +65,7 @@ pub fn all(_: &FixtureExchange) -> bool {
 
 pub fn from_fixture(
     path: impl AsRef<Path>,
-    filter: fn(&FixtureExchange) -> bool,
+    filter: impl FnMut(&FixtureExchange) -> bool,
 ) -> ScriptedTransport {
     let text = fs::read_to_string(path).expect("read fixture");
     let fixture: Fixture = serde_json::from_str(&text).expect("parse fixture");

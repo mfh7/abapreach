@@ -1,6 +1,6 @@
 [package]
 name = "abapreach"
-version = "0.12.0"
+version = "0.13.0"
 description = "Read and safely deploy existing ABAP programs via ADT HTTP or RFC/SADT."
 edition = "2024"
 

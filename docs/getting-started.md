@@ -1,9 +1,10 @@
 # Getting started
 
-ABAPReach 0.12.0 is a CLI for reading and deploying the active source of **existing
-ABAP programs** (`PROG`) on macOS arm64, Windows x64, Linux x64 and Linux arm64; see
-[Platforms and release binaries](#platforms-and-release-binaries) and the
-[0.12.0 test matrix](#tested-environment) for what was tested. You need a Rust toolchain that
+ABAPReach is a CLI for reading and deploying the active source of **ABAP programs** (`PROG`),
+function modules (`FUNC`), classes (`CLAS`) and interfaces (`INTF`), and for creating function
+groups, function modules, classes and interfaces. It runs on macOS arm64, Windows x64, Linux x64
+and Linux arm64; see [Platforms and release binaries](#platforms-and-release-binaries) and the
+[Tested environment](#tested-environment) for what was tested. You need a Rust toolchain that
 supports edition 2024, an SAP user allowed to access the relevant ADT or RFC
 services, and a reachable SAP system. Deploy also needs the SAP-side permissions
 and transport state required for the target program. Check those with your SAP
@@ -395,70 +396,205 @@ response. Deploy can leave an inactive version after failed activation. Read
 [Deploy safety](deploy-safety.md) and [Behavior differences](behavior-differences.md)
 before the first write.
 
-ABAPReach 0.12.0 has no MCP server yet; it is part of 1.0.0 (see the
+ABAPReach has no MCP server yet; it is part of 1.0.0 (see the
 [roadmap](roadmap.md#mcp-server)). An AI tool may invoke the CLI as part of a
 user-controlled workflow, but the CLI does not grant the AI any SAP
 permissions of its own.
 
+## Other source objects
+
+Besides programs, ABAPReach reads and deploys function modules (`FUNC`), classes with their
+local includes (`CLAS`), and interfaces (`INTF`). It also creates function groups (`FUGR`),
+`FUNC`, `CLAS` and `INTF` objects. The commands take the same guards and status tokens as
+`PROG` (see [Deploy safety](deploy-safety.md)).
+
+```sh
+./target/release/abapreach read FUNC ZDEMO_FM - --lines 1-20 --conn A4H_001
+./target/release/abapreach read CLAS ZCL_DEMO ./ZCL_DEMO.abap --conn A4H_001
+./target/release/abapreach read CLAS ZCL_DEMO ./ZCL_DEMO_CCIMP.abap --include CCIMP --conn A4H_001
+./target/release/abapreach read INTF ZIF_DEMO ./ZIF_DEMO.abap --conn A4H_001
+```
+
+`read --lines A-B` prints the inclusive line range `A` to `B` (one-based) to stdout. The
+output file must be `-`; any other value stops with exit 2. ABAPReach reads and hashes the
+whole source first, so the `live hash` line on stderr is the hash of the full source, not of
+the range. The matrix exercises `--lines` on `FUNC` only.
+
+```sh
+./target/release/abapreach deploy FUNC ZDEMO_FM ./ZDEMO_FM.abap --simulate --base HASH_FROM_READ --conn A4H_001
+./target/release/abapreach deploy CLAS ZCL_DEMO ./ZCL_DEMO_CCIMP.abap --include CCIMP --simulate --base HASH_FROM_READ --conn A4H_001
+./target/release/abapreach deploy INTF ZIF_DEMO ./ZIF_DEMO.abap --simulate --base HASH_FROM_READ --conn A4H_001
+```
+
+`--include` is accepted only for `CLAS`: `CCIMP`, `CCDEF`, `CCMAC` or `CCAU` (test classes).
+Without `--include`, `CLAS` means the main source.
+
+The file format of a `FUNC` is the ADT format: `FUNCTION <name> IMPORTING ... .` followed by
+the body. A file in the Python format, whose first line is the `*"` interface header, is
+refused with exit 2 (`STOP`). An unchanged signature is not reported; a changed
+signature prints `INTERFACE CHANGED`, the parameter diff and the callers (see
+[Deploy safety](deploy-safety.md#function-modules)).
+
+A `CLAS` local include that does not exist yet stops the deploy with
+`INCLUDE_MISSING: <kind> (re-run with --create-include)` and exit 1, before any write. Add
+`--create-include` to create it. The create runs once, in the same class lock, before the
+source PUT. The flag is only valid with `CLAS --include`.
+
+```sh
+./target/release/abapreach deploy CLAS ZCL_DEMO ./ZCL_DEMO_TESTS.abap --include CCAU --create-include --simulate --base HASH_FROM_READ --conn A4H_001
+```
+
+Create takes a name, a text and a package, and creates an empty object (a skeleton); the source
+follows with `deploy`:
+
+```sh
+./target/release/abapreach create FUGR ZDEMO_FG --text 'Demo function group' --package ZDEMO --simulate --conn A4H_001
+./target/release/abapreach create FUNC ZDEMO_FM --fugr ZDEMO_FG --text 'Demo function module' --simulate --conn A4H_001
+./target/release/abapreach create CLAS ZCL_DEMO --package ZDEMO --text 'Demo class' --conn A4H_001
+```
+
+Create accepts names that start with `Z` or `Y` only. Limits, checked before the create
+request: names up to 26 characters for `FUGR` and 30 for `FUNC`, `CLAS` and `INTF`; texts up to
+40 for `FUGR`, 74 for `FUNC` and 60 for `CLAS` and `INTF`. A `FUNC` is created inside an existing
+function group named with `--fugr`; `--package` is not valid for `create FUNC`. `--tr` is refused
+for a `$TMP` package, and a transportable package requires `--tr`. The live matrix does not
+exercise the name and text limits.
+
 ## Tested environment
 
-Release 0.12.0 test matrix, recorded on the release-candidate artifacts. Every cell is
-PASS, or "not available" with the reason. No cell failed. The run covered two systems: a
-7.50 system with a stateful ADT HTTP session, a second developer user and a transport,
-and a 7.40 system that holds only local objects (`$TMP`) and keeps no stateful ADT HTTP
-session.
+The release matrix ran the object kinds above on each platform and path, against two systems. The
+core, platform, fault-injection, ca and verify groups ran on `v0.13.0-rc.2`, whose release build
+is unchanged for those groups. The interactive group (prompts and Ctrl-C) ran on `v0.13.0-rc.4`,
+which uses the fault-injection build (see [Fault injection](#fault-injection)):
 
-| Target | Host | ADT HTTP | RFC, SAP GUI library | RFC, NW RFC SDK |
-| :--- | :--- | :--- | :--- | :--- |
-| macOS arm64 | arm64 workstation (regression of 0.11.1) | PASS | PASS (SAP GUI for Java, library 7.53.1629) | PASS (NW RFC SDK 7.50 PL20) |
-| Windows x64 | x64 VM, native | PASS | PASS (SAP GUI for Windows 8.10, library 7.54.722) | PASS (NW RFC SDK 7.50 PL20) |
-| Windows x64 | x64 binary on an arm64 VM, under emulation; timings labelled `emulated` | PASS | PASS (SAP GUI for Windows 8.00, library 7.53.1524) | PASS (NW RFC SDK 7.50 PL20) |
-| Linux x64 | x86_64 host | PASS | PASS (SAP GUI for Java 8.10, library 7.53.1623) | PASS (NW RFC SDK 7.50 PL20) |
-| Linux arm64 | arm64 host | PASS | not available: SAP GUI for Java for Linux is built for x86_64 only | PASS (NW RFC SDK 7.50 PL20) |
+- a SAP 7.50 system with a stateful ADT HTTP session, a second developer user and transport
+  requests;
+- a SAP 7.40 system with local objects only (`$TMP`) and no stateful ADT HTTP session.
 
-Per cell, the scenarios are `doctor`, three reads, `deploy --simulate`, `deploy`, an
-unchanged deploy, a base hash mismatch, a syntax error, a wrong password, a reset, a
-foreign inactive version under `reject` and `allow`, `--tr`, and RFC fault injection with
-the separate fault-injection artifact. The `ask` prompt and an interrupt (Ctrl-C) while
-the deploy holds the lock ran on the 7.50 system. Linux and Windows cells also cover
-the loader, trace, source-encoding, credential-permission and CA-trust checks described
-above. Each result records the loaded library path, version and architecture. In total the
-core matrix has 758 cells (527 PASS, 231 not applicable or not run, none failed) and the
-interactive group 80 cells (67 PASS, 13 not applicable or not run, none failed).
+Each cell has one of three results:
 
-The Linux x64 SAP GUI cell loaded the SAP GUI for Java 8.10 library
-(`bin/unicode/libsapnwrfc.so`) from a versioned install folder below the SAP GUI root, and
-passed on the 7.50 and the 7.40 system. The library layout in
-[RFC library lookup](#rfc-library-lookup) matches what the run found.
+- **PASS**: the scenario ran on that platform and path and its checks held.
+- **UNSUPPORTED**: the scenario could not run there, for the reason the cell gives. It is not
+  a failure. It is also not evidence that the feature works in that case.
+- **FAIL**: the scenario ran on a supported path and a check did not hold. No cell is FAIL in
+  the release matrix.
 
-Scenarios the run did not cover or could not apply:
+### Support by platform and path
 
-- A custom CA: no PEM file was supplied, so `ca_file` was not exercised. The operating
-  system trust store passed on every host. On Linux the state without the
-  `ca-certificates` package was not exercised either; the hosts have the package
-  installed.
-- A system that keeps no stateful ADT HTTP session: `deploy` pinned to `--backend adt`
-  stops before locking and says to use `--backend rfc`, and an unpinned `deploy` runs on
-  RFC and ends `ACTIVE`; both passed. The other ADT write scenarios do not apply there.
-  The ADT deploy scenarios therefore ran on the 7.50 system only.
-- A system with only local objects has no `--tr` cell, and the foreign inactive version
-  scenarios need a second developer user, which exists on the 7.50 system only.
-- ADT HTTP has no fault-injection cell: the test-only build drops RFC replies only.
-- On the emulated Windows host, the `ask` prompt and Ctrl-C cells did not run: its remote
-  execution gives the process no terminal. They ran on every other host, including the
-  native Windows host over a pseudo-terminal. `ask` without a terminal (rejected, exit 1)
-  passed on the emulated host.
-- Signals other than Ctrl-C (SIGTERM, SIGHUP, CTRL_BREAK, CTRL_CLOSE) were not sent; their
-  behavior in [Trace files and interrupts](#trace-files-and-interrupts) comes from the
-  code, not from a run.
-- Windows SmartScreen, the macOS quarantine attribute and the archive permission bits
-  describe how those systems treat a downloaded file; the live run did not exercise them.
+Each cell shows PASS / UNSUPPORTED / FAIL counts per path.
 
-Read timing: RFC reads were slower than ADT HTTP reads on the same host. On the macOS
-workstation, the median of three `read` runs was about 0.3 s over ADT HTTP and about
-0.7 s over RFC with either library. Medians from the other hosts include the time of the
-remote launcher and are not published; Windows timings from the emulated host carry the
-label `emulated` and do not compare with the native host.
+| Platform | System | ADT HTTP | RFC, SAP GUI library | RFC, NW RFC SDK |
+| :--- | :--- | :---: | :---: | :---: |
+| macOS arm64 | SAP 7.40 | 25 / 49 / 0 | 51 / 19 / 0 | 51 / 19 / 0 |
+| macOS arm64 | SAP 7.50 | 58 / 22 / 0 | 66 / 11 / 0 | 65 / 11 / 0 |
+| Windows x64, native | SAP 7.40 | 25 / 49 / 0 | 51 / 19 / 0 | 51 / 19 / 0 |
+| Windows x64, native | SAP 7.50 | 58 / 22 / 0 | 66 / 11 / 0 | 65 / 11 / 0 |
+| Windows x64, emulated on an ARM64 virtual machine | SAP 7.40 | 25 / 49 / 0 | 51 / 19 / 0 | 51 / 19 / 0 |
+| Windows x64, emulated on an ARM64 virtual machine | SAP 7.50 | 58 / 22 / 0 | 66 / 11 / 0 | 65 / 11 / 0 |
+| Linux x64 | SAP 7.40 | 25 / 51 / 0 | 52 / 18 / 0 | 52 / 18 / 0 |
+| Linux x64 | SAP 7.50 | 58 / 24 / 0 | 67 / 10 / 0 | 66 / 10 / 0 |
+| Linux arm64 | SAP 7.40 | 25 / 51 / 0 | 0 / 70 / 0 | 52 / 18 / 0 |
+| Linux arm64 | SAP 7.50 | 58 / 24 / 0 | 0 / 77 / 0 | 66 / 10 / 0 |
+
+Totals: the SAP 7.50 system has 907 PASS, 287 UNSUPPORTED and 0 FAIL cells; the SAP 7.40
+system has 602 PASS, 497 UNSUPPORTED and 0 FAIL cells.
+
+The 7.50 rows use the `v0.13.0-rc.2` counts for the core, platform, fault-injection, ca and verify
+groups, and the `v0.13.0-rc.4` counts for the interactive group. On `v0.13.0-rc.4` with the
+fault-injection build, every `interrupt-lock-held/func` and `interrupt-lock-held/clas-include` cell
+passes on every host and path that exists. The interactive group has 5 PASS on ADT HTTP and on each
+RFC path that exists; the one exception is the Linux arm64 SAP GUI column, which is UNSUPPORTED
+because SAP GUI for Java for Linux is built for x86_64 only (no library for arm64). The 7.40 system
+has no interactive group.
+
+### Unsupported cells
+
+An UNSUPPORTED cell has one of these reasons:
+
+- **Availability.** The 7.40 system has no stateful ADT HTTP session, so ADT HTTP writes do not
+  run there. `deploy --backend adt` on that system stops before the lock and names
+  `--backend rfc`; a deploy without the pin runs over RFC (`deploy-pinned`, `deploy-default-fallback`).
+  The 7.40 system holds only `$TMP` objects, so `--tr` and transportable-package scenarios do not
+  run there.
+- **Platform.** SAP GUI for Java for Linux is x86_64 only, so Linux arm64 has no SAP GUI library.
+  `LD_LIBRARY_PATH` is a Linux loader variable and does not apply on macOS or Windows.
+- **Console.** The prompt (`ask`) and Ctrl-C need a terminal. The emulated Windows host's remote
+  execution gives the process none, so the interactive group there runs over ssh with a
+  pseudo-terminal. The native Windows host ran them over a pseudo-terminal as well.
+- **Fault injection.** Fault injection drops RFC replies only. ADT HTTP has no fault cell.
+- **Testability.** A condition that a live run cannot produce is covered only by an offline fake.
+  Those cells carry no live evidence (see [Fixture-only cases](#fixture-only-cases)).
+
+### Fault injection
+
+The fault-injection build (`--features fault-injection`) reads `ABAPREACH_FAULT`, a
+comma-separated list. Its targets are `drop-reply:PUT`, `drop-reply:ACTIVATE`,
+`drop-reply:CREATE` and `fail-read:RECONCILE`. Each drops one RFC reply or fails one reconciliation
+read. Results on the RFC paths of the matrix:
+
+| Target | Result | Exit |
+| :--- | :--- | :---: |
+| `drop-reply:PUT` | `INACTIVE`: the PUT reached SAP but the activation did not | 1 |
+| `drop-reply:ACTIVATE` | `ACTIVE (reconciled)`: the active source equals the file | 1 |
+| `drop-reply:CREATE` | `CREATE: PARTIAL`: the created object is present | 1 |
+| `drop-reply:CREATE,fail-read:RECONCILE` | `CREATE: PARTIAL`: the reconciliation read failed, so the state is unknown | 1 |
+
+`fail-read:RECONCILE` is matrix-tested only combined with `drop-reply:CREATE`. Each
+reconciliation result exits 1, and none is retried. ADT HTTP cannot be fault-injected, so
+these targets are UNSUPPORTED on ADT HTTP. The `CREATE: REJECTED` branch for an object that is
+absent after an uncertain create, and the uncertain-POST branches of `--create-include`, have no
+live evidence (see below).
+
+The same `ABAPREACH_FAULT` list also takes `hold-lock:<ms>`, with `<ms>` from 1 to 60000. It
+pauses the deploy after LOCK until the time is up or Ctrl-C arrives. The interrupt-while-locked
+cells use it to test an interrupt while the lock is held, deterministically: the harness waits for
+the stderr marker `FAULT: lock held, pausing N ms` and then sends Ctrl-C. `hold-lock` is not a
+reply drop, so it does not change the results in the table above.
+
+### Carve-outs
+
+The carve-outs below are the items the release had to cover. Each shows the matrix result and the
+limitation that stays documented where the result is not PASS.
+
+| Carve-out | Result | Documented limitation |
+| :--- | :--- | :--- |
+| Namespaced source-URI path encoding on a registered namespace | UNSUPPORTED | No test object in a registered namespace exists. Objects in registered namespaces are not covered. |
+| FUNC rendering beyond the known forms | PASS for the known forms (`func-deploy`, `bom-crlf-deploy`) | Only those forms are covered. Other server re-rendering forms are not. |
+| Empty FUNC source on the 7.50 system | PASS (`read-empty-canonical`) | An empty local file is refused before any write (`STOP: source file is empty`). No empty PUT is sent. |
+| CLAS/INTF version-entry semantics on the 7.50 system | Documentation limitation | Exercised only through the deploy flows (`tr-clas`, `clas-deploy`, `foreign-inactive*`). Not tested as a separate case. |
+| Transportable create, PUT, include POST and delete over ADT HTTP | PASS for create and PUT on the 7.50 system (`create-transportable`, `tr-func`, `tr-clas`, `tr-without-tr`) | A transportable include POST over ADT HTTP was not tested. Delete is not part of this release. |
+| Transportable CLAS activation resend over ADT HTTP and NW RFC SDK | PASS (`clas-activation-worklist`) on ADT HTTP, NW RFC SDK and SAP GUI library | The Linux arm64 SAP GUI cell is UNSUPPORTED (no library). The 7.40 system has no transportable objects, so this scenario does not run there. |
+| v5 repeatability | PASS on the SAP GUI library path (`clas-activation-v5-rerun`) | Linux arm64 is UNSUPPORTED (no SAP GUI library). Not tested over ADT HTTP or NW RFC SDK. |
+| Out-of-class worklist entries | UNSUPPORTED (fixture-only) | Not tested live. Offline fake only. |
+| CLAS with a non-trivial method implementation | PASS (`clas-deploy`) | Covers the shape used by `clas-deploy`. |
+| Transportable function group activation | PASS on the 7.50 system (transport setup creates and activates a function group on the test request) | Not run on the 7.40 system (no transportable objects there). |
+| NW RFC SDK coverage | PASS: the NW RFC SDK path ran every scenario group on every platform | Its UNSUPPORTED cells are the cases listed under unsupported cells and fixture-only cases, plus the 7.40 system cases that need a transportable object or a second developer user. |
+| Create disposition over ADT HTTP on the 7.40 system | Create PASSES over ADT HTTP (`create-fugr`, `create-func`, `create-clas`, `create-intf`). Uncertain-create cells are UNSUPPORTED on ADT HTTP and PASS on both RFC paths | Uncertain-create reconciliation over ADT HTTP is not tested: no ADT HTTP fault injection, and no stateful session on that system. |
+| Class Builder DB-level checks | PASS (`clas-verify4`, `4 CHECKS: PASS`) on the 7.50 system; UNSUPPORTED on the Linux arm64 SAP GUI cell | The check is a read-only verification run by the test harness on CLAS objects. ABAPReach does not run it during deploy and never returns exit 3 (`CLASS_METADATA_INCOMPLETE` is not implemented). |
+| Ctrl-C while a FUNC lock is held | PASS on every host and path that exists (`v0.13.0-rc.4`, fault-injection build); Linux arm64 SAP GUI cell UNSUPPORTED (no library) | Interrupt-while-locked was proven with the fault-injection build (`hold-lock`), not the release build. |
+| Ctrl-C while a CLAS include lock is held | PASS on every host and path that exists (`v0.13.0-rc.4`, fault-injection build); Linux arm64 SAP GUI cell UNSUPPORTED (no library) | Same as above. |
+
+Not observed in the matrix: the transport object list (E071), the TADIR duplicate count and the
+number of write POSTs have no read-only endpoint. The matrix records them as unobserved, not as
+proved.
+
+### Fixture-only cases
+
+These cases are UNSUPPORTED because a live run cannot produce their condition. The offline fake
+models them, so they carry no live evidence:
+
+- `func-where-used-unavailable`: a failing where-used request.
+- `clas-activation-messages-w` and `clas-activation-messages-e`: a warning-only and an error
+  activation response.
+- `clas-activation-outside-class`: a worklist entry outside the class URI.
+- `include-uncertain-absent`, `include-uncertain-same`, `include-uncertain-differs` and
+  `include-uncertain-unreadable`: the uncertain `--create-include` POST, in each reconciliation state.
+- `create-uncertain-absent`: the object-absent branch after an uncertain create.
+- `tr-owner-mismatch`: a lock owned by another request owner.
+
+The `--create-include` uncertain-POST tokens (`PARTIAL`, `REJECTED`, `INCLUDE_SOURCE_DIFFERS`)
+therefore have no live evidence. The implementation does not send the include POST again in that
+state.
 
 ### 0.11.1 record (macOS arm64)
 
@@ -535,12 +671,12 @@ revision 11 run.
 
 ### Not tested yet
 
-- Windows and Linux: not part of the 0.11.1 record; the 0.12.0 matrix above covers
+- Windows and Linux: not part of the 0.11.1 record; the matrix in [Tested environment](#tested-environment) covers
   them. SAP GUI for Java ships per platform, so the Linux package and the RFC
   library inside it are checked separately; the macOS result does not carry over.
 - The `ask` prompt and a transportable deploy over ADT HTTP on 7.50: the ADT
-  HTTP endpoint of that system was unreachable during these runs. The 0.12.0 matrix
-  covers both.
+  HTTP endpoint of that system was unreachable during these runs. The matrix in
+  [Tested environment](#tested-environment) covers both.
 - `libsapnwrfccm.dylib`, a second RFC library that SAP GUI 8.10 revision 15
   ships next to `libsapnwrfc.dylib`; ABAPReach loads `libsapnwrfc.dylib`.
 

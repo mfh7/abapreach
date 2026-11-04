@@ -1,0 +1,45 @@
+{
+ "system": "DEV",
+ "release": "750",
+ "backend": "http",
+ "exchanges": [
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/repository/informationsystem/usageReferences?uri=/sap/bc/adt/functions/groups/ytest_abapreach_fg3/fmodules/ytest_abapreach_fm3",
+    "headers": {
+     "Content-Type": "application/*",
+     "Accept": "application/*"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"ASCII\"?><usagereferences:usageReferenceRequest xmlns:usagereferences=\"http://www.sap.com/adt/ris/usageReferences\"><usagereferences:affectedObjects/></usagereferences:usageReferenceRequest>"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/vnd.sap.adt.repository.usagereferences.result.v1+xml; charset=utf-8"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><usageReferences:usageReferenceResult numberOfResults=\"1\" resultDescription=\"References for: YTEST_ABAPREACH_FG3 - YTEST_ABAPREACH_FM3 (Function Module) [DEV]\" referencedObjectIdentifier=\"\" xmlns:usageReferences=\"http://www.sap.com/adt/ris/usageReferences\"><usageReferences:referencedObjects><usageReferences:referencedObject uri=\"/sap/bc/adt/programs/programs/ytest_abapreach_p3\" parentUri=\"/sap/bc/adt/vit/wb/object_type/devck/object_name/%24TMP\" isResult=\"false\" canHaveChildren=\"true\" usageInformation=\"gradeDirect,includeProductive\"><usageReferences:adtObject adtcore:responsible=\"TESTUSER\" adtcore:name=\"YTEST_ABAPREACH_P3\" adtcore:type=\"PROG/P\" adtcore:description=\"Program\" xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:packageRef adtcore:uri=\"/sap/bc/adt/vit/wb/object_type/devck/object_name/%24TMP\" adtcore:name=\"$TMP\"/></usageReferences:adtObject><objectIdentifier>ABAPFullName;YTEST_ABAPREACH_P3;YTEST_ABAPREACH_P3;\\FU:YTEST_ABAPREACH_FM3;2</objectIdentifier></usageReferences:referencedObject><usageReferences:referencedObject uri=\"/sap/bc/adt/vit/wb/object_type/devck/object_name/%24TMP\" isResult=\"false\" canHaveChildren=\"false\"><usageReferences:adtObject adtcore:name=\"$TMP\" adtcore:type=\"DEVC/K\" xmlns:adtcore=\"http://www.sap.com/adt/core\"><adtcore:packageRef adtcore:uri=\"/sap/bc/adt/vit/wb/object_type/devck/object_name/%24TMP\" adtcore:name=\"$TMP\"/></usageReferences:adtObject></usageReferences:referencedObject></usageReferences:referencedObjects></usageReferences:usageReferenceResult>"
+   }
+  },
+  {
+   "request": {
+    "method": "POST",
+    "uri": "/sap/bc/adt/repository/informationsystem/usageReferences?uri=/sap/bc/adt/functions/groups/ytest_abapreach_fg3/fmodules/ytest_abapreach_fm3",
+    "headers": {
+     "Content-Type": "application/*",
+     "Accept": "application/*"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"ASCII\"?><usagereferences:usageReferenceRequest xmlns:usagereferences=\"http://www.sap.com/adt/ris/usageReferences\"><usagereferences:affectedObjects/></usagereferences:usageReferenceRequest>"
+   },
+   "response": {
+    "status": 200,
+    "reason": "OK",
+    "headers": {
+     "content-type": "application/vnd.sap.adt.repository.usagereferences.result.v1+xml; charset=utf-8"
+    },
+    "body": "<?xml version=\"1.0\" encoding=\"utf-8\"?><usageReferences:usageReferenceResult numberOfResults=\"0\" resultDescription=\"References for: YTEST_ABAPREACH_FG3 - YTEST_ABAPREACH_FM3 (Function Module) [DEV]\" referencedObjectIdentifier=\"\" xmlns:usageReferences=\"http://www.sap.com/adt/ris/usageReferences\"><usageReferences:referencedObjects/></usageReferences:usageReferenceResult>"
+   }
+  }
+ ]
+}

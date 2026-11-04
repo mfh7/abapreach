@@ -4,7 +4,8 @@ All notable changes to ABAPReach are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-**Current Rust CLI:** version `0.12.0` supports existing `PROG` objects only.
+**Current Rust CLI:** version `0.13.0` supports `PROG`, `FUNC`, `CLAS` (including local
+includes) and `INTF` objects. Earlier versions supported `PROG` only.
 Versions `0.1.0` to `0.10.0` below describe the earlier Python implementation,
 not features available in the current Rust CLI. Their tags live in the
 internal repository where that implementation was developed. See the
@@ -12,7 +13,34 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-03
+
+### Added
+- Source objects beyond `PROG`: `FUNC`, `CLAS` (main source and local includes) and `INTF` can be
+  read and deployed.
+- `FUNC` interface change is detected before deploy: the interface diff is printed and the callers
+  found by where-used are listed as an advisory warning; the deploy is not blocked by it.
+- Create `FUGR`, `FUNC`, `CLAS` and `INTF` objects, with name and text limits, `Z`/`Y` name rules,
+  and a source-free skeleton. A create whose outcome is uncertain is reconciled, and no automatic
+  rollback is performed.
+- `read --lines` prints an inclusive line interval of the active source to stdout only. The full
+  source is read and hashed before the projection.
+- `--create-include` creates a missing local include of a `CLAS` in one POST. Without it, a missing
+  include stops with `INCLUDE_MISSING: <kind> (re-run with --create-include)` and exit 1, with no
+  write. This differs intentionally from the Python tool, which stops on a missing include.
+- Transportable `CLAS` activation runs in two steps: when the first activation answers with an
+  inactive-objects worklist, every worklist entry (including method entries) is sent again without
+  pre-audit, only when every entry is under the class URI; an error message fails the deploy and a
+  warning-only response is verified by rereading the source.
+- RFC admission allow-list covers the new object kinds.
+- Fault-injection builds accept `drop-reply:CREATE`, `fail-read:RECONCILE` and `hold-lock:<ms>`
+  (1-60000; pauses after the LOCK until the time is up or Ctrl-C), combinable as a
+  comma-separated `ABAPREACH_FAULT` list, to test uncertain create outcomes and interrupts.
+
 ### Fixed
+- The inactive-sibling warning for function groups (`W: inactive objects in function group ...`)
+  now works on SAP 7.40, whose inactive-objects feed is a flat `adtcore:objectReferences` list.
+  RFC admission and the activation worklist keep reading only the 7.50 shape.
 - Windows, SAP GUI 8.00 `sapnwrfccm.dll`: the library is a single-byte build, so the UTF-16 strings
   ABAPReach passed were read as one character (`RFC_INVALID_PARAMETER` from `RfcSetTraceDir` and
   `RfcOpenConnection`). The character width is now detected from the library and every string is

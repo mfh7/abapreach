@@ -1,3 +1,4 @@
+use crate::cli::{CreateKind, ObjectKind};
 use crate::transport::TransportError;
 use std::fmt;
 
@@ -66,16 +67,18 @@ impl Selection {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationKind {
-    ReadProg,
-    DeployProg,
+    Read(ObjectKind),
+    Deploy(ObjectKind),
+    Create(CreateKind),
     Doctor,
 }
 
 impl fmt::Display for OperationKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ReadProg => write!(formatter, "read PROG"),
-            Self::DeployProg => write!(formatter, "deploy PROG"),
+            Self::Read(kind) => write!(formatter, "read {}", kind.token()),
+            Self::Deploy(kind) => write!(formatter, "deploy {}", kind.token()),
+            Self::Create(kind) => write!(formatter, "create {}", kind.token()),
             Self::Doctor => write!(formatter, "doctor"),
         }
     }

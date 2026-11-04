@@ -1,12 +1,13 @@
 mod common;
 
 use abapreach::backend::{BackendKind, Failure, OperationKind, Router};
+use abapreach::cli::ObjectKind;
 use abapreach::transport::TransportError;
 use common::Fixture;
 use std::fs;
 
-const READ: OperationKind = OperationKind::ReadProg;
-const DEPLOY: OperationKind = OperationKind::DeployProg;
+const READ: OperationKind = OperationKind::Read(ObjectKind::Prog);
+const DEPLOY: OperationKind = OperationKind::Deploy(ObjectKind::Prog);
 
 #[test]
 fn initial_selection_prefers_adt_then_rfc() {

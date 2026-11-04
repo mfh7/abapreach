@@ -13,7 +13,7 @@ moves to the [changelog](../CHANGELOG.md).
 | 0.11.0 | Programs: read and deploy over ADT HTTP and RFC, `doctor` (released) |
 | 0.11.1 | Fixes from the three-path live test, SAProuter route outside the shared config (released) |
 | 0.12.0 | Windows and Linux: RFC library lookup per platform, live tests on every path, CI builds (released) |
-| 0.13.0 | Function modules, classes, interfaces |
+| 0.13.0 | Function modules, classes with local includes, interfaces: read and deploy; create of function groups, function modules, classes and interfaces; read with line ranges |
 | 0.14.0 | MCP server |
 | later | The remaining features below, one milestone at a time |
 
@@ -44,20 +44,28 @@ names `install`.
 | `doctor` | new | ADT, RFC |
 | `foreign_inactive` guard | FM verdict | ADT |
 
+## Shipped in 0.13.0
+
+| Feature | Python origin | Path |
+| :--- | :--- | :--- |
+| Read with line ranges (`--lines`, stdout only) | `rfc-read source` | ADT |
+| Function modules, with interface-change report and where-used advisory | `rfc-deploy FUNC` | ADT |
+| Classes, including local includes `CCIMP`, `CCDEF`, `CCMAC` and `CCAU` | `rfc-deploy CLAS` | ADT |
+| Interfaces | `rfc-deploy INTF` | ADT |
+| Create function groups, function modules, classes and interfaces | `rfc-deploy create` | ADT |
+
+The status of each path is in [Getting started: Tested environment](getting-started.md#tested-environment),
+and the intentional differences from the Python tooling are in
+[Behavior differences](behavior-differences.md).
+
 ## Planned for 1.0.0
 
 ### Source objects
 
 | Feature | Python origin | Path |
 | :--- | :--- | :--- |
-| Read with line ranges | `rfc-read source` | ADT |
-| Function modules, interface changes | `rfc-deploy FUNC` | ADT |
-| Classes and local includes | `rfc-deploy CLAS` | ADT |
-| Interfaces | `rfc-deploy INTF` | ADT |
-| Create programs, includes, groups, FMs, classes | `rfc-deploy create` | ADT |
+| Create programs and program includes | `rfc-deploy create` | ADT |
 | Create report transactions | `create TRAN` | ADT? |
-
-Deploying a function module with a changed interface lists the callers found by where-used.
 
 ### Other object types
 

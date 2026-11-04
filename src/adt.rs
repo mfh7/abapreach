@@ -19,6 +19,110 @@ pub fn versions_uri(program_uri: &str) -> String {
     format!("{program_uri}/source/main/versions")
 }
 
+/// The quickSearch that resolves the function group of a function module. The untyped search
+/// returns an empty list while the module has only an inactive version, the typed one does not.
+pub fn function_group_search_uri(name: &str) -> String {
+    let query = format!(
+        "operation=quickSearch&query={}&maxResults=10",
+        name.to_ascii_uppercase()
+    );
+
+    format!("/sap/bc/adt/repository/informationsystem/search?{query}&objectType=FUGR%2FFF")
+}
+
+/// The function group of a function module from a quickSearch result. The `adtcore:uri` of the
+/// matching `FUGR/FF` reference is `/sap/bc/adt/functions/groups/<fg>/fmodules/<fm>`; a result
+/// without such a reference has `None`.
+pub fn function_group_of(xml: &str, module: &str) -> Result<Option<String>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut group = None;
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(&element) == "objectReference" =>
+            {
+                if let Some(found) = group_of_reference(&element, module)? {
+                    group = Some(found);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(group)
+}
+
+fn group_of_reference(element: &BytesStart<'_>, module: &str) -> Result<Option<String>, String> {
+    let mut name = String::new();
+    let mut uri = String::new();
+
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        let value = attribute
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|error| error.to_string())?
+            .into_owned();
+
+        match attribute.key.local_name().into_inner() {
+            "name" => name = value,
+            "uri" => uri = value,
+            _ => {}
+        }
+    }
+
+    if !name.eq_ignore_ascii_case(module) {
+        return Ok(None);
+    }
+
+    Ok(group_of_uri(&uri, module))
+}
+
+fn group_of_uri(uri: &str, module: &str) -> Option<String> {
+    let rest = uri.strip_prefix("/sap/bc/adt/functions/groups/")?;
+    let (group, tail) = rest.split_once("/fmodules/")?;
+
+    if group.is_empty() || tail.is_empty() || tail.contains('/') {
+        return None;
+    }
+
+    if !tail.eq_ignore_ascii_case(module) {
+        return None;
+    }
+
+    Some(group.to_ascii_uppercase())
+}
+
+/// The package of an object from its metadata: the name of `adtcore:packageRef`. A document
+/// without one has `None`.
+pub fn package_of(xml: &str) -> Result<Option<String>, String> {
+    let mut reader = Reader::from_str(xml);
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(&element) == "packageRef" =>
+            {
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|error| error.to_string())?;
+
+                    if attribute.key.local_name().into_inner() == "name" {
+                        let name = attribute
+                            .normalized_value(XmlVersion::Implicit1_0)
+                            .map_err(|error| error.to_string())?
+                            .into_owned();
+
+                        return Ok(Some(name).filter(|name| !name.is_empty()));
+                    }
+                }
+            }
+            Event::Eof => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
 /// One entry of `GET <source>/versions`: the version number and the user who wrote it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VersionEntry {
@@ -104,6 +208,185 @@ pub fn parse_versions(xml: &str) -> Result<Vec<VersionEntry>, String> {
 enum Field {
     Id,
     Author,
+}
+
+/// What the body of an activation answer is. The status is 200 in every case, so the root of the
+/// body decides: nothing, a worklist that activated nothing, or messages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActivationBody {
+    Empty,
+    /// `ioc:inactiveObjects`: the objects SAP still wants activated; nothing was activated.
+    Worklist,
+    /// `chkl:messages`.
+    Messages,
+    Other,
+}
+
+pub fn classify_activation(body: &str) -> ActivationBody {
+    if body.trim().is_empty() {
+        return ActivationBody::Empty;
+    }
+
+    let mut reader = Reader::from_str(body);
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                return match local_name(&element) {
+                    "inactiveObjects" => ActivationBody::Worklist,
+                    "messages" => ActivationBody::Messages,
+                    _ => ActivationBody::Other,
+                };
+            }
+            Ok(Event::Eof) | Err(_) => return ActivationBody::Other,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// An object reference of a worklist (`ioc:object/ioc:ref`), kept as listed.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ObjectRef {
+    pub uri: String,
+    pub kind: String,
+    pub name: String,
+    pub parent_uri: Option<String>,
+}
+
+/// The object references of an `ioc:inactiveObjects` list. An entry without `ioc:object` carries
+/// only its transport request, and a reference inside `ioc:transport` is the request, so neither
+/// is an object.
+pub fn parse_object_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
+    collect_refs(xml, false)
+}
+
+/// Like [`parse_object_refs`], but also reads the flat 7.40 feed, where every
+/// `adtcore:objectReference` is an object. Only for the advisory inactive-sibling warning: the
+/// admission and activation callers keep the strict reader.
+pub fn parse_inactive_feed_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
+    collect_refs(xml, true)
+}
+
+fn collect_refs(xml: &str, flat: bool) -> Result<Vec<ObjectRef>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut refs = Vec::new();
+    let mut in_object = false;
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) => match local_name(&element) {
+                "object" => in_object = true,
+                "ref" if in_object => refs.push(object_ref(&element)?),
+                "objectReference" if flat => refs.push(object_ref(&element)?),
+                _ => {}
+            },
+            Event::Empty(element)
+                if (in_object && local_name(&element) == "ref")
+                    || (flat && local_name(&element) == "objectReference") =>
+            {
+                refs.push(object_ref(&element)?);
+            }
+            Event::End(element) if element.local_name().into_inner() == "object" => {
+                in_object = false;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(refs)
+}
+
+fn object_ref(element: &BytesStart<'_>) -> Result<ObjectRef, String> {
+    let mut found = ObjectRef::default();
+
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        let value = attribute
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|error| error.to_string())?
+            .into_owned();
+
+        match attribute.key.local_name().into_inner() {
+            "uri" => found.uri = value,
+            "type" => found.kind = value,
+            "name" => found.name = value,
+            "parentUri" => found.parent_uri = Some(value),
+            _ => {}
+        }
+    }
+
+    Ok(found)
+}
+
+/// The body of the where-used request: `usageReferences` takes the object from the query.
+pub const USAGE_REQUEST_XML: &str = r#"<?xml version="1.0" encoding="ASCII"?><usagereferences:usageReferenceRequest xmlns:usagereferences="http://www.sap.com/adt/ris/usageReferences"><usagereferences:affectedObjects/></usagereferences:usageReferenceRequest>"#;
+
+/// The where-used request of an object: the `uri` query keeps the slashes of the object URI
+/// literal, every other character outside the URI-safe set is percent-encoded.
+pub fn usage_references_uri(object_uri: &str) -> String {
+    let mut query = String::new();
+
+    for byte in object_uri.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                query.push(char::from(byte));
+            }
+            other => query.push_str(&format!("%{other:02X}")),
+        }
+    }
+
+    format!("/sap/bc/adt/repository/informationsystem/usageReferences?uri={query}")
+}
+
+/// One calling object of a where-used result.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Caller {
+    pub kind: String,
+    pub name: String,
+}
+
+/// The callers of a `usageReferenceResult`. The result also lists the package of each caller
+/// (`DEVC/K`), which is not a caller, so every package entry is dropped; a repeated object
+/// counts once.
+pub fn parse_callers(xml: &str) -> Result<Vec<Caller>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut callers: Vec<Caller> = Vec::new();
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(&element) == "adtObject" =>
+            {
+                let mut caller = Caller::default();
+
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|error| error.to_string())?;
+                    let value = attribute
+                        .normalized_value(XmlVersion::Implicit1_0)
+                        .map_err(|error| error.to_string())?
+                        .into_owned();
+
+                    match attribute.key.local_name().into_inner() {
+                        "name" => caller.name = value,
+                        "type" => caller.kind = value,
+                        _ => {}
+                    }
+                }
+
+                if !caller.name.is_empty()
+                    && !caller.kind.starts_with("DEVC")
+                    && !callers.contains(&caller)
+                {
+                    callers.push(caller);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(callers)
 }
 
 /// One checkrun or activation message, printed as `TYPE row N: MSG`.

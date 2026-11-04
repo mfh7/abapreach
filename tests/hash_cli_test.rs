@@ -120,6 +120,7 @@ fn cli_only_accepts_m1_commands_with_a_connection() {
             out,
             force,
             conn,
+            ..
         } => {
             assert_eq!(conn, "dev_100");
             assert_eq!(kind, ObjectKind::Prog);
@@ -158,6 +159,7 @@ fn cli_only_accepts_m1_commands_with_a_connection() {
             tr,
             backend,
             conn,
+            ..
         } => {
             assert_eq!(conn, "dev_100");
             assert_eq!(kind, ObjectKind::Prog);
