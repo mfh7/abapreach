@@ -279,15 +279,35 @@ impl Config {
                 .servers
                 .iter()
                 .map(|server| {
-                    let policies = server.policies.as_ref().map_or_else(
-                        || self.policies.clone(),
-                        |document| document.apply(&self.policies),
-                    );
-
-                    (server.system_id.to_ascii_uppercase(), policies.for_mcp())
+                    (
+                        server.system_id.to_ascii_uppercase(),
+                        self.effective_policies(server).for_mcp(),
+                    )
                 })
                 .collect(),
         }
+    }
+
+    /// The ids (`SID_client`) of the connections whose server allows MCP writes, in
+    /// configuration order; the write tool descriptions name them.
+    pub fn mcp_writable(&self) -> Vec<String> {
+        self.servers
+            .iter()
+            .filter(|server| self.effective_policies(server).mcp_write != McpWrite::Off)
+            .flat_map(|server| {
+                server
+                    .clients
+                    .iter()
+                    .map(|client| format!("{}_{client}", server.system_id))
+            })
+            .collect()
+    }
+
+    fn effective_policies(&self, server: &Server) -> Policies {
+        server.policies.as_ref().map_or_else(
+            || self.policies.clone(),
+            |document| document.apply(&self.policies),
+        )
     }
 
     pub fn resolve(
@@ -315,10 +335,7 @@ impl Config {
         let (user, password) = Self::credentials(&system_id, &client, env, &self.local)?;
         let (rfc, saprouter_source) = Self::saprouter(&system_id, rfc, env, &self.local);
         let adt = Self::adt_endpoint(&system_id, server)?;
-        let policies = server.policies.as_ref().map_or_else(
-            || self.policies.clone(),
-            |document| document.apply(&self.policies),
-        );
+        let policies = self.effective_policies(server);
 
         Ok(Connection {
             id: format!("{system_id}_{client}"),

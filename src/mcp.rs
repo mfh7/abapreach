@@ -68,6 +68,8 @@ pub struct Server<H> {
     handler: H,
     /// Whether any server allows MCP writes; only then do the write tools exist.
     write_offered: bool,
+    /// The connections that may write; the write tool descriptions name them.
+    writable: Vec<String>,
 }
 
 impl<H: ToolHandler> Server<H> {
@@ -75,7 +77,16 @@ impl<H: ToolHandler> Server<H> {
         Self {
             handler,
             write_offered,
+            writable: Vec::new(),
         }
+    }
+
+    /// Offers the write tools exactly when `writable` is not empty, and names those connections.
+    pub fn with_writable(mut self, writable: Vec<String>) -> Self {
+        self.write_offered = !writable.is_empty();
+        self.writable = writable;
+
+        self
     }
 
     /// One parsed message to its reply; `None` for a notification or a client response.
@@ -124,10 +135,14 @@ impl<H: ToolHandler> Server<H> {
                 None => error(id, INVALID_PARAMS, "protocolVersion must be a string"),
             },
             "ping" => ok(id, json!({})),
-            "tools/list" => ok(id, json!({"tools": tool_list(self.write_offered)})),
+            "tools/list" => ok(id, json!({"tools": self.tools()})),
             "tools/call" => self.call(id, params),
             _ => error(id, METHOD_NOT_FOUND, "Method not found"),
         })
+    }
+
+    fn tools(&self) -> Vec<Value> {
+        build_tools(self.write_offered, &self.writable)
     }
 
     fn call(&mut self, id: &Value, params: &Map<String, Value>) -> Value {
@@ -135,10 +150,7 @@ impl<H: ToolHandler> Server<H> {
             return error(id, INVALID_PARAMS, "name must be a string");
         };
 
-        if !tool_list(self.write_offered)
-            .iter()
-            .any(|tool| tool["name"] == name)
-        {
+        if !self.tools().iter().any(|tool| tool["name"] == name) {
             return error(id, INVALID_PARAMS, "Unknown tool");
         }
 
@@ -241,6 +253,24 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 /// The tools `tools/list` returns. Annotations are hints for the client; the server enforces
 /// every write itself.
 pub fn tool_list(write_offered: bool) -> Vec<Value> {
+    build_tools(write_offered, &[])
+}
+
+/// The tools for a server whose `writable` connections may write: none, and only the read tools
+/// exist; otherwise every write tool names them.
+pub fn tool_list_for(writable: &[String]) -> Vec<Value> {
+    build_tools(!writable.is_empty(), writable)
+}
+
+fn build_tools(write_offered: bool, writable: &[String]) -> Vec<Value> {
+    let scope = if writable.is_empty() {
+        String::new()
+    } else {
+        format!(" Writable connections: {}.", writable.join(", "))
+    };
+    let write_tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
+        tool(name, &format!("{description}{scope}"), properties, required)
+    };
     let conn = property("string", "Connection id, e.g. DEV_100");
     let object_type =
         |kinds: &[&str]| json!({"type": "string", "description": "Object type", "enum": kinds});
@@ -310,37 +340,37 @@ pub fn tool_list(write_offered: bool) -> Vec<Value> {
 
     if write_offered {
         tools.extend([
-            tool(
+            write_tool(
                 "abap_simulate",
                 "Simulate a source deploy (diff and checks). Issues a plan_token only if the simulation is OK.",
                 deploy_properties.clone(),
                 &["conn", "type", "name", "source"],
             ),
-            tool(
+            write_tool(
                 "abap_deploy",
                 "Deploy source to SAP (WRITE). Needs a plan_token from abap_simulate with identical arguments; single use, 15 minutes.",
                 with_token(&deploy_properties),
                 &["conn", "type", "name", "source", "plan_token"],
             ),
-            tool(
+            write_tool(
                 "abap_create_simulate",
                 "Simulate creating a new object. Issues a plan_token only if the simulation is OK.",
                 create_properties.clone(),
                 &["conn", "type", "name", "text"],
             ),
-            tool(
+            write_tool(
                 "abap_create",
                 "Create a new object in SAP (WRITE, without source). Needs a plan_token from abap_create_simulate with identical arguments.",
                 with_token(&create_properties),
                 &["conn", "type", "name", "text", "plan_token"],
             ),
-            tool(
+            write_tool(
                 "abap_delete_simulate",
                 "Plan the deletion of objects. Issues a plan_token only if every object is SIMULATED_OK.",
                 delete_properties.clone(),
                 &["conn", "objects"],
             ),
-            tool(
+            write_tool(
                 "abap_delete",
                 "Delete objects in SAP (WRITE, permanent; the user always confirms). Needs a plan_token from abap_delete_simulate with the same objects and tr.",
                 with_token(&delete_properties),

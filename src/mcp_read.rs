@@ -20,7 +20,7 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const SECRET_REJECTED: &str = "REJECTED: payload contains a configured secret";
+pub(crate) const SECRET_REJECTED: &str = "REJECTED: payload contains a configured secret";
 
 pub struct ReadTools<'a> {
     config: Config,
@@ -41,10 +41,14 @@ impl<'a> ReadTools<'a> {
         }
     }
 
-    fn connection(&self, arguments: &Map<String, Value>) -> Result<Connection, String> {
+    pub(crate) fn connection(&self, arguments: &Map<String, Value>) -> Result<Connection, String> {
         let id = required(arguments, "conn")?;
 
         self.config.resolve(id, &self.env)
+    }
+
+    pub(crate) fn factories(&mut self) -> &mut dyn Factories {
+        &mut *self.factories
     }
 
     fn read_source(&mut self, arguments: &Map<String, Value>) -> Result<ToolResult, String> {
@@ -293,7 +297,7 @@ fn done() -> Attempt {
     }
 }
 
-fn status_token(status: Status) -> &'static str {
+pub(crate) fn status_token(status: Status) -> &'static str {
     match status {
         Status::Active => "ACTIVE",
         Status::SimulatedOk => "SIMULATED_OK",
@@ -303,11 +307,17 @@ fn status_token(status: Status) -> &'static str {
     }
 }
 
-fn required<'a>(arguments: &'a Map<String, Value>, key: &str) -> Result<&'a str, String> {
+pub(crate) fn required<'a>(
+    arguments: &'a Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, String> {
     optional(arguments, key)?.ok_or_else(|| format!("{key} is required"))
 }
 
-fn optional<'a>(arguments: &'a Map<String, Value>, key: &str) -> Result<Option<&'a str>, String> {
+pub(crate) fn optional<'a>(
+    arguments: &'a Map<String, Value>,
+    key: &str,
+) -> Result<Option<&'a str>, String> {
     match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(text)) => Ok(Some(text)),
@@ -316,7 +326,7 @@ fn optional<'a>(arguments: &'a Map<String, Value>, key: &str) -> Result<Option<&
 }
 
 /// Error and note text goes through the scrub, including the hosts and the route; payload never.
-fn diagnostic(connection: &Connection, text: &str) -> String {
+pub(crate) fn diagnostic(connection: &Connection, text: &str) -> String {
     let mut secrets = connection.secrets();
 
     secrets.extend(connection.hosts());
@@ -325,7 +335,7 @@ fn diagnostic(connection: &Connection, text: &str) -> String {
     scrub(text, &secrets)
 }
 
-fn holds_secret(connection: &Connection, payload: &str) -> bool {
+pub(crate) fn holds_secret(connection: &Connection, payload: &str) -> bool {
     connection
         .secrets()
         .iter()

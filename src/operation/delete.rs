@@ -254,7 +254,7 @@ type Row = (DeleteKind, String);
 
 /// Validates the arguments, upper-cases names and orders them for execution. Every `Err` is the
 /// text of a `STOP`.
-fn prepare(
+pub(crate) fn prepare(
     targets: &[DeleteTarget],
     tr: Option<&str>,
 ) -> Result<(Vec<Row>, Option<String>), String> {
@@ -505,7 +505,7 @@ fn evaluate(
     })
 }
 
-fn sha256_hex(text: &str) -> String {
+pub(crate) fn sha256_hex(text: &str) -> String {
     Sha256::digest(text.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))

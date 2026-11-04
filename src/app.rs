@@ -8,6 +8,7 @@ use crate::domain::Outcome;
 use crate::hash::local_source_lines;
 use crate::mcp::{Server, serve};
 use crate::mcp_read::ReadTools;
+use crate::mcp_write::{ClosedGate, McpTools};
 use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
 use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::delete::{self, Context};
@@ -270,8 +271,9 @@ fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories) -> Exit {
 
     match loaded {
         Ok(config) => {
-            let write_offered = config.mcp_policies().write_offered();
-            let mut server = Server::new(ReadTools::new(config, env, factories), write_offered);
+            let writable = config.mcp_writable();
+            let tools = McpTools::new(ReadTools::new(config, env, factories), ClosedGate);
+            let mut server = Server::new(tools, false).with_writable(writable);
             let served = serve(
                 &mut server,
                 std::io::stdin().lock(),
