@@ -788,3 +788,50 @@ fn the_mcp_snapshot_maps_ask_to_reject_and_ignores_later_edits() {
     assert_eq!(next.get("DEV").unwrap().foreign_inactive.token(), "allow");
     assert_eq!(next.get("DEV").unwrap().mcp_write.token(), "token");
 }
+
+#[test]
+fn writes_are_offered_only_when_some_server_allows_them() {
+    let offered = |policies: &[&str]| {
+        let directory = tempfile::tempdir().unwrap();
+        let connections = directory.path().join("connections.json");
+        let servers: Vec<String> = policies
+            .iter()
+            .enumerate()
+            .map(|(index, policy)| {
+                format!(
+                    r#"{{"systemId":"S{index}","clients":["100"],"rfc":{{"ashost":"example.com","sysnr":"00"}}{policy}}}"#
+                )
+            })
+            .collect();
+
+        fs::write(
+            &connections,
+            format!(r#"{{"servers":[{}]}}"#, servers.join(",")),
+        )
+        .unwrap();
+
+        Config::load(
+            ConfigPaths {
+                connections,
+                local: directory.path().join("connections.local.json"),
+            },
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .mcp_policies()
+        .write_offered()
+    };
+    let off = r#","policies":{"mcp_write":"off"}"#;
+    let confirm = r#","policies":{"mcp_write":"confirm"}"#;
+    let token = r#","policies":{"mcp_write":"token"}"#;
+
+    // Absent means off.
+    assert!(!offered(&[""]));
+    assert!(!offered(&[off, ""]));
+    assert!(offered(&[confirm]));
+    assert!(offered(&[token]));
+    // One server that writes is enough, wherever it stands in the list.
+    assert!(offered(&[off, token]));
+    assert!(offered(&[confirm, off]));
+    assert!(offered(&[confirm, token]));
+}

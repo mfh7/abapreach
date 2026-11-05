@@ -152,6 +152,24 @@ fn a_token_lives_fifteen_minutes() {
 }
 
 #[test]
+fn a_token_is_still_valid_at_exactly_fifteen_minutes_and_expired_a_moment_later() {
+    let clock = Clock::new();
+    let mut gate = clock.gate();
+    let (on_time, _) = stored(&mut gate, &clock);
+    let (late, _) = stored(&mut gate, &clock);
+
+    clock.advance(TOKEN_LIFETIME);
+
+    assert!(gate.admit(&on_time, &ticket()).is_ok());
+
+    clock.advance(Duration::from_nanos(1));
+
+    let error = gate.admit(&late, &ticket()).unwrap_err();
+
+    assert!(error.contains("expired"), "{error}");
+}
+
+#[test]
 fn every_bound_field_must_match_and_a_mismatch_burns_nothing() {
     let clock = Clock::new();
     let mut gate = clock.gate();
@@ -845,6 +863,35 @@ fn a_create_asks_the_human_under_confirm_with_the_name_to_type() {
         form.message
     );
     assert!(form.label.contains("ZTESTFG"), "{}", form.label);
+    assert_eq!(rig.opened(), (0, 0));
+}
+
+#[test]
+fn a_confirmation_that_would_show_a_configured_secret_is_rejected_before_the_human_is_asked() {
+    let mut rig = rig(CONFIRM);
+    let mut session = FakeSession::new(true);
+    let create = json!({"conn": "DEV_100", "type": "FUGR", "name": "ZTESTFG", "text": PASSWORD,
+                        "package": "$TMP"});
+    let ticket = Ticket::new(
+        Operation::Create,
+        "DEV_100",
+        fields(&[
+            ("type", "FUGR"),
+            ("name", "ZTESTFG"),
+            ("text", PASSWORD),
+            ("package", "$TMP"),
+        ]),
+    );
+    let token = rig.gate.clone().issue(ticket).unwrap();
+    let result = rig.call(&mut session, "abap_create", with_token(create, &token));
+
+    assert!(result.is_error);
+    // A rejection keeps its own prefix: it is not a STOP.
+    assert_eq!(
+        result.text,
+        "REJECTED: payload contains a configured secret"
+    );
+    assert_eq!(session.asked(), 0);
     assert_eq!(rig.opened(), (0, 0));
 }
 

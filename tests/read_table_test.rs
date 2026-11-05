@@ -3,7 +3,7 @@ mod common;
 use abapreach::backend::Failure;
 use abapreach::operation::read_table::{
     CLI_MAX_ROWS, MCP_DEFAULT_ROWS, MCP_MAX_ROWS, Query, ReadTable, ReadTableError,
-    ReadTableRequest, TableData, mcp_rows, preview_request, split_where,
+    ReadTableRequest, TableData, mcp_rows, parse_preview, preview_request, split_where,
 };
 use abapreach::policy::Policies;
 use abapreach::transport::{Response, TransportError};
@@ -871,4 +871,216 @@ fn a_reply_with_columns_of_unequal_length_is_an_error_not_a_guess() {
         ),
         Err(ReadTableError::Failed { .. })
     ));
+}
+
+// ---- boundaries of the WHERE validator, the splitter and the output cut --------------------
+
+fn where_error(given: &str) -> String {
+    query("T001", &[], Some(given)).expect_err(given)
+}
+
+#[test]
+fn a_minus_sign_belongs_to_a_number_or_it_is_refused() {
+    assert!(query("T001", &[], Some("AMOUNT = -5")).is_ok());
+
+    for given in [
+        "AMOUNT = -",
+        "AMOUNT = -x",
+        "AMOUNT = - 5",
+        "AMOUNT = -.5",
+        "-",
+    ] {
+        let error = where_error(given);
+
+        assert!(
+            error.contains("character '-' is not allowed"),
+            "{given}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_literal_may_hold_255_characters_and_not_one_more() {
+    let literal = |length: usize| format!("BUTXT = '{}'", "x".repeat(length));
+
+    assert!(query("T001", &[], Some(&literal(255))).is_ok());
+    assert!(where_error(&literal(256)).contains("longer than 255"));
+    // A doubled quote counts once, as the one character it stands for.
+    assert!(
+        query(
+            "T001",
+            &[],
+            Some(&format!("BUTXT = '{}'", "''".repeat(255)))
+        )
+        .is_ok()
+    );
+    assert!(where_error(&format!("BUTXT = '{}'", "''".repeat(256))).contains("longer than 255"));
+}
+
+#[test]
+fn nesting_is_allowed_to_16_levels_and_stopped_at_the_17th() {
+    let parentheses =
+        |depth: usize| format!("{}BUKRS = '1'{}", "( ".repeat(depth), " )".repeat(depth));
+    let negations = |depth: usize| format!("{}BUKRS = '1'", "NOT ".repeat(depth));
+
+    for build in [&parentheses as &dyn Fn(usize) -> String, &negations] {
+        assert!(
+            query("T001", &[], Some(&build(16))).is_ok(),
+            "{}",
+            build(16)
+        );
+        assert!(
+            where_error(&build(17)).contains("nested too deeply"),
+            "{}",
+            build(17)
+        );
+    }
+}
+
+#[test]
+fn a_condition_may_be_2000_characters_long_and_not_one_more() {
+    let condition = vec!["BUKRS = 1"; 143].join(" AND ");
+
+    assert_eq!(condition.len(), 1997);
+
+    // Blanks pad the text to the limit without changing the condition.
+    let at_limit = format!("{condition}   ");
+
+    assert_eq!(at_limit.len(), 2000);
+    assert!(query("T001", &[], Some(&at_limit)).is_ok());
+    assert!(where_error(&format!("{at_limit} ")).contains("longer than 2000"));
+}
+
+#[test]
+fn split_where_keeps_an_empty_literal_and_a_doubled_quote_whole() {
+    assert_eq!(split_where("A = ''").unwrap(), ["A = ''"]);
+    assert_eq!(
+        split_where("A = '' AND B = ''").unwrap(),
+        ["A = '' AND B = ''"]
+    );
+
+    // The literal does not fit behind the 48 characters before it, so it moves to the next line
+    // as one piece instead of being cut at its doubled quotes.
+    let literal = "'it''s a ''quote'' in the middle'";
+    let head = format!("A = {} B =", "X".repeat(40));
+
+    assert_eq!(head.len(), 48);
+    assert_eq!(
+        split_where(&format!("{head} {literal}")).unwrap(),
+        [head.as_str(), literal]
+    );
+}
+
+#[test]
+fn split_where_accepts_a_token_of_72_characters_and_refuses_73() {
+    assert_eq!(split_where(&"A".repeat(72)).unwrap(), ["A".repeat(72)]);
+    assert!(
+        split_where(&"A".repeat(73))
+            .unwrap_err()
+            .contains("token 73 characters > 72")
+    );
+    // A quoted literal is one token too.
+    assert!(split_where(&format!("'{}'", "x".repeat(70))).is_ok());
+    assert!(split_where(&format!("'{}'", "x".repeat(71))).is_err());
+}
+
+#[test]
+fn the_output_cut_counts_the_newline_and_may_fill_the_limit_exactly() {
+    let data = TableData {
+        columns: vec!["C1".to_owned()],
+        rows: vec![vec!["x".to_owned()], vec!["yy".to_owned()]],
+    };
+
+    // "C1\nx" is 4 bytes; adding "\nyy" makes 7.
+    assert_eq!(data.render(2), ("C1".to_owned(), 2));
+    assert_eq!(data.render(3), ("C1".to_owned(), 2));
+    assert_eq!(data.render(4), ("C1\nx".to_owned(), 1));
+    assert_eq!(data.render(6), ("C1\nx".to_owned(), 1));
+    assert_eq!(data.render(7), ("C1\nx\nyy".to_owned(), 0));
+}
+
+#[test]
+fn a_table_that_is_not_in_the_dictionary_is_named_as_such() {
+    let empty = ok(preview(&[
+        ("TABNAME", &[]),
+        ("TABCLASS", &[]),
+        ("VIEWCLASS", &[]),
+    ]));
+    let message = rejected(empty, vec![], 1);
+
+    assert!(
+        message.contains("T001 is not in the ABAP dictionary as an active table or view"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_base_table_row_of_another_view_or_without_a_table_is_unreadable() {
+    let rows = |view: &'static str, table: Option<&'static str>| {
+        ok(preview(&[
+            ("VIEWNAME", &[Some(view)]),
+            ("TABNAME", &[table]),
+            ("TABPOS", &[Some("0001")]),
+        ]))
+    };
+
+    for reply in [rows("OTHER", Some("T001")), rows("T001", None)] {
+        let message = rejected(database_view("T001"), vec![reply], 2);
+
+        assert!(
+            message.contains("the base tables of T001 are unreadable"),
+            "{message}"
+        );
+    }
+}
+
+const PREVIEW_OPEN: &str =
+    "<dataPreview:tableData xmlns:dataPreview=\"http://www.sap.com/adt/dataPreview\">";
+
+#[test]
+fn a_column_name_may_sit_on_an_element_with_an_end_tag() {
+    let xml = format!(
+        "{PREVIEW_OPEN}<dataPreview:columns>\
+         <dataPreview:metadata dataPreview:name=\"BUKRS\"></dataPreview:metadata>\
+         <dataPreview:dataSet><dataPreview:data>1000</dataPreview:data></dataPreview:dataSet>\
+         </dataPreview:columns></dataPreview:tableData>"
+    );
+    let data = parse_preview(&xml).unwrap();
+
+    assert_eq!(data.columns, ["BUKRS"]);
+    assert_eq!(data.rows, [["1000"]]);
+}
+
+#[test]
+fn a_reply_without_a_root_columns_or_column_names_is_no_table() {
+    let column = "<dataPreview:columns><dataPreview:metadata dataPreview:name=\"A\"/>\
+                  <dataPreview:dataSet><dataPreview:data>1</dataPreview:data></dataPreview:dataSet>\
+                  </dataPreview:columns>";
+    let unnamed = "<dataPreview:columns><dataPreview:dataSet><dataPreview:data>1</dataPreview:data>\
+                   </dataPreview:dataSet></dataPreview:columns>";
+
+    for (what, xml) in [
+        (
+            "no tableData root",
+            format!(
+                "<dataPreview:other xmlns:dataPreview=\"http://www.sap.com/adt/dataPreview\">{column}</dataPreview:other>"
+            ),
+        ),
+        (
+            "no columns",
+            format!("{PREVIEW_OPEN}</dataPreview:tableData>"),
+        ),
+        (
+            "a column without a name",
+            format!("{PREVIEW_OPEN}{unnamed}</dataPreview:tableData>"),
+        ),
+    ] {
+        assert_eq!(
+            parse_preview(&xml),
+            Err("no table columns".to_owned()),
+            "{what}"
+        );
+    }
+
+    assert!(parse_preview(&format!("{PREVIEW_OPEN}{column}</dataPreview:tableData>")).is_ok());
 }

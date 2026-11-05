@@ -651,7 +651,7 @@ fn reference_of(element: &BytesStart<'_>) -> Option<ObjectRef> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, Part, is_encoded, is_name, parse_path};
+    use super::{Kind, Part, is_encoded, is_entity, is_name, parse_path};
 
     #[test]
     fn names_are_sap_characters_and_only_a_program_takes_a_namespace_escape() {
@@ -666,6 +666,46 @@ mod tests {
         assert!(!is_name(".", true));
         assert!(!is_name("..", true));
         assert!(is_name("z.prog-1$", true));
+    }
+
+    #[test]
+    fn an_entity_is_a_plain_or_namespaced_name_of_at_most_30_characters() {
+        let longest_plain = "A".repeat(30);
+        let longest_namespaced = format!("/N/{}", "B".repeat(27));
+
+        for entity in [
+            "T001",
+            "T_001",
+            "a1",
+            "/BIC/AFOO",
+            &longest_plain,
+            &longest_namespaced,
+        ] {
+            assert!(is_entity(entity), "{entity}");
+        }
+
+        let too_long_plain = "A".repeat(31);
+        let too_long_namespaced = format!("/N/{}", "B".repeat(28));
+
+        for entity in [
+            "",
+            "/",
+            "//",
+            "/NS",
+            "/NS/",
+            "//X",
+            "/NS/A/B",
+            "T 001",
+            "T-001",
+            "T001%20",
+            "\u{e9}",
+            "/N-S/X",
+            "/NS/X-Y",
+            &too_long_plain,
+            &too_long_namespaced,
+        ] {
+            assert!(!is_entity(entity), "{entity}");
+        }
     }
 
     #[test]
@@ -716,5 +756,40 @@ mod tests {
             format!("{create}#frag"),
             Vec::new()
         )));
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_delete_fault_target_is_a_delete_of_an_object_under_its_lock() {
+        use super::is_delete_request;
+        use crate::transport::Request;
+
+        let object = "/sap/bc/adt/programs/programs/zprog";
+        let delete = format!("{object}?lockHandle=a%2Bb&corrNr=DEVK900001");
+
+        assert!(is_delete_request(&Request::delete(delete.clone())));
+        assert!(is_delete_request(&Request::delete(format!(
+            "{object}?lockHandle=a%2Bb"
+        ))));
+        // The method, the shape and the lock all count; a fragment never does.
+        assert!(!is_delete_request(&Request::get(delete.clone())));
+        assert!(!is_delete_request(&Request::put(
+            delete.clone(),
+            Vec::new()
+        )));
+        assert!(!is_delete_request(&Request::post(
+            delete.clone(),
+            Vec::new()
+        )));
+        assert!(!is_delete_request(&Request::delete(format!(
+            "{delete}#frag"
+        ))));
+        assert!(!is_delete_request(&Request::delete(object)));
+        assert!(!is_delete_request(&Request::delete(
+            "/sap/bc/adt/discovery"
+        )));
+        assert!(!is_delete_request(&Request::delete(format!(
+            "{object}/source/main?lockHandle=a%2Bb"
+        ))));
     }
 }

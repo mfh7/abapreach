@@ -140,6 +140,13 @@ fn a_function_module_that_moved_to_another_group_stops_the_deploy() {
     let result = rig.call(&mut session, "abap_deploy", with_token(arguments, &token));
 
     assert!(result.is_error);
+    // The token carries the resolved group: the write stops on the moved module, it does not
+    // follow it to the new group.
+    assert!(
+        result.text.contains("does not match function group"),
+        "{}",
+        result.text
+    );
     assert!(
         result
             .text
@@ -303,6 +310,79 @@ fn the_summary_is_bounded_and_strips_control_characters_from_sap_strings() {
     assert!(summary.contains("truncated"), "{summary}");
 }
 
+fn change_with(excerpt: usize, omitted: usize) -> Change {
+    Change {
+        added: 1,
+        removed: 1,
+        live_lines: 2,
+        excerpt: (0..excerpt).map(|index| format!("+line {index}")).collect(),
+        omitted,
+    }
+}
+
+#[test]
+fn the_diff_excerpt_is_marked_only_when_lines_were_left_out() {
+    let marker = "more diff lines omitted";
+    let summary = |excerpt: usize, omitted: usize| {
+        confirmation_summary(&connection(), &deploy_ticket(change_with(excerpt, omitted)))
+    };
+
+    // Exactly the 30 lines the summary shows, nothing omitted: no marker.
+    assert!(!summary(0, 0).contains(marker));
+    assert!(!summary(30, 0).contains(marker));
+    assert!(summary(30, 0).contains("+line 29"));
+    // One line more than shown, or one the excerpt already left out.
+    assert!(summary(31, 0).contains("... 1 more diff lines omitted (excerpt truncated)"));
+    assert!(!summary(31, 0).contains("+line 30"));
+    assert!(summary(30, 1).contains("... 1 more diff lines omitted (excerpt truncated)"));
+    assert!(summary(2, 5).contains("... 5 more diff lines omitted (excerpt truncated)"));
+}
+
+fn delete_summary(count: usize, name: &str) -> String {
+    let mut ticket = Ticket::new(
+        Operation::Delete,
+        "DEV_100",
+        BTreeMap::from([("objects".to_owned(), "PROG:ZP".to_owned())]),
+    );
+
+    ticket.listing = (0..count)
+        .map(|index| format!("PROG:{name}{index}"))
+        .collect();
+
+    confirmation_summary(&connection(), &ticket)
+}
+
+#[test]
+fn a_delete_summary_shows_sixty_object_lines_and_counts_the_rest() {
+    let marker = "more lines omitted";
+
+    assert!(delete_summary(1, "Z").contains("objects (1):"));
+    assert!(delete_summary(60, "Z").contains("objects (60):"));
+    assert!(delete_summary(60, "Z").contains("PROG:Z59"));
+    assert!(!delete_summary(60, "Z").contains(marker));
+    assert!(delete_summary(61, "Z").contains("... 1 more lines omitted"));
+    assert!(!delete_summary(61, "Z").contains("PROG:Z60"));
+    assert!(delete_summary(62, "Z").contains("... 2 more lines omitted"));
+}
+
+#[test]
+fn a_summary_is_whole_up_to_the_limit_and_cut_with_a_marker_beyond_it() {
+    let marker = "\n... summary truncated";
+    let short = delete_summary(3, "Z");
+
+    assert!(!short.contains("summary truncated"), "{short}");
+
+    // 60 long object lines are far above the limit.
+    let long = delete_summary(60, &"N".repeat(200));
+
+    assert!(long.ends_with(marker), "{}", long.len());
+    assert_eq!(
+        long.chars().count(),
+        MAX_SUMMARY + marker.chars().count(),
+        "{long}"
+    );
+}
+
 #[test]
 fn a_delete_summary_lists_every_object_and_the_contents_of_a_group() {
     let mut ticket = Ticket::new(
@@ -461,7 +541,7 @@ fn a_cancel_before_the_operation_starts_sends_nothing() {
     );
 
     assert!(result.is_error);
-    assert!(result.text.contains("CANCELED"), "{}", result.text);
+    assert!(result.text.starts_with("CANCELED: "), "{}", result.text);
     assert_eq!(rig.opened(), opened);
 }
 

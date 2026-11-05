@@ -1192,3 +1192,48 @@ fn bind<const N: usize>(fields: [(&str, Option<String>); N]) -> BTreeMap<String,
         .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Pinging;
+
+    impl Factories for Pinging {
+        fn adt(&mut self, _: &Connection) -> Opened {
+            unreachable!("only the ping is under test")
+        }
+
+        fn rfc(&mut self, _: &Connection) -> Opened {
+            unreachable!("only the ping is under test")
+        }
+
+        fn rfc_library(&mut self, _: &Connection) -> Result<RfcLibraryInfo, String> {
+            unreachable!("only the ping is under test")
+        }
+
+        fn rfc_ping(&mut self, _: &Connection) -> Result<(), TransportError> {
+            Err(TransportError::PreSendConnectivity("ping".to_owned()))
+        }
+    }
+
+    #[test]
+    fn a_terminal_that_does_not_exist_is_never_interactive_and_never_confirms() {
+        assert!(!NoTerminal.interactive());
+        assert!(!NoTerminal.confirm("Delete? [y/N] "));
+    }
+
+    #[test]
+    fn the_factories_of_a_call_pass_a_ping_on_to_the_ones_they_wrap() {
+        let mut inner = Pinging;
+        let mut factories = WithCancel {
+            inner: &mut inner,
+            cancel: CancelFlag::new(),
+        };
+
+        assert_eq!(
+            factories.rfc_ping(&Connection::test_insecure()),
+            Err(TransportError::PreSendConnectivity("ping".to_owned()))
+        );
+    }
+}

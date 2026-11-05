@@ -983,6 +983,76 @@ fn rejected_and_not_found_continue_the_batch() {
     assert!(report.outcome.stdout.contains("DELETE_SIM: REJECTED"));
 }
 
+/// The `FAILED <kind> <name>` lines of a report, one per object that did not end in success.
+fn failed_lines(report: &DeleteReport) -> Vec<&str> {
+    report
+        .outcome
+        .stdout
+        .lines()
+        .filter(|line| line.starts_with("FAILED "))
+        .collect()
+}
+
+#[test]
+fn only_an_object_that_did_not_succeed_gets_a_failed_line() {
+    let mut fake = Fake::default();
+
+    // Every object succeeds: the summary says "0 FAILED" but no object is listed as failed.
+    let simulated = sim(&mut fake, &["CLAS:ZCL_A", "PROG:ZP"], None);
+
+    assert_eq!(simulated.outcome.exit, 0);
+    assert!(failed_lines(&simulated).is_empty(), "{simulated:?}");
+
+    let deleted = real_delete(&mut fake, &["CLAS:ZCL_A", "PROG:ZP"]);
+
+    assert_eq!(deleted.outcome.exit, 0);
+    assert!(failed_lines(&deleted).is_empty(), "{deleted:?}");
+
+    let mut fake = Fake::default().reply("ZCL_B", DeleteReply::Rejected("SAP refused".to_owned()));
+    let mixed = real_delete(&mut fake, &["CLAS:ZCL_A", "CLAS:ZCL_B"]);
+
+    assert_eq!(failed_lines(&mixed), ["FAILED CLAS ZCL_B: SAP refused"]);
+}
+
+#[test]
+fn a_member_of_a_group_counts_as_in_the_batch_only_with_its_own_kind_and_name() {
+    let hash = |texts: &[&str], contents: &[&str]| {
+        let mut fake = Fake::default().with(
+            "ZFG",
+            ObjectFacts {
+                contents: contents.iter().map(|text| (*text).to_owned()).collect(),
+                sources: Vec::new(),
+                ..facts_of("ZFG")
+            },
+        );
+
+        plan_of(&sim(&mut fake, texts, None))
+            .objects
+            .iter()
+            .find(|object| object.1 == "ZFG")
+            .expect("fugr row")
+            .2
+            .clone()
+    };
+    let content = ["FUNC ZFM_A"];
+
+    // Another function module in the batch does not stand in for ZFM_A, nor does an object of
+    // another kind with the same name: the group's member list stays part of the plan.
+    for batch in [
+        ["FUGR:ZFG", "FUNC:ZFM_B"],
+        ["FUGR:ZFG", "PROG:ZFM_A"],
+        ["FUGR:ZFG", "CLAS:ZFM_A"],
+    ] {
+        assert_ne!(hash(&batch, &content), hash(&batch, &[]), "{batch:?}");
+    }
+
+    // ZFM_A itself in the batch does.
+    assert_eq!(
+        hash(&["FUGR:ZFG", "FUNC:ZFM_A"], &content),
+        hash(&["FUGR:ZFG", "FUNC:ZFM_A"], &[])
+    );
+}
+
 fn real_delete(fake: &mut Fake, texts: &[&str]) -> DeleteReport {
     let plan = plan_for(texts, None);
 

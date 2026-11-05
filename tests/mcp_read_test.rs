@@ -27,10 +27,13 @@ type Opened = Result<Box<dyn SadtTransport>, TransportError>;
 struct Counted {
     inner: ScriptedTransport,
     closes: Rc<Cell<usize>>,
+    sent: Rc<RefCell<Vec<Request>>>,
 }
 
 impl SadtTransport for Counted {
     fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+        self.sent.borrow_mut().push(request.clone());
+
         self.inner.request(request)
     }
 
@@ -77,6 +80,7 @@ struct Rig {
     fake: Fake,
     env: BTreeMap<String, String>,
     closes: Rc<Cell<usize>>,
+    sent: Rc<RefCell<Vec<Request>>>,
     _directory: tempfile::TempDir,
 }
 
@@ -97,15 +101,21 @@ fn rig() -> Rig {
             ("DEV_100_PASS".to_owned(), PASSWORD.to_owned()),
         ]),
         closes: Rc::new(Cell::new(0)),
+        sent: Rc::default(),
         _directory: directory,
     }
 }
 
 impl Rig {
     fn adt(&mut self, replies: Vec<Result<Response, TransportError>>) {
+        self.adt_transport(ScriptedTransport::replies(replies));
+    }
+
+    fn adt_transport(&mut self, inner: ScriptedTransport) {
         self.fake.adt.push_back(Ok(Box::new(Counted {
-            inner: ScriptedTransport::replies(replies),
+            inner,
             closes: self.closes.clone(),
+            sent: self.sent.clone(),
         })));
     }
 
@@ -446,7 +456,6 @@ fn a_tools_call_over_the_wire_returns_content_structured_content_and_is_error() 
             .unwrap()
             .contains(PROGRAM)
     );
-    let _ = RefCell::new(0);
 }
 
 #[test]
@@ -472,4 +481,127 @@ fn a_table_output_is_cut_at_a_row_boundary_in_text_and_structure() {
             .text
             .contains("W: output cut at 1048576 bytes; 2 rows left out")
     );
+}
+
+#[test]
+fn a_function_group_mismatch_is_a_stop_without_a_fallback() {
+    let mut rig = rig();
+    let search = abapreach::adt::function_group_search_uri("YTEST_ABAPREACH_FM3");
+
+    rig.adt_transport(common::from_fixture(
+        common::fixture_path_in("m3", "dev-750-http-read.json"),
+        move |exchange| exchange.request.uri == search,
+    ));
+
+    let result = rig.call(
+        "abap_read_source",
+        json!({"conn": "DEV_100", "type": "FUNC", "name": "YTEST_ABAPREACH_FM3", "fugr": "ZOTHER"}),
+    );
+
+    assert!(result.is_error);
+    assert!(
+        result
+            .text
+            .starts_with("STOP: --fugr ZOTHER does not match function group"),
+        "{}",
+        result.text
+    );
+    assert_eq!(result.structured["message"], result.text);
+    // The resolution stopped the read: no source request and no RFC attempt.
+    assert_eq!(rig.sent.borrow().len(), 1);
+    assert_eq!(rig.fake.rfc_opened.get(), 0);
+}
+
+#[test]
+fn table_fields_pick_the_columns_and_a_blank_list_picks_them_all() {
+    for (fields, select) in [
+        (json!("bukrs, butxt"), "SELECT BUKRS, BUTXT FROM T001"),
+        (json!("bukrs"), "SELECT BUKRS FROM T001"),
+        (json!(""), "SELECT * FROM T001"),
+        (json!("   "), "SELECT * FROM T001"),
+        (Value::Null, "SELECT * FROM T001"),
+    ] {
+        let mut rig = rig();
+
+        rig.adt(table_replies(&[("1000", "Alpha")]));
+
+        let result = rig.call(
+            "abap_read_table",
+            json!({"conn": "DEV_100", "table": "T001", "fields": fields}),
+        );
+
+        assert!(!result.is_error, "{fields}: {}", result.text);
+
+        // The first request resolves the table, the second one reads it.
+        let sent = rig.sent.borrow();
+
+        assert_eq!(String::from_utf8_lossy(&sent[1].body), select, "{fields}");
+    }
+}
+
+#[test]
+fn a_note_of_a_fallback_reaches_a_successful_result_in_text_and_structure() {
+    let mut rig = rig();
+
+    // ADT cannot be reached; the read succeeds over RFC and says so.
+    rig.fake
+        .adt
+        .push_back(Err(TransportError::PreSendConnectivity("down".to_owned())));
+    rig.fake
+        .rfc
+        .push_back(Ok(Box::new(ScriptedTransport::replies(vec![source(
+            PROGRAM,
+        )]))));
+
+    let read = rig.call(
+        "abap_read_source",
+        json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST"}),
+    );
+
+    assert!(!read.is_error, "{}", read.text);
+    assert!(read.text.starts_with(PROGRAM), "{}", read.text);
+    assert!(
+        read.text.ends_with("falling back to RFC SADT"),
+        "{}",
+        read.text
+    );
+    assert!(
+        read.structured["notes"]
+            .as_str()
+            .unwrap()
+            .contains("falling back to RFC SADT"),
+        "{}",
+        read.structured
+    );
+    assert_eq!(read.structured["source"], PROGRAM);
+
+    rig.fake
+        .adt
+        .push_back(Err(TransportError::PreSendConnectivity("down".to_owned())));
+    rig.fake
+        .rfc
+        .push_back(Ok(Box::new(ScriptedTransport::replies(table_replies(&[
+            ("1000", "Alpha"),
+        ])))));
+
+    let table = rig.call(
+        "abap_read_table",
+        json!({"conn": "DEV_100", "table": "T001"}),
+    );
+
+    assert!(!table.is_error, "{}", table.text);
+    assert!(
+        table.text.ends_with("falling back to RFC SADT"),
+        "{}",
+        table.text
+    );
+    assert!(
+        table.structured["notes"]
+            .as_str()
+            .unwrap()
+            .contains("falling back to RFC SADT"),
+        "{}",
+        table.structured
+    );
+    assert_eq!(table.structured["rows"], json!([["1000", "Alpha"]]));
 }

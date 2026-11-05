@@ -879,6 +879,35 @@ fn a_passed_simulation_issues_a_token_bound_to_the_contract_fields() {
 }
 
 #[test]
+fn a_create_simulation_ticket_carries_the_backend_it_ran_on() {
+    let mut rig = rig();
+    let requests = log();
+    let validation = abapreach::cli::CreateKind::Fugr.validation_uri("ZTESTFG", "T", "$TMP");
+    let ok = concat!(
+        r#"<asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA>"#,
+        r#"<SEVERITY>OK</SEVERITY><SHORT_TEXT></SHORT_TEXT><LONG_TEXT/>"#,
+        r#"</DATA></asx:values></asx:abap>"#,
+    );
+
+    rig.adt(Script::new(&requests).post(&validation, 200, ok));
+
+    let result = rig.call(
+        "abap_create_simulate",
+        json!({"conn": "DEV_100", "type": "FUGR", "name": "ZTESTFG", "text": "T",
+               "package": "$TMP"}),
+    );
+
+    assert!(!result.is_error, "{}", result.text);
+    assert_eq!(result.structured["plan_token"], "tok-1");
+
+    let issued = rig.gate.issued();
+
+    assert_eq!(issued.len(), 1);
+    assert_eq!(issued[0].operation, Operation::Create);
+    assert_eq!(issued[0].backend, Some(BackendKind::AdtHttp));
+}
+
+#[test]
 fn a_failed_simulation_and_a_partly_failed_delete_plan_issue_no_token() {
     let mut rig = rig();
     let requests = log();
@@ -1034,6 +1063,9 @@ fn a_delete_plan_is_simulated_then_executed_from_the_plan_the_ticket_holds() {
         BTreeMap::from([("objects".to_owned(), "PROG:ZPROG".to_owned())])
     );
     assert_eq!(issued[0].plan.as_ref().unwrap().conn, "DEV_100");
+    // The write repeats the backend and shows the human the objects the simulation listed.
+    assert_eq!(issued[0].backend, Some(BackendKind::AdtHttp));
+    assert_eq!(issued[0].listing, ["PROG:ZPROG"]);
 
     rig.adt(
         prog_reads(&requests, "OWNER")
@@ -1061,6 +1093,48 @@ fn a_delete_plan_is_simulated_then_executed_from_the_plan_the_ticket_holds() {
     assert_eq!(deleted.structured["objects"][0]["status"], "DELETED");
     assert!(deleted.text.contains("DELETE: DELETED"), "{}", deleted.text);
     assert!(deleted.structured.get("plan_token").is_none());
+}
+
+/// An ADT connection whose server keeps no stateful session: a lock could not be held.
+struct Stateless(Script);
+
+impl SadtTransport for Stateless {
+    fn request(&mut self, request: Request) -> Reply {
+        self.0.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        Some(false)
+    }
+}
+
+#[test]
+fn a_delete_on_an_adt_without_a_stateful_session_sends_nothing_and_falls_back_to_rfc() {
+    let mut rig = rig();
+    let requests = log();
+
+    rig.adt(Stateless(prog_reads(&requests, "OWNER")));
+    rig.rfc(prog_reads(&requests, "OWNER"));
+
+    let simulated = rig.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+
+    assert!(!simulated.is_error, "{}", simulated.text);
+    assert_eq!(rig.opened(), (1, 1));
+    assert!(
+        simulated.text.contains("falling back to RFC SADT"),
+        "{}",
+        simulated.text
+    );
+    // Nothing went over the stateless connection, and the ticket pins the backend that worked.
+    assert_eq!(requests.borrow().len(), 3);
+    assert_eq!(rig.gate.issued()[0].backend, Some(BackendKind::RfcSadt));
 }
 
 #[test]
