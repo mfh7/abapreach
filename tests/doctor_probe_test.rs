@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 const DISCOVERY_URI: &str = "/sap/bc/adt/discovery";
 const WARNING: &str = "WARNING: connection DEV_100 uses insecure TLS or HTTP.";
+const DENIED_LINE: &str = "policy read_table_denied: USR02, USH02, USH02_ARC_TMP, USRPWDHISTORY, RFCDES, RSECTAB, RSECACTB, SSF_PSE_D";
 const LIBRARY_PATH: &str = "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so";
 
 fn library() -> Result<RfcLibraryInfo, String> {
@@ -172,6 +173,8 @@ fn doctor_probes_both_backends_with_one_logon_each() {
             "credential available",
             "local credentials: not present",
             "policy foreign inactive: reject",
+            DENIED_LINE,
+            "policy mcp_write: off",
             "ADT HTTP configured: https://***:443",
             "RFC SADT configured: *** system 00",
             "ADT HTTP probe: ok (HTTP 200)",
@@ -265,6 +268,8 @@ fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
             "credential available",
             "local credentials: not present",
             "policy foreign inactive: reject",
+            DENIED_LINE,
+            "policy mcp_write: off",
             "ADT HTTP: not configured",
             "RFC SADT configured: *** system 02",
             "ADT HTTP probe: not run (ADT not configured)",
@@ -907,4 +912,101 @@ fn doctor_masks_both_hosts_in_the_failed_probe_lines() {
         exit.stdout
     );
     assert_no_host(&exit);
+}
+
+/// A one-server config with `policies`, doctor run on it with the probes answered.
+fn doctor_with_policies(policies: &str) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let config = format!(
+        concat!(
+            r#"{{"policies":{policies},"servers":[{{"systemId":"QAS","clients":["100"],"#,
+            r#""rfc":{{"ashost":"example.com","sysnr":"02"}}}}]}}"#,
+        ),
+        policies = policies
+    );
+    fs::write(directory.path().join("connections.json"), config).unwrap();
+    let env = BTreeMap::from([
+        (
+            "ABAP_CONNECTIONS".to_owned(),
+            directory
+                .path()
+                .join("connections.json")
+                .display()
+                .to_string(),
+        ),
+        ("QAS_100_USER".to_owned(), "user".to_owned()),
+        ("QAS_100_PASS".to_owned(), "secret-pw".to_owned()),
+    ]);
+    let mut fake = Fake::default();
+
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    run(
+        ["abapreach", "doctor", "--conn", "qas_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        env,
+        &mut fake,
+    )
+}
+
+#[test]
+fn doctor_prints_the_effective_policy_lines() {
+    let exit =
+        doctor_with_policies(r#"{"read_table_denied":["usr02","Custom_T"],"mcp_write":"token"}"#);
+    let lines = exit.stdout.lines().collect::<Vec<_>>();
+
+    assert!(
+        lines.contains(&"policy read_table_denied: USR02, CUSTOM_T"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        lines.contains(&"policy mcp_write: token"),
+        "{}",
+        exit.stdout
+    );
+    assert!(!exit.stdout.contains("secret-pw"));
+}
+
+#[test]
+fn doctor_warns_about_the_default_entries_a_deny_list_lacks() {
+    let exit = doctor_with_policies(r#"{"read_table_denied":["usr02","rfcdes"]}"#);
+
+    assert!(
+        exit.stdout.lines().any(|line| line
+            == "WARNING: policy read_table_denied lacks default entries: USH02, USH02_ARC_TMP, USRPWDHISTORY, RSECTAB, RSECACTB, SSF_PSE_D"),
+        "{}",
+        exit.stdout
+    );
+}
+
+#[test]
+fn doctor_warns_for_an_empty_deny_list_and_not_for_the_default() {
+    let empty = doctor_with_policies(r#"{"read_table_denied":[]}"#);
+
+    assert!(
+        empty.stdout.contains("policy read_table_denied: (none)"),
+        "{}",
+        empty.stdout
+    );
+    assert!(
+        empty
+            .stdout
+            .contains("WARNING: policy read_table_denied lacks default entries: USR02,")
+    );
+    assert!(
+        !doctor_with_policies("{}")
+            .stdout
+            .contains("lacks default entries")
+    );
+    // Case does not matter, and extra entries do not trigger the warning.
+    assert!(
+        !doctor_with_policies(
+            r#"{"read_table_denied":["usr02","ush02","ush02_arc_tmp","usrpwdhistory","rfcdes","rsectab","rsecactb","ssf_pse_d","extra"]}"#
+        )
+        .stdout
+        .contains("lacks default entries")
+    );
 }

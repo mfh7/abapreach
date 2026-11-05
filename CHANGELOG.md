@@ -4,14 +4,45 @@ All notable changes to ABAPReach are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-**Current Rust CLI:** version `0.13.0` supports `PROG`, `FUNC`, `CLAS` (including local
-includes) and `INTF` objects. Earlier versions supported `PROG` only.
+**Current Rust CLI:** version `0.14.0` supports `PROG`, `FUNC`, `CLAS` (including local
+includes) and `INTF` objects, and adds `read-table`, `delete` and the MCP server. Earlier versions supported `PROG` only.
 Versions `0.1.0` to `0.10.0` below describe the earlier Python implementation,
 not features available in the current Rust CLI. Their tags live in the
 internal repository where that implementation was developed. See the
 [roadmap](docs/roadmap.md) for the path to 1.0.0, which brings all of them to Rust.
 
 ## [Unreleased]
+
+## [0.14.0] - 2026-11-04
+
+### Added
+- `read-table` command: reads an SAP table through the ADT data preview, with view resolution and
+  routing between the ADT HTTP and RFC backends.
+- `delete` command: planned delete of PROG, FUGR, FUNC, CLAS and INTF objects through a batch state machine, with ADT delete
+  transport, admission checks and reconciliation of the outcome.
+- MCP stdio server: JSON-RPC MCP protocol with read tools (untrusted payload and scrub rules) and
+  write tools.
+- `mcp_write` policy per connection (`off` by default, `confirm`, `token`) for the MCP write tools.
+- `read_table_denied` deny list for `read-table`.
+
+### Changed
+- Version metadata set to `0.14.0`.
+
+### Known limitations
+- Codex is not verified for MCP in this release; the Codex gate was deferred.
+- pi cannot answer an elicitation: writes under `mcp_write = confirm` are refused with a `STOP`
+  that names the missing capability. Reads work.
+- OpenCode has no Decline button; Esc is a cancel.
+- `mcp_write` is read once at server start. An agent that can edit `connections.json` can relax
+  it, and the change applies at the next start.
+- A SIGKILL during a write can leave the ADT lock on the object. Check SM12 before a retry.
+- A cancel after the source PUT ends as `PARTIAL` (source saved inactive, nothing activated);
+  this case was not reproduced live with an MCP client.
+- There is no restore after delete. `rfc-deploy restore` is not in this release.
+- On a system whose ADT HTTP keeps no stateful session (observed on SAP_BASIS 7.40),
+  `deploy --backend adt` stops before the lock, and a deploy or delete without the pin runs over
+  RFC SADT.
+- `read-table` MCP output is cut at 1 MiB and rows are capped at 1000 per call.
 
 ## [0.13.0] - 2026-11-03
 

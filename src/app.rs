@@ -6,11 +6,20 @@ use crate::config::{
 };
 use crate::domain::Outcome;
 use crate::hash::local_source_lines;
+use crate::mcp::{Server, serve_with};
+use crate::mcp_read::ReadTools;
+use crate::mcp_write::{McpTools, TokenGate};
 use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
 use crate::operation::create::{CreateInput, CreateProg};
+use crate::operation::delete::{self, Context};
+use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::doctor::Doctor;
 use crate::operation::read::{ReadProg, ReadTarget};
+use crate::operation::read_table::{
+    CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableError, ReadTableRequest,
+};
+use crate::policy::Terminal;
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
     DynamicRfcApi, Env, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
@@ -183,7 +192,10 @@ pub fn run(
         }
     };
     let is_doctor = matches!(cli.command, Command::Doctor { .. });
-    let (connection, local_credentials) = match resolve(connection_id(&cli.command), &env) {
+    let Some(conn) = connection_id(&cli.command) else {
+        return with_warning(mcp(env, factories), warning.as_deref());
+    };
+    let (connection, local_credentials) = match resolve(conn, &env) {
         Ok(resolved) => resolved,
         Err(message) => return with_warning(stop(message), warning.as_deref()),
     };
@@ -240,12 +252,49 @@ fn stop(message: impl std::fmt::Display) -> Exit {
     }
 }
 
-fn connection_id(command: &Command) -> &str {
+fn connection_id(command: &Command) -> Option<&str> {
     match command {
         Command::Read { conn, .. }
         | Command::Deploy { conn, .. }
         | Command::Create { conn, .. }
-        | Command::Doctor { conn } => conn,
+        | Command::ReadTable { conn, .. }
+        | Command::Delete { conn, .. }
+        | Command::Doctor { conn } => Some(conn),
+        Command::Mcp => None,
+    }
+}
+
+/// `mcp` loads every policy once, then serves stdio until EOF; an invalid policy stops the start
+/// with exit 2 before anything is written to stdout.
+fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories) -> Exit {
+    let loaded = ConfigPaths::from_env(&env).and_then(|paths| Config::load(paths, &env));
+
+    match loaded {
+        Ok(config) => {
+            let writable = config.mcp_writable();
+            // The flag a signal handler sets: it ends the server once a write has settled.
+            let cancel = factories.cancel();
+            let tools = McpTools::new(ReadTools::new(config, env, factories), TokenGate::new());
+            let mut server = Server::new(tools, false).with_writable(writable);
+            // Not the locked handles: the reader thread owns stdin, and stdout is shared.
+            let served = serve_with(
+                &mut server,
+                std::io::BufReader::new(std::io::stdin()),
+                std::io::stdout(),
+                std::io::stderr().lock(),
+                cancel,
+            );
+
+            match served {
+                Ok(()) => Exit {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                Err(error) => stop(format!("MCP stdio failed: {error}")),
+            }
+        }
+        Err(message) => stop(message),
     }
 }
 
@@ -262,12 +311,12 @@ fn resolve(
 }
 
 /// One finished try on one backend: what to print and whether a switch is still allowed.
-struct Attempt {
-    outcome: Outcome,
-    failure: Option<Failure>,
-    fallback_allowed: bool,
+pub(crate) struct Attempt {
+    pub(crate) outcome: Outcome,
+    pub(crate) failure: Option<Failure>,
+    pub(crate) fallback_allowed: bool,
     /// The failure message, quoted as the reason when the next backend is a fallback.
-    detail: Option<String>,
+    pub(crate) detail: Option<String>,
 }
 
 impl Attempt {
@@ -275,7 +324,7 @@ impl Attempt {
         Self::failed(error.to_string(), Failure::from(error))
     }
 
-    fn failed(message: String, failure: Failure) -> Self {
+    pub(crate) fn failed(message: String, failure: Failure) -> Self {
         Self {
             outcome: Outcome {
                 status: None,
@@ -306,6 +355,158 @@ fn execute(
                 stderr: String::new(),
             }
         }
+        Command::ReadTable {
+            table,
+            fields,
+            where_clause,
+            rows,
+            ..
+        } => {
+            let request = ReadTableRequest {
+                table,
+                fields,
+                where_clause,
+                rows,
+            };
+            let query = match Query::new(&request, CLI_MAX_ROWS, &connection.policies) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            route(
+                OperationKind::ReadTable,
+                None,
+                false,
+                connection,
+                factories,
+                |transport, _, _, _| {
+                    let read = ReadTable::run(transport, &query, &connection.policies);
+
+                    // A read holds no lock, so a failed session end changes nothing here.
+                    let _ = transport.close();
+
+                    match read {
+                        Ok(data) => {
+                            let (stdout, omitted) = data.render(MAX_OUTPUT_BYTES);
+                            let stderr = if omitted == 0 {
+                                String::new()
+                            } else {
+                                format!(
+                                    "W: output cut at {MAX_OUTPUT_BYTES} bytes; {omitted} rows left out"
+                                )
+                            };
+
+                            Attempt {
+                                outcome: Outcome {
+                                    status: None,
+                                    exit: 0,
+                                    stdout,
+                                    stderr,
+                                },
+                                failure: None,
+                                fallback_allowed: false,
+                                detail: None,
+                            }
+                        }
+                        Err(ReadTableError::Rejected(message)) => Attempt {
+                            outcome: Outcome {
+                                status: None,
+                                exit: 1,
+                                stdout: String::new(),
+                                stderr: format!("REJECTED: {message}"),
+                            },
+                            failure: None,
+                            fallback_allowed: false,
+                            detail: None,
+                        },
+                        Err(ReadTableError::Failed { failure, message }) => {
+                            Attempt::failed(message, failure)
+                        }
+                    }
+                },
+            )
+        }
+        Command::Delete {
+            targets,
+            simulate,
+            tr,
+            plan,
+            ..
+        } => route(
+            OperationKind::Delete,
+            None,
+            false,
+            connection,
+            factories,
+            |transport, _, cancel, fresh| {
+                // The server would answer the LOCK and then refuse the DELETE, so nothing is sent
+                // and the router may try RFC.
+                if transport.stateful_supported() == Some(false) {
+                    let _ = transport.close();
+
+                    return Attempt {
+                        fallback_allowed: true,
+                        ..Attempt::failed(
+                            NO_STATEFUL_SESSION.to_owned(),
+                            Failure::CapabilityUnavailable,
+                        )
+                    };
+                }
+
+                let context = Context {
+                    conn: &connection.id,
+                    user: &connection.user,
+                    policies: &connection.policies,
+                    confirmer: &Terminal,
+                };
+                let (mut outcome, unsent) = {
+                    let mut backend = AdtDelete::with_cancel(
+                        &mut *transport,
+                        &connection.user,
+                        fresh,
+                        cancel.clone(),
+                    );
+                    let outcome = delete::run_until(
+                        &mut backend,
+                        &context,
+                        &targets,
+                        tr.as_deref(),
+                        simulate,
+                        &plan,
+                        &mut || cancel.is_set(),
+                    );
+
+                    (outcome, backend.unsent_failure())
+                };
+                if !simulate && cancel.is_set() {
+                    outcome.exit = 130;
+                }
+
+                // The batch is over and the lock, if any, is reported by the outcome.
+                let _ = transport.close();
+
+                // A read that never left the process and no delete request sent: the plan file
+                // pins no backend, so RFC may run the whole batch, unless Ctrl-C came first.
+                if let Some((failure, message)) = unsent {
+                    if !cancel.is_set() {
+                        return Attempt {
+                            fallback_allowed: true,
+                            ..Attempt::failed(message, failure)
+                        };
+                    }
+
+                    outcome.exit = 130;
+                }
+
+                Attempt {
+                    outcome,
+                    failure: None,
+                    fallback_allowed: false,
+                    detail: None,
+                }
+            },
+        ),
+        Command::Mcp => stop("the MCP server needs no connection"),
         Command::Read {
             kind,
             name,
@@ -339,7 +540,7 @@ fn execute(
                 false,
                 connection,
                 factories,
-                |transport, _, _| {
+                |transport, _, _, _| {
                     let read =
                         ReadProg::run_target_classified(transport, target, &out, force, None);
 
@@ -407,7 +608,7 @@ fn execute(
                 false,
                 connection,
                 factories,
-                |transport, selection, cancel| {
+                |transport, selection, cancel, _| {
                     let result = CreateProg::run_with_cancel(
                         transport,
                         input.clone(),
@@ -473,7 +674,7 @@ fn execute(
                 base_given,
                 connection,
                 factories,
-                |transport, selection, cancel| {
+                |transport, selection, cancel, _| {
                     let result = DeployProg::run_scoped(
                         transport,
                         input.clone(),
@@ -504,13 +705,18 @@ fn backend_kind(backend: Backend) -> BackendKind {
 
 /// Runs the operation on the backend the router picks. A second backend is tried only when the
 /// first one failed before it sent a write request and neither `--backend` nor `--base` pins it.
-fn route(
+pub(crate) fn route(
     operation: OperationKind,
     explicit: Option<BackendKind>,
     base_given: bool,
     connection: &Connection,
     factories: &mut dyn Factories,
-    mut attempt: impl FnMut(&mut dyn SadtTransport, &Selection, &CancelFlag) -> Attempt,
+    mut attempt: impl FnMut(
+        &mut dyn SadtTransport,
+        &Selection,
+        &CancelFlag,
+        &mut dyn FnMut() -> Opened,
+    ) -> Attempt,
 ) -> Exit {
     let router = Router::new(connection.adt.is_some(), true);
     let cancel = factories.cancel();
@@ -551,7 +757,15 @@ fn route(
             BackendKind::RfcSadt => factories.rfc(connection),
         };
         let done = match opened {
-            Ok(mut transport) => attempt(&mut *transport, &selection, &cancel),
+            Ok(mut transport) => {
+                // A new session of the same backend, for the read that settles a lost reply.
+                let mut fresh = || match backend {
+                    BackendKind::AdtHttp => factories.adt(connection),
+                    BackendKind::RfcSadt => factories.rfc(connection),
+                };
+
+                attempt(&mut *transport, &selection, &cancel, &mut fresh)
+            }
             Err(error) => Attempt::from_error(&error),
         };
 

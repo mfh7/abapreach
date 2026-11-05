@@ -19,14 +19,14 @@ use quick_xml::{Reader, XmlVersion};
 use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 use std::fmt::Display;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub use crate::adt::format_messages;
 
-const LOCK_ACCEPT: &str =
+pub(crate) const LOCK_ACCEPT: &str =
     "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result";
-const VERSIONS_ACCEPT: &str = "application/atom+xml;type=feed";
+pub(crate) const VERSIONS_ACCEPT: &str = "application/atom+xml;type=feed";
 const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET without a version returns it; restore only by deploying the base source again on your order";
 const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
 const INACTIVE_OBJECTS_ACCEPT: &str =
@@ -52,6 +52,9 @@ pub struct DeployScope {
     pub group: Option<String>,
     pub include: Option<IncludeKind>,
     pub create_include: bool,
+    /// Stop before the LOCK when the cancel flag is already set. The CLI exits on its own
+    /// before a lock, so only a long-lived process (the MCP server) needs this.
+    pub cancel_before_lock: bool,
 }
 
 impl DeployScope {
@@ -61,7 +64,14 @@ impl DeployScope {
             group: None,
             include: None,
             create_include: false,
+            cancel_before_lock: false,
         }
+    }
+
+    pub fn cancel_before_lock(mut self, stop: bool) -> Self {
+        self.cancel_before_lock = stop;
+
+        self
     }
 
     pub fn group(mut self, group: Option<&str>) -> Self {
@@ -106,6 +116,8 @@ pub struct CancelFlag {
     cancelled: Arc<AtomicBool>,
     lock_held: Arc<AtomicBool>,
     write_in_flight: Arc<AtomicBool>,
+    /// The process was told to end (signal or closed input), not just one request cancelled.
+    shutdown: Arc<AtomicBool>,
 }
 
 impl CancelFlag {
@@ -113,12 +125,29 @@ impl CancelFlag {
         Self::default()
     }
 
+    /// Clears a cancellation that belonged to a request that is over. A shutdown stays.
+    pub fn reset(&self) {
+        if !self.is_shutdown() {
+            self.cancelled.store(false, Ordering::SeqCst);
+        }
+    }
+
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.set();
+    }
+
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
+    }
+
     pub fn set(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
+    /// A shutdown counts even if a racing `reset` cleared `cancelled` after it.
     pub fn is_set(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.cancelled.load(Ordering::SeqCst) || self.is_shutdown()
     }
 
     /// Marks the window in which the deploy holds a lock; the guard of the caller's scope ends it.
@@ -148,7 +177,7 @@ impl CancelFlag {
             return InterruptAction::ExitNow;
         }
 
-        self.set();
+        self.request_shutdown();
 
         InterruptAction::Deferred
     }
@@ -181,7 +210,30 @@ pub struct DeployResult {
     pub fallback_allowed: bool,
     /// The message of the failing request, quoted as the reason of a fallback.
     pub detail: Option<String>,
+    /// The function group the run resolved for a FUNC.
+    pub group: Option<String>,
+    /// The live hash the run read first: a later write that repeats it as its base is refused
+    /// when the live source moved on.
+    pub base: Option<String>,
+    /// What the simulated change adds and removes, for a human to confirm.
+    pub change: Option<Change>,
 }
+
+/// The size of a change and a bounded excerpt of its diff.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Change {
+    pub added: usize,
+    pub removed: usize,
+    /// Lines of the live source: `removed` of them leave when the new source is shorter.
+    pub live_lines: usize,
+    /// The unified diff lines (header and context included), cut at `EXCERPT_LINES`.
+    pub excerpt: Vec<String>,
+    /// How many diff lines the excerpt left out.
+    pub omitted: usize,
+}
+
+/// The diff lines a confirmation shows at most.
+pub const EXCERPT_LINES: usize = 40;
 
 pub struct DeployProg;
 
@@ -309,6 +361,9 @@ impl DeployProg {
             seen: InactiveSeen::default(),
             confirmer,
             write_sent: false,
+            live_hash: None,
+            change: None,
+            cancel_before_lock: scope.cancel_before_lock,
             lock_sent: false,
         };
         // `--base` and an explicit `--backend` bind the run to the backend that was picked.
@@ -341,6 +396,9 @@ impl DeployProg {
             failure: finish.failure,
             fallback_allowed: finish.fallback_allowed,
             detail: finish.detail,
+            group: run.group.clone(),
+            base: run.live_hash.clone(),
+            change: run.change.take(),
         }
     }
 }
@@ -444,6 +502,13 @@ impl Finish {
     fn cancelled() -> Self {
         Self {
             stderr: Some("CANCELED: interrupted while the lock was held".to_owned()),
+            ..Self::new(None, INTERRUPT_EXIT_CODE)
+        }
+    }
+
+    fn cancelled_before_lock() -> Self {
+        Self {
+            stderr: Some("CANCELED: interrupted before the lock was taken".to_owned()),
             ..Self::new(None, INTERRUPT_EXIT_CODE)
         }
     }
@@ -557,10 +622,12 @@ enum IncludePost {
     Uncertain,
 }
 
-struct LockInfo {
-    handle: String,
-    corrnr: String,
-    is_local: bool,
+pub(crate) struct LockInfo {
+    pub(crate) handle: String,
+    pub(crate) corrnr: String,
+    /// The owner of the request in `corrnr`; empty when the lock reply names none.
+    pub(crate) corruser: String,
+    pub(crate) is_local: bool,
 }
 
 /// What the locked phase decided; the lock is released afterwards in every case.
@@ -640,6 +707,10 @@ struct Run<'a> {
     confirmer: &'a dyn Confirmer,
     /// A completed mutating request closes the routing window, even when later reads fail.
     write_sent: bool,
+    /// The hash of the live source the run read first.
+    live_hash: Option<String>,
+    change: Option<Change>,
+    cancel_before_lock: bool,
     /// Whether a lock may exist: a LOCK reply that was a 2xx, or a LOCK request whose reply was
     /// lost. A refused LOCK leaves no lock, so a later session-end failure stays quiet about it.
     lock_sent: bool,
@@ -712,6 +783,8 @@ impl Run<'_> {
         let live = normalize(self.read_live()?);
         let live_hash = source_hash(&live);
 
+        self.live_hash = Some(live_hash.clone());
+
         if let Some(base) = &input.base
             && *base != live_hash
         {
@@ -736,6 +809,7 @@ impl Run<'_> {
             .header("live", "file")
             .to_string();
 
+        self.change = Some(change_of(&lines, &diff, live.len()));
         self.stdout.push(diff.trim_end().to_owned());
         self.report_interface_change(&live, &file)?;
         self.stdout.push(format!("live hash {live_hash}"));
@@ -764,6 +838,10 @@ impl Run<'_> {
         // Still read-only: a refused guard leaves no lock behind and writes nothing.
         self.foreign_inactive(Some(changed))?;
         self.warn_inactive_siblings();
+
+        if self.cancel_before_lock && cancel.is_set() {
+            return Err(Finish::cancelled_before_lock());
+        }
 
         let _lock_scope = cancel.hold_lock();
         // Ctrl-C is deferred while the LOCK request is in flight too: its 2xx reply may already
@@ -1756,6 +1834,42 @@ impl Run<'_> {
     }
 }
 
+/// The change from `live` to `file`, both whole texts.
+pub fn summarize_change(live: &str, file: &str) -> Change {
+    let lines = TextDiff::from_lines(live, file);
+    let diff = lines
+        .unified_diff()
+        .context_radius(3)
+        .header("live", "file")
+        .to_string();
+
+    change_of(&lines, &diff, live.lines().count())
+}
+
+/// The counts and the bounded excerpt of a diff that the confirmation of a write shows.
+fn change_of(lines: &TextDiff<'_, '_, str>, diff: &str, live_lines: usize) -> Change {
+    let (mut added, mut removed) = (0, 0);
+
+    for change in lines.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+
+    let all: Vec<String> = diff.trim_end().lines().map(str::to_owned).collect();
+    let omitted = all.len().saturating_sub(EXCERPT_LINES);
+
+    Change {
+        added,
+        removed,
+        live_lines,
+        excerpt: all.into_iter().take(EXCERPT_LINES).collect(),
+        omitted,
+    }
+}
+
 /// Request body of `POST /sap/bc/adt/checkruns` for a program; `file` is the normalized source.
 pub fn checkrun_xml(name: &str, file: &[String]) -> String {
     let uri = prog_uri(name);
@@ -2072,7 +2186,46 @@ pub fn encode_lock_handle(handle: &str) -> String {
     encoded
 }
 
-fn parse_lock(xml: &str) -> Result<LockInfo, String> {
+/// The ADT lock handles this process has seen. A handle is not bound to the session, so it
+/// must not reach a client: diagnostics are scrubbed of every one of them.
+static LOCK_HANDLES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The most handles kept; a process holds one lock at a time, so older ones are long released.
+const KEPT_HANDLES: usize = 64;
+
+fn remember_lock_handle(handle: &str) {
+    let mut known = LOCK_HANDLES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    if known.iter().any(|known| known == handle) {
+        return;
+    }
+
+    if known.len() == KEPT_HANDLES {
+        known.remove(0);
+    }
+
+    known.push(handle.to_owned());
+}
+
+/// Every lock handle seen so far, plain and percent-encoded, longest first.
+pub fn known_lock_handles() -> Vec<String> {
+    let known = LOCK_HANDLES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut spellings: Vec<String> = known
+        .iter()
+        .flat_map(|handle| [handle.clone(), encode_lock_handle(handle)])
+        .collect();
+
+    spellings.sort_by_key(|spelling| std::cmp::Reverse(spelling.len()));
+    spellings.dedup();
+
+    spellings
+}
+
+pub(crate) fn parse_lock(xml: &str) -> Result<LockInfo, String> {
     let fields = leaf_texts(xml)?;
     let handle = fields
         .get("LOCK_HANDLE")
@@ -2080,9 +2233,12 @@ fn parse_lock(xml: &str) -> Result<LockInfo, String> {
         .ok_or("no LOCK_HANDLE")?
         .clone();
 
+    remember_lock_handle(&handle);
+
     Ok(LockInfo {
         handle,
         corrnr: fields.get("CORRNR").cloned().unwrap_or_default(),
+        corruser: fields.get("CORRUSER").cloned().unwrap_or_default(),
         is_local: fields.get("IS_LOCAL").is_some_and(|value| value == "X"),
     })
 }
@@ -2125,4 +2281,24 @@ pub(crate) fn leaf_texts(xml: &str) -> Result<BTreeMap<String, String>, String> 
     }
 
     Ok(texts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shutdown_is_seen_even_when_a_reset_cleared_the_cancel_after_it() {
+        let flag = CancelFlag::new();
+
+        // The lost interleaving: `reset` read no shutdown, the shutdown landed, then `reset` cleared the cancel.
+        flag.shutdown.store(true, Ordering::SeqCst);
+        flag.cancelled.store(false, Ordering::SeqCst);
+
+        assert!(flag.is_set());
+
+        flag.request_shutdown();
+        flag.reset();
+        assert!(flag.is_set());
+    }
 }

@@ -1,4 +1,4 @@
-use crate::policy::{Policies, PolicyDocument};
+use crate::policy::{McpWrite, Policies, PolicyDocument};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -216,6 +216,26 @@ impl SaprouterSource {
     }
 }
 
+/// The per-system policies the MCP server loaded at start; nothing re-reads the file afterwards.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct McpPolicies {
+    by_system: BTreeMap<String, Policies>,
+}
+
+impl McpPolicies {
+    /// Whether any server allows MCP writes; only then does `tools/list` offer the write tools.
+    pub fn write_offered(&self) -> bool {
+        self.by_system
+            .values()
+            .any(|policies| policies.mcp_write != McpWrite::Off)
+    }
+
+    /// The policies of `system_id` (case-insensitive), `None` for an unknown system.
+    pub fn get(&self, system_id: &str) -> Option<&Policies> {
+        self.by_system.get(&system_id.to_ascii_uppercase())
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     servers: Vec<Server>,
@@ -251,6 +271,45 @@ impl Config {
         })
     }
 
+    /// The policies of every server as the MCP server starts with them: one immutable snapshot,
+    /// so a later edit of `connections.json` changes nothing until the next start.
+    pub fn mcp_policies(&self) -> McpPolicies {
+        McpPolicies {
+            by_system: self
+                .servers
+                .iter()
+                .map(|server| {
+                    (
+                        server.system_id.to_ascii_uppercase(),
+                        self.effective_policies(server).for_mcp(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// The ids (`SID_client`) of the connections whose server allows MCP writes, in
+    /// configuration order; the write tool descriptions name them.
+    pub fn mcp_writable(&self) -> Vec<String> {
+        self.servers
+            .iter()
+            .filter(|server| self.effective_policies(server).mcp_write != McpWrite::Off)
+            .flat_map(|server| {
+                server
+                    .clients
+                    .iter()
+                    .map(|client| format!("{}_{client}", server.system_id))
+            })
+            .collect()
+    }
+
+    fn effective_policies(&self, server: &Server) -> Policies {
+        server.policies.as_ref().map_or_else(
+            || self.policies.clone(),
+            |document| document.apply(&self.policies),
+        )
+    }
+
     pub fn resolve(
         &self,
         connection_id: &str,
@@ -276,10 +335,7 @@ impl Config {
         let (user, password) = Self::credentials(&system_id, &client, env, &self.local)?;
         let (rfc, saprouter_source) = Self::saprouter(&system_id, rfc, env, &self.local);
         let adt = Self::adt_endpoint(&system_id, server)?;
-        let policies = server.policies.as_ref().map_or_else(
-            || self.policies.clone(),
-            |document| document.apply(&self.policies),
-        );
+        let policies = self.effective_policies(server);
 
         Ok(Connection {
             id: format!("{system_id}_{client}"),

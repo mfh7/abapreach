@@ -1,11 +1,14 @@
 mod common;
 mod replay;
 
+use abapreach::cli::{Cli, Command, DeleteKind};
 use abapreach::config::Connection;
-use abapreach::operation::deploy::CancelFlag;
+use abapreach::operation::deploy::{CancelFlag, InterruptAction};
 use abapreach::transport::http::HttpTransport;
+use abapreach::transport::rfc::{FakeRfcApi, RfcEndpointResponse, RfcTransport};
 use abapreach::transport::{Response, SadtTransport, TransportError};
 use abapreach::{Exit, Factories, RfcLibraryIdentity, RfcLibraryInfo, run};
+use clap::Parser;
 use common::ScriptedTransport;
 use replay::{Step, fx, no_inactive, replay};
 use std::cell::RefCell;
@@ -36,6 +39,30 @@ impl<T: SadtTransport> SadtTransport for Shared<T> {
 
     fn stateful_supported(&self) -> Option<bool> {
         self.0.borrow().stateful_supported()
+    }
+}
+
+/// Raises Ctrl-C when DELETE has entered its lock scope, as the real signal handler does.
+struct InterruptOnLock {
+    inner: ScriptedTransport,
+    cancel: CancelFlag,
+    actions: Vec<InterruptAction>,
+}
+
+impl SadtTransport for InterruptOnLock {
+    fn request(
+        &mut self,
+        request: abapreach::transport::Request,
+    ) -> Result<Response, TransportError> {
+        if request.uri.contains("_action=LOCK") {
+            self.actions.push(self.cancel.on_interrupt());
+        }
+
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
     }
 }
 
@@ -1864,4 +1891,1011 @@ fn create_with_a_transportable_package_and_no_request_stops_before_any_connectio
     assert_eq!(exit.code, 2);
     assert!(exit.stderr.contains("invalid --tr"), "{}", exit.stderr);
     assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+fn assert_stops_locally(args: &[&str]) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let exit = go(args, directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 2, "{args:?}: {}", exit.stderr);
+    assert!(
+        exit.stderr.starts_with("STOP: "),
+        "{args:?}: {}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0), "{args:?}");
+}
+
+#[test]
+fn read_table_accepts_its_grammar_and_rejects_bad_rows_locally() {
+    let cli = |extra: &[&str]| {
+        let mut args = vec!["abapreach", "read-table", "T001"];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["--conn", "dev_100"]);
+
+        Cli::try_parse_from(args)
+    };
+
+    match cli(&[
+        "--fields",
+        "BUKRS,BUTXT",
+        "--where",
+        "BUKRS = '1000'",
+        "--rows",
+        "5000",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::ReadTable {
+            table,
+            fields,
+            where_clause,
+            rows,
+            ..
+        } => {
+            assert_eq!(table, "T001");
+            assert_eq!(fields, ["BUKRS", "BUTXT"]);
+            assert_eq!(where_clause.as_deref(), Some("BUKRS = '1000'"));
+            assert_eq!(rows, 5000);
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&[]).unwrap().command {
+        Command::ReadTable {
+            fields,
+            where_clause,
+            rows,
+            ..
+        } => {
+            assert!(fields.is_empty() && where_clause.is_none());
+            assert_eq!(rows, 100);
+        }
+        other => panic!("{other:?}"),
+    }
+    for rows in ["0", "5001", "-1", "x"] {
+        assert!(cli(&["--rows", rows]).is_err(), "{rows}");
+        assert_stops_locally(&[
+            "abapreach",
+            "read-table",
+            "T001",
+            "--rows",
+            rows,
+            "--conn",
+            "dev_100",
+        ]);
+    }
+    assert!(Cli::try_parse_from(["abapreach", "read-table", "--conn", "dev_100"]).is_err());
+    assert!(Cli::try_parse_from(["abapreach", "read-table", "T001"]).is_err());
+}
+
+#[test]
+fn delete_accepts_type_name_targets_and_rejects_bad_ones_locally() {
+    let parse = |args: &[&str]| {
+        let mut full = vec!["abapreach", "delete"];
+        full.extend_from_slice(args);
+
+        Cli::try_parse_from(full)
+    };
+
+    match parse(&[
+        "--simulate",
+        "FUNC:ZFM_A",
+        "CLAS:ZCL_A",
+        "--tr",
+        "DEVK900001",
+        "--plan",
+        "p.txt",
+        "--conn",
+        "dev_100",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::Delete {
+            targets,
+            simulate,
+            tr,
+            plan,
+            ..
+        } => {
+            assert!(simulate);
+            assert_eq!(targets.len(), 2);
+            assert_eq!(targets[0].kind, DeleteKind::Func);
+            assert_eq!(targets[1].name, "ZCL_A");
+            assert_eq!(tr.as_deref(), Some("DEVK900001"));
+            assert_eq!(plan, std::path::PathBuf::from("p.txt"));
+        }
+        other => panic!("{other:?}"),
+    }
+    for kinds in ["PROG", "FUGR", "FUNC", "CLAS", "INTF"] {
+        assert!(parse(&[&format!("{kinds}:ZX"), "--plan", "p", "--conn", "dev_100"]).is_ok());
+    }
+    // No target, no plan, no conn, an unknown or unsupported type, an empty name, no colon.
+    for bad in [
+        &["--plan", "p", "--conn", "dev_100"][..],
+        &["PROG:ZX", "--conn", "dev_100"],
+        &["PROG:ZX", "--plan", "p"],
+        &["TABL:ZX", "--plan", "p", "--conn", "dev_100"],
+        &["PROG:", "--plan", "p", "--conn", "dev_100"],
+        &["ZX", "--plan", "p", "--conn", "dev_100"],
+    ] {
+        assert!(parse(bad).is_err(), "{bad:?}");
+        let mut args = vec!["abapreach", "delete"];
+        args.extend_from_slice(bad);
+        assert_stops_locally(&args);
+    }
+}
+
+#[test]
+fn mcp_takes_no_arguments_and_stops_on_an_invalid_policy_with_exit_2() {
+    assert!(matches!(
+        Cli::try_parse_from(["abapreach", "mcp"]).unwrap().command,
+        Command::Mcp
+    ));
+    assert!(Cli::try_parse_from(["abapreach", "mcp", "--conn", "dev_100"]).is_err());
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = |policies: &str| {
+        format!(
+            r#"{{"policies":{policies},"servers":[{{"systemId":"DEV","clients":["100"],"rfc":{{"ashost":"example.com","sysnr":"00"}}}}]}}"#
+        )
+    };
+    let mut fake = Fake::default();
+    let exit = run(
+        ["abapreach", "mcp"].map(str::to_owned).to_vec(),
+        env_with(directory.path(), &config(r#"{"mcp_write":"always"}"#)),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2);
+    assert!(
+        exit.stderr.starts_with("STOP: cannot parse"),
+        "{}",
+        exit.stderr
+    );
+    assert!(
+        exit.stderr.contains("unknown variant `always`"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+fn dd02l(name: &str, class: &str, view_class: Option<&str>) -> Result<Response, TransportError> {
+    source(&common::preview(&[
+        ("TABNAME", &[Some(name)]),
+        ("TABCLASS", &[Some(class)]),
+        ("VIEWCLASS", &[view_class]),
+    ]))
+}
+
+fn t001_rows() -> Result<Response, TransportError> {
+    source(&common::preview(&[
+        ("BUKRS", &[Some("1000"), Some("2000")]),
+        ("BUTXT", &[Some("Alpha"), Some("Beta")]),
+    ]))
+}
+
+/// The stdout without the insecure-TLS warning line the DEV test server adds.
+fn table_of(exit: &Exit) -> String {
+    exit.stdout
+        .lines()
+        .filter(|line| *line != WARNING)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn read_table(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "read-table"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+#[test]
+fn read_table_stops_locally_on_a_denied_table_or_a_bad_grammar() {
+    for args in [
+        vec!["usr02", "--conn", "dev_100"],
+        vec![
+            "T001",
+            "--where",
+            "BUKRS IN ( SELECT BNAME FROM USR02 )",
+            "--conn",
+            "dev_100",
+        ],
+        vec!["T001", "--where", "BUKRS = 'open", "--conn", "dev_100"],
+        vec!["T001", "--fields", "BUKRS,COUNT(*)", "--conn", "dev_100"],
+        vec!["T001~X", "--conn", "dev_100"],
+    ] {
+        let mut fake = Fake::default();
+        let exit = read_table(&args, &mut fake);
+
+        assert_eq!(exit.code, 2, "{args:?}: {}", exit.stderr);
+        assert!(
+            exit.stderr.starts_with("STOP: "),
+            "{args:?}: {}",
+            exit.stderr
+        );
+        assert_eq!(table_of(&exit), "", "{args:?}");
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0), "{args:?}");
+    }
+
+    let mut fake = Fake::default();
+    let exit = read_table(&["usr02", "--conn", "dev_100"], &mut fake);
+
+    assert!(exit.stderr.contains("USR02") && exit.stderr.contains("read_table_denied"));
+}
+
+#[test]
+fn read_table_prints_a_tab_separated_table_over_adt() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![
+        dd02l("T001", "TRANSP", None),
+        t001_rows(),
+    ]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = read_table(
+        &[
+            "t001",
+            "--fields",
+            "bukrs,butxt",
+            "--where",
+            "bukrs <> '0001'",
+            "--rows",
+            "2",
+            "--conn",
+            "dev_100",
+        ],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "BUKRS\tBUTXT\n1000\tAlpha\n2000\tBeta");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert_eq!(calls.borrow().closes, 1);
+
+    let calls = calls.borrow();
+
+    assert_eq!(calls.calls.len(), 2);
+    assert_eq!(
+        calls.calls[1].uri,
+        "/sap/bc/adt/datapreview/ddic?rowNumber=2&ddicEntityName=T001"
+    );
+    assert_eq!(
+        String::from_utf8(calls.calls[1].body.clone()).unwrap(),
+        "SELECT BUKRS, BUTXT FROM T001 WHERE BUKRS <> '0001'"
+    );
+}
+
+#[test]
+fn read_table_over_the_rfc_backend_passes_admission_with_the_fake() {
+    let reply = |xml: String| RfcEndpointResponse {
+        status: 200,
+        headers: BTreeMap::new(),
+        body: xml.into_bytes(),
+    };
+    let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(vec![
+        reply(common::preview(&[
+            ("TABNAME", &[Some("T001")]),
+            ("TABCLASS", &[Some("TRANSP")]),
+            ("VIEWCLASS", &[None]),
+        ])),
+        reply(common::preview(&[
+            ("BUKRS", &[Some("1000"), Some("2000")]),
+            ("BUTXT", &[Some("Alpha"), Some("Beta")]),
+        ])),
+    ])));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(rfc);
+
+    let exit = read_table(
+        &["t001", "--fields", "bukrs,butxt", "--conn", "dev_100"],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "BUKRS\tBUTXT\n1000\tAlpha\n2000\tBeta");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    // Both previews (the DD02L lookup and the read) left the process.
+    assert_eq!(api.borrow().api().counts().2, 2);
+}
+
+#[test]
+fn an_emptied_deny_list_lets_read_table_through_the_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = concat!(
+        r#"{"policies":{"read_table_denied":[]},"servers":[{"systemId":"DEV","host":"example.com","#,
+        r#""port":443,"clients":["100"],"rfc":{"ashost":"example.com","sysnr":"00"},"adt":{"insecure":true}}]}"#,
+    );
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("USR02", "TRANSP", None),
+        source(&common::preview(&[("BNAME", &[Some("X")])])),
+    ]));
+
+    let exit = run(
+        ["abapreach", "read-table", "usr02", "--conn", "dev_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        env_with(directory.path(), config),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(table_of(&exit).starts_with("BNAME"));
+}
+
+#[test]
+fn a_view_over_a_denied_table_is_rejected_after_the_lookups_only() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![
+        dd02l("ZV_USERS", "VIEW", Some("D")),
+        source(&common::preview(&[
+            ("VIEWNAME", &[Some("ZV_USERS")]),
+            ("TABNAME", &[Some("USR02")]),
+            ("TABPOS", &[Some("0001")]),
+        ])),
+    ]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = read_table(&["zv_users", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(exit.stderr.starts_with("REJECTED: "), "{}", exit.stderr);
+    assert!(exit.stderr.contains("USR02"), "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "");
+    assert_eq!(calls.borrow().calls.len(), 2);
+    assert_eq!(fake.rfc_opened, 0, "a rejection never falls back");
+}
+
+#[test]
+fn a_failed_data_read_is_an_error_without_fallback() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("T001", "TRANSP", None),
+        Ok(Response::text(400, "<exc:exception><localizedMessage>Unknown column name \"NOPE\"</localizedMessage></exc:exception>")),
+    ]));
+
+    let exit = read_table(&["T001", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(exit.stderr.starts_with("ERROR: "), "{}", exit.stderr);
+    assert!(
+        exit.stderr.contains("Unknown column name"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn read_table_falls_back_to_rfc_only_before_anything_was_read() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc
+        .push_back(scripted(vec![dd02l("T001", "TRANSP", None), t001_rows()]));
+
+    let exit = read_table(&["T001", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        table_of(&exit).starts_with("BUKRS\tBUTXT\n1000\tAlpha"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn an_rfc_only_connection_reads_over_a_fresh_rfc_connection() {
+    let mut fake = Fake::default();
+
+    fake.rfc
+        .push_back(scripted(vec![dd02l("T001", "TRANSP", None), t001_rows()]));
+
+    let exit = read_table(&["T001", "--conn", "qas_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+}
+
+// ---- delete ----------------------------------------------------------------------------------
+
+const DELETE_PROG: &str = "/sap/bc/adt/programs/programs/ztest_del";
+const DELETE_LOCK: &str = "<DATA><LOCK_HANDLE>a/b+c=</LOCK_HANDLE><CORRNR></CORRNR>\
+    <IS_LOCAL>X</IS_LOCAL></DATA>";
+
+fn delete_facts() -> Vec<Result<Response, TransportError>> {
+    vec![
+        source(
+            "<x xmlns:adtcore=\"http://www.sap.com/adt/core\" adtcore:responsible=\"OWNER\">\
+             <adtcore:packageRef adtcore:name=\"$TMP\"/></x>",
+        ),
+        source("REPORT ztest_del."),
+        source("<feed xmlns=\"http://www.w3.org/2005/Atom\"/>"),
+    ]
+}
+
+fn delete_args(plan: &str, simulate: bool) -> Vec<&str> {
+    let mut args = vec!["abapreach", "delete", "PROG:ZTEST_DEL", "--plan", plan];
+
+    if simulate {
+        args.push("--simulate");
+    }
+
+    args.extend_from_slice(&["--conn", "dev_100"]);
+
+    args
+}
+
+#[test]
+fn delete_simulates_then_deletes_on_adt_and_proves_it_from_a_fresh_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(delete_facts()));
+
+    let simulated = go(&delete_args(plan, true), directory.path(), &mut fake);
+
+    assert_eq!(simulated.code, 0, "{}", simulated.stderr);
+    assert!(
+        simulated.stdout.contains("SIMULATED_OK"),
+        "{}",
+        simulated.stdout
+    );
+
+    let mut replies = delete_facts();
+
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Ok(Response::empty(200)));
+    fake.adt.push_back(scripted(replies));
+
+    let (cell, session) = shared(ScriptedTransport::replies(vec![Ok(Response::text(
+        404, "<exc/>",
+    ))]));
+
+    fake.adt.push_back(session);
+
+    let deleted = go(&delete_args(plan, false), directory.path(), &mut fake);
+
+    assert_eq!(deleted.code, 0, "{} {}", deleted.stdout, deleted.stderr);
+    assert!(deleted.stdout.contains("DELETED"), "{}", deleted.stdout);
+    assert_eq!(fake.adt_opened, 3);
+    assert_eq!(cell.borrow().calls[0].uri, DELETE_PROG);
+    assert!(!deleted.stdout.contains("a/b+c="));
+    assert!(!deleted.stderr.contains("a/b+c="));
+}
+
+#[test]
+fn a_delete_simulation_falls_back_to_rfc_when_adt_fails_before_sending() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan_path = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(scripted(delete_facts()));
+
+    let exit = go(&delete_args(plan_path, true), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(exit.stdout.contains("SIMULATED_OK"), "{}", exit.stdout);
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert!(plan.exists());
+}
+
+#[test]
+fn a_delete_with_a_plan_file_falls_back_to_rfc_when_adt_fails_before_sending() {
+    // The plan file records no backend, so nothing pins the execution to the simulated one.
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan_path = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(delete_facts()));
+
+    let simulated = go(&delete_args(plan_path, true), directory.path(), &mut fake);
+
+    assert_eq!(simulated.code, 0, "{}", simulated.stderr);
+
+    let mut replies = delete_facts();
+
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Ok(Response::empty(200)));
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(scripted(replies));
+    fake.rfc
+        .push_back(scripted(vec![Ok(Response::text(404, "<exc/>"))]));
+
+    let deleted = go(&delete_args(plan_path, false), directory.path(), &mut fake);
+
+    assert_eq!(deleted.code, 0, "{} {}", deleted.stdout, deleted.stderr);
+    assert!(deleted.stdout.contains("DELETED"), "{}", deleted.stdout);
+    assert!(
+        deleted.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        deleted.stderr
+    );
+    assert_eq!(fake.rfc_opened, 2);
+}
+
+/// An ADT that answers reads but sets no context cookie: its stateless verdict comes with the
+/// first reply, as on a server that keeps no stateful session.
+struct NoContext {
+    inner: ScriptedTransport,
+    answered: bool,
+}
+
+impl SadtTransport for NoContext {
+    fn request(
+        &mut self,
+        request: abapreach::transport::Request,
+    ) -> Result<Response, TransportError> {
+        self.answered = true;
+
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        self.answered.then_some(false)
+    }
+}
+
+#[test]
+fn a_delete_plan_runs_on_rfc_when_adt_keeps_no_stateful_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan_path = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    // The simulation reads on RFC as well: ADT showed it cannot lock.
+    fake.adt.push_back(Ok(Box::new(NoContext {
+        inner: ScriptedTransport::replies(delete_facts()),
+        answered: false,
+    })));
+    fake.rfc.push_back(scripted(delete_facts()));
+
+    let simulated = go(&delete_args(plan_path, true), directory.path(), &mut fake);
+
+    assert_eq!(simulated.code, 0, "{}", simulated.stderr);
+    assert!(
+        simulated.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        simulated.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+
+    let mut replies = delete_facts();
+
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Ok(Response::empty(200)));
+    fake.adt.push_back(Ok(Box::new(NoContext {
+        inner: ScriptedTransport::replies(delete_facts()),
+        answered: false,
+    })));
+    fake.rfc.push_back(scripted(replies));
+    fake.rfc
+        .push_back(scripted(vec![Ok(Response::text(404, "<exc/>"))]));
+
+    let deleted = go(&delete_args(plan_path, false), directory.path(), &mut fake);
+
+    assert_eq!(deleted.code, 0, "{} {}", deleted.stdout, deleted.stderr);
+    assert!(deleted.stdout.contains("DELETED"), "{}", deleted.stdout);
+    assert!(
+        deleted.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        deleted.stderr
+    );
+    assert_eq!(fake.rfc_opened, 3);
+}
+
+/// Cancels the run, as Ctrl-C does, and then fails before sending.
+struct CancelThenFail(CancelFlag);
+
+impl SadtTransport for CancelThenFail {
+    fn request(&mut self, _: abapreach::transport::Request) -> Result<Response, TransportError> {
+        self.0.set();
+
+        pre_send()
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_cancelled_delete_simulation_does_not_fall_back_to_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(Ok(Box::new(CancelThenFail(fake.cancel.clone()))));
+
+    // No RFC transport is scripted: opening one would panic.
+    let exit = go(
+        &delete_args(plan.to_str().unwrap(), true),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 130, "{} {}", exit.stdout, exit.stderr);
+    assert!(!exit.stderr.contains("falling back"), "{}", exit.stderr);
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn a_lock_that_fails_before_sending_never_falls_back_to_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan_path = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(delete_facts()));
+
+    let simulated = go(&delete_args(plan_path, true), directory.path(), &mut fake);
+
+    assert_eq!(simulated.code, 0, "{}", simulated.stderr);
+
+    // The reads pass, then the LOCK fails before it is sent: a write was about to start.
+    let mut replies = delete_facts();
+
+    replies.push(pre_send());
+    fake.adt.push_back(scripted(replies));
+
+    let exit = go(&delete_args(plan_path, false), directory.path(), &mut fake);
+
+    assert_ne!(exit.code, 0, "{}", exit.stdout);
+    assert!(exit.stdout.contains("lock not sent"), "{}", exit.stdout);
+    assert!(!exit.stderr.contains("falling back"), "{}", exit.stderr);
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn a_function_group_resolution_that_fails_before_sending_falls_back_to_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    // RFC fails before sending too: the run ends, after it was tried.
+    fake.rfc.push_back(scripted(vec![pre_send()]));
+
+    let exit = go(
+        &[
+            "abapreach",
+            "delete",
+            "FUNC:ZTEST_FM",
+            "--simulate",
+            "--plan",
+            plan.to_str().unwrap(),
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn a_delete_does_not_fall_back_after_a_failure_that_is_not_pre_send() {
+    let failures = [
+        Err(TransportError::PostSendUncertain("reset".to_owned())),
+        Err(TransportError::Authorization("denied".to_owned())),
+        Ok(Response::text(401, "<exc/>")),
+    ];
+
+    for failure in failures {
+        let directory = tempfile::tempdir().unwrap();
+        let plan = directory.path().join("plan.json");
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(scripted(vec![failure]));
+        fake.rfc.push_back(scripted(delete_facts()));
+
+        let exit = go(
+            &delete_args(plan.to_str().unwrap(), true),
+            directory.path(),
+            &mut fake,
+        );
+
+        assert_ne!(exit.code, 0, "{}", exit.stdout);
+        assert!(!exit.stderr.contains("falling back"), "{}", exit.stderr);
+        assert_eq!(fake.rfc_opened, 0);
+    }
+}
+
+#[test]
+fn a_function_group_delete_plan_carries_the_members_from_the_member_listing() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan_path = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+    let (cell, session) = shared(ScriptedTransport::replies(vec![
+        source(
+            "<x xmlns:adtcore=\"http://www.sap.com/adt/core\" adtcore:responsible=\"OWNER\">\
+             <adtcore:packageRef adtcore:name=\"$TMP\"/></x>",
+        ),
+        source(
+            "<asx:abap xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA><TREE_CONTENT>\
+             <SEU_ADT_REPOSITORY_OBJ_NODE><OBJECT_TYPE>FUGR/FF</OBJECT_TYPE>\
+             <OBJECT_NAME>ZTEST_FM</OBJECT_NAME></SEU_ADT_REPOSITORY_OBJ_NODE>\
+             <SEU_ADT_REPOSITORY_OBJ_NODE><OBJECT_TYPE>FUGR/I</OBJECT_TYPE>\
+             <OBJECT_NAME>LZTEST_FGTOP</OBJECT_NAME></SEU_ADT_REPOSITORY_OBJ_NODE>\
+             </TREE_CONTENT></DATA></asx:values></asx:abap>",
+        ),
+    ]));
+
+    fake.adt.push_back(session);
+
+    let exit = go(
+        &[
+            "abapreach",
+            "delete",
+            "FUGR:ZTEST_FG",
+            "--plan",
+            plan_path,
+            "--simulate",
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{} {}", exit.stdout, exit.stderr);
+    assert!(
+        exit.stdout
+            .lines()
+            .any(|line| line == "CONTENT FUNC ZTEST_FM"),
+        "{}",
+        exit.stdout
+    );
+    assert!(!exit.stdout.contains("LZTEST_FGTOP"), "{}", exit.stdout);
+    assert_eq!(
+        cell.borrow()
+            .calls
+            .iter()
+            .map(|request| format!("{} {}", request.method, request.uri))
+            .collect::<Vec<_>>(),
+        [
+            "GET /sap/bc/adt/functions/groups/ztest_fg",
+            "POST /sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&parent_name=ZTEST_FG&withShortDescriptions=false",
+        ]
+    );
+    // The plan stores the hash of the object facts, members included, that the output prints.
+    let hash = exit
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("plan hash "))
+        .expect("plan hash line");
+    let stored = std::fs::read_to_string(&plan).unwrap();
+
+    assert_eq!(hash.len(), 64, "{hash}");
+    assert!(stored.contains(hash), "{stored}");
+}
+
+#[test]
+fn ctrl_c_during_a_cli_delete_lock_unlocks_and_exits_130() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(delete_facts()));
+    assert_eq!(
+        go(&delete_args(plan, true), directory.path(), &mut fake).code,
+        0
+    );
+
+    let mut replies = delete_facts();
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Ok(Response::empty(200))); // UNLOCK after deferred interrupt
+    let (cell, opened) = shared(InterruptOnLock {
+        inner: ScriptedTransport::replies(replies),
+        cancel: fake.cancel.clone(),
+        actions: Vec::new(),
+    });
+    fake.adt.push_back(opened);
+
+    let exit = go(&delete_args(plan, false), directory.path(), &mut fake);
+    let transport = cell.borrow();
+
+    assert_eq!(exit.code, 130, "{} {}", exit.stdout, exit.stderr);
+    assert_eq!(transport.actions, [InterruptAction::Deferred]);
+    assert!(
+        transport
+            .inner
+            .calls
+            .iter()
+            .any(|request| request.uri.contains("_action=UNLOCK"))
+    );
+    assert!(
+        transport
+            .inner
+            .calls
+            .iter()
+            .all(|request| request.method != "DELETE")
+    );
+}
+
+#[test]
+fn ctrl_c_in_a_cli_delete_batch_skips_the_rest_without_a_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan = plan.to_str().unwrap();
+    let args = |simulate: bool| {
+        let mut args = delete_args(plan, simulate);
+
+        args.insert(3, "PROG:ZTEST_DEL2");
+
+        args
+    };
+    let mut fake = Fake::default();
+    let mut both = delete_facts();
+
+    both.extend(delete_facts());
+    fake.adt.push_back(scripted(both));
+
+    let simulated = go(&args(true), directory.path(), &mut fake);
+
+    assert_eq!(
+        simulated.code, 0,
+        "{} {}",
+        simulated.stdout, simulated.stderr
+    );
+
+    // The second object has no replies: any request for it fails the call count below.
+    let mut replies = delete_facts();
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Ok(Response::empty(200))); // UNLOCK after the deferred interrupt
+    let (cell, opened) = shared(InterruptOnLock {
+        inner: ScriptedTransport::replies(replies),
+        cancel: fake.cancel.clone(),
+        actions: Vec::new(),
+    });
+    fake.adt.push_back(opened);
+
+    let exit = go(&args(false), directory.path(), &mut fake);
+    let transport = cell.borrow();
+    let uris: Vec<_> = transport
+        .inner
+        .calls
+        .iter()
+        .map(|request| format!("{} {}", request.method, request.uri))
+        .collect();
+
+    assert_eq!(exit.code, 130, "{} {}", exit.stdout, exit.stderr);
+    assert!(exit.stdout.contains("SKIPPED"), "{}", exit.stdout);
+    assert_eq!(
+        uris.iter()
+            .filter(|uri| uri.contains("_action=LOCK"))
+            .count(),
+        1,
+        "{uris:?}"
+    );
+    assert_eq!(
+        uris.iter()
+            .filter(|uri| uri.contains("_action=UNLOCK"))
+            .count(),
+        1,
+        "{uris:?}"
+    );
+    assert_eq!(uris.len(), 5, "three reads, one lock, one unlock: {uris:?}");
+    assert!(
+        uris.iter().all(|uri| !uri.starts_with("DELETE ")),
+        "{uris:?}"
+    );
+}
+
+#[test]
+fn a_lost_delete_reply_is_reconciled_once_and_the_batch_exits_1() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(delete_facts()));
+    assert_eq!(
+        go(&delete_args(plan, true), directory.path(), &mut fake).code,
+        0
+    );
+
+    let mut replies = delete_facts();
+
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Err(TransportError::PostSendUncertain(
+        "reply lost".to_owned(),
+    )));
+    fake.adt.push_back(scripted(replies));
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(404, "<exc/>"))]));
+
+    let exit = go(&delete_args(plan, false), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1, "{} {}", exit.stdout, exit.stderr);
+    assert!(
+        exit.stdout.contains("DELETED (reconciled)"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stdout.contains("check before retrying"),
+        "{}",
+        exit.stdout
+    );
+    assert!(exit.stdout.contains("a lock may remain"), "{}", exit.stdout);
+    // The DELETE was sent once; the only other session is the read-only look.
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (3, 0));
+}
+
+#[test]
+fn delete_on_a_session_without_state_falls_back_to_rfc_before_anything_is_sent() {
+    struct Stateless;
+
+    impl SadtTransport for Stateless {
+        fn request(
+            &mut self,
+            request: abapreach::transport::Request,
+        ) -> Result<Response, TransportError> {
+            panic!("nothing may be sent: {request:?}");
+        }
+
+        fn close(&mut self) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn stateful_supported(&self) -> Option<bool> {
+            Some(false)
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(Ok(Box::new(Stateless)));
+    fake.rfc.push_back(scripted(delete_facts()));
+
+    let exit = go(&delete_args(plan, true), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0, "{} {}", exit.stdout, exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
 }

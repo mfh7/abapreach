@@ -6,6 +6,7 @@
 
 use super::Request;
 use crate::adt::{ActivationBody, ObjectRef, classify_activation, parse_object_refs};
+use crate::operation::read_table::validate_preview_body;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
@@ -15,12 +16,18 @@ const CHECKRUNS: &str = "/sap/bc/adt/checkruns?reporters=abapCheckRun";
 const ACTIVATION: &str = "/sap/bc/adt/activation?method=activate&preauditRequested=";
 const SEARCH: &str = "/sap/bc/adt/repository/informationsystem/search";
 const USAGE_REFERENCES: &str = "/sap/bc/adt/repository/informationsystem/usageReferences";
+const NODE_STRUCTURE: &str = "/sap/bc/adt/repository/nodestructure";
 const FUNCTION_VALIDATION: &str = "/sap/bc/adt/functions/validation";
 const OBJECT_VALIDATION: &str = "/sap/bc/adt/oo/validation/objectname";
 const GROUPS: &str = "/sap/bc/adt/functions/groups";
 const CLASSES: &str = "/sap/bc/adt/oo/classes";
 const INTERFACES: &str = "/sap/bc/adt/oo/interfaces";
 const PROGRAMS: &str = "/sap/bc/adt/programs/programs";
+const DATA_PREVIEW: &str = "/sap/bc/adt/datapreview/ddic";
+/// The row limit of the 740 data preview.
+const MAX_PREVIEW_ROWS: u32 = 5000;
+/// A DDIC identifier is at most 30 characters, `/NAMESPACE/` included.
+const MAX_ENTITY: usize = 30;
 const OBJECT_STRUCTURE: &str = "version=active&withShortDescriptions=true";
 const SEARCH_TAIL: &str = "&maxResults=10&objectType=FUGR%2FFF";
 const LOCK: &str = "_action=LOCK&accessMode=MODIFY";
@@ -36,7 +43,7 @@ enum Kind {
     Func,
     Clas,
     Intf,
-    /// A function group: readable as metadata, never locked or written.
+    /// A function group: readable as metadata, locked only for a delete, never written.
     Group,
 }
 
@@ -79,6 +86,7 @@ impl Admission {
 
         match request.method.as_str() {
             "GET" => is_read(uri, path, query),
+            "DELETE" => request.body.is_empty() && is_delete(path, query),
             "PUT" => is_put(path, query) && has_content_type(request, "text/plain; charset=utf-8"),
             "POST" => {
                 if let Some(preaudit) = uri.strip_prefix(ACTIVATION) {
@@ -178,6 +186,14 @@ pub fn is_put_request(request: &Request) -> bool {
     request.method == "PUT" && !request.uri.contains('#') && is_put(path, query)
 }
 
+/// Whether `request` is a `DELETE` of an object under its lock.
+#[cfg(feature = "fault-injection")]
+pub fn is_delete_request(request: &Request) -> bool {
+    let (path, query) = split_query(&request.uri);
+
+    request.method == "DELETE" && !request.uri.contains('#') && is_delete(path, query)
+}
+
 fn split_query(uri: &str) -> (&str, Option<&str>) {
     match uri.split_once('?') {
         Some((path, query)) => (path, Some(query)),
@@ -202,8 +218,9 @@ fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
         (Part::Source | Part::IncludeSource, Some("version=active" | "version=inactive")) => true,
         (Part::SourceVersions | Part::IncludeVersions, None) => true,
         (Part::Structure, Some(OBJECT_STRUCTURE)) => true,
-        // The metadata the create reconciliation and the group package lookup read.
-        (Part::Object, None) => matches!(parsed.kind, Kind::Group | Kind::Func | Kind::Intf),
+        // The metadata the create reconciliation and the group package lookup read, and the
+        // read that proves a delete (404 from a fresh session).
+        (Part::Object, None) => true,
         _ => false,
     }
 }
@@ -214,6 +231,15 @@ fn is_group_search(query: &str) -> bool {
     query
         .strip_prefix("operation=quickSearch&query=")
         .and_then(|rest| rest.strip_suffix(SEARCH_TAIL))
+        .is_some_and(|name| is_name(name, false))
+}
+
+/// `nodestructure?parent_type=FUGR%2FF&parent_name=<NAME>&withShortDescriptions=false`, the
+/// member listing of a function group that a delete plan reads.
+fn is_group_members(query: &str) -> bool {
+    query
+        .strip_prefix("parent_type=FUGR%2FF&parent_name=")
+        .and_then(|rest| rest.strip_suffix("&withShortDescriptions=false"))
         .is_some_and(|name| is_name(name, false))
 }
 
@@ -231,8 +257,18 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
         return has_content_type(request, "application/*");
     }
 
+    if path == DATA_PREVIEW {
+        return has_content_type(request, "text/plain")
+            && has_header(request, "Accept", "application/*")
+            && query.is_some_and(|query| is_data_preview(query, &request.body));
+    }
+
     if path == USAGE_REFERENCES {
         return query.is_some_and(is_where_used_object);
+    }
+
+    if path == NODE_STRUCTURE {
+        return request.body.is_empty() && query.is_some_and(is_group_members);
     }
 
     if path == FUNCTION_VALIDATION || path == OBJECT_VALIDATION {
@@ -248,7 +284,8 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
     };
 
     match parsed.part {
-        Part::Object if parsed.kind != Kind::Group => query.is_some_and(|query| {
+        // The group lock only serves the delete of a function group.
+        Part::Object => query.is_some_and(|query| {
             query == LOCK || query.strip_prefix(UNLOCK).is_some_and(is_encoded_handle)
         }),
         // The include POST runs under the class lock.
@@ -259,11 +296,70 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
     }
 }
 
+/// `DELETE <object>?lockHandle=<handle>[&corrNr=<request>]`: one object of the five delete kinds,
+/// under its lock, never a part, a collection or another endpoint.
+fn is_delete(path: &str, query: Option<&str>) -> bool {
+    parse_path(path).is_some_and(|parsed| parsed.part == Part::Object)
+        && query.is_some_and(is_lock_and_request)
+}
+
 fn has_content_type(request: &Request, expected: &str) -> bool {
+    has_header(request, "Content-Type", expected)
+}
+
+fn has_header(request: &Request, name: &str, expected: &str) -> bool {
     request
         .headers
-        .get("Content-Type")
+        .get(name)
         .is_some_and(|value| value == expected)
+}
+
+/// `rowNumber=<1..5000>&ddicEntityName=<entity>` with one `SELECT` line that reads that entity.
+/// The body is never SQL of its own choosing: a second statement or another table is refused.
+fn is_data_preview(query: &str, body: &[u8]) -> bool {
+    let Some((rows, entity)) = query.split_once("&ddicEntityName=") else {
+        return false;
+    };
+    let Some(rows) = rows.strip_prefix("rowNumber=") else {
+        return false;
+    };
+    let rows_valid = !rows.starts_with('0')
+        && rows.bytes().all(|byte| byte.is_ascii_digit())
+        && rows
+            .parse::<u32>()
+            .is_ok_and(|rows| (1..=MAX_PREVIEW_ROWS).contains(&rows));
+    // Only the `/` of a namespace is escaped, as `%2F`; a raw one is refused.
+    let decoded = entity.replace("%2F", "/");
+
+    rows_valid && !entity.contains('/') && is_entity(&decoded) && reads_entity(body, &decoded)
+}
+
+/// `NAME` or `/NAMESPACE/NAME` of letters, digits and `_`.
+fn is_entity(entity: &str) -> bool {
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+
+    entity.len() <= MAX_ENTITY
+        && match entity.strip_prefix('/') {
+            Some(rest) => rest
+                .split_once('/')
+                .is_some_and(|(space, local)| plain(space) && plain(local)),
+            None => plain(entity),
+        }
+}
+
+/// Only the exact canonical `read-table` rendering is admitted. SAP runs data-preview bodies as
+/// is, so this boundary reuses the operation parser rather than trusting a caller's body.
+fn reads_entity(body: &[u8], entity: &str) -> bool {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return false;
+    };
+
+    validate_preview_body(entity, text).is_ok()
 }
 
 /// `lockHandle=<handle>[&corrNr=<request>]`, the query of a write under a lock. A lock itself
@@ -569,7 +665,7 @@ fn reference_of(element: &BytesStart<'_>) -> Option<ObjectRef> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, Part, is_encoded, is_name, parse_path};
+    use super::{Kind, Part, is_encoded, is_entity, is_name, parse_path};
 
     #[test]
     fn names_are_sap_characters_and_only_a_program_takes_a_namespace_escape() {
@@ -584,6 +680,46 @@ mod tests {
         assert!(!is_name(".", true));
         assert!(!is_name("..", true));
         assert!(is_name("z.prog-1$", true));
+    }
+
+    #[test]
+    fn an_entity_is_a_plain_or_namespaced_name_of_at_most_30_characters() {
+        let longest_plain = "A".repeat(30);
+        let longest_namespaced = format!("/N/{}", "B".repeat(27));
+
+        for entity in [
+            "T001",
+            "T_001",
+            "a1",
+            "/BIC/AFOO",
+            &longest_plain,
+            &longest_namespaced,
+        ] {
+            assert!(is_entity(entity), "{entity}");
+        }
+
+        let too_long_plain = "A".repeat(31);
+        let too_long_namespaced = format!("/N/{}", "B".repeat(28));
+
+        for entity in [
+            "",
+            "/",
+            "//",
+            "/NS",
+            "/NS/",
+            "//X",
+            "/NS/A/B",
+            "T 001",
+            "T-001",
+            "T001%20",
+            "\u{e9}",
+            "/N-S/X",
+            "/NS/X-Y",
+            &too_long_plain,
+            &too_long_namespaced,
+        ] {
+            assert!(!is_entity(entity), "{entity}");
+        }
     }
 
     #[test]
@@ -634,5 +770,40 @@ mod tests {
             format!("{create}#frag"),
             Vec::new()
         )));
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_delete_fault_target_is_a_delete_of_an_object_under_its_lock() {
+        use super::is_delete_request;
+        use crate::transport::Request;
+
+        let object = "/sap/bc/adt/programs/programs/zprog";
+        let delete = format!("{object}?lockHandle=a%2Bb&corrNr=DEVK900001");
+
+        assert!(is_delete_request(&Request::delete(delete.clone())));
+        assert!(is_delete_request(&Request::delete(format!(
+            "{object}?lockHandle=a%2Bb"
+        ))));
+        // The method, the shape and the lock all count; a fragment never does.
+        assert!(!is_delete_request(&Request::get(delete.clone())));
+        assert!(!is_delete_request(&Request::put(
+            delete.clone(),
+            Vec::new()
+        )));
+        assert!(!is_delete_request(&Request::post(
+            delete.clone(),
+            Vec::new()
+        )));
+        assert!(!is_delete_request(&Request::delete(format!(
+            "{delete}#frag"
+        ))));
+        assert!(!is_delete_request(&Request::delete(object)));
+        assert!(!is_delete_request(&Request::delete(
+            "/sap/bc/adt/discovery"
+        )));
+        assert!(!is_delete_request(&Request::delete(format!(
+            "{object}/source/main?lockHandle=a%2Bb"
+        ))));
     }
 }

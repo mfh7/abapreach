@@ -1,6 +1,6 @@
 use super::admission::Admission;
 #[cfg(feature = "fault-injection")]
-use super::admission::{is_create_post, is_put_request};
+use super::admission::{is_create_post, is_delete_request, is_put_request};
 use super::{Request, Response, SadtTransport, TransportError};
 use crate::config::Connection;
 use libloading::{Library, Symbol};
@@ -644,7 +644,8 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
         }
         // Decided before the request is consumed by the call.
         #[cfg(feature = "fault-injection")]
-        let read_is_reconciliation = request.method == "GET" && self.create_sent;
+        let read_is_reconciliation =
+            request.method == "GET" && (self.create_sent || crate::fault::delete_reply_dropped());
         #[cfg(feature = "fault-injection")]
         if is_create_post(&request) {
             self.create_sent = true;
@@ -665,6 +666,8 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
                 .target()
                 .and_then(|target| fault.drop_reply(is_fault_target(target, &request)))
         });
+        #[cfg(feature = "fault-injection")]
+        let delete_dropped = dropped.is_some() && is_delete_request(&request);
         let response = match self.api.invoke(RfcEndpointRequest {
             function: SADT_REST_RFC_ENDPOINT,
             method: request.method,
@@ -688,6 +691,10 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
         #[cfg(feature = "fault-injection")]
         if let Some(error) = dropped {
             self.admission.clear();
+
+            if delete_dropped {
+                crate::fault::note_delete_reply_dropped();
+            }
 
             return Err(error);
         }
@@ -1473,14 +1480,15 @@ impl Drop for DynamicRfcApi {
     }
 }
 
-/// Whether the request is the write a fault targets: the source `PUT`, the activation or the
-/// create `POST`.
+/// Whether the request is the write a fault targets: the source `PUT`, the activation, the
+/// create `POST` or the `DELETE`.
 #[cfg(feature = "fault-injection")]
 fn is_fault_target(target: crate::fault::Target, request: &Request) -> bool {
     match target {
         crate::fault::Target::Put => is_put_request(request),
         crate::fault::Target::Activate => request.method == "POST" && request.uri == ACTIVATION_URI,
         crate::fault::Target::Create => is_create_post(request),
+        crate::fault::Target::Delete => is_delete_request(request),
     }
 }
 

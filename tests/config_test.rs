@@ -642,3 +642,196 @@ fn secrets_hide_the_password_the_route_and_only_its_host_and_password_fragments(
         [route, "router.example.com", "password-x", "secret"]
     );
 }
+
+/// The effective policies of `DEV_100` for a config with optional top-level and server policies.
+fn effective(top: &str, server: &str) -> Result<abapreach::policy::Policies, String> {
+    let directory = tempfile::tempdir().unwrap();
+    let connections = directory.path().join("connections.json");
+
+    fs::write(
+        &connections,
+        format!(
+            concat!(
+                r#"{{"servers":[{{"systemId":"DEV","host":"example.com","port":443,"#,
+                r#""clients":["100"],"rfc":{{"ashost":"example.com","sysnr":"00"}}{server}}}]{top}}}"#,
+            ),
+            server = server,
+            top = top
+        ),
+    )
+    .unwrap();
+    let env = BTreeMap::from([
+        ("DEV_100_USER".to_owned(), "user".to_owned()),
+        ("DEV_100_PASS".to_owned(), "password".to_owned()),
+    ]);
+
+    Ok(Config::load(
+        ConfigPaths {
+            connections,
+            local: directory.path().join("connections.local.json"),
+        },
+        &env,
+    )?
+    .resolve("dev_100", &env)?
+    .policies)
+}
+
+#[test]
+fn read_table_denied_defaults_to_the_eight_tables_and_mcp_write_to_off() {
+    let policies = effective("", "").unwrap();
+
+    assert_eq!(policies.read_table_denied.len(), 8);
+    assert_eq!(policies.mcp_write.token(), "off");
+    assert!(policies.is_read_table_denied("USR02"));
+    assert!(policies.is_read_table_denied("ssf_pse_d"));
+    assert!(!policies.is_read_table_denied("T001"));
+    assert!(policies.missing_default_denied().is_empty());
+}
+
+#[test]
+fn read_table_denied_is_inherited_overridden_and_may_be_empty() {
+    let top = r#","policies":{"read_table_denied":["Bseg"]}"#;
+
+    // The top-level list replaces the default (it does not extend it), matched case-insensitively.
+    let policies = effective(top, "").unwrap();
+    assert!(policies.is_read_table_denied("BSEG") && policies.is_read_table_denied("bseg"));
+    assert!(!policies.is_read_table_denied("USR02"));
+    // A server list overrides the top-level one; a server block without the key inherits it.
+    let overridden = effective(top, r#","policies":{"read_table_denied":["lfa1"]}"#).unwrap();
+    assert!(overridden.is_read_table_denied("LFA1") && !overridden.is_read_table_denied("BSEG"));
+    assert!(
+        effective(top, r#","policies":{}"#)
+            .unwrap()
+            .is_read_table_denied("BSEG")
+    );
+    // An explicit empty list denies nothing, also as a server override of a non-empty list.
+    let empty = effective(r#","policies":{"read_table_denied":[]}"#, "").unwrap();
+    assert!(empty.read_table_denied.is_empty() && !empty.is_read_table_denied("USR02"));
+    assert!(
+        effective(top, r#","policies":{"read_table_denied":[]}"#)
+            .unwrap()
+            .read_table_denied
+            .is_empty()
+    );
+}
+
+#[test]
+fn mcp_write_accepts_off_confirm_and_token_and_inherits() {
+    for value in ["off", "confirm", "token"] {
+        let top = format!(r#","policies":{{"mcp_write":"{value}"}}"#);
+
+        assert_eq!(effective(&top, "").unwrap().mcp_write.token(), value);
+    }
+
+    let top = r#","policies":{"mcp_write":"token"}"#;
+
+    assert_eq!(
+        effective(top, r#","policies":{"mcp_write":"confirm"}"#)
+            .unwrap()
+            .mcp_write
+            .token(),
+        "confirm"
+    );
+    assert_eq!(
+        effective(top, r#","policies":{}"#)
+            .unwrap()
+            .mcp_write
+            .token(),
+        "token"
+    );
+}
+
+#[test]
+fn malformed_new_policies_stop_at_load() {
+    for top in [
+        r#","policies":{"mcp_write":"always"}"#,
+        r#","policies":{"mcp_write":true}"#,
+        r#","policies":{"read_table_denied":"USR02"}"#,
+        r#","policies":{"read_table_denied":[1]}"#,
+    ] {
+        let message = effective(top, "").unwrap_err();
+
+        assert!(message.starts_with("cannot parse"), "{top}: {message}");
+    }
+}
+
+#[test]
+fn the_mcp_snapshot_maps_ask_to_reject_and_ignores_later_edits() {
+    let directory = tempfile::tempdir().unwrap();
+    let connections = directory.path().join("connections.json");
+    let paths = ConfigPaths {
+        connections: connections.clone(),
+        local: directory.path().join("connections.local.json"),
+    };
+    let write = |policies: &str| {
+        fs::write(
+            &connections,
+            format!(
+                r#"{{"policies":{policies},"servers":[{{"systemId":"DEV","clients":["100"],"rfc":{{"ashost":"example.com","sysnr":"00"}}}}]}}"#
+            ),
+        )
+        .unwrap();
+    };
+    let env = BTreeMap::new();
+
+    write(r#"{"foreign_inactive":"ask","mcp_write":"confirm"}"#);
+    let snapshot = Config::load(paths.clone(), &env).unwrap().mcp_policies();
+    write(r#"{"foreign_inactive":"allow","mcp_write":"token","read_table_denied":[]}"#);
+
+    let policies = snapshot.get("dev").unwrap();
+    assert_eq!(policies.foreign_inactive.token(), "reject");
+    assert_eq!(policies.mcp_write.token(), "confirm");
+    assert!(policies.is_read_table_denied("USR02"));
+    assert!(snapshot.get("QAS").is_none());
+    // The next start sees the edit.
+    let next = Config::load(paths, &env).unwrap().mcp_policies();
+    assert_eq!(next.get("DEV").unwrap().foreign_inactive.token(), "allow");
+    assert_eq!(next.get("DEV").unwrap().mcp_write.token(), "token");
+}
+
+#[test]
+fn writes_are_offered_only_when_some_server_allows_them() {
+    let offered = |policies: &[&str]| {
+        let directory = tempfile::tempdir().unwrap();
+        let connections = directory.path().join("connections.json");
+        let servers: Vec<String> = policies
+            .iter()
+            .enumerate()
+            .map(|(index, policy)| {
+                format!(
+                    r#"{{"systemId":"S{index}","clients":["100"],"rfc":{{"ashost":"example.com","sysnr":"00"}}{policy}}}"#
+                )
+            })
+            .collect();
+
+        fs::write(
+            &connections,
+            format!(r#"{{"servers":[{}]}}"#, servers.join(",")),
+        )
+        .unwrap();
+
+        Config::load(
+            ConfigPaths {
+                connections,
+                local: directory.path().join("connections.local.json"),
+            },
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .mcp_policies()
+        .write_offered()
+    };
+    let off = r#","policies":{"mcp_write":"off"}"#;
+    let confirm = r#","policies":{"mcp_write":"confirm"}"#;
+    let token = r#","policies":{"mcp_write":"token"}"#;
+
+    // Absent means off.
+    assert!(!offered(&[""]));
+    assert!(!offered(&[off, ""]));
+    assert!(offered(&[confirm]));
+    assert!(offered(&[token]));
+    // One server that writes is enough, wherever it stands in the list.
+    assert!(offered(&[off, token]));
+    assert!(offered(&[confirm, off]));
+    assert!(offered(&[confirm, token]));
+}

@@ -145,7 +145,7 @@ fn allow_list_accepts_only_the_m1_program_requests() {
             format!("{program}/source/main?lockHandle=a&corrNr="),
             Vec::new(),
         ),
-        Request::delete(format!("{program}?lockHandle=a")),
+        Request::delete(format!("{program}/source/main?lockHandle=a")),
     ];
     let mut transport = RfcTransport::new(FakeRfcApi::ok());
 
@@ -481,15 +481,11 @@ fn the_recorded_transportable_class_flow_is_admitted_except_its_helper_requests(
         }
     }
 
-    // The fixture records no first activation response, so its resend is refused; the DELETE and
-    // bare-class GET belong to the PM cleanup helper too.
+    // The fixture records no first activation response, so its resend is refused. Its DELETE and
+    // bare-class GET are the M4 delete shapes and are admitted now.
     assert_eq!(
         refused,
-        [
-            "POST /sap/bc/adt/activation?method=activate&preauditRequested=false",
-            "DELETE /sap/bc/adt/oo/classes/ytest_abapreach_cl6?lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D&corrNr=DEVK900001",
-            "GET /sap/bc/adt/oo/classes/ytest_abapreach_cl6",
-        ]
+        ["POST /sap/bc/adt/activation?method=activate&preauditRequested=false"]
     );
 }
 
@@ -867,13 +863,10 @@ fn wrong_object_kind_uris_are_refused() {
         Request::get(format!(
             "{CLASS}/objectstructure?version=active&withShortDescriptions=true&x=1"
         )),
-        // A function module needs its group; the group and collections are not lockable.
+        // A function module needs its group; collections are not lockable (the group lock for
+        // a delete is covered by the delete admission tests).
         Request::get("/sap/bc/adt/functions/groups/zfg/source/main?version=active"),
         Request::get("/sap/bc/adt/functions/fmodules/zfm/source/main?version=active"),
-        Request::post(
-            "/sap/bc/adt/functions/groups/zfg?_action=LOCK&accessMode=MODIFY",
-            Vec::new(),
-        ),
         Request::post(
             "/sap/bc/adt/oo/classes?_action=LOCK&accessMode=MODIFY",
             Vec::new(),
@@ -882,9 +875,7 @@ fn wrong_object_kind_uris_are_refused() {
             format!("{function}/fmodules/zfm2/source/main?lockHandle={handle}"),
             Vec::new(),
         ),
-        // Bare object reads are limited to the metadata the create reconciliation reads.
-        Request::get(CLASS),
-        Request::get(program),
+        // Bare object reads never take a query or name a collection.
         Request::get("/sap/bc/adt/oo/classes"),
         Request::get("/sap/bc/adt/functions/groups"),
         // Metadata of a function module and interface have no query.
@@ -1080,14 +1071,11 @@ fn create_validation_and_creation_shapes_outside_the_four_kinds_are_refused() {
 }
 
 #[test]
-fn direct_delete_mcp_function_module_fallback_and_unrelated_endpoints_are_refused() {
+fn delete_of_a_part_mcp_function_module_fallback_and_unrelated_endpoints_are_refused() {
     let handle = handle();
 
     assert_refused(&[
-        Request::delete(format!("{CLASS}?lockHandle={handle}&corrNr=DEVK900001")),
         Request::delete(format!("{CLASS}/includes/testclasses?lockHandle={handle}")),
-        Request::delete("/sap/bc/adt/functions/groups/zfg/fmodules/zfm?lockHandle=a"),
-        Request::delete("/sap/bc/adt/oo/interfaces/zif_a?lockHandle=a"),
         Request::new(
             "PATCH",
             format!("{CLASS}/source/main?lockHandle={handle}"),

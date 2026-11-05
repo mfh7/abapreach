@@ -7,6 +7,9 @@ pub mod domain;
 #[cfg(feature = "fault-injection")]
 pub mod fault;
 pub mod hash;
+pub mod mcp;
+pub mod mcp_read;
+pub mod mcp_write;
 pub mod object;
 pub mod operation;
 pub mod policy;

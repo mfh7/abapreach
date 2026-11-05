@@ -36,17 +36,95 @@ impl Display for ForeignInactive {
     }
 }
 
+/// Whether the MCP server may write, and how a write is confirmed.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpWrite {
+    /// No MCP write tool for this server.
+    #[default]
+    Off,
+    /// A write is confirmed by the human through elicitation.
+    Confirm,
+    /// A write needs a plan token from a simulation.
+    Token,
+}
+
+impl McpWrite {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Confirm => "confirm",
+            Self::Token => "token",
+        }
+    }
+}
+
+impl Display for McpWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.token())
+    }
+}
+
+/// The tables `read_table_denied` holds when the key is absent: credential and crypto tables.
+pub const DEFAULT_READ_TABLE_DENIED: [&str; 8] = [
+    "USR02",
+    "USH02",
+    "USH02_ARC_TMP",
+    "USRPWDHISTORY",
+    "RFCDES",
+    "RSECTAB",
+    "RSECACTB",
+    "SSF_PSE_D",
+];
+
 /// The effective policies of one connection: every guard has a value, `reject` unless configured.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Policies {
     pub foreign_inactive: ForeignInactive,
+    /// Upper-case table names `read-table` refuses; an empty list denies nothing.
+    pub read_table_denied: Vec<String>,
+    pub mcp_write: McpWrite,
 }
 
 impl Default for Policies {
     fn default() -> Self {
         Self {
             foreign_inactive: ForeignInactive::Reject,
+            read_table_denied: DEFAULT_READ_TABLE_DENIED
+                .iter()
+                .map(|table| (*table).to_owned())
+                .collect(),
+            mcp_write: McpWrite::Off,
         }
+    }
+}
+
+impl Policies {
+    /// Whether `table` is on the deny list, ignoring case.
+    pub fn is_read_table_denied(&self, table: &str) -> bool {
+        self.read_table_denied
+            .iter()
+            .any(|denied| denied.eq_ignore_ascii_case(table.trim()))
+    }
+
+    /// The default entries the configured deny list does not hold, for the doctor warning.
+    pub fn missing_default_denied(&self) -> Vec<&'static str> {
+        DEFAULT_READ_TABLE_DENIED
+            .iter()
+            .copied()
+            .filter(|table| !self.is_read_table_denied(table))
+            .collect()
+    }
+
+    /// The policies the MCP server runs with: `ask` has no terminal there, so it counts as `reject`.
+    pub fn for_mcp(&self) -> Self {
+        let mut policies = self.clone();
+
+        if policies.foreign_inactive == ForeignInactive::Ask {
+            policies.foreign_inactive = ForeignInactive::Reject;
+        }
+
+        policies
     }
 }
 
@@ -56,12 +134,28 @@ impl Default for Policies {
 pub struct PolicyDocument {
     #[serde(default)]
     foreign_inactive: Option<ForeignInactive>,
+    /// `[]` is an explicit empty list; an absent key keeps the outer list.
+    #[serde(default)]
+    read_table_denied: Option<Vec<String>>,
+    #[serde(default)]
+    mcp_write: Option<McpWrite>,
 }
 
 impl PolicyDocument {
     pub fn apply(&self, outer: &Policies) -> Policies {
         Policies {
             foreign_inactive: self.foreign_inactive.unwrap_or(outer.foreign_inactive),
+            read_table_denied: self.read_table_denied.as_ref().map_or_else(
+                || outer.read_table_denied.clone(),
+                |tables| {
+                    tables
+                        .iter()
+                        .map(|table| table.trim().to_ascii_uppercase())
+                        .filter(|table| !table.is_empty())
+                        .collect()
+                },
+            ),
+            mcp_write: self.mcp_write.unwrap_or(outer.mcp_write),
         }
     }
 }

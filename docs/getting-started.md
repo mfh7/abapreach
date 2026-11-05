@@ -460,12 +460,39 @@ function group named with `--fugr`; `--package` is not valid for `create FUNC`. 
 for a `$TMP` package, and a transportable package requires `--tr`. The live matrix does not
 exercise the name and text limits.
 
+## Read a table and delete objects
+
+`read-table` reads rows of one table through the ADT data preview:
+
+```text
+abapreach read-table T000 --fields MANDT,MTEXT --rows 3 --conn DEV
+```
+
+`--rows` takes 1 to 5000 (default 100). `--where` takes a condition with fields, comparison
+operators, `AND`, `OR`, `NOT`, parentheses and literals. Tables on the read-table deny list are
+refused; see [MCP server: Trust boundaries](mcp.md#trust-boundaries).
+
+`delete` removes objects only from a plan written by `--simulate`:
+
+```text
+abapreach delete --simulate PROG:ZEXAMPLE --plan delete.plan --conn DEV
+abapreach delete PROG:ZEXAMPLE --plan delete.plan --conn DEV
+```
+
+Add `--tr TRKORR` when the object is transportable. Delete has a reconciliation and recovery
+path; see [Deploy safety: Delete](deploy-safety.md#delete).
+
+To use ABAPReach from an AI assistant, see [MCP server](mcp.md).
+
 ## Tested environment
 
-The release matrix ran the object kinds above on each platform and path, against two systems. The
-core, platform, fault-injection, ca and verify groups ran on `v0.13.0-rc.2`, whose release build
-is unchanged for those groups. The interactive group (prompts and Ctrl-C) ran on `v0.13.0-rc.4`,
-which uses the fault-injection build (see [Fault injection](#fault-injection)):
+The 0.14.0 release matrix ran on `v0.14.0-rc.4` with the release and the fault-injection builds,
+on each platform and path, against two systems. It covers the core, platform, fault-injection, ca,
+delete, read-table, policy, MCP and Python-parity groups. The interactive group (prompts and Ctrl-C)
+is from the 0.13.0 matrix (`v0.13.0-rc.4`) and was not rerun for 0.14.0. The final `v0.14.0`
+binaries are byte-identical to `v0.14.0-rc.5`; rc.5 differs from rc.4 only in documentation, and
+its macOS and Linux binaries are byte-identical to rc.4 (the Windows binaries differ only in the
+link timestamp and PDB identifier). The two systems:
 
 - a SAP 7.50 system with a stateful ADT HTTP session, a second developer user and transport
   requests;
@@ -485,27 +512,22 @@ Each cell shows PASS / UNSUPPORTED / FAIL counts per path.
 
 | Platform | System | ADT HTTP | RFC, SAP GUI library | RFC, NW RFC SDK |
 | :--- | :--- | :---: | :---: | :---: |
-| macOS arm64 | SAP 7.40 | 25 / 49 / 0 | 51 / 19 / 0 | 51 / 19 / 0 |
-| macOS arm64 | SAP 7.50 | 58 / 22 / 0 | 66 / 11 / 0 | 65 / 11 / 0 |
-| Windows x64, native | SAP 7.40 | 25 / 49 / 0 | 51 / 19 / 0 | 51 / 19 / 0 |
-| Windows x64, native | SAP 7.50 | 58 / 22 / 0 | 66 / 11 / 0 | 65 / 11 / 0 |
-| Windows x64, emulated on an ARM64 virtual machine | SAP 7.40 | 25 / 49 / 0 | 51 / 19 / 0 | 51 / 19 / 0 |
-| Windows x64, emulated on an ARM64 virtual machine | SAP 7.50 | 58 / 22 / 0 | 66 / 11 / 0 | 65 / 11 / 0 |
-| Linux x64 | SAP 7.40 | 25 / 51 / 0 | 52 / 18 / 0 | 52 / 18 / 0 |
-| Linux x64 | SAP 7.50 | 58 / 24 / 0 | 67 / 10 / 0 | 66 / 10 / 0 |
-| Linux arm64 | SAP 7.40 | 25 / 51 / 0 | 0 / 70 / 0 | 52 / 18 / 0 |
-| Linux arm64 | SAP 7.50 | 58 / 24 / 0 | 0 / 77 / 0 | 66 / 10 / 0 |
+| macOS arm64 | SAP 7.40 | 52 / 82 / 0 | 106 / 24 / 0 | 106 / 24 / 0 |
+| macOS arm64 | SAP 7.50 | 109 / 25 / 0 | 118 / 12 / 0 | 118 / 12 / 0 |
+| Windows x64, native | SAP 7.40 | 52 / 82 / 0 | 106 / 24 / 0 | 106 / 24 / 0 |
+| Windows x64, native | SAP 7.50 | 109 / 25 / 0 | 118 / 12 / 0 | 118 / 12 / 0 |
+| Windows x64, emulated on an ARM64 virtual machine | SAP 7.40 | 52 / 82 / 0 | 106 / 24 / 0 | 106 / 24 / 0 |
+| Windows x64, emulated on an ARM64 virtual machine | SAP 7.50 | 109 / 25 / 0 | 118 / 12 / 0 | 118 / 12 / 0 |
+| Linux x64 | SAP 7.40 | 52 / 84 / 0 | 107 / 23 / 0 | 107 / 23 / 0 |
+| Linux x64 | SAP 7.50 | 109 / 27 / 0 | 119 / 11 / 0 | 119 / 11 / 0 |
+| Linux arm64 | SAP 7.40 | 52 / 84 / 0 | 0 / 130 / 0 | 107 / 23 / 0 |
+| Linux arm64 | SAP 7.50 | 109 / 27 / 0 | 0 / 130 / 0 | 119 / 11 / 0 |
 
-Totals: the SAP 7.50 system has 907 PASS, 287 UNSUPPORTED and 0 FAIL cells; the SAP 7.40
-system has 602 PASS, 497 UNSUPPORTED and 0 FAIL cells.
-
-The 7.50 rows use the `v0.13.0-rc.2` counts for the core, platform, fault-injection, ca and verify
-groups, and the `v0.13.0-rc.4` counts for the interactive group. On `v0.13.0-rc.4` with the
-fault-injection build, every `interrupt-lock-held/func` and `interrupt-lock-held/clas-include` cell
-passes on every host and path that exists. The interactive group has 5 PASS on ADT HTTP and on each
-RFC path that exists; the one exception is the Linux arm64 SAP GUI column, which is UNSUPPORTED
-because SAP GUI for Java for Linux is built for x86_64 only (no library for arm64). The 7.40 system
-has no interactive group.
+Totals: the SAP 7.50 system has 1610 PASS, 364 UNSUPPORTED and 0 FAIL cells; the SAP 7.40
+system has 1217 PASS, 757 UNSUPPORTED and 0 FAIL cells. Path-independent setup, sweep and
+credential-permission cells are not counted. The MCP cells drive the server with a scripted client
+that reproduces each client's advertised capabilities; the real clients were tested separately
+(see [MCP server: Support by client](mcp.md#support-by-client)).
 
 ### Unsupported cells
 
@@ -522,6 +544,9 @@ An UNSUPPORTED cell has one of these reasons:
   execution gives the process none, so the interactive group there runs over ssh with a
   pseudo-terminal. The native Windows host ran them over a pseudo-terminal as well.
 - **Fault injection.** Fault injection drops RFC replies only. ADT HTTP has no fault cell.
+- **Python parity.** The parity cells run the same delete through the Python tooling. Its deploy
+  function module is not installed on the 7.40 system, so delete parity runs on the 7.50 system only;
+  `read-table` parity passes on both systems.
 - **Testability.** A condition that a live run cannot produce is covered only by an offline fake.
   Those cells carry no live evidence (see [Fixture-only cases](#fixture-only-cases)).
 
@@ -529,7 +554,7 @@ An UNSUPPORTED cell has one of these reasons:
 
 The fault-injection build (`--features fault-injection`) reads `ABAPREACH_FAULT`, a
 comma-separated list. Its targets are `drop-reply:PUT`, `drop-reply:ACTIVATE`,
-`drop-reply:CREATE` and `fail-read:RECONCILE`. Each drops one RFC reply or fails one reconciliation
+`drop-reply:CREATE`, `drop-reply:DELETE` and `fail-read:RECONCILE`. Each drops one RFC reply or fails one reconciliation
 read. Results on the RFC paths of the matrix:
 
 | Target | Result | Exit |
@@ -538,8 +563,10 @@ read. Results on the RFC paths of the matrix:
 | `drop-reply:ACTIVATE` | `ACTIVE (reconciled)`: the active source equals the file | 1 |
 | `drop-reply:CREATE` | `CREATE: PARTIAL`: the created object is present | 1 |
 | `drop-reply:CREATE,fail-read:RECONCILE` | `CREATE: PARTIAL`: the reconciliation read failed, so the state is unknown | 1 |
+| `drop-reply:DELETE` | `DELETED (reconciled)`: a new session no longer finds the object; the batch stops | 1 |
+| `drop-reply:DELETE,fail-read:RECONCILE` | `PARTIAL`: the reconciliation read failed, so the state is unknown; the batch stops | 1 |
 
-`fail-read:RECONCILE` is matrix-tested only combined with `drop-reply:CREATE`. Each
+`fail-read:RECONCILE` is matrix-tested only combined with `drop-reply:CREATE` or `drop-reply:DELETE`. Each
 reconciliation result exits 1, and none is retried. ADT HTTP cannot be fault-injected, so
 these targets are UNSUPPORTED on ADT HTTP. The `CREATE: REJECTED` branch for an object that is
 absent after an uncertain create, and the uncertain-POST branches of `--create-include`, have no
@@ -562,7 +589,7 @@ limitation that stays documented where the result is not PASS.
 | FUNC rendering beyond the known forms | PASS for the known forms (`func-deploy`, `bom-crlf-deploy`) | Only those forms are covered. Other server re-rendering forms are not. |
 | Empty FUNC source on the 7.50 system | PASS (`read-empty-canonical`) | An empty local file is refused before any write (`STOP: source file is empty`). No empty PUT is sent. |
 | CLAS/INTF version-entry semantics on the 7.50 system | Documentation limitation | Exercised only through the deploy flows (`tr-clas`, `clas-deploy`, `foreign-inactive*`). Not tested as a separate case. |
-| Transportable create, PUT, include POST and delete over ADT HTTP | PASS for create and PUT on the 7.50 system (`create-transportable`, `tr-func`, `tr-clas`, `tr-without-tr`) | A transportable include POST over ADT HTTP was not tested. Delete is not part of this release. |
+| Transportable create, PUT, include POST and delete over ADT HTTP | PASS for create and PUT on the 7.50 system (`create-transportable`, `tr-func`, `tr-clas`, `tr-without-tr`) | A transportable include POST over ADT HTTP was not tested. Transportable delete passes on every path on the 7.50 system (`delete-transportable`). |
 | Transportable CLAS activation resend over ADT HTTP and NW RFC SDK | PASS (`clas-activation-worklist`) on ADT HTTP, NW RFC SDK and SAP GUI library | The Linux arm64 SAP GUI cell is UNSUPPORTED (no library). The 7.40 system has no transportable objects, so this scenario does not run there. |
 | v5 repeatability | PASS on the SAP GUI library path (`clas-activation-v5-rerun`) | Linux arm64 is UNSUPPORTED (no SAP GUI library). Not tested over ADT HTTP or NW RFC SDK. |
 | Out-of-class worklist entries | UNSUPPORTED (fixture-only) | Not tested live. Offline fake only. |

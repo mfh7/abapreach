@@ -28,6 +28,14 @@ impl DoctorReport {
 
 pub struct Doctor;
 
+fn denied_label(tables: &[String]) -> String {
+    if tables.is_empty() {
+        "(none)".to_owned()
+    } else {
+        tables.join(", ")
+    }
+}
+
 /// One ADT discovery probe: the HTTP status and, when the transport knows it, whether the
 /// server keeps the stateful session.
 struct AdtProbe {
@@ -52,7 +60,20 @@ impl Doctor {
                 "policy foreign inactive: {}",
                 connection.policies.foreign_inactive
             ),
+            format!(
+                "policy read_table_denied: {}",
+                denied_label(&connection.policies.read_table_denied)
+            ),
+            format!("policy mcp_write: {}", connection.policies.mcp_write),
         ];
+        let missing = connection.policies.missing_default_denied();
+
+        if !missing.is_empty() {
+            lines.push(format!(
+                "WARNING: policy read_table_denied lacks default entries: {}",
+                missing.join(", ")
+            ));
+        }
 
         match &connection.adt {
             Some(adt) => lines.push(format!(
