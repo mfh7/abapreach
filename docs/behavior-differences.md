@@ -227,3 +227,6 @@ the ADT route (`tests/delete_operation_test.rs`). Intentional differences:
 - `delete`: the Python tooling deletes through `rfc-deploy`. The Rust delete runs ADT HTTP
   first and falls back to RFC SADT only before the first LOCK; the plan file records no backend.
   See [Deploy safety: Delete](deploy-safety.md#delete).
+- Parity with the Python tooling: delete parity (batch and `INTF`) passes on every path on a 7.50
+  system; on a 7.40 system without the Python deploy function module the Python side cannot run, so
+  delete parity is not tested there. `read-table` parity passes on both.

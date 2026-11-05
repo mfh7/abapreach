@@ -178,13 +178,12 @@ use the same two paths; the result of each path is in
 
 ## Platforms
 
-Release 0.13.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
+Release 0.14.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
 library lookup per OS, the release file checks, the Linux glibc baseline, the credential
 file permission rules and the test matrix are in
 [Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
-The release matrix has no FAIL cell on any path, and it lists every UNSUPPORTED cell with its
-reason. Interrupt-while-locked cells were proven on `v0.13.0-rc.4` with the fault-injection build;
-the other groups ran on `v0.13.0-rc.2`. See
+The 0.14.0 release matrix ran on `v0.14.0-rc.4`; it has no FAIL cell on any path, and it lists every
+UNSUPPORTED cell with its reason. Interrupt-while-locked cells are from the 0.13.0 matrix. See
 [Tested environment](docs/getting-started.md#tested-environment).
 
 An explicit `ABAPREACH_RFC_LIBRARY` that cannot be loaded stops the command with an
