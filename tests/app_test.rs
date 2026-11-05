@@ -2386,6 +2386,76 @@ fn delete_simulates_then_deletes_on_adt_and_proves_it_from_a_fresh_session() {
 }
 
 #[test]
+fn a_function_group_delete_plan_carries_the_members_from_the_member_listing() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan_path = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+    let (cell, session) = shared(ScriptedTransport::replies(vec![
+        source(
+            "<x xmlns:adtcore=\"http://www.sap.com/adt/core\" adtcore:responsible=\"OWNER\">\
+             <adtcore:packageRef adtcore:name=\"$TMP\"/></x>",
+        ),
+        source(
+            "<asx:abap xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA><TREE_CONTENT>\
+             <SEU_ADT_REPOSITORY_OBJ_NODE><OBJECT_TYPE>FUGR/FF</OBJECT_TYPE>\
+             <OBJECT_NAME>ZTEST_FM</OBJECT_NAME></SEU_ADT_REPOSITORY_OBJ_NODE>\
+             <SEU_ADT_REPOSITORY_OBJ_NODE><OBJECT_TYPE>FUGR/I</OBJECT_TYPE>\
+             <OBJECT_NAME>LZTEST_FGTOP</OBJECT_NAME></SEU_ADT_REPOSITORY_OBJ_NODE>\
+             </TREE_CONTENT></DATA></asx:values></asx:abap>",
+        ),
+    ]));
+
+    fake.adt.push_back(session);
+
+    let exit = go(
+        &[
+            "abapreach",
+            "delete",
+            "FUGR:ZTEST_FG",
+            "--plan",
+            plan_path,
+            "--simulate",
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{} {}", exit.stdout, exit.stderr);
+    assert!(
+        exit.stdout
+            .lines()
+            .any(|line| line == "CONTENT FUNC ZTEST_FM"),
+        "{}",
+        exit.stdout
+    );
+    assert!(!exit.stdout.contains("LZTEST_FGTOP"), "{}", exit.stdout);
+    assert_eq!(
+        cell.borrow()
+            .calls
+            .iter()
+            .map(|request| format!("{} {}", request.method, request.uri))
+            .collect::<Vec<_>>(),
+        [
+            "GET /sap/bc/adt/functions/groups/ztest_fg",
+            "POST /sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&parent_name=ZTEST_FG&withShortDescriptions=false",
+        ]
+    );
+    // The plan stores the hash of the object facts, members included, that the output prints.
+    let hash = exit
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("plan hash "))
+        .expect("plan hash line");
+    let stored = std::fs::read_to_string(&plan).unwrap();
+
+    assert_eq!(hash.len(), 64, "{hash}");
+    assert!(stored.contains(hash), "{stored}");
+}
+
+#[test]
 fn ctrl_c_during_a_cli_delete_lock_unlocks_and_exits_130() {
     let directory = tempfile::tempdir().unwrap();
     let plan = directory.path().join("plan.json");

@@ -16,6 +16,7 @@ const CHECKRUNS: &str = "/sap/bc/adt/checkruns?reporters=abapCheckRun";
 const ACTIVATION: &str = "/sap/bc/adt/activation?method=activate&preauditRequested=";
 const SEARCH: &str = "/sap/bc/adt/repository/informationsystem/search";
 const USAGE_REFERENCES: &str = "/sap/bc/adt/repository/informationsystem/usageReferences";
+const NODE_STRUCTURE: &str = "/sap/bc/adt/repository/nodestructure";
 const FUNCTION_VALIDATION: &str = "/sap/bc/adt/functions/validation";
 const OBJECT_VALIDATION: &str = "/sap/bc/adt/oo/validation/objectname";
 const GROUPS: &str = "/sap/bc/adt/functions/groups";
@@ -233,6 +234,15 @@ fn is_group_search(query: &str) -> bool {
         .is_some_and(|name| is_name(name, false))
 }
 
+/// `nodestructure?parent_type=FUGR%2FF&parent_name=<NAME>&withShortDescriptions=false`, the
+/// member listing of a function group that a delete plan reads.
+fn is_group_members(query: &str) -> bool {
+    query
+        .strip_prefix("parent_type=FUGR%2FF&parent_name=")
+        .and_then(|rest| rest.strip_suffix("&withShortDescriptions=false"))
+        .is_some_and(|name| is_name(name, false))
+}
+
 fn is_put(path: &str, query: Option<&str>) -> bool {
     let Some(parsed) = parse_path(path) else {
         return false;
@@ -255,6 +265,10 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
 
     if path == USAGE_REFERENCES {
         return query.is_some_and(is_where_used_object);
+    }
+
+    if path == NODE_STRUCTURE {
+        return request.body.is_empty() && query.is_some_and(is_group_members);
     }
 
     if path == FUNCTION_VALIDATION || path == OBJECT_VALIDATION {

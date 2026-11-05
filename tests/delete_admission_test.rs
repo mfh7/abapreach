@@ -170,3 +170,67 @@ fn bare_reads_stay_limited_to_the_object_itself() {
         Request::get("/sap/bc/adt/oo/classes/%2fns%2fcl"),
     ]);
 }
+
+const MEMBERS: &str = "/sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&parent_name=ZFG&withShortDescriptions=false";
+
+#[test]
+fn the_function_group_member_listing_is_admitted() {
+    assert_admitted(&[
+        Request::post(MEMBERS, Vec::new()),
+        Request::post(MEMBERS.replace("ZFG", "yfg_utils"), Vec::new()),
+    ]);
+}
+
+#[test]
+fn nothing_else_of_nodestructure_opens() {
+    let path = "/sap/bc/adt/repository/nodestructure";
+    let mut body = Request::post(MEMBERS, Vec::new());
+    body.body = b"x".to_vec();
+
+    assert_refused(&[
+        body,
+        Request::get(MEMBERS),
+        Request::get(path),
+        Request::post(path, Vec::new()),
+        Request::post(format!("{path}?"), Vec::new()),
+        Request::delete(MEMBERS),
+        Request::put(MEMBERS, Vec::new()),
+        Request::new("post", MEMBERS, Vec::new()),
+        // Other parent types.
+        Request::post(MEMBERS.replace("FUGR%2FF", "DEVC%2FK"), Vec::new()),
+        Request::post(MEMBERS.replace("FUGR%2FF", "FUGR%2FFF"), Vec::new()),
+        Request::post(MEMBERS.replace("FUGR%2FF", "fugr%2Ff"), Vec::new()),
+        Request::post(MEMBERS.replace("FUGR%2FF", "FUGR/F"), Vec::new()),
+        // Extra, missing, reordered or renamed parameters.
+        Request::post(format!("{MEMBERS}&x=1"), Vec::new()),
+        Request::post(format!("{MEMBERS}&"), Vec::new()),
+        Request::post(
+            MEMBERS.replace("&withShortDescriptions=false", ""),
+            Vec::new(),
+        ),
+        Request::post(MEMBERS.replace("parent_type=FUGR%2FF&", ""), Vec::new()),
+        Request::post(MEMBERS.replace("false", "true"), Vec::new()),
+        Request::post(
+            "/sap/bc/adt/repository/nodestructure?parent_name=ZFG&parent_type=FUGR%2FF&withShortDescriptions=false",
+            Vec::new(),
+        ),
+        Request::post(
+            "/sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&withShortDescriptions=false&parent_name=ZFG",
+            Vec::new(),
+        ),
+        // Bad names.
+        Request::post(MEMBERS.replace("ZFG", ""), Vec::new()),
+        Request::post(MEMBERS.replace("ZFG", "A B"), Vec::new()),
+        Request::post(MEMBERS.replace("ZFG", "A%2FB"), Vec::new()),
+        Request::post(MEMBERS.replace("ZFG", "../ZFG"), Vec::new()),
+        Request::post(MEMBERS.replace("ZFG", "ZFG&x=1"), Vec::new()),
+        Request::post(MEMBERS.replace("ZFG", "ZFG&parent_name=OTHER"), Vec::new()),
+        // A fragment, and a path that only starts like the endpoint.
+        Request::post(format!("{MEMBERS}#frag"), Vec::new()),
+        Request::post(
+            MEMBERS.replace("nodestructure", "nodestructure/x"),
+            Vec::new(),
+        ),
+        Request::post(MEMBERS.replace("nodestructure", "nodepath"), Vec::new()),
+    ]);
+}

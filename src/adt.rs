@@ -150,38 +150,122 @@ pub fn responsible_of(xml: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// The function modules a function group document links to: every attribute value that holds
-/// `/fmodules/<name>`, upper-cased, each module once and sorted.
+/// The member listing of a function group: `POST <this>` with no body. Unlike the group metadata,
+/// which carries no function module link, it names every function module of the group.
+pub fn group_nodestructure_uri(group: &str) -> String {
+    format!(
+        "/sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&parent_name={}&withShortDescriptions=false",
+        group.to_ascii_uppercase()
+    )
+}
+
+/// The function modules in a `nodestructure` answer: the `OBJECT_NAME` of every node of type
+/// `FUGR/FF`, upper-cased, each once and sorted. Includes (`FUGR/I`) are ignored. The answer is
+/// an error, never an empty list, when it is not a complete document with a `TREE_CONTENT` (a
+/// group the server does not know answers 200 with an empty body, a cut body has no closing tag),
+/// when a function module has no valid name, or when the object type summary names `FUGR/FF` but
+/// no such node was listed.
 pub fn group_members(xml: &str) -> Result<Vec<String>, String> {
     let mut reader = Reader::from_str(xml);
     let mut members = std::collections::BTreeSet::new();
+    let mut tree = false;
+    let mut in_node = false;
+    let mut in_types = false;
+    let mut summary_has_modules = false;
+    let mut field = String::new();
+    let mut object_type = String::new();
+    let mut object_name = String::new();
 
     loop {
         match reader.read_event().map_err(|error| error.to_string())? {
-            Event::Start(element) | Event::Empty(element) => {
-                for attribute in element.attributes() {
-                    let attribute = attribute.map_err(|error| error.to_string())?;
-                    let value = attribute
-                        .normalized_value(XmlVersion::Implicit1_0)
-                        .map_err(|error| error.to_string())?;
+            Event::Start(element) => {
+                field = local_name(&element).to_owned();
 
-                    if let Some((_, tail)) = value.rsplit_once("/fmodules/") {
-                        let name = tail.split(['/', '?']).next().unwrap_or_default();
+                match field.as_str() {
+                    "SEU_ADT_REPOSITORY_OBJ_NODE" => {
+                        in_node = true;
+                        object_type.clear();
+                        object_name.clear();
+                    }
+                    "OBJECT_TYPES" => in_types = true,
+                    _ => {}
+                }
+            }
+            Event::Empty(element) => {
+                tree |= local_name(&element) == "TREE_CONTENT";
+            }
+            Event::Text(text) => {
+                let text = text.xml_content(XmlVersion::Implicit1_0);
 
-                        if !name.is_empty()
-                            && name
-                                .bytes()
-                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-                        {
-                            members.insert(name.to_ascii_uppercase());
+                push_field(&field, &text, &mut object_type, &mut object_name, in_node);
+                summary_has_modules |=
+                    in_types && !in_node && field == "OBJECT_TYPE" && text == "FUGR/FF";
+            }
+            Event::CData(text) => {
+                let text = text.into_inner().into_owned();
+
+                push_field(&field, &text, &mut object_type, &mut object_name, in_node);
+                summary_has_modules |=
+                    in_types && !in_node && field == "OBJECT_TYPE" && text == "FUGR/FF";
+            }
+            Event::End(element) => {
+                field.clear();
+
+                match element.local_name().into_inner() {
+                    "TREE_CONTENT" => tree = true,
+                    "OBJECT_TYPES" => in_types = false,
+                    "SEU_ADT_REPOSITORY_OBJ_NODE" => {
+                        in_node = false;
+
+                        if object_type == "FUGR/FF" {
+                            if !is_member_name(&object_name) {
+                                return Err(format!(
+                                    "invalid function module name {object_name:?}"
+                                ));
+                            }
+
+                            members.insert(object_name.to_ascii_uppercase());
                         }
                     }
+                    _ => {}
                 }
+            }
+            Event::Eof if !tree => {
+                return Err("the member listing has no complete TREE_CONTENT".to_owned());
+            }
+            Event::Eof if members.is_empty() && summary_has_modules => {
+                return Err("the member listing names function modules but lists none".to_owned());
             }
             Event::Eof => return Ok(members.into_iter().collect()),
             _ => {}
         }
     }
+}
+
+fn push_field(
+    field: &str,
+    text: &str,
+    object_type: &mut String,
+    object_name: &mut String,
+    in_node: bool,
+) {
+    if !in_node {
+        return;
+    }
+
+    match field {
+        "OBJECT_TYPE" => object_type.push_str(text),
+        "OBJECT_NAME" => object_name.push_str(text),
+        _ => {}
+    }
+}
+
+/// A function module name: at most 30 of letters, digits, `_` and `/` (namespace).
+fn is_member_name(name: &str) -> bool {
+    (1..=30).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'/')
 }
 
 /// One entry of `GET <source>/versions`: the version number and the user who wrote it.

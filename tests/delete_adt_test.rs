@@ -21,6 +21,7 @@ const GROUP: &str = "/sap/bc/adt/functions/groups/zfg";
 const FM: &str = "/sap/bc/adt/functions/groups/zfg/fmodules/zfm";
 const CLAS: &str = "/sap/bc/adt/oo/classes/zcl_a";
 const INTF: &str = "/sap/bc/adt/oo/interfaces/zif_a";
+const MEMBERS: &str = "/sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&parent_name=ZFG&withShortDescriptions=false";
 const LOCK: &str = "?_action=LOCK&accessMode=MODIFY";
 const SEARCH: &str = "/sap/bc/adt/repository/informationsystem/search?operation=quickSearch&query=ZFM&maxResults=10&objectType=FUGR%2FFF";
 
@@ -436,26 +437,200 @@ fn a_function_module_resolves_its_group_and_reports_where_used() {
     assert_eq!(facts.where_used, ["PROG/P ZCALLER"]);
 }
 
+fn group_metadata() -> String {
+    "<group:abapFunctionGroup xmlns:group=\"g\" xmlns:adtcore=\"http://www.sap.com/adt/core\" \
+     adtcore:responsible=\"OWNER\"><adtcore:packageRef adtcore:name=\"$TMP\"/>\
+     </group:abapFunctionGroup>"
+        .to_owned()
+}
+
+fn node(object_type: &str, name: &str) -> String {
+    format!(
+        "<SEU_ADT_REPOSITORY_OBJ_NODE><OBJECT_TYPE>{object_type}</OBJECT_TYPE>\
+         <OBJECT_NAME>{name}</OBJECT_NAME></SEU_ADT_REPOSITORY_OBJ_NODE>"
+    )
+}
+
+fn listing(nodes: &str) -> String {
+    format!(
+        "<asx:abap xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA>\
+         <TREE_CONTENT>{nodes}</TREE_CONTENT></DATA></asx:values></asx:abap>"
+    )
+}
+
+fn inspect_group(listing: Fake) -> (Result<Option<ObjectFacts>, String>, Calls) {
+    let (result, calls, _) = with_backend(listing, vec![], |backend| {
+        backend.inspect(DeleteKind::Fugr, "ZFG")
+    });
+
+    (result, calls)
+}
+
 #[test]
 fn a_function_group_reports_its_members_and_has_no_source() {
-    let group = format!(
-        "<group:abapFunctionGroup xmlns:group=\"g\" xmlns:adtcore=\"http://www.sap.com/adt/core\" \
-         xmlns:atom=\"http://www.w3.org/2005/Atom\" adtcore:responsible=\"OWNER\">\
-         <adtcore:packageRef adtcore:name=\"$TMP\"/>\
-         <atom:link href=\"{GROUP}/fmodules/zfm_b\" rel=\"x\"/>\
-         <atom:link href=\"{GROUP}/fmodules/zfm_a\" rel=\"x\"/>\
-         <atom:link href=\"{GROUP}/fmodules/zfm_a\" rel=\"y\"/></group:abapFunctionGroup>"
-    );
-    let (result, calls, _) =
-        with_backend(Fake::default().get(GROUP, 200, &group), vec![], |backend| {
-            backend.inspect(DeleteKind::Fugr, "ZFG")
-        });
+    let nodes = [
+        node("FUGR/FF", "ZFM_B"),
+        node("FUGR/I", "LZFGTOP"),
+        node("FUGR/FF", "zfm_a"),
+        node("FUGR/FF", "ZFM_A"),
+    ]
+    .concat();
+    let main =
+        Fake::default()
+            .get(GROUP, 200, &group_metadata())
+            .post(MEMBERS, 200, &listing(&nodes));
+    let (result, calls) = inspect_group(main);
     let facts = facts(result);
 
     assert_eq!(facts.contents, ["FUNC ZFM_A", "FUNC ZFM_B"]);
     assert!(facts.sources.is_empty());
     assert_eq!(facts.inactive, InactiveFact::Absent);
-    assert_eq!(uris(&calls), [format!("GET {GROUP}")]);
+    assert_eq!(
+        uris(&calls),
+        [format!("GET {GROUP}"), format!("POST {MEMBERS}")]
+    );
+
+    let post = &calls.borrow()[1];
+
+    assert!(post.body.is_empty());
+    assert_eq!(
+        post.headers.get("Accept").map(String::as_str),
+        Some("application/*")
+    );
+}
+
+#[test]
+fn a_function_group_without_function_modules_has_no_members() {
+    let main = Fake::default().get(GROUP, 200, &group_metadata()).post(
+        MEMBERS,
+        200,
+        &listing(&node("FUGR/I", "LZFGTOP")),
+    );
+
+    assert!(facts(inspect_group(main).0).contents.is_empty());
+}
+
+#[test]
+fn the_recorded_member_listing_yields_its_function_module_and_ignores_its_includes() {
+    let recorded = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/m4/nodestructure-hd1-yfg-utils.xml"
+    ))
+    .unwrap();
+    let uri = "/sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&parent_name=YFG_UTILS&withShortDescriptions=false";
+    let main = Fake::default()
+        .get(
+            "/sap/bc/adt/functions/groups/yfg_utils",
+            200,
+            &group_metadata(),
+        )
+        .post(uri, 200, &recorded);
+    let (result, _, _) = with_backend(main, vec![], |backend| {
+        backend.inspect(DeleteKind::Fugr, "YFG_UTILS")
+    });
+
+    assert_eq!(facts(result).contents, ["FUNC YFM_UTILS_SOURCE_DEPLOY"]);
+}
+
+#[test]
+fn the_recorded_listing_of_a_group_without_function_modules_is_an_empty_plan() {
+    let recorded = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/m4/nodestructure-hd1-empty-group.xml"
+    ))
+    .unwrap();
+    let uri = "/sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&parent_name=YTEST_ABAPREACH_PMEG1&withShortDescriptions=false";
+    let main = Fake::default()
+        .get(
+            "/sap/bc/adt/functions/groups/ytest_abapreach_pmeg1",
+            200,
+            &group_metadata(),
+        )
+        .post(uri, 200, &recorded);
+    let (result, _, _) = with_backend(main, vec![], |backend| {
+        backend.inspect(DeleteKind::Fugr, "YTEST_ABAPREACH_PMEG1")
+    });
+
+    assert!(facts(result).contents.is_empty());
+}
+
+#[test]
+fn a_function_module_that_has_only_an_inactive_version_is_a_member() {
+    let recorded = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/m4/nodestructure-hd1-inactive-fm.xml"
+    ))
+    .unwrap();
+    let uri = "/sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&parent_name=YTEST_ABAPREACH_PMEG3&withShortDescriptions=false";
+    let main = Fake::default()
+        .get(
+            "/sap/bc/adt/functions/groups/ytest_abapreach_pmeg3",
+            200,
+            &group_metadata(),
+        )
+        .post(uri, 200, &recorded);
+    let (result, _, _) = with_backend(main, vec![], |backend| {
+        backend.inspect(DeleteKind::Fugr, "YTEST_ABAPREACH_PMEG3")
+    });
+
+    assert_eq!(facts(result).contents, ["FUNC YTEST_ABAPREACH_PMEF3"]);
+}
+
+#[test]
+fn an_unusable_member_listing_fails_the_plan_instead_of_emptying_it() {
+    let answers = [
+        (500, listing("")),
+        (404, listing("")),
+        (200, String::new()),
+        (200, "not xml <".to_owned()),
+        (200, "<asx:abap xmlns:asx=\"urn:x\"/>".to_owned()),
+        // Cut after the first node: no closing TREE_CONTENT.
+        (
+            200,
+            listing(&node("FUGR/FF", "ZFM_A"))
+                .split("</TREE_CONTENT>")
+                .next()
+                .unwrap()
+                .to_owned(),
+        ),
+        // A function module without a usable name, in each spelling.
+        (200, listing(&node("FUGR/FF", ""))),
+        (200, listing(&node("FUGR/FF", "ZFM A"))),
+        (200, listing(&node("FUGR/FF", "ZFM<"))),
+        (200, listing(&node("FUGR/FF", &"Z".repeat(31)))),
+        (
+            200,
+            listing(
+                "<SEU_ADT_REPOSITORY_OBJ_NODE><OBJECT_TYPE>FUGR/FF</OBJECT_TYPE>\
+                 <OBJECT_NAME><![CDATA[]]></OBJECT_NAME></SEU_ADT_REPOSITORY_OBJ_NODE>",
+            ),
+        ),
+        // The summary names function modules, the tree lists none.
+        (
+            200,
+            listing(&node("FUGR/I", "LZFGTOP")).replace(
+                "</DATA>",
+                "<OBJECT_TYPES><SEU_ADT_OBJECT_TYPE_INFO><OBJECT_TYPE>FUGR/FF</OBJECT_TYPE>\
+                 </SEU_ADT_OBJECT_TYPE_INFO></OBJECT_TYPES></DATA>",
+            ),
+        ),
+    ];
+
+    for (status, body) in answers {
+        let main = Fake::default()
+            .get(GROUP, 200, &group_metadata())
+            .post(MEMBERS, status, &body);
+        let (result, _) = inspect_group(main);
+
+        assert!(
+            result.is_err(),
+            "{status} {body:?} must not give a plan: {result:?}"
+        );
+    }
+
+    let unscripted = Fake::default().get(GROUP, 200, &group_metadata());
+
+    assert!(inspect_group(unscripted).0.is_err());
 }
 
 // ---- delete ----------------------------------------------------------------------------------

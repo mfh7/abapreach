@@ -6,8 +6,8 @@
 //! answers is classified, never retried.
 
 use crate::adt::{
-    Caller, USAGE_REQUEST_XML, VersionEntry, group_members, package_of, parse_callers,
-    parse_versions, responsible_of, usage_references_uri,
+    Caller, USAGE_REQUEST_XML, VersionEntry, group_members, group_nodestructure_uri, package_of,
+    parse_callers, parse_versions, responsible_of, usage_references_uri,
 };
 use crate::cli::{DeleteKind, IncludeKind, ObjectKind};
 use crate::hash::local_source_lines;
@@ -90,6 +90,25 @@ impl<'a> AdtDelete<'a> {
             Some(error) => Err(error.to_string()),
             None => Ok(response),
         }
+    }
+
+    /// The function modules of a group. The group metadata links none, so the member listing is
+    /// read; a failed read fails the plan rather than leaving the members out of it.
+    fn members(&mut self, group: &str) -> Result<Vec<String>, String> {
+        let mut request = Request::post(group_nodestructure_uri(group), Vec::new());
+        request
+            .headers
+            .insert("Accept".to_owned(), "application/*".to_owned());
+        let response = self.send(request)?;
+
+        if response.status != 200 {
+            return Err(format!("member listing: HTTP {}", response.status));
+        }
+
+        let xml = String::from_utf8(response.body)
+            .map_err(|error| format!("member listing is not UTF-8: {error}"))?;
+
+        group_members(&xml).map_err(|error| format!("member listing: {error}"))
     }
 
     /// The ADT URI of the object, and for a function module its group, which the server resolves
@@ -345,7 +364,8 @@ impl DeleteBackend for AdtDelete<'_> {
 
         match kind {
             DeleteKind::Fugr => {
-                contents = group_members(&xml)?
+                contents = self
+                    .members(name)?
                     .into_iter()
                     .map(|member| format!("FUNC {member}"))
                     .collect();

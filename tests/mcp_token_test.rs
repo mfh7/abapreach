@@ -980,3 +980,88 @@ fn a_failed_create_simulation_issues_no_token() {
     assert!(simulated.is_error, "{}", simulated.text);
     assert!(simulated.structured.get("plan_token").is_none());
 }
+
+fn group_reads(requests: &Log, members: &[&str]) -> Script {
+    let nodes: String = members
+        .iter()
+        .map(|member| {
+            format!(
+                "<SEU_ADT_REPOSITORY_OBJ_NODE><OBJECT_TYPE>FUGR/FF</OBJECT_TYPE>\
+                 <OBJECT_NAME>{member}</OBJECT_NAME></SEU_ADT_REPOSITORY_OBJ_NODE>"
+            )
+        })
+        .collect();
+    let listing = format!(
+        "<asx:abap xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA>\
+         <TREE_CONTENT>{nodes}</TREE_CONTENT></DATA></asx:values></asx:abap>"
+    );
+
+    Script::new(requests)
+        .get(
+            "/sap/bc/adt/functions/groups/zfg",
+            200,
+            &metadata("OWNER"),
+        )
+        .post(
+            "/sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&parent_name=ZFG&withShortDescriptions=false",
+            200,
+            &listing,
+        )
+}
+
+#[test]
+fn a_function_group_delete_lists_its_members_and_the_token_binds_them() {
+    let mut rig = rig(TOKEN);
+    let requests = log();
+    let mut session = FakeSession::typing("ZFG");
+    let delete = json!({"conn": "DEV_100", "objects": ["FUGR:ZFG"]});
+
+    rig.adt(group_reads(&requests, &["ZFM_A", "ZFM_B"]));
+
+    let simulated = rig.call(&mut session, "abap_delete_simulate", delete.clone());
+    let token = token_of(&simulated);
+
+    assert!(simulated.text.contains("FUNC ZFM_A"), "{}", simulated.text);
+    assert!(simulated.text.contains("FUNC ZFM_B"), "{}", simulated.text);
+    assert!(any(
+        &requests,
+        "POST /sap/bc/adt/repository/nodestructure?parent_type=FUGR%2FF&parent_name=ZFG"
+    ));
+
+    // A function module appeared after the simulation: the plan no longer matches, so nothing is
+    // locked or deleted.
+    rig.adt(group_reads(&requests, &["ZFM_A", "ZFM_B", "ZFM_C"]));
+
+    let result = rig.call(&mut session, "abap_delete", with_token(delete, &token));
+
+    assert!(result.is_error, "{}", result.text);
+    assert!(
+        result.text.contains("Plan changed since simulate"),
+        "{}",
+        result.text
+    );
+    assert!(!any(&requests, "DELETE "));
+    assert!(!any(&requests, "_action=LOCK"));
+}
+
+#[test]
+fn a_function_group_delete_without_a_member_listing_issues_no_token() {
+    let mut rig = rig(TOKEN);
+    let requests = log();
+    let mut session = FakeSession::typing("ZFG");
+
+    rig.adt(Script::new(&requests).get(
+        "/sap/bc/adt/functions/groups/zfg",
+        200,
+        &metadata("OWNER"),
+    ));
+
+    let simulated = rig.call(
+        &mut session,
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["FUGR:ZFG"]}),
+    );
+
+    assert!(simulated.structured.get("plan_token").is_none());
+    assert!(!any(&requests, "DELETE "));
+}
