@@ -2443,6 +2443,80 @@ fn a_delete_with_a_plan_file_falls_back_to_rfc_when_adt_fails_before_sending() {
     assert_eq!(fake.rfc_opened, 2);
 }
 
+/// An ADT that answers reads but sets no context cookie: its stateless verdict comes with the
+/// first reply, as on a server that keeps no stateful session.
+struct NoContext {
+    inner: ScriptedTransport,
+    answered: bool,
+}
+
+impl SadtTransport for NoContext {
+    fn request(
+        &mut self,
+        request: abapreach::transport::Request,
+    ) -> Result<Response, TransportError> {
+        self.answered = true;
+
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        self.answered.then_some(false)
+    }
+}
+
+#[test]
+fn a_delete_plan_runs_on_rfc_when_adt_keeps_no_stateful_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan_path = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    // The simulation reads on RFC as well: ADT showed it cannot lock.
+    fake.adt.push_back(Ok(Box::new(NoContext {
+        inner: ScriptedTransport::replies(delete_facts()),
+        answered: false,
+    })));
+    fake.rfc.push_back(scripted(delete_facts()));
+
+    let simulated = go(&delete_args(plan_path, true), directory.path(), &mut fake);
+
+    assert_eq!(simulated.code, 0, "{}", simulated.stderr);
+    assert!(
+        simulated.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        simulated.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+
+    let mut replies = delete_facts();
+
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Ok(Response::empty(200)));
+    fake.adt.push_back(Ok(Box::new(NoContext {
+        inner: ScriptedTransport::replies(delete_facts()),
+        answered: false,
+    })));
+    fake.rfc.push_back(scripted(replies));
+    fake.rfc
+        .push_back(scripted(vec![Ok(Response::text(404, "<exc/>"))]));
+
+    let deleted = go(&delete_args(plan_path, false), directory.path(), &mut fake);
+
+    assert_eq!(deleted.code, 0, "{} {}", deleted.stdout, deleted.stderr);
+    assert!(deleted.stdout.contains("DELETED"), "{}", deleted.stdout);
+    assert!(
+        deleted.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        deleted.stderr
+    );
+    assert_eq!(fake.rfc_opened, 3);
+}
+
 /// Cancels the run, as Ctrl-C does, and then fails before sending.
 struct CancelThenFail(CancelFlag);
 

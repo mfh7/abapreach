@@ -744,7 +744,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                         None => delete::simulate(&mut backend, &context, &targets, tr),
                     };
 
-                    (result, backend.unsent_failure().map(str::to_owned))
+                    (result, backend.unsent_failure())
                 };
 
                 // The batch is over and the lock, if any, is reported by the outcome.
@@ -762,8 +762,18 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
 
                         report = Some(done);
 
-                        if let Some(message) = fallback {
-                            return Attempt::failed(message, Failure::PreSendConnectivity);
+                        if let Some((failure, message)) = fallback {
+                            // A simulation that moves on must not leave its results behind: if the
+                            // next backend cannot even open, they would read as SIMULATED_OK.
+                            // Only an execute pinned to this backend keeps them.
+                            if plan.is_none() {
+                                report = None;
+                            }
+
+                            return Attempt {
+                                fallback_allowed: true,
+                                ..Attempt::failed(message, failure)
+                            };
                         }
 
                         Attempt {
@@ -776,8 +786,11 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                     Err(message) => {
                         report = None;
 
-                        if let Some(message) = fallback {
-                            return Attempt::failed(message, Failure::PreSendConnectivity);
+                        if let Some((failure, message)) = fallback {
+                            return Attempt {
+                                fallback_allowed: true,
+                                ..Attempt::failed(message, failure)
+                            };
                         }
 
                         Attempt {

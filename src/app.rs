@@ -476,7 +476,7 @@ fn execute(
                         &mut || cancel.is_set(),
                     );
 
-                    (outcome, backend.unsent_failure().map(str::to_owned))
+                    (outcome, backend.unsent_failure())
                 };
                 if !simulate && cancel.is_set() {
                     outcome.exit = 130;
@@ -487,9 +487,12 @@ fn execute(
 
                 // A read that never left the process and no delete request sent: the plan file
                 // pins no backend, so RFC may run the whole batch, unless Ctrl-C came first.
-                if let Some(message) = unsent {
+                if let Some((failure, message)) = unsent {
                     if !cancel.is_set() {
-                        return Attempt::failed(message, Failure::PreSendConnectivity);
+                        return Attempt {
+                            fallback_allowed: true,
+                            ..Attempt::failed(message, failure)
+                        };
                     }
 
                     outcome.exit = 130;

@@ -82,8 +82,21 @@ impl<'a> AdtDelete<'a> {
 
     /// The pre-send connectivity failure of a read when no write has started: the whole batch can
     /// then run again on another backend, because nothing was changed.
-    pub fn unsent_failure(&self) -> Option<&str> {
-        self.unsent.as_deref().filter(|_| !self.wrote)
+    /// A transport that keeps no stateful session cannot hold the lock, so the batch cannot run
+    /// here at all, whether it simulates or deletes.
+    pub fn unsent_failure(&self) -> Option<(Failure, String)> {
+        if self.wrote {
+            return None;
+        }
+
+        match &self.unsent {
+            Some(message) => Some((Failure::PreSendConnectivity, message.clone())),
+            None if self.transport.stateful_supported() == Some(false) => Some((
+                Failure::CapabilityUnavailable,
+                NO_STATEFUL_SESSION.to_owned(),
+            )),
+            None => None,
+        }
     }
 
     fn get(&mut self, uri: &str, accept: &str) -> Result<Response, String> {

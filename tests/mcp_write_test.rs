@@ -1205,6 +1205,127 @@ fn a_delete_token_pinned_to_adt_does_not_fall_back_when_adt_fails_before_sending
     );
 }
 
+/// An ADT that answers reads but sets no context cookie: the stateless verdict comes with the
+/// first reply.
+struct NoContext {
+    inner: Script,
+    answered: bool,
+}
+
+impl SadtTransport for NoContext {
+    fn request(&mut self, request: Request) -> Reply {
+        self.answered = true;
+
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        self.answered.then_some(false)
+    }
+}
+
+#[test]
+fn a_delete_simulation_on_an_adt_that_keeps_no_session_runs_on_rfc_and_the_token_binds_rfc() {
+    let mut rig = rig();
+    let requests = log();
+
+    rig.adt(NoContext {
+        inner: prog_reads(&requests, "OWNER"),
+        answered: false,
+    });
+    rig.rfc(prog_reads(&requests, "OWNER"));
+
+    let simulated = rig.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+
+    assert!(!simulated.is_error, "{}", simulated.text);
+    assert_eq!(rig.opened(), (1, 1));
+    assert!(
+        simulated.text.contains("falling back to RFC SADT"),
+        "{}",
+        simulated.text
+    );
+    assert_eq!(rig.gate.issued()[0].backend, Some(BackendKind::RfcSadt));
+}
+
+#[test]
+fn a_delete_token_pinned_to_adt_does_not_fall_back_when_adt_keeps_no_session() {
+    let mut rig = rig();
+    let requests = log();
+
+    rig.adt(prog_reads(&requests, "OWNER"));
+
+    let simulated = rig.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+
+    assert_eq!(rig.gate.issued()[0].backend, Some(BackendKind::AdtHttp));
+    rig.adt(NoContext {
+        inner: prog_reads(&requests, "OWNER"),
+        answered: false,
+    });
+    rig.rfc(prog_reads(&requests, "OWNER"));
+    requests.borrow_mut().clear();
+
+    let result = rig.call_as(
+        &mut Typing("ZPROG"),
+        "abap_delete",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"],
+               "plan_token": simulated.structured["plan_token"]}),
+    );
+
+    assert!(result.is_error, "{}", result.text);
+    assert_eq!(rig.opened(), (2, 0));
+    assert!(result.text.contains("plan_token"), "{}", result.text);
+    assert!(!result.text.contains("--backend"), "{}", result.text);
+    // Only reads left: no lock, no delete.
+    assert!(
+        requests
+            .borrow()
+            .iter()
+            .all(|request| request.starts_with("GET ")),
+        "{:?}",
+        requests.borrow()
+    );
+}
+
+#[test]
+fn a_simulation_that_moved_on_and_failed_shows_no_results_of_the_abandoned_backend() {
+    let mut rig = rig();
+    let requests = log();
+
+    rig.adt(NoContext {
+        inner: prog_reads(&requests, "OWNER"),
+        answered: false,
+    });
+    rig.fake
+        .rfc
+        .push_back(Err(TransportError::PreSendConnectivity(
+            "no route".to_owned(),
+        )));
+
+    let result = rig.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+
+    assert!(result.is_error, "{}", result.text);
+    assert!(!result.text.contains("SIMULATED_OK"), "{}", result.text);
+    assert!(
+        !result.structured.to_string().contains("SIMULATED_OK"),
+        "{}",
+        result.structured
+    );
+    assert!(result.structured.get("plan_token").is_none());
+}
+
 /// Waits, then lets `inner` answer: the call outlives its time limit on the first backend.
 struct Slow {
     inner: Script,
