@@ -460,6 +460,30 @@ function group named with `--fugr`; `--package` is not valid for `create FUNC`. 
 for a `$TMP` package, and a transportable package requires `--tr`. The live matrix does not
 exercise the name and text limits.
 
+## Read a table and delete objects
+
+`read-table` reads rows of one table through the ADT data preview:
+
+```text
+abapreach read-table T000 --fields MANDT,MTEXT --rows 3 --conn DEV
+```
+
+`--rows` takes 1 to 5000 (default 100). `--where` takes a condition with fields, comparison
+operators, `AND`, `OR`, `NOT`, parentheses and literals. Tables on the read-table deny list are
+refused; see [MCP server: Trust boundaries](mcp.md#trust-boundaries).
+
+`delete` removes objects only from a plan written by `--simulate`:
+
+```text
+abapreach delete --simulate PROG:ZEXAMPLE --plan delete.plan --conn DEV
+abapreach delete PROG:ZEXAMPLE --plan delete.plan --conn DEV
+```
+
+Add `--tr TRKORR` when the object is transportable. Delete has a reconciliation and recovery
+path; see [Deploy safety: Delete](deploy-safety.md#delete).
+
+To use ABAPReach from an AI assistant, see [MCP server](mcp.md).
+
 ## Tested environment
 
 The release matrix ran the object kinds above on each platform and path, against two systems. The

@@ -14,7 +14,7 @@ moves to the [changelog](../CHANGELOG.md).
 | 0.11.1 | Fixes from the three-path live test, SAProuter route outside the shared config (released) |
 | 0.12.0 | Windows and Linux: RFC library lookup per platform, live tests on every path, CI builds (released) |
 | 0.13.0 | Function modules, classes with local includes, interfaces: read and deploy; create of function groups, function modules, classes and interfaces; read with line ranges |
-| 0.14.0 | MCP server |
+| 0.14.0 | MCP server (stdio), `read-table`, `delete` (released) |
 | later | The remaining features below, one milestone at a time |
 
 Platforms come before new features, so every feature after 0.12.0 is built and tested on
@@ -83,7 +83,6 @@ and a table that holds data is not deleted.
 
 | Feature | Python origin | Path |
 | :--- | :--- | :--- |
-| Delete with a reviewed plan | `rfc-deploy delete` | EXT |
 | Version list and diff | `rfc-read versions` | ADT? |
 | Restore an old version | `rfc-deploy restore` | EXT |
 | Inactive objects, activation | `inactive`, `activate` | ADT |
@@ -110,13 +109,24 @@ and a table that holds data is not deleted.
 | `install` of the EXT objects | new | ADT |
 | `doctor`: installed objects, capabilities | new | ADT, RFC |
 
-## MCP server
+## Shipped in 0.14.0
 
-The same binary will run as an MCP server over stdio, so AI assistants can use ABAPReach.
-Each MCP tool maps to one CLI operation with the same guards. Writes keep the gate of the
-Python MCP server: a simulate returns a plan token, and only a write that presents that token
-runs. The Python server offered `read_source`, `read_table`, `simulate`, `deploy`, `create`,
-`create_simulate`, `delete` and `delete_simulate`; all of them return in Rust.
+| Feature | Python origin | Path |
+| :--- | :--- | :--- |
+| Read a table through the data preview (`read-table`) | `rfc-read table` | ADT, RFC SADT for the admitted shape |
+| Delete with a reviewed plan (`delete`) | `rfc-deploy delete` | ADT, RFC SADT fallback before the first LOCK |
+| MCP server (`abapreach mcp`): read tools, write tools behind `mcp_write` | MCP server (Python) | stdio |
+
+Setup and limits: [MCP server](mcp.md) and [Deploy safety: Delete](deploy-safety.md#delete).
+
+## MCP server (0.14.0)
+
+`abapreach mcp` serves the tools over stdio. Each MCP tool maps to one CLI operation with the
+same guards. Writes need a `plan_token` from a simulate, and `mcp_write` decides whether a human
+must also confirm. The tool list is in [MCP server](mcp.md#tools).
+
+Not yet in 0.14.0: Codex client support (not verified in this release); restore of an old version
+(`rfc-deploy restore`); creation of programs and includes.
 
 ## Platforms and distribution
 

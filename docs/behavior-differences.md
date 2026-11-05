@@ -214,3 +214,16 @@ the ADT route (`tests/delete_operation_test.rs`). Intentional differences:
   do not apply on the ADT route (system change option, `CCNOCLIIND`, SE06 and software
   component, server-side self-guard).
 - Backend fallback: when ADT HTTP fails before sending (connect, DNS, TLS) while the batch only reads, the whole batch runs again on RFC SADT and prints the usual `falling back to RFC SADT` note. This holds until the first LOCK or DELETE request is started; after that, and after a post-send, authorization, conflict or validation failure, there is no fallback. A Ctrl-C or an MCP time limit that passed ends the call instead of opening RFC. The CLI plan file records no backend (as in Python), so `delete --plan` may therefore execute on a different backend than the one that simulated, before any write; the execute re-reads and re-hashes every object, so a difference between the two routes is a `REJECTED` object, never a wrong delete. An MCP `plan_token` pins the backend it was issued for: its execute never falls back and reports that the `plan_token` pins the backend.
+
+## MCP server and `read-table` (M4, 0.14.0)
+
+- The Python tooling has an MCP server. `abapreach mcp` ports its tools and its plan-token gate
+  to the Rust CLI; see [MCP server](mcp.md).
+- The MCP write gate is stricter than the CLI: a `plan_token` is single-use and lives 15 minutes,
+  `mcp_write` defaults to `off`, and a delete always needs a human confirmation through
+  elicitation. The CLI has no token.
+- `read-table` rows: CLI 1 to 5000, MCP 1 to 1000 (default 100). A value outside the range is a
+  `STOP` with exit 2 on the CLI.
+- `delete`: the Python tooling deletes through `rfc-deploy`. The Rust delete runs ADT HTTP
+  first and falls back to RFC SADT only before the first LOCK; the plan file records no backend.
+  See [Deploy safety: Delete](deploy-safety.md#delete).

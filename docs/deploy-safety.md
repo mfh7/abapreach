@@ -214,6 +214,43 @@ The matrix covers the PUT and activation reply drops on the RFC paths: a dropped
 reports `INACTIVE`, a dropped activation reply reports `ACTIVE (reconciled)`, both exit 1, and
 neither is retried. ADT HTTP has no fault injection.
 
+## Delete
+
+`delete` removes objects only from a plan written by `--simulate`. Simulate reports the objects,
+their transport request and where-used references; no object is changed.
+
+- **Confirmation.** A delete through MCP always needs a human confirmation: the typed object name
+  (or `DELETE <n>` for a batch of n). In `token` and `confirm` mode alike. A client that cannot
+  answer the form is refused. See [MCP server](mcp.md#mcp_write).
+- **Reconciliation.** When the reply of a delete is lost, ABAPReach reads the object once from a
+  new session and never sends the delete again. The result is one of:
+  - `DELETED (reconciled)`: a new session no longer finds the object. The message says
+    `check before retrying`, and the exit code is 1.
+  - `PARTIAL`: the status is unknown. The object still exists, or the check failed. The message
+    names a possible remaining lock. Read the object before any retry.
+  The objects after the uncertain one are `SKIPPED`; the batch stops.
+- **Backend.** ADT HTTP runs first. When ADT fails before anything is sent (connect, DNS, TLS),
+  the batch runs again on RFC SADT with the usual note. After the first LOCK or DELETE is sent,
+  there is no fallback. An MCP `plan_token` pins its backend and never falls back.
+- **Transport request.** An object in your own request follows that request. An explicit `--tr`
+  that differs from the request of the lock is rejected. An object locked in another user's
+  request is rejected, and so is a transportable object without a request. Transport-request
+  checks run at execute time, because simulate does not lock the object.
+- **Rollback.** There is no automatic rollback and no restore step in this release. A deleted
+  object is not restored by ABAPReach; restore is in the [roadmap](roadmap.md) (`Versions, restore,
+  activation`).
+
+## Cancellation and SIGKILL
+
+- A write cancelled while it runs ends at its safe point with exit 130: unlock and nothing
+  further written. A cancel after the source PUT ends as
+  `PARTIAL: the new source is saved inactive and nothing was activated`. Through MCP, the next
+  tool result carries a `W:` line that ends with `check the object before retrying`.
+- A cancel before the request starts sends nothing.
+- SIGKILL cannot be caught. A write killed while it holds an ADT lock can leave that lock on the
+  object. Check the lock in transaction `SM12` before any retry. This release did not test
+  clearing it by hand.
+
 ## Status and exit summary
 
 | Result | Exit | Meaning |

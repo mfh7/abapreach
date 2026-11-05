@@ -5,7 +5,7 @@
 **Read and deploy ABAP source from the command line, over ADT HTTP or RFC, including
 systems you can only reach through SAProuter.**
 
-![version](https://img.shields.io/badge/version-0.13.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
+![version](https://img.shields.io/badge/version-0.14.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
 
 ```text
 $ abapreach deploy PROG ZDEMO ZDEMO.abap --base 63886692bf65... --conn A4H_001
@@ -291,7 +291,7 @@ and passes a live test.
   </tr>
   <tr>
     <td align="left">Create objects</td>
-    <td align="left"><b>0.13.0</b> for function groups, function modules, classes and interfaces; programs, includes and delete planned</td>
+    <td align="left"><b>0.13.0</b> for function groups, function modules, classes and interfaces; <b>0.14.0</b> delete; programs and includes planned</td>
   </tr>
   <tr>
     <td align="left">DDIC, messages, text pools, CDS, enhancements</td>
@@ -311,7 +311,7 @@ and passes a live test.
   </tr>
   <tr>
     <td align="left">MCP server</td>
-    <td align="left">planned</td>
+    <td align="left"><b>0.14.0</b> (stdio; read tools, token and confirm write policies); see <a href="docs/mcp.md">MCP server</a></td>
   </tr>
   <tr>
     <td align="left">Windows x64, Linux x64 and arm64 binaries</td>
@@ -344,6 +344,7 @@ switches to the other one. `--include` and `--create-include` apply to `CLAS` on
 
 - [Getting started](docs/getting-started.md): build, connection setup, first read and deploy.
 - [Deploy safety](docs/deploy-safety.md): guards, policies, exit codes, recovery.
+- [MCP server](docs/mcp.md): `abapreach mcp`, client setup, write policies and support by client.
 - [Behavior differences](docs/behavior-differences.md): where the Rust CLI differs from the
   Python tooling.
 - [Roadmap](docs/roadmap.md): every feature on the way to 1.0.0.
