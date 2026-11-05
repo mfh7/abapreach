@@ -18,6 +18,22 @@ const HOLD_LOCK: &str = "hold-lock";
 const HOLD_LOCK_MAX_MS: u64 = 60_000;
 const UNKNOWN: &str = "unknown ABAPREACH_FAULT value";
 
+thread_local! {
+    static DELETE_REPLY_DROPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Remembers that the reply of a delete was dropped. A delete reconciles from a new session, whose
+/// transport knows nothing of the drop, so the fault state is kept per thread: one operation runs
+/// on one thread, and parallel tests do not see each other's drops.
+pub fn note_delete_reply_dropped() {
+    DELETE_REPLY_DROPPED.with(|dropped| dropped.set(true));
+}
+
+/// Whether a delete reply was dropped on this thread: the reads that follow reconcile it.
+pub fn delete_reply_dropped() -> bool {
+    DELETE_REPLY_DROPPED.with(std::cell::Cell::get)
+}
+
 /// The write whose reply is dropped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Target {
@@ -56,7 +72,8 @@ impl Target {
 pub enum Fault {
     /// The request is sent and executed, then its reply is discarded.
     DropReply(Target),
-    /// The read-only reconciliation GET that follows a create `POST` fails without being sent.
+    /// The read-only reconciliation GET that follows a create `POST` or a delete whose reply was
+    /// dropped fails without being sent.
     FailReconcileRead,
     /// The deploy pauses this many milliseconds right after its LOCK succeeded.
     HoldLock(u64),
