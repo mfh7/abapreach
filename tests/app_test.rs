@@ -2386,6 +2386,188 @@ fn delete_simulates_then_deletes_on_adt_and_proves_it_from_a_fresh_session() {
 }
 
 #[test]
+fn a_delete_simulation_falls_back_to_rfc_when_adt_fails_before_sending() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan_path = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(scripted(delete_facts()));
+
+    let exit = go(&delete_args(plan_path, true), directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(exit.stdout.contains("SIMULATED_OK"), "{}", exit.stdout);
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert!(plan.exists());
+}
+
+#[test]
+fn a_delete_with_a_plan_file_falls_back_to_rfc_when_adt_fails_before_sending() {
+    // The plan file records no backend, so nothing pins the execution to the simulated one.
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan_path = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(delete_facts()));
+
+    let simulated = go(&delete_args(plan_path, true), directory.path(), &mut fake);
+
+    assert_eq!(simulated.code, 0, "{}", simulated.stderr);
+
+    let mut replies = delete_facts();
+
+    replies.push(Ok(Response::text(200, DELETE_LOCK)));
+    replies.push(Ok(Response::empty(200)));
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(scripted(replies));
+    fake.rfc
+        .push_back(scripted(vec![Ok(Response::text(404, "<exc/>"))]));
+
+    let deleted = go(&delete_args(plan_path, false), directory.path(), &mut fake);
+
+    assert_eq!(deleted.code, 0, "{} {}", deleted.stdout, deleted.stderr);
+    assert!(deleted.stdout.contains("DELETED"), "{}", deleted.stdout);
+    assert!(
+        deleted.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        deleted.stderr
+    );
+    assert_eq!(fake.rfc_opened, 2);
+}
+
+/// Cancels the run, as Ctrl-C does, and then fails before sending.
+struct CancelThenFail(CancelFlag);
+
+impl SadtTransport for CancelThenFail {
+    fn request(&mut self, _: abapreach::transport::Request) -> Result<Response, TransportError> {
+        self.0.set();
+
+        pre_send()
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_cancelled_delete_simulation_does_not_fall_back_to_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(Ok(Box::new(CancelThenFail(fake.cancel.clone()))));
+
+    // No RFC transport is scripted: opening one would panic.
+    let exit = go(
+        &delete_args(plan.to_str().unwrap(), true),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 130, "{} {}", exit.stdout, exit.stderr);
+    assert!(!exit.stderr.contains("falling back"), "{}", exit.stderr);
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn a_lock_that_fails_before_sending_never_falls_back_to_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let plan_path = plan.to_str().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(delete_facts()));
+
+    let simulated = go(&delete_args(plan_path, true), directory.path(), &mut fake);
+
+    assert_eq!(simulated.code, 0, "{}", simulated.stderr);
+
+    // The reads pass, then the LOCK fails before it is sent: a write was about to start.
+    let mut replies = delete_facts();
+
+    replies.push(pre_send());
+    fake.adt.push_back(scripted(replies));
+
+    let exit = go(&delete_args(plan_path, false), directory.path(), &mut fake);
+
+    assert_ne!(exit.code, 0, "{}", exit.stdout);
+    assert!(exit.stdout.contains("lock not sent"), "{}", exit.stdout);
+    assert!(!exit.stderr.contains("falling back"), "{}", exit.stderr);
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn a_function_group_resolution_that_fails_before_sending_falls_back_to_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    // RFC fails before sending too: the run ends, after it was tried.
+    fake.rfc.push_back(scripted(vec![pre_send()]));
+
+    let exit = go(
+        &[
+            "abapreach",
+            "delete",
+            "FUNC:ZTEST_FM",
+            "--simulate",
+            "--plan",
+            plan.to_str().unwrap(),
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn a_delete_does_not_fall_back_after_a_failure_that_is_not_pre_send() {
+    let failures = [
+        Err(TransportError::PostSendUncertain("reset".to_owned())),
+        Err(TransportError::Authorization("denied".to_owned())),
+        Ok(Response::text(401, "<exc/>")),
+    ];
+
+    for failure in failures {
+        let directory = tempfile::tempdir().unwrap();
+        let plan = directory.path().join("plan.json");
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(scripted(vec![failure]));
+        fake.rfc.push_back(scripted(delete_facts()));
+
+        let exit = go(
+            &delete_args(plan.to_str().unwrap(), true),
+            directory.path(),
+            &mut fake,
+        );
+
+        assert_ne!(exit.code, 0, "{}", exit.stdout);
+        assert!(!exit.stderr.contains("falling back"), "{}", exit.stderr);
+        assert_eq!(fake.rfc_opened, 0);
+    }
+}
+
+#[test]
 fn a_function_group_delete_plan_carries_the_members_from_the_member_listing() {
     let directory = tempfile::tempdir().unwrap();
     let plan = directory.path().join("plan.json");

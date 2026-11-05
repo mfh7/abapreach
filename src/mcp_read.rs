@@ -331,6 +331,15 @@ pub(crate) fn diagnostic(connection: &Connection, text: &str) -> String {
     let mut secrets = connection.secrets();
 
     secrets.extend(connection.hosts());
+    // reqwest prints the URL host lowercased: hosts and route parts match in both spellings. The
+    // password stays exact.
+    let lowered: Vec<String> = secrets
+        .iter()
+        .filter(|secret| **secret != connection.password)
+        .map(|secret| secret.to_ascii_lowercase())
+        .collect();
+
+    secrets.extend(lowered);
     // A lock handle is not bound to the session: it never leaves the process.
     secrets.extend(known_lock_handles());
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));

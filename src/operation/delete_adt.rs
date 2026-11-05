@@ -9,6 +9,7 @@ use crate::adt::{
     Caller, USAGE_REQUEST_XML, VersionEntry, group_members, group_nodestructure_uri, package_of,
     parse_callers, parse_versions, responsible_of, usage_references_uri,
 };
+use crate::backend::Failure;
 use crate::cli::{DeleteKind, IncludeKind, ObjectKind};
 use crate::hash::local_source_lines;
 use crate::object::check_request;
@@ -44,6 +45,10 @@ pub struct AdtDelete<'a> {
     user: String,
     open: &'a mut Opener<'a>,
     cancel: Option<CancelFlag>,
+    /// The first read that did not leave the process, for the router's fallback.
+    unsent: Option<String>,
+    /// A delete request has started: nothing can fall back to another backend any more.
+    wrote: bool,
 }
 
 impl<'a> AdtDelete<'a> {
@@ -53,6 +58,8 @@ impl<'a> AdtDelete<'a> {
             user: user.to_owned(),
             open,
             cancel: None,
+            unsent: None,
+            wrote: false,
         }
     }
 
@@ -68,7 +75,15 @@ impl<'a> AdtDelete<'a> {
             user: user.to_owned(),
             open,
             cancel: Some(cancel),
+            unsent: None,
+            wrote: false,
         }
+    }
+
+    /// The pre-send connectivity failure of a read when no write has started: the whole batch can
+    /// then run again on another backend, because nothing was changed.
+    pub fn unsent_failure(&self) -> Option<&str> {
+        self.unsent.as_deref().filter(|_| !self.wrote)
     }
 
     fn get(&mut self, uri: &str, accept: &str) -> Result<Response, String> {
@@ -81,10 +96,13 @@ impl<'a> AdtDelete<'a> {
     }
 
     fn send(&mut self, request: Request) -> Result<Response, String> {
-        let response = self
-            .transport
-            .request(request)
-            .map_err(|error| error.to_string())?;
+        let response = self.transport.request(request).map_err(|error| {
+            if Failure::from(&error) == Failure::PreSendConnectivity {
+                self.unsent.get_or_insert_with(|| error.to_string());
+            }
+
+            error.to_string()
+        })?;
 
         match response.authorization_failure() {
             Some(error) => Err(error.to_string()),
@@ -143,7 +161,13 @@ impl<'a> AdtDelete<'a> {
         match resolve_group(&mut *self.transport, name, None) {
             Ok(group) => Ok(Some(group)),
             Err(error) if error.message.contains("returned no reference") => Ok(None),
-            Err(error) => Err(error.message),
+            Err(error) => {
+                if error.failure == Failure::PreSendConnectivity {
+                    self.unsent.get_or_insert_with(|| error.message.clone());
+                }
+
+                Err(error.message)
+            }
         }
     }
 
@@ -437,6 +461,7 @@ impl DeleteBackend for AdtDelete<'_> {
             Ok(None) => return DeleteReply::NotFound,
             Err(reason) => return DeleteReply::Rejected(reason),
         };
+        self.wrote = true;
         // A successful LOCK may already have side effects, so interruption is deferred until the
         // handle is consumed or explicitly released.
         let cancel = self.cancel.clone();
@@ -578,12 +603,29 @@ fn failure(what: &str, response: &Response) -> String {
         .filter(|text| !text.is_empty());
 
     match message {
-        Some(message) => format!(
-            "{what}: HTTP {}: {}",
-            response.status,
-            message.chars().take(MESSAGE_LIMIT).collect::<String>()
-        ),
+        Some(message) => format!("{what}: HTTP {}: {}", response.status, cut(&message)),
         None => format!("{what}: HTTP {}", response.status),
+    }
+}
+
+/// Shown instead of a message that has no word boundary to cut at.
+const MESSAGE_CUT: &str = "(message cut)";
+
+/// At most `MESSAGE_LIMIT` characters, cut at a word boundary: the caller scrubs afterwards, and
+/// a secret split by the cut would survive as a prefix. The message has single spaces only; one
+/// without a boundary in its first characters is replaced by a marker.
+fn cut(message: &str) -> String {
+    if message.chars().count() <= MESSAGE_LIMIT {
+        return message.to_owned();
+    }
+
+    let head: String = message.chars().take(MESSAGE_LIMIT).collect();
+    let on_boundary = head.ends_with(' ') || message.chars().nth(MESSAGE_LIMIT) == Some(' ');
+
+    match head.rsplit_once(' ') {
+        Some((words, _)) if !on_boundary => words.to_owned(),
+        _ if on_boundary => head.trim_end().to_owned(),
+        _ => MESSAGE_CUT.to_owned(),
     }
 }
 
@@ -599,7 +641,7 @@ fn scrub(text: &str, handle: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{LockInfo, scrub, transport_request};
+    use super::{LockInfo, MESSAGE_CUT, MESSAGE_LIMIT, cut, scrub, transport_request};
 
     fn lock(local: bool, corrnr: &str) -> LockInfo {
         LockInfo {
@@ -617,6 +659,21 @@ mod tests {
             "x <lock handle> y <lock handle>"
         );
         assert_eq!(scrub("untouched", ""), "untouched");
+    }
+
+    #[test]
+    fn a_long_message_is_cut_at_a_word_boundary() {
+        let word = "x".repeat(9);
+        let long = vec![word.as_str(); 30].join(" ");
+        let secret_cut = format!("{} router.example.net", "y".repeat(MESSAGE_LIMIT - 11));
+
+        assert_eq!(cut("short"), "short");
+        assert_eq!(cut(&long), vec![word.as_str(); 20].join(" "));
+        // The cut falls inside the host: the partial word is dropped with the rest.
+        assert_eq!(cut(&secret_cut), "y".repeat(MESSAGE_LIMIT - 11));
+        assert!(!cut(&secret_cut).contains("router"));
+        // No boundary at all: nothing of the message can be kept safely.
+        assert_eq!(cut(&"z".repeat(MESSAGE_LIMIT + 5)), MESSAGE_CUT);
     }
 
     #[test]

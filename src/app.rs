@@ -459,15 +459,14 @@ fn execute(
                     policies: &connection.policies,
                     confirmer: &Terminal,
                 };
-                let mut outcome = {
+                let (mut outcome, unsent) = {
                     let mut backend = AdtDelete::with_cancel(
                         &mut *transport,
                         &connection.user,
                         fresh,
                         cancel.clone(),
                     );
-
-                    delete::run_until(
+                    let outcome = delete::run_until(
                         &mut backend,
                         &context,
                         &targets,
@@ -475,7 +474,9 @@ fn execute(
                         simulate,
                         &plan,
                         &mut || cancel.is_set(),
-                    )
+                    );
+
+                    (outcome, backend.unsent_failure().map(str::to_owned))
                 };
                 if !simulate && cancel.is_set() {
                     outcome.exit = 130;
@@ -483,6 +484,16 @@ fn execute(
 
                 // The batch is over and the lock, if any, is reported by the outcome.
                 let _ = transport.close();
+
+                // A read that never left the process and no delete request sent: the plan file
+                // pins no backend, so RFC may run the whole batch, unless Ctrl-C came first.
+                if let Some(message) = unsent {
+                    if !cancel.is_set() {
+                        return Attempt::failed(message, Failure::PreSendConnectivity);
+                    }
+
+                    outcome.exit = 130;
+                }
 
                 Attempt {
                     outcome,

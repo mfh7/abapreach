@@ -696,6 +696,115 @@ fn a_delete_batch_is_confirmed_by_typing_delete_and_the_count() {
 }
 
 #[test]
+fn a_deploy_result_payload_with_a_configured_secret_is_rejected_and_issues_no_token() {
+    let mut rig = rig(TOKEN);
+    let mut session = FakeSession::new(true);
+    let mut arguments = deploy_arguments();
+
+    // The deploy plan prints the source: here a line of it holds the password.
+    arguments["source"] = json!(format!("{PROGRAM}\n\" {PASSWORD}"));
+    // The check run sees the changed source: it answers without matching the recorded request.
+    let check = r#"<chkrun:checkRunReports xmlns:chkrun="http://www.sap.com/adt/checkrun"><chkrun:checkReport chkrun:reporter="abapCheckRun" chkrun:status="processed" chkrun:statusText="Object YTEST_ABAPREACH01 has been checked"/></chkrun:checkRunReports>"#;
+    let mut steps = simulate_steps();
+
+    steps[5] = Step::Any(Ok(abapreach::transport::Response::text(200, check)));
+    rig.adt(replay(FIXTURE, steps));
+
+    let result = rig.call(&mut session, "abap_simulate", arguments);
+
+    assert!(result.is_error, "{}", result.text);
+    assert!(result.text.contains("payload contains a configured secret"));
+    assert!(!result.text.contains(PASSWORD));
+    assert!(!result.structured.to_string().contains(PASSWORD));
+    assert!(result.structured.get("plan_token").is_none());
+}
+
+#[test]
+fn a_delete_simulation_scrubs_secrets_from_its_diagnostics_and_still_issues_the_token() {
+    let mut rig = rig(TOKEN);
+    let requests = log();
+    let mut session = FakeSession::new(true);
+    let delete = json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]});
+    // Delete output echoes server text: here the author carries the password, the route and a hop host.
+    let author = format!("{PASSWORD} /H/router.example.net/S/3299/H/ router.example.net");
+
+    rig.adt(prog_reads(&requests, &author));
+
+    let simulated = rig.call(&mut session, "abap_delete_simulate", delete);
+
+    assert!(!simulated.is_error, "{}", simulated.text);
+    assert!(!simulated.text.contains("REJECTED"), "{}", simulated.text);
+    assert!(simulated.text.contains("author ***"), "{}", simulated.text);
+    for secret in [
+        PASSWORD,
+        "/H/router.example.net/S/3299/H/",
+        "router.example.net",
+    ] {
+        assert!(
+            !simulated.text.contains(secret),
+            "{secret}: {}",
+            simulated.text
+        );
+        assert!(
+            !simulated.structured.to_string().contains(secret),
+            "{secret}: {}",
+            simulated.structured
+        );
+    }
+    assert!(simulated.structured["plan_token"].is_string());
+}
+
+#[test]
+fn a_delete_simulation_hides_the_lowercased_host_of_a_pre_send_error_instead_of_rejecting_it() {
+    let mut rig = rig(TOKEN);
+    let path = rig.env["ABAP_CONNECTIONS"].clone();
+    let config = std::fs::read_to_string(&path).unwrap();
+    // The configured host is upper case while the transport error prints the URL lowercased.
+    let upper = config
+        .replace(HOST, &HOST.to_ascii_uppercase())
+        .replace("router.example.net", "ROUTER.EXAMPLE.NET");
+
+    std::fs::write(&path, upper).unwrap();
+
+    let requests = log();
+    let mut session = FakeSession::new(true);
+    let delete = json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]});
+    let error = "error sending request for url (https://example.com:44300/sap/bc/adt/x): \
+                 tcp connect error via router.example.net";
+
+    rig.adt(Script::new(&requests).on(
+        "GET",
+        PROG,
+        Err(abapreach::transport::TransportError::PreSendConnectivity(
+            error.to_owned(),
+        )),
+    ));
+
+    let result = rig.call(&mut session, "abap_delete_simulate", delete);
+
+    // The failed read is a real failure (no token); a passed simulation's token is covered above.
+    assert!(result.is_error);
+    assert!(
+        !result.text.contains("payload contains a configured secret"),
+        "{}",
+        result.text
+    );
+    assert!(
+        result.text.contains("pre-send connectivity failure"),
+        "{}",
+        result.text
+    );
+    assert!(result.structured.get("plan_token").is_none());
+    for text in [result.text.clone(), result.structured.to_string()] {
+        assert!(!text.to_ascii_lowercase().contains("example.com"), "{text}");
+        assert!(
+            !text.to_ascii_lowercase().contains("router.example"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn a_mixed_simulation_issues_no_delete_token_and_nothing_can_delete_afterwards() {
     let mut rig = rig(TOKEN);
     let requests = log();

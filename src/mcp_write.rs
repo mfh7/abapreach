@@ -538,6 +538,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             seen.status,
             issue,
             json!({}),
+            false,
             execute.then(|| Settled::new("abap_deploy", name, &cancel, session)),
         ))
     }
@@ -640,6 +641,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             seen.status,
             issue,
             json!({}),
+            false,
             execute.then(|| Settled::new("abap_create", name, &cancel, session)),
         ))
     }
@@ -723,15 +725,14 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                     policies: &connection.policies,
                     confirmer: &NoTerminal,
                 };
-                let result = {
+                let (result, unsent) = {
                     let mut backend = AdtDelete::with_cancel(
                         &mut *transport,
                         &connection.user,
                         fresh,
                         cancel.clone(),
                     );
-
-                    match &plan {
+                    let result = match &plan {
                         Some(plan) => delete::execute_until(
                             &mut backend,
                             &context,
@@ -741,17 +742,29 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                             &mut || cancel.is_set() || deadline.passed(),
                         ),
                         None => delete::simulate(&mut backend, &context, &targets, tr),
-                    }
+                    };
+
+                    (result, backend.unsent_failure().map(str::to_owned))
                 };
 
                 // The batch is over and the lock, if any, is reported by the outcome.
                 let _ = transport.close();
+
+                // A read that never left the process and no delete request sent: another backend
+                // may run the whole batch, unless the call was cancelled or ran out of time. A
+                // token pins its backend, so the router refuses there; the report stays for the
+                // per-object results.
+                let fallback = unsent.filter(|_| !cancel.is_set() && !deadline.passed());
 
                 match result {
                     Ok(done) => {
                         let outcome = done.outcome.clone();
 
                         report = Some(done);
+
+                        if let Some(message) = fallback {
+                            return Attempt::failed(message, Failure::PreSendConnectivity);
+                        }
 
                         Attempt {
                             outcome,
@@ -760,17 +773,25 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                             detail: None,
                         }
                     }
-                    Err(message) => Attempt {
-                        outcome: Outcome {
-                            status: None,
-                            exit: 2,
-                            stdout: String::new(),
-                            stderr: format!("STOP: {message}"),
-                        },
-                        failure: None,
-                        fallback_allowed: false,
-                        detail: None,
-                    },
+                    Err(message) => {
+                        report = None;
+
+                        if let Some(message) = fallback {
+                            return Attempt::failed(message, Failure::PreSendConnectivity);
+                        }
+
+                        Attempt {
+                            outcome: Outcome {
+                                status: None,
+                                exit: 2,
+                                stdout: String::new(),
+                                stderr: format!("STOP: {message}"),
+                            },
+                            failure: None,
+                            fallback_allowed: false,
+                            detail: None,
+                        }
+                    }
                 }
             },
         );
@@ -808,6 +829,9 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             None,
             issue,
             json!({"objects": results}),
+            // Delete output is diagnostics, never a source or table payload, and its error
+            // reasons echo the transport text: scrub it instead of rejecting it.
+            true,
             execute.then(|| Settled::new("abap_delete", &label, &cancel, session)),
         ))
     }
@@ -815,6 +839,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
     /// The result of an operation: complete text, the same data in structured form, the status
     /// from the operation's own state, and a token when a passed simulation earns one. A write
     /// that has run is logged, and noted for the next result when the client had given up on it.
+    #[allow(clippy::too_many_arguments)]
     fn finish(
         &mut self,
         connection: &Connection,
@@ -822,15 +847,21 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         status: Option<Status>,
         issue: Option<Ticket>,
         mut structured: Value,
+        diagnostics: bool,
         settled: Option<Settled<'_>>,
     ) -> ToolResult {
-        let notes = diagnostic(connection, &exit.stderr);
-        let leaked = holds_secret(connection, &exit.stdout);
+        // Every write here repeats the backend of a plan_token, not of a CLI flag.
+        let notes = diagnostic(
+            connection,
+            &exit.stderr.replace(
+                "--backend pins the backend",
+                "the plan_token pins the backend",
+            ),
+        );
+        let leaked = !diagnostics && holds_secret(connection, &exit.stdout);
         let output = if leaked {
             SECRET_REJECTED.to_owned()
-        } else if structured.get("objects").is_some() {
-            // Delete output is diagnostics, never a source or table payload, and its error
-            // reasons echo the transport text: scrub hosts and the route as diagnostics are.
+        } else if diagnostics {
             diagnostic(connection, exit.stdout.trim_end())
         } else {
             scrub(exit.stdout.trim_end(), &known_lock_handles())

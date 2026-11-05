@@ -11,7 +11,7 @@ use abapreach::mcp::{
     Answer, Form, Server, Session, ToolHandler, ToolResult, serve, tool_list_for,
 };
 use abapreach::mcp_read::ReadTools;
-use abapreach::mcp_write::{McpTools, Operation, Ticket, TokenGate, WriteGate};
+use abapreach::mcp_write::{Limits, McpTools, Operation, Ticket, TokenGate, WriteGate};
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use abapreach::{Factories, RfcLibraryInfo, run};
@@ -1095,6 +1095,200 @@ fn a_delete_plan_is_simulated_then_executed_from_the_plan_the_ticket_holds() {
     assert!(deleted.structured.get("plan_token").is_none());
 }
 
+#[test]
+fn a_delete_simulation_falls_back_to_rfc_when_adt_fails_before_sending_and_the_token_binds_rfc() {
+    let mut rig = rig();
+    let requests = log();
+
+    rig.adt(Script::new(&requests).on(
+        "GET",
+        PROG,
+        Err(TransportError::PreSendConnectivity(format!(
+            "cannot reach {HOST}"
+        ))),
+    ));
+    rig.rfc(prog_reads(&requests, "OWNER"));
+
+    let simulated = rig.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+
+    assert!(!simulated.is_error, "{}", simulated.text);
+    assert_eq!(rig.opened(), (1, 1));
+    assert!(
+        simulated.text.contains("falling back to RFC SADT"),
+        "{}",
+        simulated.text
+    );
+    assert_eq!(rig.gate.issued()[0].backend, Some(BackendKind::RfcSadt));
+}
+
+#[test]
+fn a_delete_simulation_does_not_fall_back_after_a_failure_that_is_not_pre_send() {
+    let failures = [
+        Err(TransportError::PostSendUncertain("reset".to_owned())),
+        Err(TransportError::Authorization("denied".to_owned())),
+        Ok(Response::text(401, "<exc/>")),
+    ];
+
+    for failure in failures {
+        let mut rig = rig();
+        let requests = log();
+
+        rig.adt(Script::new(&requests).on("GET", PROG, failure));
+        rig.rfc(prog_reads(&requests, "OWNER"));
+
+        let result = rig.call(
+            "abap_delete_simulate",
+            json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+        );
+
+        assert!(result.is_error, "{}", result.text);
+        assert!(!result.text.contains("falling back"), "{}", result.text);
+        assert_eq!(rig.opened(), (1, 0));
+        assert!(rig.gate.issued().is_empty());
+    }
+}
+
+#[test]
+fn a_delete_token_pinned_to_adt_does_not_fall_back_when_adt_fails_before_sending() {
+    let mut rig = rig();
+    let requests = log();
+
+    rig.adt(prog_reads(&requests, "OWNER"));
+
+    let simulated = rig.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+
+    assert_eq!(rig.gate.issued()[0].backend, Some(BackendKind::AdtHttp));
+    rig.adt(Script::new(&requests).on(
+        "GET",
+        PROG,
+        Err(TransportError::PreSendConnectivity("no route".to_owned())),
+    ));
+    rig.rfc(prog_reads(&requests, "OWNER"));
+    requests.borrow_mut().clear();
+
+    let result = rig.call_as(
+        &mut Typing("ZPROG"),
+        "abap_delete",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"],
+               "plan_token": simulated.structured["plan_token"]}),
+    );
+
+    assert!(result.is_error, "{}", result.text);
+    assert_eq!(rig.opened(), (2, 0));
+    assert!(!result.text.contains("DELETED"), "{}", result.text);
+    // The message names the token, not a CLI flag, and the per-object results stay.
+    assert!(result.text.contains("plan_token"), "{}", result.text);
+    assert!(!result.text.contains("--backend"), "{}", result.text);
+    assert_eq!(result.structured["objects"][0]["status"], "REJECTED");
+    assert!(
+        result.structured["objects"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cannot read"),
+        "{}",
+        result.structured
+    );
+    // Nothing but the failed read was sent: no lock, no delete.
+    assert!(
+        requests
+            .borrow()
+            .iter()
+            .all(|request| request.starts_with("GET ")),
+        "{:?}",
+        requests.borrow()
+    );
+}
+
+/// Waits, then lets `inner` answer: the call outlives its time limit on the first backend.
+struct Slow {
+    inner: Script,
+    delay: Duration,
+}
+
+impl SadtTransport for Slow {
+    fn request(&mut self, request: Request) -> Reply {
+        std::thread::sleep(self.delay);
+
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
+    }
+}
+
+#[test]
+fn a_cancelled_delete_simulation_does_not_fall_back_to_rfc() {
+    let mut rig = rig();
+    let requests = log();
+    let mut session = CancelTyping::new();
+
+    rig.adt(CancelDuringInspection {
+        inner: Script::new(&requests).on(
+            "GET",
+            PROG,
+            Err(TransportError::PreSendConnectivity("no route".to_owned())),
+        ),
+        cancel: session.cancel.clone(),
+        fired: false,
+    });
+    rig.rfc(prog_reads(&requests, "OWNER"));
+
+    let result = rig.call_as(
+        &mut session,
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+
+    assert!(result.is_error, "{}", result.text);
+    assert_eq!(rig.opened(), (1, 0));
+    assert!(!result.text.contains("falling back"), "{}", result.text);
+    assert!(rig.gate.issued().is_empty());
+}
+
+#[test]
+fn a_delete_simulation_past_its_time_limit_does_not_fall_back_to_rfc() {
+    let mut rig = rig();
+    let requests = log();
+
+    rig.adt(Slow {
+        inner: Script::new(&requests).on(
+            "GET",
+            PROG,
+            Err(TransportError::PreSendConnectivity("no route".to_owned())),
+        ),
+        delay: Duration::from_millis(150),
+    });
+    rig.rfc(prog_reads(&requests, "OWNER"));
+
+    let mut tools = McpTools::new(
+        ReadTools::new(rig.config(), rig.env.clone(), &mut rig.fake),
+        rig.gate.clone(),
+    )
+    .with_limits(Limits {
+        call: Duration::from_millis(50),
+        ..Limits::default()
+    });
+    let result = tools.call(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]})
+            .as_object()
+            .unwrap(),
+    );
+
+    drop(tools);
+
+    assert!(result.is_error, "{}", result.text);
+    assert_eq!(rig.opened(), (1, 0));
+    assert!(!result.text.contains("falling back"), "{}", result.text);
+}
+
 /// An ADT connection whose server keeps no stateful session: a lock could not be held.
 struct Stateless(Script);
 
@@ -1303,24 +1497,4 @@ fn a_delete_execution_scrubs_a_host_only_leak() {
         result.text
     );
     assert_no_host(&result);
-}
-
-#[test]
-fn a_result_payload_with_a_configured_secret_is_rejected_and_issues_no_token() {
-    let mut rig = rig();
-    let requests = log();
-
-    // The object author is printed in the plan lines: here it is the password.
-    rig.adt(prog_reads(&requests, PASSWORD));
-
-    let result = rig.call(
-        "abap_delete_simulate",
-        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
-    );
-
-    assert!(result.is_error);
-    assert!(result.text.contains("payload contains a configured secret"));
-    assert!(!result.structured.to_string().contains(PASSWORD));
-    assert!(!result.text.contains(PASSWORD));
-    assert!(rig.gate.issued().is_empty());
 }
