@@ -404,8 +404,8 @@ permissions of its own.
 
 Besides programs, ABAPReach reads and deploys function modules (`FUNC`), classes with their
 local includes (`CLAS`), and interfaces (`INTF`). It also creates function groups (`FUGR`),
-`FUNC`, `CLAS` and `INTF` objects, and programs, includes and report transactions (`PROG`, `TRAN`);
-see [Program includes and transactions](#program-includes-and-transactions). The commands take the same guards and status tokens as
+`FUNC`, `CLAS` and `INTF` objects, and programs and includes (`PROG`);
+see [Program includes](#program-includes). The commands take the same guards and status tokens as
 `PROG` (see [Deploy safety](deploy-safety.md)).
 
 ```sh
@@ -454,14 +454,14 @@ follows with `deploy`:
 ```
 
 Create accepts names that start with `Z` or `Y` only. Limits, checked before the create
-request: names up to 40 characters for `PROG`, 26 for `FUGR`, 20 for `TRAN` and 30 for `FUNC`, `CLAS`
-and `INTF`; texts up to 70 for `PROG`, 40 for `FUGR`, 36 for `TRAN`, 74 for `FUNC` and 60 for `CLAS`
+request: names up to 40 characters for `PROG`, 26 for `FUGR` and 30 for `FUNC`, `CLAS`
+and `INTF`; texts up to 70 for `PROG`, 40 for `FUGR`, 74 for `FUNC` and 60 for `CLAS`
 and `INTF`. A `FUNC` is created inside an existing
 function group named with `--fugr`; `--package` is not valid for `create FUNC`. `--tr` is refused
 for a `$TMP` package, and a transportable package requires `--tr`. The live matrix does not
 exercise the name and text limits.
 
-## Program includes and transactions
+## Program includes
 
 `create PROG` makes a program (`--subc 1`, the default) or an include (`--subc I`). `--package`
 defaults to `$TMP`; a transportable package needs `--tr`.
@@ -497,24 +497,6 @@ include's main program list names:
 --subc I` takes no FILE: deploy the include source after the `INCLUDE` statement exists in the parent
 program.
 
-`TRAN` (report transactions) is created, read and deleted through the EXT path. It needs an RFC
-connection and the `YFM_UTILS_SOURCE_DEPLOY` function module installed on the system. A connection
-without RFC stops with exit 2:
-
-```sh
-./target/release/abapreach create TRAN ZEXAMPLE --prog ZEXAMPLE --text 'Demo transaction' --simulate --conn A4H_001
-./target/release/abapreach create TRAN ZEXAMPLE --prog ZEXAMPLE --text 'Demo transaction' --conn A4H_001
-./target/release/abapreach read TRAN ZEXAMPLE - --conn A4H_001
-```
-
-`--prog` names the report the transaction starts; it must be a `Z` or `Y` report. The TCODE and the
-report are sent in upper case. `deploy TRAN` is not supported. The function module, the allow-list and
-the reconciliation rules are in [Deploy safety: TRAN and the EXT path](deploy-safety.md#tran-and-the-ext-path).
-
-ABAPReach has no `install` command. The function module is installed with abapGit or by hand; see
-[Deploy safety](deploy-safety.md#tran-and-the-ext-path). `abapreach doctor` shows whether it is
-installed (`EXT FM YFM_UTILS_SOURCE_DEPLOY: installed, interface matches`).
-
 ## Read a table and delete objects
 
 `read-table` reads rows of one table through the ADT data preview:
@@ -544,14 +526,13 @@ To use ABAPReach from an AI assistant, see [MCP server](mcp.md).
 The 0.15.0 release matrix ran on `v0.15.0-rc.3`, with the release and the fault-injection builds,
 on each platform and path, against two systems. It covers the core, platform, fault-injection, ca,
 delete, read-table, policy, MCP and Python-parity groups, and the 0.15.0 scenarios (program create
-and include, `TRAN` create, read and delete, include delete, Python parity, the MCP write tools).
+and include, include delete, Python parity, the MCP write tools).
 The interactive group (prompts and Ctrl-C) is from the 0.13.0 matrix (`v0.13.0-rc.4`) and was not
 rerun for 0.15.0. The two systems:
 
 - a SAP 7.50 system with a stateful ADT HTTP session, a second developer user and transport
   requests;
-- a SAP 7.40 system with local objects only (`$TMP`), no stateful ADT HTTP session, and no
-  `YFM_UTILS_SOURCE_DEPLOY` function module in this run.
+- a SAP 7.40 system with local objects only (`$TMP`), no stateful ADT HTTP session.
 
 Each cell has one of three results:
 
@@ -591,11 +572,8 @@ capabilities. The real clients were tested separately (see
 
 An UNSUPPORTED cell has one of these reasons:
 
-- **Availability.** `TRAN` has no ADT endpoint on any system: no ADT collection creates or reads a
-  report transaction, so every `TRAN` cell on ADT HTTP is UNSUPPORTED. On the SAP 7.40 system the
-  `YFM_UTILS_SOURCE_DEPLOY` function module was not installed in this run, so its `TRAN` cells and
-  its Python-parity cells are UNSUPPORTED. That system holds only `$TMP` objects, so `--tr` and
-  transportable-package cells are UNSUPPORTED there too.
+- **Availability.** The SAP 7.40 system holds only `$TMP` objects, so `--tr` and
+  transportable-package cells are UNSUPPORTED there.
 - **Stateful session.** The SAP 7.40 system has no stateful ADT HTTP session, so ADT HTTP write cells
   run there only in their pinned and fallback form. The RFC paths cover the same scenarios.
 - **Platform.** SAP GUI for Java for Linux is x86_64 only, so Linux arm64 has no SAP GUI library.
@@ -615,11 +593,8 @@ An UNSUPPORTED cell has one of these reasons:
 
 The fault-injection build (`--features fault-injection`) reads `ABAPREACH_FAULT`, a
 comma-separated list. Its targets are `drop-reply:PUT`, `drop-reply:ACTIVATE`,
-`drop-reply:CREATE`, `drop-reply:DELETE`, `drop-reply:FM` and `fail-read:RECONCILE`. Each drops one RFC
-reply or fails one reconciliation read. `drop-reply:FM` drops the reply of the EXT function module call
-of a `TRAN` `create` or `delete` (see [Deploy safety: TRAN and the EXT path](deploy-safety.md#tran-and-the-ext-path)).
-`fail-read:RECONCILE` also covers the EXT reconciliation connection. The matrix runs the `FM` cells on
-the RFC paths of the SAP 7.50 system; the ADT HTTP cells are UNSUPPORTED. Results on the RFC paths of the matrix:
+`drop-reply:CREATE`, `drop-reply:DELETE` and `fail-read:RECONCILE`. Each drops one RFC
+reply or fails one reconciliation read. The matrix runs these cells on the RFC paths of the SAP 7.50 system; the ADT HTTP cells are UNSUPPORTED. Results on the RFC paths of the matrix:
 
 | Target | Result | Exit |
 | :--- | :--- | :---: |
@@ -681,15 +656,10 @@ models them, so they carry no live evidence:
 - `include-uncertain-absent`, `include-uncertain-same`, `include-uncertain-differs` and
   `include-uncertain-unreadable`: the uncertain `--create-include` POST, in each reconciliation state.
 - `create-uncertain-absent`: the object-absent branch after an uncertain create.
-- The `CREATE: REJECTED` branch of an uncertain `TRAN` create (the report transaction is absent after
-  the reply was lost): not produced live. Both `TRAN` create fault cells end with `CREATE: PARTIAL`.
 - `tr-owner-mismatch`: a lock owned by another request owner.
 - The first-activation warning of a new include (`W: no syntax check before the first activation of a
   new include`): the state (empty main program list with `--main`) did not arise on the matrix
   systems, because activating a parent that holds the `INCLUDE` statement fills the list.
-- The EXT guard rejections (system change option, client `CCNOCLIIND`, a request owned by another
-  user): not produced live in the 0.15.0 matrix. The offline fakes check that the function module's
-  rejection passes through as `REJECTED`.
 - A transportable include delete over RFC SADT: covered by fixtures; the 0.15.0 matrix has no live run.
 
 The `--create-include` uncertain-POST tokens (`PARTIAL`, `REJECTED`, `INCLUDE_SOURCE_DIFFERS`)

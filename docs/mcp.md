@@ -5,9 +5,9 @@ Each tool maps to one CLI operation with the same guards. Stdout carries protoco
 only. The server accepts MCP protocol versions `2025-11-25`, `2025-06-18`, `2025-03-26` and
 `2024-11-05`.
 
-Status in 0.15.0: the client gate ran with Claude Code. On macOS it covered the program, include and
-`TRAN` tools in token and confirm modes. On native Windows x64 it covered token mode only: program and
-`TRAN` create, and a `TRAN` delete cancelled in `-p` (see [Support by client](#support-by-client)).
+Status in 0.15.0: the client gate ran with Claude Code. On macOS it covered the program and include
+tools in token and confirm modes. On native Windows x64 it covered token mode only: program create
+(see [Support by client](#support-by-client)).
 OpenCode, pi and Codex were not rerun for 0.15.0. Their behaviour is unchanged from the 0.14.0 gate
 and was not re-verified in this release.
 
@@ -64,23 +64,14 @@ Write tools (listed only when `mcp_write` is `token` or `confirm`):
   A program include is addressed as `PROG` with its own name. `main` names its main program; without
   it, the single main program of the include is used.
 - `abap_create_simulate`, `abap_create`: simulate and create objects, as `create`. `subc` (`1` for a
-  program, the default, or `I` for an include) applies to `PROG`. `prog` is the report of a `TRAN`
-  (`TRAN` is listed among the create kinds).
+  program, the default, or `I` for an include) applies to `PROG`.
 - `abap_delete_simulate`, `abap_delete`: simulate and delete objects, as `delete`. `objects` take
-  `TYPE:NAME` with `TYPE` `PROG`, `FUGR`, `FUNC`, `CLAS`, `INTF` or `TRAN`.
-
-`abap_read_source` does not read `TRAN`. A `TRAN` request answers
-`STOP: abap_read_source does not read TRAN; use the CLI read TRAN`. Read a `TRAN` with the CLI
-(`abapreach read TRAN ...`).
-
-A `TRAN` create or delete on a connection without RFC stops before any request, with
-`STOP: create TRAN needs the RFC path (EXT); connection <id> has no RFC` (the same text with `delete`
-for a delete). `TRAN` never runs over ADT HTTP.
+  `TYPE:NAME` with `TYPE` `PROG`, `FUGR`, `FUNC`, `CLAS` or `INTF`.
 
 Input schemas are listed by the client through `tools/list`.
 
 **Token binding.** A `plan_token` is bound to the arguments of the simulate that issued it and to its
-backend. For `abap_create`, the bound arguments include `subc`, `prog`, `package` and `text`. For an
+backend. For `abap_create`, the bound arguments include `subc`, `package` and `text`. For an
 include, `abap_deploy` also runs under the main program that the simulate resolved; if the main program
 changed since the simulate, the deploy stops before the lock. A write with different arguments is refused and the token is not spent:
 `STOP: plan_token does not match this call (arguments differ)`. The token is single use and expires
@@ -215,15 +206,10 @@ Notes:
 - Under `token`, a write needs a real plan token from the same session; the server refuses an
   unknown or used token with `STOP: plan_token is unknown or already used; simulate again`.
 - 0.15.0 gate, Claude Code (`claude -p`, Haiku), against the SAP 7.50 system. macOS: `create PROG`
-  (program and include) and `create TRAN` with `token` simulate and create answered `SIMULATED_OK` and
-  `ACTIVE`; a `TRAN` delete in `-p` (no answerable form) stopped with
-  `STOP: write not confirmed: cancelled` and deleted nothing. Under `confirm` (interactive): a declined
-  `TRAN` delete stopped with `STOP: write not confirmed: declined`; an accepted delete with the typed
-  name ran. A batch delete of three programs and includes asked for `DELETE 3` and removed them.
-  Native Windows x64: token mode only, with program create, `TRAN` create and the `TRAN` delete
-  cancelled in `-p`. It ran no include and no `confirm` mode.
-- A `TRAN` on a connection without RFC stops with the contract STOP text, under the
-  [TRAN and the EXT path](deploy-safety.md#tran-and-the-ext-path) rules.
+  (program and include) with `token` simulate and create answered `SIMULATED_OK` and `ACTIVE`. Under
+  `confirm` (interactive): a batch delete of three programs and includes asked for `DELETE 3` and
+  removed them. Native Windows x64: token mode only, with program create. It ran no include and no
+  `confirm` mode.
 
 ## Cancellation
 

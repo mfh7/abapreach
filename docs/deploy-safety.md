@@ -157,10 +157,9 @@ run there. The warning-only and error responses of that activation (`clas-activa
 - `--tr` for a `$TMP` package and a missing `--tr` for a transportable package stop with exit 2
   (`create-tr-on-tmp`, `create-transportable-no-tr`).
 - Name and text limits are checked before the create request is sent. `PROG`: name 40, text 70.
-  `TRAN`: name 20, text 36. Names start with `Z` or `Y`. See
+  Names start with `Z` or `Y`. See
   [Getting started](getting-started.md#other-source-objects). The matrix does not exercise them.
-- `create PROG --subc I` creates an include; see [Program includes](#program-includes). `create TRAN`
-  is written through the EXT path; see [TRAN and the EXT path](#tran-and-the-ext-path).
+- `create PROG --subc I` creates an include; see [Program includes](#program-includes).
 
 **Uncertain create.** When the create POST outcome is unknown, ABAPReach reads the object (a
 read-only GET) and does not send the POST again:
@@ -211,60 +210,19 @@ single program that the include's `mainprograms` lists.
   include where-used run over ADT HTTP and over RFC SADT. A transportable include delete over RFC
   SADT has fixture coverage only; the 0.15.0 matrix has no live run of it.
 
-## TRAN and the EXT path
+## Lost create and delete replies
 
-`TRAN` (report transactions) has no ADT endpoint. It is created, read and deleted only through the
-EXT path: the function module `YFM_UTILS_SOURCE_DEPLOY` over RFC. `deploy TRAN` is refused
-(`deploy TRAN is not supported`, exit 2).
+A `create` or `delete` whose reply is lost is settled by one read from a new
+connection. It is never sent again, and no rollback is attempted. Exit codes:
+- `CREATE: PARTIAL` (exit 1): the object is found, or the read fails.
+- `DELETED (reconciled)` (exit 1): a new connection no longer finds the object.
+- `PARTIAL` (exit 1): the state is unknown.
 
-- **Requirements.** A connection with RFC configured (SAP GUI library or NW RFC SDK) and the
-  function module installed on the SAP system with the interface that ABAPReach expects. A connection
-  without RFC, or `--backend adt`, stops with `STOP: create TRAN needs the RFC path (EXT); connection
-  <id> has no RFC` (exit 2), before any connection is opened.
-- **Installing the function module.** ABAPReach 0.15.0 has no install command. Install
-  `YFM_UTILS_SOURCE_DEPLOY` (function group `YFG_UTILS`) with abapGit, or create the function group and
-  the function module by hand from the same ABAP source. The `STOP` below names `(install)`; that
-  word refers to this step.
-- **Not installed.** `STOP: YFM_UTILS_SOURCE_DEPLOY is not installed on <system>; see docs (install)`,
-  exit 2. Nothing is read or written. `doctor` shows the state in its EXT line:
-  `EXT FM YFM_UTILS_SOURCE_DEPLOY: installed, interface matches`, `...: not installed`, or
-  `...: interface mismatch: <details>`. Other states: `EXT: not applicable (no RFC)` for a connection
-  without RFC, `EXT: unavailable: <error>` when the library cannot be loaded or the connection
-  fails, and `EXT: not run (RFC SADT probe failed)`. The EXT line never changes the exit code of
-  `doctor`.
-- **Allow-list.** Only one tuple reaches the function module: the function module
-  `YFM_UTILS_SOURCE_DEPLOY`, the object type `TRAN`, and one of the modes `READ`, `CREATE_SIM`, `CREATE`,
-  `DELETE_SIM` and `DELETE`. Values are compared exactly. Anything else is refused before the call
-  with a `STOP`, including the `DEPLOY` mode, other object types, other function modules, and the
-  tooling's own objects (names starting with `YCL_UTILS_`, `YFM_UTILS_`, `YFG_UTILS`, `SAPLYFG_UTILS` or
-  `LYFG_UTILS`). The function module accepts every mode and type on its own, so the gate is what keeps
-  those requests out.
-- **What the EXT path does.** It reads, simulates, creates and deletes one `TRAN` per request, and
-  reports the transaction's report, dynpro, text and package. It cannot deploy source, and it cannot
-  call any other function module.
-- **Guards.** A simulate prints `FM guards active: self-guard, system change option (SCC), client
-  CCNOCLIIND, request owned by another user`. The guards are applied by the function module. Live, the
-  SCC, `CCNOCLIIND` and foreign-request rejections were not produced in the 0.15.0 matrix; their pass-through
-  as `REJECTED` is covered by offline fixtures.
-- **Transport request.** `create TRAN` in a transportable package needs `--tr`; `--tr` is refused for a
-  `$TMP` package. A delete of a `TRAN` follows the same transport request rules as the other delete
-  kinds (see [Delete](#delete)).
-- **Uncertain writes.** A `create` or `delete` whose reply is lost is settled by one read from a new
-  connection. It is never sent again, and no rollback is attempted. Exit codes:
-  - `CREATE: PARTIAL` (exit 1): the TCODE is found, or the read fails.
-  - `CREATE: REJECTED` (exit 1): a new connection does not find the TCODE. Fixture only: the live
-    `TRAN` fault cells ended with `CREATE: PARTIAL` and never produced this branch.
-  - `DELETED (reconciled)` (exit 1): a new connection no longer finds the TCODE.
-  - `PARTIAL` (exit 1): the state is unknown, or a partial marker (`PARTIAL_DELETE:`,
-    `OBJECT_STILL_EXISTS:`) is in the reply. A partial marker wins over the status token.
-
-  An uncertain create ends its message with `the create is not repeated; check with read TRAN before
-  repeating; a lock may remain`. An uncertain delete prints `W: reply lost (<reason>); a new session
-  no longer finds the object: check before retrying` for `DELETED (reconciled)`, or `W: status
-  unknown: reply lost (<reason>); ...` for `PARTIAL`, and then `W: a lock may remain on the object`.
-  Read the TCODE before any retry.
-- **Ctrl-C.** Ctrl-C during the EXT create call waits for the reply, prints `CANCELED: interrupted
-  during the EXT create call; result follows` and the status line, and exits 130.
+An uncertain create ends its message with `the create is not repeated; check with read before
+repeating; a lock may remain`. An uncertain delete prints `W: reply lost (<reason>); a new session
+no longer finds the object: check before retrying` for `DELETED (reconciled)`, or `W: status
+unknown: reply lost (<reason>); ...` for `PARTIAL`, and then `W: a lock may remain on the object`.
+Read the object before any retry.
 
 ## Transport requests and failed activation
 
@@ -360,7 +318,7 @@ their transport request and where-used references; no object is changed.
 | `CREATE: REJECTED`, `CREATE: PARTIAL` | 1 | inspect the SAP state; read before retrying |
 | `INCLUDE_MISSING: ...` | 1 | the class include does not exist; nothing written |
 | `NOT_FOUND: PROG <N> ...` | 1 | no program or include of that name; nothing written |
-| `DELETED (reconciled)`, `PARTIAL` (`TRAN` delete) | 1 | inspect the SAP state; read before retrying |
+| `DELETED (reconciled)`, `PARTIAL` (delete) | 1 | inspect the SAP state; read before retrying |
 | `ACTIVE (reconciled)` | 1 | file is active; verify with `read` |
 | `STOP: ...` | 2 | input, configuration, or guard |
 

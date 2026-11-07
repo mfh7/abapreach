@@ -5,9 +5,8 @@ All notable changes to ABAPReach are recorded here. The format follows
 [Semantic Versioning](https://semver.org/).
 
 **Current Rust CLI:** version `0.15.0` supports `PROG`, `FUNC`, `CLAS` (including local
-includes) and `INTF` objects, program includes and report transactions (`TRAN`, over RFC with the
-`YFM_UTILS_SOURCE_DEPLOY` function module), and adds `read-table`, `delete` and the MCP server. Earlier
-versions supported `PROG` only.
+includes) and `INTF` objects, and program includes, and adds `read-table`, `delete` and the MCP
+server. Earlier versions supported `PROG` only.
 Versions `0.1.0` to `0.10.0` below describe the earlier Python implementation,
 not features available in the current Rust CLI. Their tags live in the
 internal repository where that implementation was developed. See the
@@ -26,16 +25,9 @@ internal repository where that implementation was developed. See the
 - Program includes: `read`, `deploy`, `deploy --simulate` and `delete` of an include named as a
   `PROG`. `--main <PROG>` names the main program of an include. Without it, exactly one listed main
   program is used, which is printed as `main <PROG>`.
-- `create TRAN`, `read TRAN` and `delete TRAN` (report transactions), written and read through the
-  EXT path: the `YFM_UTILS_SOURCE_DEPLOY` function module over RFC. The name is up to 20
-  characters, the `--text` up to 36, and `--prog` names a `Z` or `Y` report.
-- `doctor` prints an EXT line for the deploy function module.
-- Fault injection: `drop-reply:FM` drops the reply of the EXT function module call of `create` and
-  `delete`.
-- MCP: `abap_create_simulate` and `abap_create` take `subc` and `prog`; `abap_simulate`,
-  `abap_deploy` and `abap_read_source` take `main`; `abap_delete_simulate` and `abap_delete` accept
-  `TRAN:<TCODE>` objects. `plan_token`s are bound to `subc`, `prog`, `package` and `text`, and an
-  include deploy runs under the main program that its simulate resolved.
+- MCP: `abap_create_simulate` and `abap_create` take `subc`; `abap_simulate`,
+  `abap_deploy` and `abap_read_source` take `main`. `plan_token`s are bound to `subc`, `package`
+  and `text`, and an include deploy runs under the main program that its simulate resolved.
 - The simulate of a program delete lists the transactions that start the program as
   `WHERE-USED TRAN <tcode>`.
 
@@ -48,24 +40,15 @@ internal repository where that implementation was developed. See the
   row runs in a new session. A row that deletes nothing keeps its session.
 - Include delete, and program and include where-used, run over RFC SADT as well, including on the
   SAP 7.40 system.
-- A partial-delete marker in the EXT reply (`PARTIAL_DELETE:`, `OBJECT_STILL_EXISTS:`) decides the
-  outcome before the status token does.
-- `fail-read:RECONCILE` also covers the EXT reconciliation connection.
 - Version metadata set to `0.15.0`.
 
 ### Known limitations
-- `TRAN` needs an RFC connection and the installed `YFM_UTILS_SOURCE_DEPLOY` function module. ADT
-  HTTP has no endpoint for `TRAN`. A connection without RFC, or `--backend adt`, stops with exit 2.
-  There is no `install` command.
-- The EXT path calls only the five modes of the allow-list (`READ`, `CREATE_SIM`, `CREATE`,
-  `DELETE_SIM`, `DELETE`) for `TRAN`. It cannot deploy source, and it cannot call another function
-  module or touch the tooling's own objects.
+- TRAN is not supported: SAP offers no standard remote path to create or delete a transaction.
+  See [TRAN is not supported](docs/behavior-differences.md#tran-is-not-supported).
 - A new include's first deploy prints `W: no syntax check before the first activation of a new
   include (main <PROG>)`. The live matrix did not produce this state: activating a parent program
   that holds `INCLUDE <name>.` always fills the include's main program index. The warning path is
   covered by offline fixtures only.
-- The EXT guards (system change option, client `CCNOCLIIND`, a request owned by another user) were
-  not exercised live. The offline fakes cover the pass-through of their rejections.
 - A transportable include delete over RFC SADT is proven by a fixture only. The 0.15.0 matrix
   records no live run of that case.
 - OpenCode, pi and Codex were not rerun for 0.15.0. Their behaviour is unchanged from the 0.14.0

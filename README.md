@@ -235,12 +235,6 @@ active and inactive source and reports what it finds. Creating an object whose o
 uncertain is handled the same way: a read-only check, no second POST, and no automatic rollback.
 [Deploy safety](docs/deploy-safety.md) has the details.
 
-`TRAN` (report transactions) has no ADT endpoint. It is written only through the EXT path: the
-`YFM_UTILS_SOURCE_DEPLOY` function module over RFC. The gate sends only that function module, with the
-object type `TRAN` and one of five modes (`READ`, `CREATE_SIM`, `CREATE`, `DELETE_SIM`, `DELETE`);
-source deploy and the tooling's own objects are refused before the call. See
-[Deploy safety: TRAN and the EXT path](docs/deploy-safety.md#tran-and-the-ext-path).
-
 ### Exit codes
 
 Scripts can rely on four exit codes. Any result that needs a human look exits 1, including a
@@ -305,7 +299,7 @@ and passes a live test.
   </tr>
   <tr>
     <td align="left">Create objects</td>
-    <td align="left"><b>0.13.0</b> for function groups, function modules, classes and interfaces; <b>0.14.0</b> delete; <b>0.15.0</b> programs, includes and report transactions (<code>TRAN</code>, through the EXT path)</td>
+    <td align="left"><b>0.13.0</b> for function groups, function modules, classes and interfaces; <b>0.14.0</b> delete; <b>0.15.0</b> programs and includes</td>
   </tr>
   <tr>
     <td align="left">DDIC, messages, text pools, CDS, enhancements</td>
@@ -339,13 +333,13 @@ Every planned row is part of 1.0.0. The full list, with the path each feature us
 ## Command reference
 
 ```text
-abapreach read PROG|FUNC|CLAS|INTF|TRAN <NAME> <OUT_FILE> [--force] [--include CCIMP|CCDEF|CCMAC|CCAU]
+abapreach read PROG|FUNC|CLAS|INTF <NAME> <OUT_FILE> [--force] [--include CCIMP|CCDEF|CCMAC|CCAU]
     [--fugr <GROUP>] [--lines A-B] [--main <PROG>] --conn <SID>_<client>
 abapreach deploy PROG|FUNC|CLAS|INTF <NAME> <FILE> [--simulate] [--base <hash>] [--tr <request>]
     [--include CCIMP|CCDEF|CCMAC|CCAU] [--create-include] [--fugr <GROUP>] [--main <PROG>]
     [--backend adt|rfc] --conn <SID>_<client>
-abapreach create PROG|FUGR|FUNC|CLAS|INTF|TRAN <NAME> [FILE] --text '<text>' [--package <PACKAGE>]
-    [--subc 1|I] [--fugr <GROUP>] [--prog <REPORT>] [--tr <request>] [--simulate]
+abapreach create PROG|FUGR|FUNC|CLAS|INTF <NAME> [FILE] --text '<text>' [--package <PACKAGE>]
+    [--subc 1|I] [--fugr <GROUP>] [--tr <request>] [--simulate]
     [--backend adt|rfc] --conn <SID>_<client>
 abapreach delete TYPE:NAME... [--simulate] [--tr <request>] --plan <FILE> --conn <SID>_<client>
 abapreach read-table <TABLE> [--fields <A,B>] [--where '<condition>'] [--rows 1-5000] --conn <SID>_<client>
@@ -356,9 +350,8 @@ abapreach mcp
 `read` refuses to overwrite an existing file unless `--force` is set; with `--lines`, the output
 must be `-` (stdout). `--base` and `--backend` both pin the backend, so a failed attempt never
 switches to the other one. `--include` and `--create-include` apply to `CLAS` only. `--main` applies to
-a `PROG` include only. `--subc` applies to `PROG` only. `TRAN` is created, read and deleted through
-the EXT path and needs an RFC connection and the installed `YFM_UTILS_SOURCE_DEPLOY` function module.
-The grammar and the limits are in [Getting started](docs/getting-started.md#program-includes-and-transactions).
+a `PROG` include only. `--subc` applies to `PROG` only.
+The grammar and the limits are in [Getting started](docs/getting-started.md#program-includes).
 [Getting started](docs/getting-started.md#other-source-objects) has examples.
 
 ## Documentation

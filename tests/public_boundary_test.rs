@@ -115,10 +115,7 @@ fn every_exception_still_holds_a_forbidden_string() {
     }
 }
 
-/// Green once the public docs are reworded (task S5); until then the old text still names the
-/// function module.
 #[test]
-#[ignore = "green in task S5 (docs, README and CHANGELOG)"]
 fn the_public_docs_name_no_custom_function_module_and_no_private_crate() {
     let found = offenders(&["docs", "README.md", "CHANGELOG.md", "CONTRIBUTING.md"]);
 

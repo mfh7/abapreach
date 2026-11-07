@@ -105,47 +105,25 @@ A changed `FUNC` interface lists at most 50 callers, then `WHERE-USED ... <n> mo
 the 50-caller cap. The matrix (`func-signature-change`) checks on one caller that the list holds only
 caller kinds and that no `more` line appears.
 
-## `create PROG`/`TRAN` and `delete TRAN` grammar (0.15.0)
+## `create PROG` grammar (0.15.0)
 
 The 0.15.0 grammar ports the create and delete cases of `tools/test_rfc_deploy.py`
 (`test_create_missing_flags`, `test_create_text_too_long`, `test_create_bad_flag_combinations`,
-`test_create_file_problems`, `test_create_trans_*`). The intentional differences:
+`test_create_file_problems`). The intentional differences:
 
 - `create PROG <NAME> --text T` needs no `--package`: ABAPReach defaults to `$TMP`, as it already
 does for the M3 kinds (Python stops: `create PROG needs --package`).
-- `create` takes no FILE for the M3 kinds (source-free create, difference 4) and for `TRAN`;
+- `create` takes no FILE for the M3 kinds (source-free create, difference 4);
 `create PROG --subc I` refuses FILE with the Python message about deploying the source after the
 `INCLUDE` statement exists in the parent program; `create PROG --subc 1 FILE` accepts the file and
 runs a simulate deploy after `CREATE: ACTIVE`, never a source write (Python writes the source with
 create). Matrix: `create-prog-file`.
-- `TRAN` is stricter than Python in both directions the contract names: the TCODE name limit is 20
-(`TSTC-TCODE`), and `--text` is 36. The Python tooling checks a single 40-name limit for every kind
-and no TRAN text limit; `test_rfc_deploy.py` has no `TRAN` cases to port.
 - The create forms that the Rust grammar does not know are refused by the CLI parser instead of
 by validation: `--remote`, `--base`, `--force` on any create, and the DDIC kinds.
-- `delete` accepts `TRAN:<TCODE>` (TCODE limit 20). The EXT delete writes a plan line
-(`DELETE TRAN <TCODE> package ...`); the plan hash is the SHA-256 over the plan line and the
-`EV_LIVE_HASH` that the function module returns, and the plan file has an optional `backends`
-column that the Python tooling ignores. On a connection without RFC the CLI stops with the
-contract STOP.
-- The contract STOP text for `TRAN` on the ADT path is fixed: `STOP: <op> TRAN needs the RFC
-path (EXT); connection <id> has no RFC` (exit 2), before any connection.
 
-## `create TRAN` and `read TRAN` over EXT (0.15.0)
+## TRAN is not supported
 
-`tools/test_rfc_deploy.py` has no `create TRAN` or `read TRAN` case, so none is ported; the
-Rust cases follow the SAP 7.50 baseline recorded for the milestone. The intentional differences:
-
-- A refused simulate prints `CREATE: REJECTED` (the M3 token and exit 1); Python prints
-`CREATE_SIM: REJECTED`. The success token stays `CREATE_SIM: SIMULATED_OK`.
-- The TCODE and the report are sent in upper case; Python sends them as typed.
-- The output starts with `backend: rfc (EXT)` and `reason:` lines; a simulate adds the active
-function module guards and the ADT guards that do not apply on this path.
-- `read TRAN` supports `--lines` and the `--force` overwrite rule of every other read; a missing
-TCODE keeps the Python `STOP: READ TRAN <T>: status NOT_FOUND: ...` with exit 2.
-- A `create` whose reply is lost ends with exit 1 and no second call. A read from a new connection
-then decides the token: `CREATE: PARTIAL` when the TCODE is found or the read fails, and
-`CREATE: REJECTED` when a new connection does not find it.
+TRAN is not supported: SAP offers no standard remote path to create or delete a transaction.
 
 ## `create PROG` operation (0.15.0)
 
@@ -178,7 +156,7 @@ ABAPReach covers that read.
 - Over ADT HTTP an include created on a 7.40 system may not be visible right after the create (the
 HTTP session is stateless there); creates on that system run over the RFC path.
 
-## Program includes, ADT HTTP logoff and the EXT path (0.15.0)
+## Program includes and ADT HTTP logoff (0.15.0)
 
 These differences were settled from the 0.15.0 matrix. Each entry names the
 evidence it rests on; where the matrix did not produce a case live, the entry says so.
@@ -231,15 +209,6 @@ SADT is unchanged. Within a batch, programs are deleted before their includes.
 - **Include delete and where-used.** The program and include where-used of the delete plan runs
 over RFC SADT as well, on both systems. SAP refuses to delete an include that a program still
 references (HTTP 403, `Program <N> is referenced in other programs`).
-- **Partial markers.** A `PARTIAL_DELETE:` or `OBJECT_STILL_EXISTS:` message in the EXT reply decides
-the outcome before any `EV_STATUS`. The Python tooling lets a success status win.
-- **TRAN names.** The TCODE and the report are sent upper case; the Python tooling sends them as
-typed. A refused TRAN simulate prints `CREATE: REJECTED`.
-- **TRAN plan.** A `delete TRAN` whose function module refuses the read prints
-`cannot read TRAN <TCODE>: <FM message>`.
-- **TRAN without RFC.** A connection with no RFC, or `--backend adt`, stops before any connection:
-`STOP: create TRAN needs the RFC path (EXT); connection <id> has no RFC` (exit 2). A connection
-whose RFC library cannot be loaded stops with the M1 library text, exit 2. There is no fallback.
 - **Transportable packages.** Every POST, PUT and DELETE on an object in a transportable package
 carries `corrNr`. A create without `corrNr` makes SAP generate a new request, so a create in a
 non-`$TMP` package without `--tr` is refused before any request (exit 2).
@@ -262,7 +231,7 @@ installed there.
 
 ### Inactive version after a failed activation
 
-The Python function module (`YFM_UTILS_SOURCE_DEPLOY`) discards the inactive
+The Python tooling discards the inactive
 version when activation fails. The ADT paths of `abapreach` (HTTP and
 RFC/SADT) do not: after a failed activation, the failed source remains as
 the program's inactive version (an entry in `DWINACTIV`), the active source
@@ -351,7 +320,7 @@ the ADT route (`tests/delete_operation_test.rs`). Intentional differences:
   (`DELETED (reconciled)` exits 1); Python reports an unknown status and stops.
 - `delete --simulate` prints the guards that apply and the function-module guards that
   do not apply on the ADT route (system change option, `CCNOCLIIND`, SE06 and software
-  component, server-side self-guard).
+  component).
 - Backend fallback: when ADT HTTP fails before sending (connect, DNS, TLS) while the batch only reads, the whole batch runs again on RFC SADT and prints the usual `falling back to RFC SADT` note. This holds until the first LOCK or DELETE request is started; after that, and after a post-send, authorization, conflict or validation failure, there is no fallback. A Ctrl-C or an MCP time limit that passed ends the call instead of opening RFC. The CLI plan file records no backend (as in Python), so `delete --plan` may therefore execute on a different backend than the one that simulated, before any write; the execute re-reads and re-hashes every object, so a difference between the two routes is a `REJECTED` object, never a wrong delete. An MCP `plan_token` pins the backend it was issued for: its execute never falls back and reports that the `plan_token` pins the backend.
 
 ## MCP server and `read-table` (0.14.0)

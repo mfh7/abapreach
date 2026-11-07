@@ -15,7 +15,7 @@ moves to the [changelog](../CHANGELOG.md).
 | 0.12.0 | Windows and Linux: RFC library lookup per platform, live tests on every path, CI builds (released) |
 | 0.13.0 | Function modules, classes with local includes, interfaces: read and deploy; create of function groups, function modules, classes and interfaces; read with line ranges |
 | 0.14.0 | MCP server (stdio), `read-table`, `delete` (released) |
-| 0.15.0 | Programs and includes: `create PROG` (program and include), include read, deploy and delete; `TRAN` create, read and delete through EXT; ADT HTTP logoff fix; MCP additions |
+| 0.15.0 | Programs and includes: `create PROG` (program and include), include read, deploy and delete; ADT HTTP logoff fix; MCP additions |
 | later | The remaining features below, one milestone at a time |
 
 Platforms come before new features, so every feature after 0.12.0 is built and tested on
@@ -29,13 +29,10 @@ first.
 | Path | Needs | Used for |
 | :--- | :--- | :--- |
 | **ADT** | HTTPS, or an RFC library for the ADT tunnel | everything ADT offers |
-| **ADT?** | same as ADT | ADT if live tests confirm the object type, else **EXT** |
-| **EXT** | RFC library and ABAPReach's ABAP objects | operations ADT does not offer |
+| **ADT?** | same as ADT | ADT if live tests confirm the object type |
 
 **ADT** covers both ADT HTTP and the RFC tunnel through `SADT_REST_RFC_ENDPOINT`; neither
-needs anything installed in SAP. **EXT** objects are installed with abapGit or by hand; there is no
-`install` command in 0.15.0. An **EXT** operation on a system without them stops with
-`STOP: YFM_UTILS_SOURCE_DEPLOY is not installed on <system>; see docs (install)`.
+needs anything installed in SAP.
 
 ## Released in 0.11.0
 
@@ -78,20 +75,14 @@ and a table that holds data is not deleted.
 | Feature | Python origin | Path |
 | :--- | :--- | :--- |
 | Version list and diff | `rfc-read versions` | ADT? |
-| Restore an old version | `rfc-deploy restore` | EXT |
 | Inactive objects, activation | `inactive`, `activate` | ADT |
 | ATC, ABAP Unit | `atc`, `aunit` | ADT |
-| Transport gate | `rfc-gate` | EXT |
 
 ### System information
 
 | Feature | Python origin | Path |
 | :--- | :--- | :--- |
 | Ping and system info | `rfc-read ping` | ADT, RFC |
-| Package export and drift | `export`, `drift` | EXT |
-| Own locks (SM12), unlock | `locks`, `unlock` | EXT |
-| Table read with denylist | `rfc-read table` | EXT |
-| DDIC field info | `rfc-read ddic` | EXT |
 | Short dumps (ST22) | `rfc-read dumps` | ADT? |
 | Where-used | `rfc-read where-used` | ADT? |
 | Test call of a remote FM | `rfc-call` | RFC |
@@ -100,7 +91,6 @@ and a table that holds data is not deleted.
 
 | Feature | Python origin | Path |
 | :--- | :--- | :--- |
-| `install` of the EXT objects | new | ADT |
 | `doctor`: installed objects, capabilities | new | ADT, RFC |
 
 ## Shipped in 0.14.0
@@ -119,16 +109,13 @@ Setup and limits: [MCP server](mcp.md) and [Deploy safety: Delete](deploy-safety
 | :--- | :--- | :--- |
 | Create a program (`create PROG --subc 1`), with an optional FILE that runs a simulate deploy | `rfc-deploy create PROG` | ADT, RFC SADT |
 | Create an include (`create PROG --subc I`); read, deploy (`--main`) and delete of program includes | `rfc-deploy create PROG` (include create parity only; the other include operations are not in the parity matrix) | ADT, RFC SADT |
-| Create, read and delete a report transaction (`create TRAN`, `read TRAN`, `delete TRAN`) | `rfc-deploy create TRAN`, `read TRAN`, `delete TRAN` (parity matrix) | EXT (RFC) |
-| `doctor` EXT line for `YFM_UTILS_SOURCE_DEPLOY` | new | RFC |
-| MCP: `subc`, `prog`, `main` and `TRAN` objects in the delete tools; plan tokens bound to their arguments and backend | MCP server (0.14.0) | stdio |
+| MCP: `subc` and `main` arguments; plan tokens bound to their arguments and backend | MCP server (0.14.0) | stdio |
 
-Setup and limits: [Getting started: Program includes and transactions](getting-started.md#program-includes-and-transactions),
+Setup and limits: [Getting started: Program includes](getting-started.md#program-includes),
 [Deploy safety](deploy-safety.md), and [MCP server](mcp.md).
 
 Not in 0.15.0: DDIC (`DTEL`, `DOMA`, `TABL`, `TTYP`), messages (`MSAG`), text pools (`TEXT`), CDS
-(`DDLS`), enhancements (`ENHO`), restore, the lifecycle (inactive, activate, ATC, ABAP Unit), the
-`install` command, and an FM version marker.
+(`DDLS`), enhancements (`ENHO`), and the lifecycle (inactive, activate, ATC, ABAP Unit).
 
 ## MCP server (0.14.0)
 
@@ -136,8 +123,7 @@ Not in 0.15.0: DDIC (`DTEL`, `DOMA`, `TABL`, `TTYP`), messages (`MSAG`), text po
 same guards. Writes need a `plan_token` from a simulate, and `mcp_write` decides whether a human
 must also confirm. The tool list is in [MCP server](mcp.md#tools).
 
-Not yet in 0.14.0: Codex client support (not verified in this release); restore of an old version
-(`rfc-deploy restore`); creation of programs and includes.
+Not yet in 0.14.0: Codex client support (not verified in this release); creation of programs and includes.
 
 ## Platforms and distribution
 
