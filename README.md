@@ -278,7 +278,8 @@ activation: the command reports the real result (for example `ACTIVE`, exit code
 
 ABAPReach started as Python tooling (0.1.0 to 0.10.0) used in daily SAP development. The Rust
 CLI ports it. 1.0.0 ships when every Python feature runs in the Rust binary, behaves the same,
-and passes a live test.
+and passes a live test. A Python feature with no standard SAP path is not ported: transaction
+codes (`TRAN`), see [Behavior differences](docs/behavior-differences.md#tran-is-not-supported).
 
 <table>
   <tr>
@@ -319,11 +320,11 @@ and passes a live test.
   </tr>
   <tr>
     <td align="left">MCP server</td>
-    <td align="left"><b>0.14.0</b> (stdio; read tools, token and confirm write policies); see <a href="docs/mcp.md">MCP server</a></td>
+    <td align="left"><b>0.14.0</b> (stdio; read tools, token and confirm write policies); <b>0.15.0</b> <code>subc</code> and <code>main</code> arguments; see <a href="docs/mcp.md">MCP server</a></td>
   </tr>
   <tr>
     <td align="left">Windows x64, Linux x64 and arm64 binaries</td>
-    <td align="left">planned</td>
+    <td align="left"><b>0.12.0</b></td>
   </tr>
 </table>
 
