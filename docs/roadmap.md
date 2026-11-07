@@ -30,6 +30,7 @@ first.
 | :--- | :--- | :--- |
 | **ADT** | HTTPS, or an RFC library for the ADT tunnel | everything ADT offers |
 | **ADT?** | same as ADT | ADT if live tests confirm the object type |
+| **standard?** | depends on the path found | offered only if its milestone proves a standard SAP path (ADT, or a remote-enabled standard function module); otherwise not supported |
 
 **ADT** covers both ADT HTTP and the RFC tunnel through `SADT_REST_RFC_ENDPOINT`; neither
 needs anything installed in SAP.
@@ -75,6 +76,10 @@ and a table that holds data is not deleted.
 | Feature | Python origin | Path |
 | :--- | :--- | :--- |
 | Version list and diff | `rfc-read versions` | ADT? |
+| Restore an old version | `rfc-deploy restore` | standard? |
+| Transport gate | `rfc-gate` | standard? |
+| Package export and drift | `export`, `drift` | standard? |
+| Own locks (SM12), unlock | `locks`, `unlock` | standard? |
 | Inactive objects, activation | `inactive`, `activate` | ADT |
 | ATC, ABAP Unit | `atc`, `aunit` | ADT |
 
@@ -84,6 +89,7 @@ and a table that holds data is not deleted.
 | :--- | :--- | :--- |
 | Ping and system info | `rfc-read ping` | ADT, RFC |
 | Short dumps (ST22) | `rfc-read dumps` | ADT? |
+| DDIC field info | `rfc-read ddic` | standard? |
 | Where-used | `rfc-read where-used` | ADT? |
 | Test call of a remote FM | `rfc-call` | RFC |
 
