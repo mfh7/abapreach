@@ -1,0 +1,17 @@
+Usage: abapreach create [OPTIONS] --text <TEXT> --conn <CONN> <KIND> <NAME> [FILE]
+
+Arguments:
+  <KIND>  [possible values: PROG, FUGR, FUNC, CLAS, INTF]
+  <NAME>  
+  [FILE]  A `PROG` create only: the source a simulate deploy checks after `CREATE: ACTIVE`
+
+Options:
+      --text <TEXT>        
+      --package <PACKAGE>  
+      --fugr <FUGR>        
+      --subc <SUBC>        A `PROG` create only: `1` for a program (the default) or `I` for an include [possible values: 1, I]
+      --tr <TR>            
+      --simulate           
+      --backend <BACKEND>  [possible values: adt, rfc]
+      --conn <CONN>        
+  -h, --help               Print help

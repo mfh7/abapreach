@@ -1,0 +1,4 @@
+STOP: error: invalid value 'BOGUS' for '<KIND>'
+  [possible values: PROG, FUGR, FUNC, CLAS, INTF]
+
+For more information, try '--help'.

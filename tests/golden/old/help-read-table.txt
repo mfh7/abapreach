@@ -1,0 +1,13 @@
+Reads rows of one table through the ADT data preview
+
+Usage: abapreach read-table [OPTIONS] --conn <CONN> <TABLE>
+
+Arguments:
+  <TABLE>  
+
+Options:
+      --fields <FIELDS>       
+      --where <WHERE_CLAUSE>  
+      --rows <ROWS>           1 to 5000; the data preview of the 740 release stops there [default: 100]
+      --conn <CONN>           
+  -h, --help                  Print help

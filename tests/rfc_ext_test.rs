@@ -136,7 +136,7 @@ pub unsafe extern "C" fn RfcPing(_: *mut c_void, _: *mut c_void) -> c_int { 0 }
 #[no_mangle]
 pub unsafe extern "C" fn RfcGetFunctionDesc(_: *mut c_void, name: *const c_void, info: *mut c_void) -> *mut c_void {
     match read(name).as_str() {
-        "YFM_UTILS_SOURCE_DEPLOY" => FN_YFM as *mut c_void,
+        "YTEST_FAKE_FUNCTION" => FN_YFM as *mut c_void,
         "SADT_REST_RFC_ENDPOINT" => FN_SADT as *mut c_void,
         "NULL_CREATE" => FN_NULL_CREATE as *mut c_void,
         "ABAP_EXC" => FN_ABAP_EXC as *mut c_void,
@@ -536,7 +536,7 @@ fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
 
 fn deploy_call(name: &str, mode: &str, lines: &[&str]) -> FunctionCall {
     FunctionCall {
-        function: "YFM_UTILS_SOURCE_DEPLOY".to_owned(),
+        function: "YTEST_FAKE_FUNCTION".to_owned(),
         imports: pairs(&[
             ("IV_OBJECT_TYPE", "TRAN"),
             ("IV_OBJECT_NAME", name),
@@ -720,7 +720,7 @@ fn a_function_description_lists_its_parameters_in_either_width() {
         let mut fixture = Fixture::new(wide, &[]);
         let info = fixture
             .api
-            .describe_function("YFM_UTILS_SOURCE_DEPLOY")
+            .describe_function("YTEST_FAKE_FUNCTION")
             .unwrap_or_else(|error| panic!("wide {wide}: {error}"))
             .expect("the function exists");
         let summary = info
@@ -738,7 +738,7 @@ fn a_function_description_lists_its_parameters_in_either_width() {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(info.name, "YFM_UTILS_SOURCE_DEPLOY");
+        assert_eq!(info.name, "YTEST_FAKE_FUNCTION");
         assert_eq!(
             summary,
             vec![
@@ -1032,7 +1032,7 @@ fn a_library_without_the_ext_symbols_still_serves_sadt() {
         assert_eq!(
             fixture
                 .api
-                .describe_function("YFM_UTILS_SOURCE_DEPLOY")
+                .describe_function("YTEST_FAKE_FUNCTION")
                 .unwrap_err(),
             TransportError::Protocol(message)
         );

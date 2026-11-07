@@ -1,0 +1,5 @@
+Usage: abapreach doctor --conn <CONN>
+
+Options:
+      --conn <CONN>  
+  -h, --help         Print help

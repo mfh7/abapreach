@@ -1,0 +1,6 @@
+Serves the MCP tools on stdio
+
+Usage: abapreach mcp
+
+Options:
+  -h, --help  Print help
