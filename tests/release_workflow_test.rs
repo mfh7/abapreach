@@ -369,6 +369,68 @@ fn release_workflow_inspects_the_executable_extracted_from_the_packaged_archive(
 }
 
 #[test]
+fn release_workflow_checks_the_extracted_executable_for_the_custom_function_module() {
+    let document = document();
+
+    for build in [BARE_BUILD_JOB, LINUX_BUILD_JOB] {
+        let extract = step_index(&document, build, "Extract");
+        let check = step_index(&document, build, "check-no-custom-module.sh");
+        let upload = step_index(&document, build, "actions/upload-artifact");
+        let script = scalar(get(&steps(&document, build)[check], "run"));
+
+        assert!(
+            extract < check && check < upload,
+            "{build}: check before upload"
+        );
+        assert_eq!(
+            script, "bash .github/scripts/check-no-custom-module.sh \"inspect/$EXE\"",
+            "{build}"
+        );
+    }
+
+    // The needle must stay out of the workflow file itself (the public boundary test).
+    assert!(!workflow_text().contains(concat!("YFM_UTILS_", "SOURCE_DEPLOY")));
+}
+
+#[cfg(unix)]
+#[test]
+fn custom_module_check_rejects_a_binary_that_names_the_module_and_accepts_a_clean_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let clean = directory.path().join("clean");
+    let tainted = directory.path().join("tainted");
+    let needle = concat!("YFM_UTILS_", "SOURCE_DEPLOY");
+
+    std::fs::write(&clean, b"\x7fELF\0YFM_UTILS_OTHER\0SOURCE_DEPLOY\0").unwrap();
+    std::fs::write(&tainted, format!("\x7fELF\0\0{needle}\0\0").as_bytes()).unwrap();
+
+    let outcome = scripts::run(
+        "check-no-custom-module.sh",
+        &[clean.to_str().unwrap()],
+        "",
+        None,
+    );
+    assert!(outcome.success, "{}", outcome.text);
+
+    let outcome = scripts::run(
+        "check-no-custom-module.sh",
+        &[tainted.to_str().unwrap()],
+        "",
+        None,
+    );
+    assert!(!outcome.success, "{}", outcome.text);
+    assert!(outcome.text.contains("::error::"), "{}", outcome.text);
+
+    let missing = directory.path().join("missing");
+    let outcome = scripts::run(
+        "check-no-custom-module.sh",
+        &[missing.to_str().unwrap()],
+        "",
+        None,
+    );
+    assert!(!outcome.success, "{}", outcome.text);
+}
+
+#[test]
 fn release_workflow_rejects_a_package_version_that_differs_from_the_tag() {
     // The rc build must report the tag's base version: a Cargo.toml mismatch stops the plan step.
     let scripts = run_scripts(&document(), "plan").join("\n");

@@ -121,7 +121,8 @@ Setup and limits: [Getting started: Program includes](getting-started.md#program
 [Deploy safety](deploy-safety.md), and [MCP server](mcp.md).
 
 Not in 0.15.0: DDIC (`DTEL`, `DOMA`, `TABL`, `TTYP`), messages (`MSAG`), text pools (`TEXT`), CDS
-(`DDLS`), enhancements (`ENHO`), and the lifecycle (inactive, activate, ATC, ABAP Unit).
+(`DDLS`), enhancements (`ENHO`), restore of an old version (`rfc-deploy restore`), and the
+lifecycle (inactive, activate, ATC, ABAP Unit).
 
 ## MCP server (0.14.0)
 
@@ -129,7 +130,8 @@ Not in 0.15.0: DDIC (`DTEL`, `DOMA`, `TABL`, `TTYP`), messages (`MSAG`), text po
 same guards. Writes need a `plan_token` from a simulate, and `mcp_write` decides whether a human
 must also confirm. The tool list is in [MCP server](mcp.md#tools).
 
-Not yet in 0.14.0: Codex client support (not verified in this release); creation of programs and includes.
+Not yet in 0.14.0: Codex client support (not verified in this release); restore of an old version
+(`rfc-deploy restore`); creation of programs and includes.
 
 ## Platforms and distribution
 

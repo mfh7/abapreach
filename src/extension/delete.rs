@@ -83,6 +83,8 @@ impl DeleteBackend for MixedDelete<'_> {
         self.adt.begin(rows, tr)
     }
 
+    /// Always the extension's answer, also when `adt.begin` was the side that failed: `AdtDelete`
+    /// has no `begin`, so the ADT side cannot fail there today.
     fn begin_failure(&self, message: &str) -> (i32, String) {
         self.extension.begin_failure(message)
     }

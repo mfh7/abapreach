@@ -36,6 +36,8 @@ pub use crate::transport::rfc::{
     FunctionInfo, FunctionResult, MAX_CALL_CHARS, MAX_CALL_PARAMETERS, MAX_CALL_ROWS,
     ParameterInfo, ParameterType, TableRead, TableWrite,
 };
+// `MixedDelete` and `adt_pin` are kept on purpose: the private delete tests drive a batch through
+// them, and `RfcProbe` is the return type of `Extension::rfc_probe`.
 pub use delete::{ExtensionDelete, MixedDelete, adt_label, adt_pin};
 
 use crate::app::{Opened, RealFactories, RfcLibraryInfo};
@@ -51,6 +53,24 @@ use std::path::Path;
 const STANDARD_TOKENS: [&str; 5] = ["PROG", "FUGR", "FUNC", "CLAS", "INTF"];
 /// The write targets of the standard fault grammar; an extension may not reuse one.
 const STANDARD_FAULT_TARGETS: [&str; 4] = ["PUT", "ACTIVATE", "CREATE", "DELETE"];
+/// The ids and long flags of the standard create arguments and MCP properties; an extension
+/// option may not reuse one.
+const STANDARD_OPTION_NAMES: [&str; 14] = [
+    "kind",
+    "type",
+    "name",
+    "file",
+    "text",
+    "package",
+    "fugr",
+    "subc",
+    "tr",
+    "simulate",
+    "backend",
+    "conn",
+    "plan_token",
+    "help",
+];
 const ONE_EXTENSION: &str = "only one extension per process";
 
 /// Which grammars accept a type: `read`, `create` and the `delete` batch.
@@ -367,7 +387,9 @@ impl Registry {
     /// # Panics
     ///
     /// A programmer error at start-up: a second extension, a type token that is a standard token
-    /// or repeats, a backend label that is an ADT label, or a fault target that is a standard one.
+    /// or repeats, a backend label that is an ADT label, an option id or long flag that is a
+    /// standard create argument (or that two options share with different meanings), or a fault
+    /// target that is a standard one.
     #[must_use]
     pub fn with(mut self, extension: impl Extension + 'static) -> Self {
         assert!(self.extension.is_none(), "{ONE_EXTENSION}");
@@ -393,6 +415,30 @@ impl Registry {
                     .all(|backend| adt_label(backend) != kind.spec().backend_label),
                 "extension type {token} uses the label of an ADT backend"
             );
+        }
+
+        // The same option id on several types is one option; its long flag must then agree.
+        let options: Vec<&OptionSpec> = kinds
+            .iter()
+            .flat_map(|kind| kind.spec().create_options)
+            .collect();
+
+        for (index, option) in options.iter().enumerate() {
+            for name in [option.id, option.long] {
+                assert!(
+                    !STANDARD_OPTION_NAMES.contains(&name),
+                    "extension option {name} is a standard create argument"
+                );
+            }
+
+            for earlier in &options[..index] {
+                assert!(
+                    (earlier.id == option.id) == (earlier.long == option.long),
+                    "extension options {} and {} share an id or a long flag",
+                    earlier.id,
+                    option.id
+                );
+            }
         }
 
         for target in extension.fault_targets() {

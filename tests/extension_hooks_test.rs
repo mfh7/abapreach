@@ -2199,8 +2199,11 @@ mod fault {
             );
         }
 
-        // A name the extension did not register is unknown even with the extension.
-        assert_eq!(with_fault(&registry, "drop-reply:OTHER").code, 2);
+        // A name the extension did not register is unknown even with the extension; so are the
+        // registered name in another case and with trailing whitespace.
+        for value in ["drop-reply:OTHER", "drop-reply:xtest", "drop-reply:XTEST "] {
+            assert_eq!(with_fault(&registry, value).code, 2, "{value:?}");
+        }
     }
 
     #[test]
@@ -2436,6 +2439,96 @@ fn the_label_of_the_adt_backend_is_refused() {
 fn the_label_of_the_sadt_backend_is_refused() {
     let _ = Registry::new().with(Colliding {
         kinds: &SADT_LABEL_KINDS,
+        faults: &[],
+    });
+}
+
+const fn option(id: &'static str, long: &'static str) -> OptionSpec {
+    OptionSpec {
+        id,
+        long,
+        value_name: "V",
+        help: "",
+        mcp_description: "",
+        normalize: Normalize::Verbatim,
+        misuse: "",
+    }
+}
+
+static TEXT_ID: [OptionSpec; 1] = [option("text", "ytext")];
+static PACKAGE_LONG: [OptionSpec; 1] = [option("ypackage", "package")];
+static SHARED_ID: [OptionSpec; 1] = [option("yopt", "other")];
+static SHARED_LONG: [OptionSpec; 1] = [option("yother", "yopt")];
+static YOPT: [OptionSpec; 1] = [option("yopt", "yopt")];
+
+const fn spec_with(options: &'static [OptionSpec], token: &'static str) -> KindSpec {
+    let mut kind = spec(token, "y (YKIND)");
+
+    kind.create_options = options;
+    kind
+}
+
+static TEXT_ID_KIND: KindSpec = spec_with(&TEXT_ID, "YKIND");
+static PACKAGE_LONG_KIND: KindSpec = spec_with(&PACKAGE_LONG, "YKIND");
+static YOPT_KIND: KindSpec = spec_with(&YOPT, "YKIND");
+static SHARED_ID_KIND: KindSpec = spec_with(&SHARED_ID, "YOTHER");
+static SHARED_LONG_KIND: KindSpec = spec_with(&SHARED_LONG, "YOTHER");
+static TEXT_ID_KINDS: [ExtensionKind; 1] = [ExtensionKind::new(&TEXT_ID_KIND)];
+static PACKAGE_LONG_KINDS: [ExtensionKind; 1] = [ExtensionKind::new(&PACKAGE_LONG_KIND)];
+static SHARED_ID_KINDS: [ExtensionKind; 2] = [
+    ExtensionKind::new(&YOPT_KIND),
+    ExtensionKind::new(&SHARED_ID_KIND),
+];
+static SHARED_LONG_KINDS: [ExtensionKind; 2] = [
+    ExtensionKind::new(&YOPT_KIND),
+    ExtensionKind::new(&SHARED_LONG_KIND),
+];
+static SAME_OPTION_KINDS: [ExtensionKind; 2] = [
+    ExtensionKind::new(&YOPT_KIND),
+    ExtensionKind::new(&YOPT_KIND_B),
+];
+static YOPT_KIND_B: KindSpec = spec_with(&YOPT, "YOTHER");
+
+#[test]
+#[should_panic(expected = "extension option text is a standard create argument")]
+fn an_option_id_that_is_a_standard_argument_is_refused() {
+    let _ = Registry::new().with(Colliding {
+        kinds: &TEXT_ID_KINDS,
+        faults: &[],
+    });
+}
+
+#[test]
+#[should_panic(expected = "extension option package is a standard create argument")]
+fn an_option_long_that_is_a_standard_argument_is_refused() {
+    let _ = Registry::new().with(Colliding {
+        kinds: &PACKAGE_LONG_KINDS,
+        faults: &[],
+    });
+}
+
+#[test]
+#[should_panic(expected = "share an id or a long flag")]
+fn one_option_id_with_two_long_flags_is_refused() {
+    let _ = Registry::new().with(Colliding {
+        kinds: &SHARED_ID_KINDS,
+        faults: &[],
+    });
+}
+
+#[test]
+#[should_panic(expected = "share an id or a long flag")]
+fn one_long_flag_under_two_option_ids_is_refused() {
+    let _ = Registry::new().with(Colliding {
+        kinds: &SHARED_LONG_KINDS,
+        faults: &[],
+    });
+}
+
+#[test]
+fn the_same_option_on_two_types_is_one_option() {
+    let _ = Registry::new().with(Colliding {
+        kinds: &SAME_OPTION_KINDS,
         faults: &[],
     });
 }
