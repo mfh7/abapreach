@@ -523,7 +523,7 @@ To use ABAPReach from an AI assistant, see [MCP server](mcp.md).
 
 ## Tested environment
 
-The 0.15.0 release matrix ran on `v0.15.0-rc.3`, with the release and the fault-injection builds,
+The 0.15.0 release matrix ran on `v0.15.0-rc.6` (the binaries that were released as 0.15.0), with the release and the fault-injection builds,
 on each platform and path, against two systems. It covers the core, platform, fault-injection, ca,
 delete, read-table, policy, MCP and Python-parity groups, and the 0.15.0 scenarios (program create
 and include, include delete, Python parity, the MCP write tools).
@@ -549,20 +549,21 @@ that platform on that system.
 
 | Platform | SAP 7.50 system | SAP 7.40 system |
 | :--- | :---: | :---: |
-| macOS arm64 | 484 / 68 / 0 | 322 / 230 / 0 |
-| Windows x64, native | 484 / 68 / 0 | 322 / 230 / 0 |
-| Windows x64, emulated on an ARM64 virtual machine | 484 / 68 / 0 | 321 / 230 / 1 ¹ |
-| Linux x64 | 486 / 68 / 0 | 324 / 230 / 0 |
-| Linux arm64 | 317 / 237 / 0 | 191 / 363 / 0 |
+| macOS arm64 | 456 / 108 / 0 ¹ | 333 / 231 / 0 ¹ |
+| Windows x64, native | 456 / 108 / 0 ¹ | 333 / 231 / 0 ¹ |
+| Windows x64, emulated on an ARM64 virtual machine | 456 / 108 / 0 | 333 / 231 / 0 ¹ |
+| Linux x64 | 458 / 108 / 0 ¹ | 335 / 231 / 0 |
+| Linux arm64 | 304 / 262 / 0 | 199 / 367 / 0 ¹ |
 
-¹ One cell (`policy-doctor`, rfc-gui) ended as a harness error: the test harness could not read its
-own file over SSH, and the product did not run. The rerun of that group passed on the same host and
-binary. The count above is from the first run.
+¹ The MCP write group was rerun on the same host and binary. In the first run, the plan-token
+binding cell of the test harness sent an argument that the 0.15.0 MCP schema does not have; the
+server ignored it, as it ignores every unknown argument, and the cell failed on its own wrong
+expectation. The harness was fixed and the group was rerun: every cell passed. The count above is
+the first run with the rerun group in place of its first result.
 
-Totals: the SAP 7.50 system has 2255 PASS, 509 UNSUPPORTED and 0 FAIL cells. The SAP 7.40 system has
-1480 PASS, 1283 UNSUPPORTED and 1 FAIL cell (the harness error above, which passed on rerun). Every
-lane reported no leftover test objects, and the sweeps at start and end passed on every run, each
-verified in a fresh session.
+Totals: the SAP 7.50 system has 2130 PASS, 694 UNSUPPORTED and 0 FAIL cells. The SAP 7.40 system has
+1533 PASS, 1291 UNSUPPORTED and 0 FAIL cells. Every lane reported no leftover test objects, and the
+sweeps at start and end passed on every final run, each verified in a fresh session.
 
 The MCP cells drive the server with a scripted client that reproduces each client's advertised
 capabilities. The real clients were tested separately (see
@@ -574,6 +575,9 @@ An UNSUPPORTED cell has one of these reasons:
 
 - **Availability.** The SAP 7.40 system holds only `$TMP` objects, so `--tr` and
   transportable-package cells are UNSUPPORTED there.
+- **Not in this product.** The transaction code (`TRAN`) create, read and delete cells are
+  UNSUPPORTED on every platform and system: SAP offers no standard remote path for them (see
+  [TRAN is not supported](behavior-differences.md#tran-is-not-supported)).
 - **Stateful session.** The SAP 7.40 system has no stateful ADT HTTP session, so ADT HTTP write cells
   run there only in their pinned and fallback form. The RFC paths cover the same scenarios.
 - **Platform.** SAP GUI for Java for Linux is x86_64 only, so Linux arm64 has no SAP GUI library.

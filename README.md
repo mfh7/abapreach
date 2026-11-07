@@ -182,8 +182,8 @@ Release 0.15.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The 
 library lookup per OS, the release file checks, the Linux glibc baseline, the credential
 file permission rules and the test matrix are in
 [Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
-The 0.15.0 release matrix ran on `v0.15.0-rc.3`; its final runs have no FAIL cell, and every
-UNSUPPORTED cell is listed with its reason. The interactive group (prompts and Ctrl-C), including
+The 0.15.0 release matrix ran on `v0.15.0-rc.6`, the binaries that were released; its final runs
+have no FAIL cell, and every UNSUPPORTED cell is listed with its reason. The interactive group (prompts and Ctrl-C), including
 the interrupt-while-locked cells, is from the 0.13.0 matrix and was not rerun. See
 [Tested environment](docs/getting-started.md#tested-environment).
 
