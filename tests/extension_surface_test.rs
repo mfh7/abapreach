@@ -14,7 +14,7 @@ use abapreach::extension::{
     MAX_CALL_ROWS, MixedDelete, Normalize, ObjectFacts, OptionSpec, Outcome, ParameterInfo,
     ParameterType, Plan, ReadError, ReadRequest, Reconcile, Registry, RfcProbe, RunContext,
     SharedFactories, SourceFact, Status, TableRead, TableWrite, TrLock, TransportError, Verbs,
-    adt_label, adt_pin, emit_lines, run_main, run_with, source_hash,
+    adt_label, adt_pin, emit_lines, run_main, run_with, source_hash, validate_name_within,
 };
 // Fault injection, in builds that have it.
 #[cfg(feature = "fault-injection")]
@@ -32,4 +32,6 @@ fn the_surface_resolves() {
     assert!(!Verbs::READ.contains(Verbs::CREATE));
     assert_eq!(Registry::new().version_text(), env!("CARGO_PKG_VERSION"));
     assert_eq!(MAX_CALL_CHARS, 255);
+    assert!(validate_name_within("ZREPORT", 40).is_ok());
+    assert!(validate_name_within("ZREPORT", 3).is_err());
 }

@@ -22,7 +22,7 @@ pub use crate::config::Connection;
 pub use crate::domain::{Outcome, Status};
 #[cfg(feature = "fault-injection")]
 pub use crate::fault::{ENV, Fault, Target, delete_reply_dropped, note_delete_reply_dropped};
-pub use crate::hash::source_hash;
+pub use crate::hash::{source_hash, validate_name_within};
 pub use crate::object::DEFAULT_PACKAGE;
 pub use crate::operation::delete::{
     DeleteBackend, DeleteReply, DeleteStatus, InactiveFact, ObjectFacts, Plan, Reconcile,
