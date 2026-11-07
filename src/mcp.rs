@@ -2,6 +2,7 @@
 //! (framing, negotiation, discovery); what a tool does lives behind [`ToolHandler`], and a write
 //! is never decided by anything a client sends.
 
+use crate::extension::{ExtensionKind, Verbs};
 use crate::operation::deploy::CancelFlag;
 use serde_json::{Map, Value, json};
 use std::collections::{HashSet, VecDeque};
@@ -183,6 +184,10 @@ pub struct Server<H> {
     writable: Vec<String>,
     /// Whether the client that initialized can answer a form.
     elicitation: bool,
+    /// The types of the registered extension, offered next to the standard ones.
+    kinds: Vec<ExtensionKind>,
+    /// The `serverInfo` version.
+    version: &'static str,
 }
 
 impl<H: ToolHandler> Server<H> {
@@ -192,7 +197,23 @@ impl<H: ToolHandler> Server<H> {
             write_offered,
             writable: Vec::new(),
             elicitation: false,
+            kinds: Vec::new(),
+            version: env!("CARGO_PKG_VERSION"),
         }
+    }
+
+    /// Offers the types of a registered extension in the write tools.
+    pub fn with_kinds(mut self, kinds: Vec<ExtensionKind>) -> Self {
+        self.kinds = kinds;
+
+        self
+    }
+
+    /// The version `initialize` reports; the default is the crate version.
+    pub fn with_version(mut self, version: &'static str) -> Self {
+        self.version = version;
+
+        self
     }
 
     /// Offers the write tools exactly when `writable` is not empty, and names those connections.
@@ -246,7 +267,7 @@ impl<H: ToolHandler> Server<H> {
         Some(match method {
             "initialize" => match params.get("protocolVersion").and_then(Value::as_str) {
                 Some(version) => {
-                    let result = initialize_result(version);
+                    let result = initialize_result(version, self.version);
                     let negotiated = result["protocolVersion"].as_str().unwrap_or_default();
 
                     self.elicitation = negotiated >= ELICITATION_SINCE
@@ -264,7 +285,7 @@ impl<H: ToolHandler> Server<H> {
     }
 
     fn tools(&self) -> Vec<Value> {
-        build_tools(self.write_offered, &self.writable)
+        build_tools(self.write_offered, &self.writable, &self.kinds)
     }
 
     fn call(
@@ -320,7 +341,7 @@ fn advertises_forms(capabilities: Option<&Value>) -> bool {
         .is_some_and(|elicitation| elicitation.is_empty() || elicitation.contains_key("form"))
 }
 
-fn initialize_result(requested: &str) -> Value {
+fn initialize_result(requested: &str, server_version: &str) -> Value {
     let version = SUPPORTED_VERSIONS
         .iter()
         .find(|version| **version == requested)
@@ -329,7 +350,7 @@ fn initialize_result(requested: &str) -> Value {
     json!({
         "protocolVersion": version,
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": "abapreach", "version": env!("CARGO_PKG_VERSION")},
+        "serverInfo": {"name": "abapreach", "version": server_version},
     })
 }
 
@@ -809,16 +830,21 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 /// The tools `tools/list` returns. Annotations are hints for the client; the server enforces
 /// every write itself.
 pub fn tool_list(write_offered: bool) -> Vec<Value> {
-    build_tools(write_offered, &[])
+    build_tools(write_offered, &[], &[])
 }
 
 /// The tools for a server whose `writable` connections may write: none, and only the read tools
 /// exist; otherwise every write tool names them.
 pub fn tool_list_for(writable: &[String]) -> Vec<Value> {
-    build_tools(!writable.is_empty(), writable)
+    build_tools(!writable.is_empty(), writable, &[])
 }
 
-fn build_tools(write_offered: bool, writable: &[String]) -> Vec<Value> {
+/// [`tool_list_for`] for a server with the types of an extension.
+pub fn tool_list_with(writable: &[String], kinds: &[ExtensionKind]) -> Vec<Value> {
+    build_tools(!writable.is_empty(), writable, kinds)
+}
+
+fn build_tools(write_offered: bool, writable: &[String], kinds: &[ExtensionKind]) -> Vec<Value> {
     let scope = if writable.is_empty() {
         String::new()
     } else {
@@ -848,14 +874,27 @@ fn build_tools(write_offered: bool, writable: &[String]) -> Vec<Value> {
         "Create the include of a program if it does not exist",
     );
     let source_kinds = ["PROG", "FUNC", "CLAS", "INTF"];
-    let create_kinds = ["PROG", "FUGR", "FUNC", "CLAS", "INTF"];
+    let with_verb = |verb: Verbs| {
+        kinds
+            .iter()
+            .filter(move |kind| kind.spec().verbs.contains(verb))
+            .map(|kind| kind.token())
+    };
+    let create_kinds: Vec<&str> = ["PROG", "FUGR", "FUNC", "CLAS", "INTF"]
+        .into_iter()
+        .chain(with_verb(Verbs::CREATE))
+        .collect();
+    let delete_kinds: Vec<&str> = ["PROG", "FUGR", "FUNC", "CLAS", "INTF"]
+        .into_iter()
+        .chain(with_verb(Verbs::DELETE))
+        .collect();
     let main = property(
         "string",
         "Main program of a PROG include (optional; the server's single main program is used when omitted)",
     );
     let objects = json!({
         "type": "array",
-        "description": "Objects as TYPE:NAME, TYPE PROG|FUGR|FUNC|CLAS|INTF",
+        "description": format!("Objects as TYPE:NAME, TYPE {}", delete_kinds.join("|")),
         "items": {"type": "string"},
     });
     let deploy_properties = json!({
@@ -863,7 +902,7 @@ fn build_tools(write_offered: bool, writable: &[String]) -> Vec<Value> {
         "tr": tr, "include": include, "fugr": fugr, "create_include": create_include,
         "main": main,
     });
-    let create_properties = json!({
+    let mut create_properties = json!({
         "conn": conn, "type": object_type(&create_kinds), "name": name,
         "text": property("string", "Object description"),
         "package": property("string", "Package (required except FUNC)"), "tr": tr, "fugr": fugr,
@@ -873,6 +912,11 @@ fn build_tools(write_offered: bool, writable: &[String]) -> Vec<Value> {
             "enum": ["1", "I"],
         }),
     });
+
+    for option in kinds.iter().flat_map(|kind| kind.spec().create_options) {
+        create_properties[option.id] = property("string", option.mcp_description);
+    }
+
     let delete_properties = json!({"conn": conn, "objects": objects, "tr": tr});
     let with_token = |properties: &Value| {
         let mut properties = properties.clone();

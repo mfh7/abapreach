@@ -3,6 +3,7 @@
 
 use crate::adt::prog_uri;
 use crate::cli::{CreateKind, IncludeKind, LineRange, ObjectKind, Subc};
+use crate::extension::KindSpec;
 use crate::hash::{validate_name_within, validate_source};
 use std::path::Path;
 
@@ -361,10 +362,13 @@ fn query_value(value: &str) -> String {
 /// A name as one path segment. Only a PROG has an evidenced path form for a namespaced name, so
 /// the other kinds refuse it instead of guessing an encoding.
 fn path_segment(kind: ObjectKind, name: &str) -> Result<String, String> {
+    segment_of(kind.token(), name)
+}
+
+fn segment_of(token: &str, name: &str) -> Result<String, String> {
     if name.starts_with('/') {
         return Err(format!(
-            "a namespaced {} name has no verified source path yet: {name}",
-            kind.token()
+            "a namespaced {token} name has no verified source path yet: {name}"
         ));
     }
 
@@ -378,18 +382,38 @@ fn check_scope(
     include: Option<IncludeKind>,
     fugr: Option<&str>,
 ) -> Result<(), String> {
-    if include.is_some() && kind != ObjectKind::Clas {
+    scope_rules(
+        Some(kind),
+        kind.token(),
+        kind.max_name(),
+        name,
+        include,
+        fugr,
+    )
+}
+
+/// The scope rules for a standard kind (`Some`) or an extension type (`None`, with its own token
+/// and name limit): `--include`, `--fugr`, the name and the group.
+fn scope_rules(
+    kind: Option<ObjectKind>,
+    token: &str,
+    max_name: usize,
+    name: &str,
+    include: Option<IncludeKind>,
+    fugr: Option<&str>,
+) -> Result<(), String> {
+    if include.is_some() && kind != Some(ObjectKind::Clas) {
         return Err("--include is only valid for CLAS".to_owned());
     }
 
-    if fugr.is_some() && kind != ObjectKind::Func {
+    if fugr.is_some() && kind != Some(ObjectKind::Func) {
         return Err("--fugr is only valid for FUNC".to_owned());
     }
 
-    validate_name_within(name, kind.max_name())?;
+    validate_name_within(name, max_name)?;
 
-    if kind != ObjectKind::Prog {
-        path_segment(kind, name)?;
+    if kind != Some(ObjectKind::Prog) {
+        segment_of(token, name)?;
     }
 
     if let Some(group) = fugr {
@@ -402,11 +426,15 @@ fn check_scope(
 /// The `--main` option names the program an include belongs to; it is a `PROG` option only, and
 /// its program-vs-include decision happens after URI resolution on the server.
 fn check_main(kind: ObjectKind, main: Option<&str>) -> Result<(), String> {
+    main_rule(Some(kind), main)
+}
+
+fn main_rule(kind: Option<ObjectKind>, main: Option<&str>) -> Result<(), String> {
     let Some(main) = main else {
         return Ok(());
     };
 
-    if kind != ObjectKind::Prog {
+    if kind != Some(ObjectKind::Prog) {
         return Err("--main is only valid for PROG".to_owned());
     }
 
@@ -442,6 +470,27 @@ pub fn check_read(
     check_main(kind, main)?;
 
     // A partial file must never be deployed as the full source.
+    if lines.is_some() && out != Path::new("-") {
+        return Err("--lines requires OUT to be '-' (stdout)".to_owned());
+    }
+
+    Ok(())
+}
+
+/// The common local rules of `read` for an extension type, from its spec; the extension adds its
+/// own after this.
+pub fn check_read_extension(
+    spec: &KindSpec,
+    name: &str,
+    out: &Path,
+    include: Option<IncludeKind>,
+    fugr: Option<&str>,
+    lines: Option<LineRange>,
+    main: Option<&str>,
+) -> Result<(), String> {
+    scope_rules(None, spec.token, spec.max_name, name, include, fugr)?;
+    main_rule(None, main)?;
+
     if lines.is_some() && out != Path::new("-") {
         return Err("--lines requires OUT to be '-' (stdout)".to_owned());
     }
@@ -499,7 +548,80 @@ pub fn check_create(
     misuse: Option<&str>,
     file: Option<&Path>,
 ) -> Result<(), String> {
-    validate_name_within(name, kind.max_name())?;
+    let subject = CreateSubject {
+        kind: Some(kind),
+        token: kind.token(),
+        max_name: kind.max_name(),
+        max_text: kind.max_text(),
+    };
+
+    create_rules(
+        &subject,
+        name,
+        text,
+        package,
+        fugr,
+        tr,
+        subc,
+        misuse,
+        &|| Ok(()),
+        file,
+    )
+}
+
+/// The common local rules of `create` for an extension type, from its spec, in the order of the
+/// standard rules. `own` runs where the extension's own rules belong: after the option rules and
+/// before the FILE rules.
+#[allow(clippy::too_many_arguments)]
+pub fn check_create_extension(
+    spec: &KindSpec,
+    name: &str,
+    text: &str,
+    package: Option<&str>,
+    fugr: Option<&str>,
+    tr: Option<&str>,
+    subc: Option<Subc>,
+    misuse: Option<&str>,
+    own: &dyn Fn() -> Result<(), String>,
+    file: Option<&Path>,
+) -> Result<(), String> {
+    let subject = CreateSubject {
+        kind: None,
+        token: spec.token,
+        max_name: spec.max_name,
+        max_text: spec.max_text,
+    };
+
+    create_rules(
+        &subject, name, text, package, fugr, tr, subc, misuse, own, file,
+    )
+}
+
+/// What the create rules need to know about a type: a standard kind (`Some`) or an extension
+/// type (`None`) with its token and limits.
+struct CreateSubject<'a> {
+    kind: Option<CreateKind>,
+    token: &'a str,
+    max_name: usize,
+    max_text: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_rules(
+    subject: &CreateSubject<'_>,
+    name: &str,
+    text: &str,
+    package: Option<&str>,
+    fugr: Option<&str>,
+    tr: Option<&str>,
+    subc: Option<Subc>,
+    misuse: Option<&str>,
+    own: &dyn Fn() -> Result<(), String>,
+    file: Option<&Path>,
+) -> Result<(), String> {
+    let kind = subject.kind;
+
+    validate_name_within(name, subject.max_name)?;
 
     if name.starts_with('/') || !matches!(name.as_bytes()[0].to_ascii_uppercase(), b'Z' | b'Y') {
         return Err(format!("a created name must start with Z or Y: {name}"));
@@ -507,22 +629,23 @@ pub fn check_create(
 
     let length = text.chars().count();
 
-    if length > kind.max_text() {
+    if length > subject.max_text {
         return Err(format!(
             "--text is {length} characters; {} allows {}",
-            kind.token(),
-            kind.max_text()
+            subject.token, subject.max_text
         ));
     }
 
     match (kind, fugr) {
-        (CreateKind::Func, None) => return Err("create FUNC requires --fugr <FG>".to_owned()),
-        (CreateKind::Func, Some(group)) => check_group(group)?,
+        (Some(CreateKind::Func), None) => {
+            return Err("create FUNC requires --fugr <FG>".to_owned());
+        }
+        (Some(CreateKind::Func), Some(group)) => check_group(group)?,
         (_, Some(_)) => return Err("--fugr is only valid for FUNC".to_owned()),
         _ => {}
     }
 
-    if subc.is_some() && kind != CreateKind::Prog {
+    if subc.is_some() && kind != Some(CreateKind::Prog) {
         return Err("--subc only applies to PROG".to_owned());
     }
 
@@ -531,8 +654,10 @@ pub fn check_create(
         return Err(message.to_owned());
     }
 
+    own()?;
+
     if file.is_some() {
-        if kind == CreateKind::Prog && subc == Some(Subc::Include) {
+        if kind == Some(CreateKind::Prog) && subc == Some(Subc::Include) {
             return Err(
                 "new include: deploy the source after the INCLUDE statement exists in the \
                  parent program (create PROG --subc I without FILE)"
@@ -540,13 +665,13 @@ pub fn check_create(
             );
         }
 
-        if kind != CreateKind::Prog {
-            return Err(format!("create {} does not accept FILE", kind.token()));
+        if kind != Some(CreateKind::Prog) {
+            return Err(format!("create {} does not accept FILE", subject.token));
         }
     }
 
     // A FUNC takes the package of its function group, which only the server knows.
-    if kind == CreateKind::Func {
+    if kind == Some(CreateKind::Func) {
         return match package {
             Some(_) => Err(
                 "--package is not valid for create FUNC: the function module uses the \

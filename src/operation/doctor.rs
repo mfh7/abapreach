@@ -1,5 +1,6 @@
 use crate::app::{Factories, RfcLibraryInfo, end_session};
 use crate::config::{Connection, LocalCredentialsPermission, tls_warning};
+use crate::extension::{Registry, doctor_line};
 use crate::transport::Request;
 use crate::transport::rfc::identity_report;
 
@@ -51,6 +52,18 @@ impl Doctor {
         connection: &Connection,
         local_credentials: LocalCredentialsPermission,
         factories: &mut dyn Factories,
+    ) -> DoctorReport {
+        Self::probe_with(connection, local_credentials, factories, &Registry::new())
+    }
+
+    /// [`Doctor::probe`] for a process with a registry. An extension adds its line after the
+    /// `RFC SADT probe` line; it then gets the logon of the passed ping instead of a second one,
+    /// and its line never decides the exit code.
+    pub fn probe_with(
+        connection: &Connection,
+        local_credentials: LocalCredentialsPermission,
+        factories: &mut dyn Factories,
+        registry: &Registry,
     ) -> DoctorReport {
         let mut lines = vec![
             format!("connection {}: configuration available", connection.id),
@@ -133,7 +146,10 @@ impl Doctor {
         }
 
         // A ping needs the library, so a missing library skips (never fails) the ping probe. An
-        // ADT-only connection has no RFC to probe at all.
+        // ADT-only connection has no RFC to probe at all. The library error text is kept: an
+        // extension line shows it unchanged, instead of loading the library once more.
+        let mut library_error = None;
+        let mut function = None;
         let library_found = if connection.rfc.is_none() {
             lines.push("RFC library: not run (no RFC)".to_owned());
 
@@ -149,6 +165,7 @@ impl Doctor {
                 Err(error) => {
                     passed = false;
                     lines.push(format!("RFC library: not found: {error}"));
+                    library_error = Some(error);
 
                     false
                 }
@@ -158,7 +175,17 @@ impl Doctor {
         if connection.rfc.is_none() {
             lines.push("RFC SADT probe: not run (no RFC)".to_owned());
         } else if library_found {
-            match factories.rfc_ping(connection) {
+            let ping = if registry.extension().is_some() {
+                let probe = factories.rfc_probe(connection);
+
+                function = probe.function;
+
+                probe.ping
+            } else {
+                factories.rfc_ping(connection)
+            };
+
+            match ping {
                 Ok(()) => {
                     rfc_passed = true;
                     lines.push("RFC SADT probe: ok".to_owned());
@@ -170,6 +197,16 @@ impl Doctor {
             }
         } else {
             lines.push("RFC SADT probe: not run (RFC library not found)".to_owned());
+        }
+
+        if let Some(line) = doctor_line(
+            registry,
+            connection,
+            library_error.as_deref(),
+            rfc_passed,
+            function,
+        ) {
+            lines.push(line);
         }
 
         // A capability line names only the backends whose probe passed; nothing passed reads `none`.

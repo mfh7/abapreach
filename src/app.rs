@@ -1,15 +1,22 @@
 use crate::backend::{BackendKind, Failure, OperationKind, Router, Selection, SelectionReason};
-use crate::cli::{Backend, Cli, Command, DeleteTarget, ObjectKind, Subc};
+use crate::cli::{Backend, Command, DeleteKind, DeleteTarget, ObjectKind, Subc, TypeArg};
 use crate::config::{
     Config, ConfigPaths, Connection, LocalCredentialsPermission, local_credentials_permission,
     scrub, tls_warning,
 };
 use crate::domain::Outcome;
+use crate::extension::{
+    CreateRequest, ExtensionDelete, ExtensionKind, ExtensionOp, ExtensionOptions, MixedDelete,
+    ReadRequest, Registry, RunContext, SharedFactories, adt_label, adt_pin,
+};
 use crate::hash::local_source_lines;
 use crate::mcp::{Server, serve_with};
 use crate::mcp_read::ReadTools;
 use crate::mcp_write::{McpTools, TokenGate};
-use crate::object::{check_create, check_deploy_options, check_deploy_source, check_read};
+use crate::object::{
+    check_create, check_create_extension, check_deploy_options, check_deploy_source, check_read,
+    check_read_extension,
+};
 use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::delete::{self, Context};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
@@ -22,10 +29,9 @@ use crate::operation::read_table::{
 use crate::policy::Terminal;
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
-    DynamicRfcApi, Env, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
+    DynamicRfcApi, Env, FunctionApi, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
 };
 use crate::transport::{SadtTransport, TransportError};
-use clap::Parser;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -63,6 +69,13 @@ pub struct RfcLibraryIdentity {
     pub chars: String,
 }
 
+/// What the doctor's RFC probe found: the ping result and, after a passed ping, the logon behind it.
+pub struct RfcProbe {
+    pub ping: Result<(), TransportError>,
+    /// `Some` only after a passed ping; an `Err` keeps the open error of that logon.
+    pub function: Option<Result<Box<dyn FunctionApi>, TransportError>>,
+}
+
 /// Opens the transports; tests replace it so no network is touched. A failed open must be a
 /// pre-send failure (nothing was sent yet).
 pub trait Factories {
@@ -75,6 +88,33 @@ pub trait Factories {
 
     /// One `RfcPing`: the only logon the doctor probe makes on RFC.
     fn rfc_ping(&mut self, connection: &Connection) -> Result<(), TransportError>;
+
+    /// The doctor's RFC probe for an extension: one ping and, only when it passed, the generic
+    /// function-call layer on that same logon, so a doctor run never logs on twice. A failed ping
+    /// opens nothing more. The default belongs to test doubles that count `rfc_ping` and
+    /// `function_api` separately.
+    fn rfc_probe(&mut self, connection: &Connection) -> RfcProbe {
+        let ping = self.rfc_ping(connection);
+        let function = ping.is_ok().then(|| self.function_api(connection));
+
+        RfcProbe { ping, function }
+    }
+
+    /// An RFC logon for generic function-module calls. The default belongs to factories that carry
+    /// no RFC (a test double); the real ones override.
+    fn function_api(&mut self, _: &Connection) -> Result<Box<dyn FunctionApi>, TransportError> {
+        Err(TransportError::PreSendConnectivity(
+            "function calls are not available from these factories".to_owned(),
+        ))
+    }
+
+    /// A NEW logon for the read-only reconciliation of an uncertain write.
+    fn function_api_fresh(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<Box<dyn FunctionApi>, TransportError> {
+        self.function_api(connection)
+    }
 
     fn cancel(&self) -> CancelFlag {
         CancelFlag::new()
@@ -157,6 +197,41 @@ impl Factories for RealFactories {
         result
     }
 
+    fn rfc_probe(&mut self, connection: &Connection) -> RfcProbe {
+        let mut api = match Self::rfc_api(connection) {
+            Ok(api) => api,
+            Err(error) => {
+                return RfcProbe {
+                    ping: Err(error),
+                    function: None,
+                };
+            }
+        };
+        let ping = api.ping();
+
+        if ping.is_err() {
+            api.close();
+
+            return RfcProbe {
+                ping,
+                function: None,
+            };
+        }
+
+        // The probe keeps the pinged logon; dropping it logs off.
+        RfcProbe {
+            ping,
+            function: Some(Ok(Box::new(api))),
+        }
+    }
+
+    fn function_api(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<Box<dyn FunctionApi>, TransportError> {
+        Ok(Box::new(Self::rfc_api(connection)?))
+    }
+
     fn cancel(&self) -> CancelFlag {
         self.cancel.clone()
     }
@@ -167,17 +242,29 @@ pub fn run(
     env: BTreeMap<String, String>,
     factories: &mut dyn Factories,
 ) -> Exit {
+    run_registered(args, env, factories, &Registry::new())
+}
+
+/// [`run`] with the registry of the process; `extension::run_with` is the public name.
+pub(crate) fn run_registered(
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    factories: &mut dyn Factories,
+    registry: &Registry,
+) -> Exit {
     // Test-only: an unknown value stops the command before any connection is opened.
     #[cfg(feature = "fault-injection")]
-    let warning =
-        match crate::fault::Fault::from_lookup(env.get(crate::fault::ENV).map(String::as_str)) {
-            Ok(faults) => crate::fault::Fault::warning(&faults),
-            Err(message) => return stop(message),
-        };
+    let warning = match crate::fault::Fault::from_lookup_with(
+        env.get(crate::fault::ENV).map(String::as_str),
+        &registry.fault_targets(),
+    ) {
+        Ok(faults) => crate::fault::Fault::warning(&faults),
+        Err(message) => return stop(message),
+    };
     #[cfg(not(feature = "fault-injection"))]
     let warning: Option<String> = None;
-    let cli = match Cli::try_parse_from(args) {
-        Ok(cli) => cli,
+    let (cli, options) = match crate::cli::parse(args, registry) {
+        Ok(parsed) => parsed,
         Err(error) if error.use_stderr() => {
             return with_warning(
                 stop(error.render().to_string().trim_end()),
@@ -197,14 +284,21 @@ pub fn run(
     };
     let is_doctor = matches!(cli.command, Command::Doctor { .. });
     let Some(conn) = connection_id(&cli.command) else {
-        return with_warning(mcp(env, factories), warning.as_deref());
+        return with_warning(mcp(env, factories, registry), warning.as_deref());
     };
     let (connection, local_credentials) = match resolve(conn, &env) {
         Ok(resolved) => resolved,
         Err(message) => return with_warning(stop(message), warning.as_deref()),
     };
     let exit = with_warning(
-        execute(cli.command, &connection, local_credentials, factories),
+        execute(
+            cli.command,
+            &connection,
+            local_credentials,
+            factories,
+            registry,
+            &options,
+        ),
         warning.as_deref(),
     );
     let mut stdout = exit.stdout;
@@ -270,7 +364,7 @@ fn connection_id(command: &Command) -> Option<&str> {
 
 /// `mcp` loads every policy once, then serves stdio until EOF; an invalid policy stops the start
 /// with exit 2 before anything is written to stdout.
-fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories) -> Exit {
+fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories, registry: &Registry) -> Exit {
     let loaded = ConfigPaths::from_env(&env).and_then(|paths| Config::load(paths, &env));
 
     match loaded {
@@ -278,8 +372,12 @@ fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories) -> Exit {
             let writable = config.mcp_writable();
             // The flag a signal handler sets: it ends the server once a write has settled.
             let cancel = factories.cancel();
-            let tools = McpTools::new(ReadTools::new(config, env, factories), TokenGate::new());
-            let mut server = Server::new(tools, false).with_writable(writable);
+            let tools = McpTools::new(ReadTools::new(config, env, factories), TokenGate::new())
+                .with_registry(registry);
+            let mut server = Server::new(tools, false)
+                .with_writable(writable)
+                .with_kinds(registry.kinds().collect())
+                .with_version(registry.version_text());
             // Not the locked handles: the reader thread owns stdin, and stdout is shared.
             let served = serve_with(
                 &mut server,
@@ -374,10 +472,37 @@ fn execute(
     connection: &Connection,
     local_credentials: LocalCredentialsPermission,
     factories: &mut dyn Factories,
+    registry: &Registry,
+    options: &ExtensionOptions,
 ) -> Exit {
+    // A batch with an extension type is refused by the extension before the first object, and
+    // before any connection; its rows never run over ADT.
+    if let Command::Delete {
+        targets,
+        simulate,
+        tr,
+        plan,
+        ..
+    } = &command
+        && let Some(refusal) = extension_delete_refusal(targets, registry, connection)
+    {
+        return match refusal {
+            Ok(()) => delete_with_extension(
+                targets,
+                *simulate,
+                tr.as_deref(),
+                plan,
+                connection,
+                factories,
+                registry,
+            ),
+            Err(message) => stop(message),
+        };
+    }
+
     match command {
         Command::Doctor { .. } => {
-            let report = Doctor::probe(connection, local_credentials, factories);
+            let report = Doctor::probe_with(connection, local_credentials, factories, registry);
 
             Exit {
                 code: report.exit(),
@@ -469,9 +594,10 @@ fn execute(
             false,
             connection,
             factories,
-            |transport, _, cancel, fresh| {
+            |transport, selection, cancel, fresh| {
                 delete_attempt(
                     transport,
+                    selection,
                     cancel,
                     fresh,
                     connection,
@@ -479,6 +605,7 @@ fn execute(
                     tr.as_deref(),
                     simulate,
                     &plan,
+                    None,
                 )
             },
         ),
@@ -495,6 +622,29 @@ fn execute(
             backend,
             ..
         } => {
+            let kind = match kind {
+                TypeArg::Standard(kind) => kind,
+                TypeArg::Extension(kind) => {
+                    let request = ReadRequest {
+                        name: &name,
+                        out: &out,
+                        force,
+                        lines,
+                        options,
+                    };
+
+                    return read_with_extension(
+                        kind,
+                        &request,
+                        (include, fugr.as_deref(), main.as_deref()),
+                        backend,
+                        connection,
+                        factories,
+                        registry,
+                    );
+                }
+            };
+
             if let Err(message) = check_read(
                 kind,
                 &name,
@@ -571,6 +721,30 @@ fn execute(
             backend,
             ..
         } => {
+            let kind = match kind {
+                TypeArg::Standard(kind) => kind,
+                TypeArg::Extension(kind) => {
+                    let request = CreateRequest {
+                        name: &name,
+                        text: &text,
+                        package: package.as_deref(),
+                        tr: tr.as_deref(),
+                        simulate,
+                        options,
+                    };
+
+                    return create_with_extension(
+                        kind,
+                        &request,
+                        (fugr.as_deref(), subc, file.as_deref()),
+                        backend,
+                        connection,
+                        factories,
+                        registry,
+                    );
+                }
+            };
+
             if let Err(message) = check_create(
                 kind,
                 &name,
@@ -579,7 +753,7 @@ fn execute(
                 fugr.as_deref(),
                 tr.as_deref(),
                 subc,
-                None,
+                option_misuse(None, options, registry),
                 file.as_deref(),
             ) {
                 return stop(message);
@@ -655,6 +829,18 @@ fn execute(
             main,
             ..
         } => {
+            let kind = match kind {
+                TypeArg::Standard(kind) => kind,
+                // `deploy` parses an extension type only so that it can say why it stops.
+                TypeArg::Extension(kind) => {
+                    return stop(
+                        kind.spec()
+                            .deploy_refusal
+                            .unwrap_or("deploy is not supported"),
+                    );
+                }
+            };
+
             if let Err(message) = check_deploy_options(
                 kind,
                 &name,
@@ -718,6 +904,14 @@ fn execute(
     }
 }
 
+/// The `--backend` pin that names a backend, for an extension that reads the pin of a token.
+pub(crate) fn pin_of(backend: BackendKind) -> Backend {
+    match backend {
+        BackendKind::AdtHttp => Backend::Adt,
+        BackendKind::RfcSadt => Backend::Rfc,
+    }
+}
+
 fn backend_kind(backend: Backend) -> BackendKind {
     match backend {
         Backend::Adt => BackendKind::AdtHttp,
@@ -725,10 +919,12 @@ fn backend_kind(backend: Backend) -> BackendKind {
     }
 }
 
-/// One attempt of a delete batch on the transport the router opened.
+/// One attempt of a delete batch on the transport the router opened. `extension` is the backend
+/// of the extension rows of a mixed batch: its rows run on it, the rest over `transport`.
 #[allow(clippy::too_many_arguments)]
 fn delete_attempt(
     transport: &mut dyn SadtTransport,
+    selection: &Selection,
     cancel: &CancelFlag,
     fresh: &mut dyn FnMut() -> Opened,
     connection: &Connection,
@@ -736,6 +932,7 @@ fn delete_attempt(
     tr: Option<&str>,
     simulate: bool,
     plan: &Path,
+    mut extension: Option<&mut dyn ExtensionDelete>,
 ) -> Attempt {
     // The server would answer the LOCK and then refuse the DELETE, so nothing is sent
     // and the router may try RFC.
@@ -761,15 +958,31 @@ fn delete_attempt(
     let (mut outcome, unsent, fresh_note) = {
         let mut backend =
             AdtDelete::with_cancel(&mut *transport, &connection.user, fresh, cancel.clone());
-        let outcome = delete::run_until(
-            &mut backend,
-            &context,
-            targets,
-            tr,
-            simulate,
-            plan,
-            &mut || cancel.is_set(),
-        );
+        let outcome = match extension.as_deref_mut() {
+            Some(extension) => {
+                let mut mixed =
+                    MixedDelete::new(&mut backend, adt_label(selection.backend), extension);
+
+                delete::run_until(
+                    &mut mixed,
+                    &context,
+                    targets,
+                    tr,
+                    simulate,
+                    plan,
+                    &mut || cancel.is_set(),
+                )
+            }
+            None => delete::run_until(
+                &mut backend,
+                &context,
+                targets,
+                tr,
+                simulate,
+                plan,
+                &mut || cancel.is_set(),
+            ),
+        };
 
         (outcome, backend.unsent_failure(), backend.close_note())
     };
@@ -781,9 +994,15 @@ fn delete_attempt(
     // session end is only a note.
     let note = end_session(transport);
 
-    // A read that never left the process and no delete request sent: the plan file pins no
-    // backend, so RFC may run the whole batch, unless Ctrl-C came first.
-    if let Some((failure, message)) = unsent {
+    // A read that never left the process and no delete request sent: the plan file of a batch
+    // without an extension row pins no backend, so RFC may run the whole batch, unless Ctrl-C came
+    // first. A batch with one is pinned by its plan, so the router refuses the fallback; an
+    // extension delete that was sent still keeps its report, which the refused fallback would drop.
+    let sent = extension
+        .as_ref()
+        .is_some_and(|extension| extension.wrote());
+
+    if let Some((failure, message)) = unsent.filter(|_| !sent) {
         if !cancel.is_set() {
             return Attempt {
                 fallback_allowed: true,
@@ -804,6 +1023,261 @@ fn delete_attempt(
     }
     .noted(fresh_note)
     .noted(note)
+}
+
+pub(crate) fn exit_of_outcome(outcome: Outcome) -> Exit {
+    Exit {
+        code: outcome.exit,
+        stdout: outcome.stdout,
+        stderr: outcome.stderr,
+    }
+}
+
+/// The extension types of a delete batch, once each.
+fn extension_kinds(targets: &[DeleteTarget]) -> Vec<ExtensionKind> {
+    let mut kinds: Vec<ExtensionKind> = Vec::new();
+
+    for target in targets {
+        if let DeleteKind::Extension(kind) = target.kind
+            && !kinds.contains(&kind)
+        {
+            kinds.push(kind);
+        }
+    }
+
+    kinds
+}
+
+/// `None`: no extension row. `Some(Ok(()))`: every extension type of the batch passed its
+/// preflight, so the batch goes to the extension path. `Some(Err(message))`: a STOP.
+fn extension_delete_refusal(
+    targets: &[DeleteTarget],
+    registry: &Registry,
+    connection: &Connection,
+) -> Option<Result<(), String>> {
+    let kinds = extension_kinds(targets);
+
+    if kinds.is_empty() {
+        return None;
+    }
+
+    let Some(extension) = registry.extension() else {
+        return Some(Err("no extension is registered for this type".to_owned()));
+    };
+
+    Some(
+        kinds
+            .into_iter()
+            .try_for_each(|kind| extension.preflight(ExtensionOp::Delete, kind, connection, None)),
+    )
+}
+
+/// The text of the extension option a command gave that the type does not declare: for a standard
+/// type (`None`) every extension option, for an extension type the options of other types.
+pub(crate) fn option_misuse(
+    kind: Option<ExtensionKind>,
+    options: &ExtensionOptions,
+    registry: &Registry,
+) -> Option<&'static str> {
+    let declared = kind.map_or(&[][..], |kind| kind.spec().create_options);
+
+    options.keys().find_map(|id| {
+        if declared.iter().any(|option| option.id == *id) {
+            return None;
+        }
+
+        registry
+            .kinds()
+            .flat_map(|kind| kind.spec().create_options)
+            .find(|option| option.id == *id)
+            .map(|option| option.misuse)
+    })
+}
+
+/// `read` of an extension type: the common local rules, the extension's own, the refusals, the
+/// overwrite rule, then the one read outside the router.
+fn read_with_extension(
+    kind: ExtensionKind,
+    request: &ReadRequest<'_>,
+    (include, fugr, main): (Option<crate::cli::IncludeKind>, Option<&str>, Option<&str>),
+    backend: Option<Backend>,
+    connection: &Connection,
+    factories: &mut dyn Factories,
+    registry: &Registry,
+) -> Exit {
+    let Some(extension) = registry.extension() else {
+        return stop("no extension is registered for this type");
+    };
+
+    if let Err(message) = check_read_extension(
+        kind.spec(),
+        request.name,
+        request.out,
+        include,
+        fugr,
+        request.lines,
+        main,
+    )
+    .and_then(|()| extension.check_read(kind, request))
+    .and_then(|()| extension.preflight(ExtensionOp::Read, kind, connection, backend))
+    {
+        return stop(message);
+    }
+
+    // A local overwrite rule: it stops before the connection, like every other option rule.
+    if request.lines.is_none() && request.out.exists() && !request.force {
+        return stop(format!(
+            "{} already exists; use --force to overwrite",
+            request.out.display()
+        ));
+    }
+
+    let cancel = factories.cancel();
+    let shared = SharedFactories::new(factories);
+    let run = RunContext {
+        connection,
+        cancel: &cancel,
+        pin: backend,
+        factories: &shared,
+    };
+
+    exit_of_outcome(extension.read(kind, request, run))
+}
+
+/// `create` of an extension type, like [`read_with_extension`].
+fn create_with_extension(
+    kind: ExtensionKind,
+    request: &CreateRequest<'_>,
+    (fugr, subc, file): (Option<&str>, Option<Subc>, Option<&Path>),
+    backend: Option<Backend>,
+    connection: &Connection,
+    factories: &mut dyn Factories,
+    registry: &Registry,
+) -> Exit {
+    let Some(extension) = registry.extension() else {
+        return stop("no extension is registered for this type");
+    };
+
+    if let Err(message) = check_create_extension(
+        kind.spec(),
+        request.name,
+        request.text,
+        request.package,
+        fugr,
+        request.tr,
+        subc,
+        option_misuse(Some(kind), request.options, registry),
+        &|| extension.check_create(kind, request),
+        file,
+    )
+    .and_then(|()| extension.preflight(ExtensionOp::Create, kind, connection, backend))
+    {
+        return stop(message);
+    }
+
+    let cancel = factories.cancel();
+    let shared = SharedFactories::new(factories);
+    let run = RunContext {
+        connection,
+        cancel: &cancel,
+        pin: backend,
+        factories: &shared,
+    };
+
+    exit_of_outcome(extension.create(kind, request, run))
+}
+
+/// A delete batch with an extension type: its rows run on the extension's backend, the other
+/// objects over the ADT backend the router picks, and the plan records the backend of every
+/// object. A real delete is pinned to the backend its plan names, so nothing falls back between
+/// simulate and delete.
+fn delete_with_extension(
+    targets: &[DeleteTarget],
+    simulate: bool,
+    tr: Option<&str>,
+    plan: &Path,
+    connection: &Connection,
+    factories: &mut dyn Factories,
+    registry: &Registry,
+) -> Exit {
+    let Some(extension) = registry.extension() else {
+        return stop("no extension is registered for this type");
+    };
+
+    // The local rules of the batch run before any connection is opened.
+    if let Err(message) = delete::prepare(targets, tr) {
+        return stop(message);
+    }
+
+    let cancel = factories.cancel();
+    let shared = SharedFactories::new(factories);
+    let run = RunContext {
+        connection,
+        cancel: &cancel,
+        pin: None,
+        factories: &shared,
+    };
+    let mut backend = match extension.delete_backend(run) {
+        Ok(backend) => backend,
+        Err(outcome) => return exit_of_outcome(outcome),
+    };
+
+    if targets
+        .iter()
+        .all(|target| matches!(target.kind, DeleteKind::Extension(_)))
+    {
+        let context = Context {
+            conn: &connection.id,
+            user: &connection.user,
+            policies: &connection.policies,
+            confirmer: &Terminal,
+        };
+        let mut outcome = delete::run_until(
+            &mut *backend,
+            &context,
+            targets,
+            tr,
+            simulate,
+            plan,
+            &mut || cancel.is_set(),
+        );
+
+        if !simulate && cancel.is_set() {
+            outcome.exit = 130;
+        }
+
+        return exit_of_outcome(outcome);
+    }
+
+    // shortcut: a plan that names no backend leaves the router free; the batch then stops at the
+    // plan check, before its first object, when the backend it picks is not the recorded one.
+    let pin = if simulate {
+        None
+    } else {
+        delete::load_plan(plan).ok().as_ref().and_then(adt_pin)
+    };
+
+    route(
+        OperationKind::Delete,
+        pin,
+        false,
+        connection,
+        &mut shared.lend(),
+        |transport, selection, cancel, fresh| {
+            delete_attempt(
+                transport,
+                selection,
+                cancel,
+                fresh,
+                connection,
+                targets,
+                tr,
+                simulate,
+                plan,
+                Some(&mut *backend),
+            )
+        },
+    )
 }
 
 /// Runs the operation on the backend the router picks. A second backend is tried only when the

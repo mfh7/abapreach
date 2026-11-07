@@ -8,6 +8,7 @@ use crate::backend::OperationKind;
 use crate::cli::{IncludeKind, LineRange, ObjectKind};
 use crate::config::{Config, Connection, scrub};
 use crate::domain::{Outcome, Status};
+use crate::extension::Registry;
 use crate::hash::source_hash;
 use crate::mcp::{ToolHandler, ToolResult};
 use crate::object::check_read;
@@ -27,6 +28,8 @@ pub struct ReadTools<'a> {
     config: Config,
     env: BTreeMap<String, String>,
     factories: &'a mut dyn Factories,
+    /// The extension types the tools refuse by name; none without a registry.
+    registry: Option<&'a Registry>,
 }
 
 impl<'a> ReadTools<'a> {
@@ -39,7 +42,16 @@ impl<'a> ReadTools<'a> {
             config,
             env,
             factories,
+            registry: None,
         }
+    }
+
+    /// Lets `abap_read_source` name the refusal of an extension type.
+    #[must_use]
+    pub fn with_registry(mut self, registry: &'a Registry) -> Self {
+        self.registry = Some(registry);
+
+        self
     }
 
     pub(crate) fn connection(&self, arguments: &Map<String, Value>) -> Result<Connection, String> {
@@ -54,8 +66,14 @@ impl<'a> ReadTools<'a> {
 
     fn read_source(&mut self, arguments: &Map<String, Value>) -> Result<ToolResult, String> {
         let kind = required(arguments, "type")?;
-        let kind = ObjectKind::from_str(kind, false)
-            .map_err(|_| "type must be one of PROG, FUNC, CLAS, INTF".to_owned())?;
+        let token = kind;
+        let kind = ObjectKind::from_str(token, false).map_err(|_| {
+            self.registry
+                .and_then(|registry| registry.kind(token))
+                .and_then(|kind| kind.spec().mcp_read_refusal)
+                .unwrap_or("type must be one of PROG, FUNC, CLAS, INTF")
+                .to_owned()
+        })?;
 
         let name = required(arguments, "name")?;
         let include = match optional(arguments, "include")? {

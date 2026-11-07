@@ -4,6 +4,7 @@ pub mod backend;
 pub mod cli;
 pub mod config;
 pub mod domain;
+pub mod extension;
 #[cfg(feature = "fault-injection")]
 pub mod fault;
 pub mod hash;

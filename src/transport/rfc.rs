@@ -1752,6 +1752,34 @@ pub trait FunctionApi {
     }
 }
 
+impl<T: FunctionApi + ?Sized> FunctionApi for Box<T> {
+    fn describe_function(&mut self, name: &str) -> Result<Option<FunctionInfo>, TransportError> {
+        (**self).describe_function(name)
+    }
+
+    fn call_function(&mut self, call: &FunctionCall) -> Result<FunctionResult, TransportError> {
+        (**self).call_function(call)
+    }
+
+    fn function_support(&self) -> Result<(), String> {
+        (**self).function_support()
+    }
+}
+
+impl<T: FunctionApi + ?Sized> FunctionApi for &mut T {
+    fn describe_function(&mut self, name: &str) -> Result<Option<FunctionInfo>, TransportError> {
+        (**self).describe_function(name)
+    }
+
+    fn call_function(&mut self, call: &FunctionCall) -> Result<FunctionResult, TransportError> {
+        (**self).call_function(call)
+    }
+
+    fn function_support(&self) -> Result<(), String> {
+        (**self).function_support()
+    }
+}
+
 /// A name of a function, parameter or field as the SDK accepts it: at most 30 characters, no blank.
 fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 30 && name.bytes().all(|byte| byte.is_ascii_graphic())
@@ -2270,6 +2298,8 @@ fn is_fault_target(target: crate::fault::Target, request: &Request) -> bool {
         crate::fault::Target::Activate => request.method == "POST" && request.uri == ACTIVATION_URI,
         crate::fault::Target::Create => is_create_post(request),
         crate::fault::Target::Delete => is_delete_request(request),
+        // A function call of an extension is not an ADT request.
+        crate::fault::Target::Named(_) => false,
     }
 }
 

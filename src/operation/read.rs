@@ -217,7 +217,7 @@ impl ReadProg {
 }
 
 /// Writes the source to `output`, or for a line interval prints it, and reports lines and hash.
-pub(crate) fn emit_lines(
+pub fn emit_lines(
     lines: &[String],
     range: Option<LineRange>,
     output: &Path,

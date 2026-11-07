@@ -37,6 +37,7 @@ impl DeleteKind {
             Self::Func => "FUNC",
             Self::Clas => "CLAS",
             Self::Intf => "INTF",
+            Self::Extension(kind) => kind.token(),
         }
     }
 
@@ -46,11 +47,12 @@ impl DeleteKind {
             Self::Prog => 40,
             Self::Fugr => 26,
             Self::Func | Self::Clas | Self::Intf => 30,
+            Self::Extension(kind) => kind.spec().max_name,
         }
     }
 
     /// Execution order: a function module before its group, a class before the program it
-    /// includes.
+    /// includes. An extension type brings its own rank on the same scale.
     fn rank(self) -> u8 {
         match self {
             Self::Func => 1,
@@ -58,6 +60,7 @@ impl DeleteKind {
             Self::Intf => 3,
             Self::Prog => 4,
             Self::Fugr => 5,
+            Self::Extension(kind) => kind.spec().delete_rank,
         }
     }
 }
@@ -360,6 +363,7 @@ fn is_self(kind: DeleteKind, name: &str, group: Option<&str>) -> bool {
         DeleteKind::Clas => class(),
         DeleteKind::Prog => name == "SAPLYFG_UTILS" || name.starts_with("LYFG_UTILS") || class(),
         DeleteKind::Intf => false,
+        DeleteKind::Extension(kind) => kind.spec().is_self.is_some_and(|is_self| is_self(name)),
     }
 }
 
@@ -726,6 +730,38 @@ impl Batch {
     }
 }
 
+fn has_extension(rows: &[Row]) -> bool {
+    rows.iter()
+        .any(|(kind, _)| matches!(kind, DeleteKind::Extension(_)))
+}
+
+/// A batch with an extension type runs each object on the backend it was simulated on. The plan
+/// names it; a plan from another tool names none, which is enough for a type that allows it
+/// (`plan_backend_optional`) and never for another object. Nothing has been sent when this fails.
+fn check_backends(backend: &dyn DeleteBackend, plan: &Plan, rows: &[Row]) -> Result<(), String> {
+    for (kind, name) in rows {
+        let Some(actual) = backend.backend_label(*kind) else {
+            continue;
+        };
+
+        match plan.backend_of(*kind, name) {
+            Some(planned) if planned == actual => {}
+            None if matches!(
+                kind,
+                DeleteKind::Extension(extension) if extension.spec().plan_backend_optional
+            ) => {}
+            planned => {
+                return Err(format!(
+                    "plan backend for {kind} {name} is {}, this run would use {actual}; simulate again",
+                    planned.unwrap_or("not recorded")
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Writes nothing to SAP: reads every object, applies the guards and computes the plan hash.
 /// `Err` is the text of a `STOP`.
 pub fn simulate(
@@ -746,6 +782,7 @@ pub fn simulate(
         objects: Vec::new(),
         backends: Vec::new(),
     };
+    let mixed = has_extension(&rows);
 
     batch
         .out
@@ -755,6 +792,16 @@ pub fn simulate(
     for row in &rows {
         batch.start(row);
 
+        let label = if mixed {
+            backend.backend_label(row.0)
+        } else {
+            None
+        };
+
+        if let Some(label) = &label {
+            batch.out.push(format!("backend: {label}"));
+        }
+
         match evaluate(backend, context, row, tr.as_deref(), &rows) {
             Eval::Rejected(reason) => batch.fail(row, DeleteStatus::Rejected, reason),
             Eval::NotFound => batch.finish(row, DeleteStatus::NotFound, None, None),
@@ -762,6 +809,11 @@ pub fn simulate(
                 batch.out.extend(ready.lines);
                 plan.objects
                     .push((row.0.token().to_owned(), row.1.clone(), ready.hash.clone()));
+
+                if let Some(label) = label {
+                    plan.backends
+                        .push((row.0.token().to_owned(), row.1.clone(), label));
+                }
 
                 batch.finish(row, DeleteStatus::SimulatedOk, Some(ready.hash), None);
 
@@ -821,6 +873,12 @@ pub fn execute_until(
     backend.begin(&rows, tr.as_deref())?;
     programs_before_includes(backend, &mut rows);
 
+    let mixed = has_extension(&rows);
+
+    if mixed {
+        check_backends(backend, plan, &rows)?;
+    }
+
     let mut batch = Batch::new("DELETE");
 
     for (index, row) in rows.iter().enumerate() {
@@ -834,6 +892,10 @@ pub fn execute_until(
         }
 
         batch.start(row);
+
+        if mixed && let Some(label) = backend.backend_label(row.0) {
+            batch.out.push(format!("backend: {label}"));
+        }
 
         let ready = match evaluate(backend, context, row, tr.as_deref(), &rows) {
             Eval::Rejected(reason) => {
