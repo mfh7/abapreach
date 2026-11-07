@@ -123,7 +123,11 @@ by validation: `--remote`, `--base`, `--force` on any create, and the DDIC kinds
 
 ## TRAN is not supported
 
-TRAN is not supported: SAP offers no standard remote path to create or delete a transaction.
+TRAN is not supported in 0.15.0. The 0.15.0 analysis looked only for an ADT endpoint and for a
+remote-enabled standard function module, and found neither. A later check found a standard path
+through ADT classrun: a temporary class, created over ADT and run through
+`/sap/bc/adt/oo/classrun`, calls the standard transaction function modules on the server and is
+deleted afterwards. It was proven on SAP 7.40 and 7.50, so TRAN is planned for 0.16.0 over that path.
 
 ## `create PROG` operation (0.15.0)
 
