@@ -34,7 +34,10 @@ fn binary(args: &[&str]) -> Output {
 }
 
 fn text(bytes: &[u8]) -> String {
-    String::from_utf8(bytes.to_vec()).unwrap()
+    // clap names the program after the executable file: `abapreach.exe` on Windows.
+    String::from_utf8(bytes.to_vec())
+        .unwrap()
+        .replace("abapreach.exe", "abapreach")
 }
 
 /// File name, arguments, and whether the text is on stdout (help, version) or stderr (a STOP).
