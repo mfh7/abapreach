@@ -575,8 +575,8 @@ An UNSUPPORTED cell has one of these reasons:
 
 - **Availability.** The SAP 7.40 system holds only `$TMP` objects, so `--tr` and
   transportable-package cells are UNSUPPORTED there.
-- **Not in this product.** The transaction code (`TRAN`) create, read and delete cells are
-  UNSUPPORTED on every platform and system: SAP offers no standard remote path for them (see
+- **Not in this release.** The transaction code (`TRAN`) create, read and delete cells are
+  UNSUPPORTED on every platform and system in 0.15.0; TRAN is planned for 0.16.0 (see
   [TRAN is not supported](behavior-differences.md#tran-is-not-supported)).
 - **Stateful session.** The SAP 7.40 system has no stateful ADT HTTP session, so ADT HTTP write cells
   run there only in their pinned and fallback form. The RFC paths cover the same scenarios.

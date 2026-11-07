@@ -43,8 +43,8 @@ internal repository where that implementation was developed. See the
 - Version metadata set to `0.15.0`.
 
 ### Known limitations
-- TRAN is not supported: SAP offers no standard remote path to create or delete a transaction.
-  See [TRAN is not supported](docs/behavior-differences.md#tran-is-not-supported).
+- TRAN is not supported in 0.15.0; it is planned for 0.16.0 over the ADT classrun path. See
+  [TRAN is not supported](docs/behavior-differences.md#tran-is-not-supported).
 - A new include's first deploy prints `W: no syntax check before the first activation of a new
   include (main <PROG>)`. The live matrix did not produce this state: activating a parent program
   that holds `INCLUDE <name>.` always fills the include's main program index. The warning path is

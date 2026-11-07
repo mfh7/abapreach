@@ -278,8 +278,7 @@ activation: the command reports the real result (for example `ACTIVE`, exit code
 
 ABAPReach started as Python tooling (0.1.0 to 0.10.0) used in daily SAP development. The Rust
 CLI ports it. 1.0.0 ships when every Python feature runs in the Rust binary, behaves the same,
-and passes a live test. A Python feature with no standard SAP path is not ported: transaction
-codes (`TRAN`), see [Behavior differences](docs/behavior-differences.md#tran-is-not-supported).
+and passes a live test.
 
 <table>
   <tr>
@@ -303,7 +302,11 @@ codes (`TRAN`), see [Behavior differences](docs/behavior-differences.md#tran-is-
     <td align="left"><b>0.13.0</b> for function groups, function modules, classes and interfaces; <b>0.14.0</b> delete; <b>0.15.0</b> programs and includes</td>
   </tr>
   <tr>
-    <td align="left">DDIC, messages, text pools, CDS, enhancements</td>
+    <td align="left">DDIC (data elements, domains, tables, table types), transaction codes</td>
+    <td align="left">planned for <b>0.16.0</b></td>
+  </tr>
+  <tr>
+    <td align="left">Messages, text pools, CDS, enhancements</td>
     <td align="left">planned</td>
   </tr>
   <tr>
