@@ -1,0 +1,41 @@
+Usage: abapreach read [OPTIONS] --conn <CONN> <KIND> <NAME> <OUT>
+
+Arguments:
+  <KIND>
+          Possible values:
+          - PROG
+          - FUNC
+          - CLAS
+          - INTF
+          - TRAN: A report transaction; it has no ADT path and runs over the RFC EXT path only
+
+  <NAME>
+          
+
+  <OUT>
+          
+
+Options:
+      --force
+          
+
+      --include <INCLUDE>
+          [possible values: CCIMP, CCDEF, CCMAC, CCAU]
+
+      --fugr <FUGR>
+          
+
+      --lines <LINES>
+          
+
+      --main <MAIN>
+          The main program of a `PROG` include, as `INCLUDE <NAME>.` names it
+
+      --backend <BACKEND>
+          [possible values: adt, rfc]
+
+      --conn <CONN>
+          
+
+  -h, --help
+          Print help (see a summary with '-h')

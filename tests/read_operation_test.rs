@@ -105,7 +105,6 @@ fn failures_carry_the_routing_class_and_run_keeps_the_string_contract() {
         ),
         (Ok(Response::empty(401)), Failure::Authorization),
         (Ok(Response::empty(403)), Failure::Validation),
-        (Ok(Response::empty(404)), Failure::Validation),
         (
             Ok(Response {
                 body: vec![0xff, 0xfe],
@@ -124,10 +123,30 @@ fn failures_carry_the_routing_class_and_run_keeps_the_string_contract() {
         assert!(!output.exists());
     }
 
-    let mut transport = common::ScriptedTransport::replies(vec![Ok(Response::empty(404))]);
+    // A 404 on the program source asks which object the name is: a program that has no source
+    // keeps the plain HTTP error, a name neither URI knows is NOT_FOUND.
+    let mut transport = common::ScriptedTransport::replies(vec![
+        Ok(Response::empty(404)),
+        Ok(Response::empty(200)),
+    ]);
     let message = ReadProg::run(&mut transport, "Z", &output, false, None).unwrap_err();
 
     assert_eq!(message, "read PROG Z: HTTP 404");
+    transport.assert_finished();
+
+    let mut transport = common::ScriptedTransport::replies(vec![
+        Ok(Response::empty(404)),
+        Ok(Response::empty(404)),
+        Ok(Response::empty(404)),
+    ]);
+    let error = ReadProg::run_classified(&mut transport, "Z", &output, false, None).unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "read PROG Z: NOT_FOUND (no program or include of that name)"
+    );
+    assert_eq!((error.failure, error.stop), (Failure::Validation, false));
+    transport.assert_finished();
 }
 
 /// The status of a refused logon travels in the message, so the read reports what the RFC

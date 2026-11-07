@@ -1,0 +1,18 @@
+Usage: abapreach deploy [OPTIONS] --conn <CONN> <KIND> <NAME> <FILE>
+
+Arguments:
+  <KIND>  [possible values: PROG, FUNC, CLAS, INTF]
+  <NAME>  
+  <FILE>  
+
+Options:
+      --simulate           
+      --base <BASE>        
+      --tr <TR>            
+      --backend <BACKEND>  [possible values: adt, rfc]
+      --include <INCLUDE>  [possible values: CCIMP, CCDEF, CCMAC, CCAU]
+      --create-include     
+      --fugr <FUGR>        
+      --main <MAIN>        The main program of a `PROG` include, as `INCLUDE <NAME>.` names it
+      --conn <CONN>        
+  -h, --help               Print help

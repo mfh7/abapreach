@@ -45,17 +45,36 @@ pub enum Target {
     Create,
     /// The `DELETE` of an object under its lock.
     Delete,
+    /// A write of a registered extension. No transport of this crate matches it.
+    Named(&'static str),
 }
 
 impl Target {
-    fn parse(value: &str) -> Option<Self> {
+    /// A standard target, or one of the `extra` names an extension registered.
+    fn parse(value: &str, extra: &[&'static str]) -> Option<Self> {
         match value {
             "PUT" => Some(Self::Put),
             "ACTIVATE" => Some(Self::Activate),
             "CREATE" => Some(Self::Create),
             "DELETE" => Some(Self::Delete),
-            _ => None,
+            _ => extra
+                .iter()
+                .find(|name| **name == value)
+                .map(|name| Self::Named(name)),
         }
+    }
+
+    /// Like `parse`, but any upper-case name is accepted as an extension target. The strict check
+    /// of the registered names ran at start-up (`from_lookup_with`).
+    fn parse_lenient(value: &str) -> Option<Self> {
+        Self::parse(value, &[]).or_else(|| {
+            let name_ok = !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+
+            name_ok.then(|| Self::Named(intern(value)))
+        })
     }
 
     pub fn name(self) -> &'static str {
@@ -64,27 +83,53 @@ impl Target {
             Self::Activate => "ACTIVATE",
             Self::Create => "CREATE",
             Self::Delete => "DELETE",
+            Self::Named(name) => name,
         }
     }
+}
+
+/// One leaked copy per distinct name, so a long session does not leak on every transport it opens.
+// shortcut: names are leaked once per process, bounded by the distinct values of one variable.
+fn intern(name: &str) -> &'static str {
+    static NAMES: std::sync::OnceLock<std::sync::Mutex<Vec<&'static str>>> =
+        std::sync::OnceLock::new();
+
+    let mut names = NAMES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    if let Some(known) = names.iter().find(|known| **known == name) {
+        return known;
+    }
+
+    let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+
+    names.push(leaked);
+    leaked
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Fault {
     /// The request is sent and executed, then its reply is discarded.
     DropReply(Target),
-    /// The read-only reconciliation GET that follows a create `POST` or a delete whose reply was
-    /// dropped fails without being sent.
+    /// The read-only reconciliation that follows a create `POST` or a delete whose reply was
+    /// dropped (the GET over ADT) fails without being sent.
     FailReconcileRead,
     /// The deploy pauses this many milliseconds right after its LOCK succeeded.
     HoldLock(u64),
 }
 
 impl Fault {
-    fn parse(value: &str) -> Option<Self> {
+    fn parse(value: &str, extra: &[&'static str], lenient: bool) -> Option<Self> {
         let (action, target) = value.split_once(':')?;
 
         match (action, target) {
-            (DROP_REPLY, _) => Some(Self::DropReply(Target::parse(target)?)),
+            (DROP_REPLY, _) => Some(Self::DropReply(if lenient {
+                Target::parse_lenient(target)?
+            } else {
+                Target::parse(target, extra)?
+            })),
             (FAIL_READ, RECONCILE) => Some(Self::FailReconcileRead),
             (HOLD_LOCK, ms) if !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()) => ms
                 .parse()
@@ -98,21 +143,46 @@ impl Fault {
     /// The faults the variable selects: empty when it is unset, otherwise a comma-separated list
     /// (`drop-reply:CREATE,fail-read:RECONCILE`). `Err` for any item this build does not know.
     pub fn from_lookup(value: Option<&str>) -> Result<Vec<Self>, String> {
+        Self::from_lookup_with(value, &[])
+    }
+
+    /// Like [`Fault::from_lookup`], with the `drop-reply:<NAME>` targets of a registered extension.
+    pub fn from_lookup_with(
+        value: Option<&str>,
+        extra_targets: &[&'static str],
+    ) -> Result<Vec<Self>, String> {
         value.map_or_else(
             || Ok(Vec::new()),
             |value| {
                 value
                     .split(',')
-                    .map(|item| Self::parse(item).ok_or_else(|| UNKNOWN.to_owned()))
+                    .map(|item| {
+                        Self::parse(item, extra_targets, false).ok_or_else(|| UNKNOWN.to_owned())
+                    })
                     .collect()
             },
         )
     }
 
     /// The faults the process environment selects. An unknown value has already stopped the
-    /// command (`app::run`) before the first request, so it injects nothing here.
+    /// command (`run_with`) before the first request, so it injects nothing here. A
+    /// `drop-reply:<NAME>` of an extension is kept as a named target that no transport of this
+    /// crate matches, so it never disturbs the other faults of the list.
     pub fn from_env() -> Vec<Self> {
-        Self::from_lookup(std::env::var(ENV).ok().as_deref()).unwrap_or_default()
+        Self::from_lookup_lenient(std::env::var(ENV).ok().as_deref())
+    }
+
+    /// The parse of [`Fault::from_env`] on a given value: empty for a value with an unknown item.
+    pub fn from_lookup_lenient(value: Option<&str>) -> Vec<Self> {
+        value
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(|item| Self::parse(item, &[], true))
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
     }
 
     /// The write a drop-reply fault targets; `None` for a fault that drops no reply.
@@ -194,7 +264,7 @@ mod tests {
         assert_eq!(
             Fault::from_lookup(Some("drop-reply:CREATE,hold-lock:1500")),
             Ok(vec![
-                Fault::DropReply(super::Target::parse("CREATE").unwrap()),
+                Fault::DropReply(super::Target::parse("CREATE", &[]).unwrap()),
                 Fault::HoldLock(1500)
             ])
         );
@@ -325,6 +395,9 @@ mod tests {
             "drop-reply:put",
             "drop-reply:create",
             "drop-reply:delete",
+            "drop-reply:FUNCTION",
+            "drop-reply:FM",
+            "fail-read:FM",
             "drop-reply:INCLUDE",
             "drop-reply:GET",
             "drop-reply:RECONCILE",

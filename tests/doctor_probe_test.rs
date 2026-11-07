@@ -62,6 +62,24 @@ fn discovery() -> Opened {
     .1
 }
 
+fn adt_only_env(directory: &Path) -> BTreeMap<String, String> {
+    let config = concat!(
+        r#"{"servers":[{"systemId":"DEV","host":"example.com","port":443,"clients":["100"],"#,
+        r#""adt":{"insecure":true}}]}"#,
+    );
+
+    fs::write(directory.join("connections.json"), config).unwrap();
+
+    BTreeMap::from([
+        (
+            "ABAP_CONNECTIONS".to_owned(),
+            directory.join("connections.json").display().to_string(),
+        ),
+        ("DEV_100_USER".to_owned(), "user".to_owned()),
+        ("DEV_100_PASS".to_owned(), "secret-pw".to_owned()),
+    ])
+}
+
 /// Doctor must never open the SADT session; a ping is the only RFC logon it may make.
 #[derive(Default)]
 struct Fake {
@@ -1008,5 +1026,33 @@ fn doctor_warns_for_an_empty_deny_list_and_not_for_the_default() {
         )
         .stdout
         .contains("lacks default entries")
+    );
+}
+
+#[test]
+fn an_adt_only_connection_reports_ext_as_not_applicable() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(discovery());
+
+    let exit = run(
+        ["abapreach", "doctor", "--conn", "dev_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        adt_only_env(directory.path()),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0);
+    assert!(
+        exit.stdout.contains("RFC library: not run (no RFC)"),
+        "{}",
+        exit.stdout
+    );
+    assert!(!exit.stdout.contains("EXT"), "{}", exit.stdout);
+    assert_eq!(
+        (fake.adt_calls, fake.library_calls, fake.ping_calls),
+        (1, 0, 0)
     );
 }

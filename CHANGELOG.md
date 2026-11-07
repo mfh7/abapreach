@@ -4,14 +4,56 @@ All notable changes to ABAPReach are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-**Current Rust CLI:** version `0.14.0` supports `PROG`, `FUNC`, `CLAS` (including local
-includes) and `INTF` objects, and adds `read-table`, `delete` and the MCP server. Earlier versions supported `PROG` only.
+**Current Rust CLI:** version `0.15.0` supports `PROG`, `FUNC`, `CLAS` (including local
+includes) and `INTF` objects, and program includes, and adds `read-table`, `delete` and the MCP
+server. Earlier versions supported `PROG` only.
 Versions `0.1.0` to `0.10.0` below describe the earlier Python implementation,
 not features available in the current Rust CLI. Their tags live in the
 internal repository where that implementation was developed. See the
 [roadmap](docs/roadmap.md) for the path to 1.0.0, which brings all of them to Rust.
 
 ## [Unreleased]
+
+## [0.15.0] - 2026-11-07
+
+### Added
+- `create PROG`: a program (`--subc 1`, the default) or an include (`--subc I`). The name is up to
+  40 characters, starts with `Z` or `Y`, and the `--text` is up to 70 characters. `--package`
+  defaults to `$TMP`. `create PROG --subc 1` takes an optional FILE and runs a simulate deploy
+  after `CREATE: ACTIVE`; it writes no source. `--subc I` takes no FILE: deploy the source after
+  the `INCLUDE` statement exists in the parent program.
+- Program includes: `read`, `deploy`, `deploy --simulate` and `delete` of an include named as a
+  `PROG`. `--main <PROG>` names the main program of an include. Without it, exactly one listed main
+  program is used, which is printed as `main <PROG>`.
+- MCP: `abap_create_simulate` and `abap_create` take `subc`; `abap_simulate`,
+  `abap_deploy` and `abap_read_source` take `main`. `plan_token`s are bound to `subc`, `package`
+  and `text`, and an include deploy runs under the main program that its simulate resolved.
+- The simulate of a program delete lists the transactions that start the program as
+  `WHERE-USED TRAN <tcode>`.
+
+### Changed
+- Every ADT HTTP stateful session ends with a logoff (`GET /sap/public/bc/icf/logoff`) on every exit
+  path, in the CLI and in MCP. 0.14.0 ended the session with a discovery GET, which left enqueue
+  locks in SM12. A failed logoff prints `W: session close failed: <reason>`; the status and exit
+  code do not change, and the logoff is not retried.
+- An ADT HTTP `delete` batch logs off the stateful session after each row it deleted, and the next
+  row runs in a new session. A row that deletes nothing keeps its session.
+- Include delete, and program and include where-used, run over RFC SADT as well, including on the
+  SAP 7.40 system.
+- Version metadata set to `0.15.0`.
+
+### Known limitations
+- TRAN is not supported: SAP offers no standard remote path to create or delete a transaction.
+  See [TRAN is not supported](docs/behavior-differences.md#tran-is-not-supported).
+- A new include's first deploy prints `W: no syntax check before the first activation of a new
+  include (main <PROG>)`. The live matrix did not produce this state: activating a parent program
+  that holds `INCLUDE <name>.` always fills the include's main program index. The warning path is
+  covered by offline fixtures only.
+- A transportable include delete over RFC SADT is proven by a fixture only. The 0.15.0 matrix
+  records no live run of that case.
+- OpenCode, pi and Codex were not rerun for 0.15.0. Their behaviour is unchanged from the 0.14.0
+  gate and was not re-verified in this release.
+- A SIGKILL during a write can still leave an ADT lock on the object. Check SM12 before a retry.
 
 ## [0.14.0] - 2026-11-04
 

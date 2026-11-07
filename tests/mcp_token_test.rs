@@ -656,7 +656,15 @@ fn a_delete_batch_is_confirmed_by_typing_delete_and_the_count() {
     let other = "/sap/bc/adt/programs/programs/zother";
     let reads = |script: Script| {
         script
+            // The include check reads each PROG once before the batch is inspected.
+            .get(PROG, 200, &metadata("OWNER"))
             .get(other, 200, &metadata("OWNER"))
+            .get(other, 200, &metadata("OWNER"))
+            .post(
+                &abapreach::adt::usage_references_uri(other),
+                200,
+                "<usageReferences:usageReferenceResult xmlns:usageReferences=\"u\"/>",
+            )
             .get(
                 &format!("{other}/source/main?version=active"),
                 200,
@@ -891,7 +899,15 @@ fn a_delete_token_binds_the_objects_and_the_request_but_not_their_order() {
 
     rig.adt(
         prog_reads(&requests, "OWNER")
+            // The include check reads each PROG once before the batch is inspected.
+            .get(PROG, 200, &metadata("OWNER"))
             .get(other, 200, &metadata("OWNER"))
+            .get(other, 200, &metadata("OWNER"))
+            .post(
+                &abapreach::adt::usage_references_uri(other),
+                200,
+                "<usageReferences:usageReferenceResult xmlns:usageReferences=\"u\"/>",
+            )
             .get(
                 &format!("{other}/source/main?version=active"),
                 200,
@@ -1022,7 +1038,9 @@ fn a_successful_create_simulation_issues_a_token_that_the_create_redeems() {
     let mut rig = rig(TOKEN);
     let mut session = FakeSession::new(false);
     let requests = log();
-    let validation = abapreach::cli::CreateKind::Fugr.validation_uri("ZTESTFG", "T", "$TMP");
+    let validation = abapreach::cli::CreateKind::Fugr
+        .validation_uri("ZTESTFG", "T", "$TMP")
+        .unwrap();
     let ok = create_validation_ok();
 
     // One transport per opened connection: the simulation, then the create.
@@ -1075,7 +1093,9 @@ fn a_failed_create_simulation_issues_no_token() {
     let mut rig = rig(TOKEN);
     let mut session = FakeSession::new(false);
     let requests = log();
-    let validation = abapreach::cli::CreateKind::Fugr.validation_uri("ZTESTFG", "T", "$TMP");
+    let validation = abapreach::cli::CreateKind::Fugr
+        .validation_uri("ZTESTFG", "T", "$TMP")
+        .unwrap();
     let rejected = r#"<asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA><SEVERITY>ERROR</SEVERITY><SHORT_TEXT>exists</SHORT_TEXT><LONG_TEXT/></DATA></asx:values></asx:abap>"#;
 
     rig.adt(Script::new(&requests).post(&validation, 200, rejected));

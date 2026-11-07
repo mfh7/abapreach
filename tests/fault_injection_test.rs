@@ -6,10 +6,10 @@ mod common;
 mod replay;
 
 use abapreach::backend::{BackendKind, Selection, SelectionReason};
-use abapreach::cli::CreateKind;
+use abapreach::cli::{CreateKind, Subc};
 use abapreach::config::Connection;
 use abapreach::fault::{Fault, Target};
-use abapreach::operation::create::{CreateInput, CreateProg};
+use abapreach::operation::create::{CreateInput, CreateProg, program_creation_body};
 use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg};
 use abapreach::transport::rfc::{
     FakeRfcApi, RfcApi, RfcEndpointRequest, RfcEndpointResponse, RfcTransport,
@@ -409,7 +409,17 @@ fn clas_create() -> CreateInput {
         group: None,
         tr: None,
         simulate: false,
+        subc: Subc::Program,
+        source: None,
     }
+}
+
+/// The create POST of an include as the product builds it, so admission lets it through.
+fn include_post() -> Request {
+    create(
+        "/sap/bc/adt/programs/includes",
+        program_creation_body(Subc::Include, "ZINCL", "T", "$TMP", "TESTUSER", "EN").into_bytes(),
+    )
 }
 
 fn reply(status: u16, body: &str) -> RfcEndpointResponse {
@@ -471,6 +481,217 @@ fn a_failed_reconciliation_read_ends_the_create_partial_without_a_second_post() 
             result.outcome.stdout
         );
         assert!(!result.fallback_allowed, "{value}");
+    }
+}
+
+fn include_create() -> CreateInput {
+    CreateInput {
+        kind: CreateKind::Prog,
+        name: "ZINCL".to_owned(),
+        text: "T".to_owned(),
+        package: None,
+        group: None,
+        tr: None,
+        simulate: false,
+        subc: Subc::Include,
+        source: None,
+    }
+}
+
+/// The create of an include whose reply is lost over RFC-SADT: SAP executed it, the client has no
+/// answer, and the settlement is a read of the properties of the name. No second POST is sent.
+#[test]
+fn a_lost_include_create_reply_is_reconciled_by_the_properties_read_and_never_repeated() {
+    let check_ok = concat!(
+        r#"<asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA>"#,
+        r#"<CHECK_RESULT>X</CHECK_RESULT></DATA></asx:values></asx:abap>"#,
+    );
+    let selection = Selection::new(BackendKind::RfcSadt, SelectionReason::DefaultAdt);
+    let mut connection = Connection::test_insecure();
+
+    connection.user = "TESTUSER".to_owned();
+
+    // Resolution (program, include), validation and the create; then the read-back, if any.
+    let before = || {
+        vec![
+            reply(404, ""),
+            reply(404, ""),
+            reply(200, check_ok),
+            reply(200, ""),
+        ]
+    };
+    let cases: Vec<(
+        &str,
+        Vec<RfcEndpointResponse>,
+        abapreach::domain::Status,
+        &str,
+        usize,
+    )> = vec![
+        (
+            "drop-reply:CREATE",
+            [before(), vec![reply(404, ""), reply(200, "<x/>")]].concat(),
+            abapreach::domain::Status::Partial,
+            "PROG ZINCL exists",
+            6,
+        ),
+        (
+            "drop-reply:CREATE",
+            [before(), vec![reply(404, ""), reply(404, "")]].concat(),
+            abapreach::domain::Status::Rejected,
+            "PROG ZINCL was not found at read-back",
+            6,
+        ),
+        (
+            "drop-reply:CREATE,fail-read:RECONCILE",
+            before(),
+            abapreach::domain::Status::Partial,
+            "the object cannot be read back",
+            4,
+        ),
+    ];
+
+    for (value, responses, status, detail, invocations) in cases {
+        let mut transport = RfcTransport::with_faults(
+            FakeRfcApi::with_responses(responses),
+            Fault::from_lookup(Some(value)).unwrap(),
+        );
+        let result = CreateProg::run(
+            &mut transport,
+            include_create(),
+            Some(&selection),
+            Some(&connection),
+        );
+
+        assert_eq!(
+            result.outcome.status,
+            Some(status),
+            "{value}: {:?}",
+            result.outcome
+        );
+        assert_eq!(result.outcome.exit, 1, "{value}");
+        assert!(
+            result.outcome.stdout.contains(detail),
+            "{value}: {}",
+            result.outcome.stdout
+        );
+        assert!(!result.fallback_allowed, "{value}");
+        // The POST went out once; nothing else is a write.
+        assert_eq!(transport.api().counts().2, invocations, "{value}");
+    }
+}
+
+/// The same lost create reply for a program (`--subc 1`): found is `PARTIAL`, absent is
+/// `REJECTED`, an unreadable name is `PARTIAL`, and the POST is never sent twice.
+#[test]
+fn a_lost_program_create_reply_is_reconciled_like_an_include_and_never_repeated() {
+    let check_ok = concat!(
+        r#"<asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA>"#,
+        r#"<CHECK_RESULT>X</CHECK_RESULT></DATA></asx:values></asx:abap>"#,
+    );
+    let selection = Selection::new(BackendKind::RfcSadt, SelectionReason::DefaultAdt);
+    let mut connection = Connection::test_insecure();
+
+    connection.user = "TESTUSER".to_owned();
+
+    let before = || {
+        vec![
+            reply(404, ""),
+            reply(404, ""),
+            reply(200, check_ok),
+            reply(200, ""),
+        ]
+    };
+    let cases: Vec<(
+        &str,
+        Vec<RfcEndpointResponse>,
+        abapreach::domain::Status,
+        &str,
+        usize,
+    )> = vec![
+        (
+            "drop-reply:CREATE",
+            [before(), vec![reply(200, "<x/>")]].concat(),
+            abapreach::domain::Status::Partial,
+            "PROG ZPROG exists",
+            5,
+        ),
+        (
+            "drop-reply:CREATE",
+            [before(), vec![reply(404, ""), reply(404, "")]].concat(),
+            abapreach::domain::Status::Rejected,
+            "PROG ZPROG was not found at read-back",
+            6,
+        ),
+        (
+            "drop-reply:CREATE,fail-read:RECONCILE",
+            before(),
+            abapreach::domain::Status::Partial,
+            "the object cannot be read back",
+            4,
+        ),
+    ];
+
+    for (value, responses, status, detail, invocations) in cases {
+        let mut transport = RfcTransport::with_faults(
+            FakeRfcApi::with_responses(responses),
+            Fault::from_lookup(Some(value)).unwrap(),
+        );
+        let result = CreateProg::run(
+            &mut transport,
+            CreateInput {
+                name: "ZPROG".to_owned(),
+                subc: Subc::Program,
+                ..include_create()
+            },
+            Some(&selection),
+            Some(&connection),
+        );
+
+        assert_eq!(
+            result.outcome.status,
+            Some(status),
+            "{value}: {:?}",
+            result.outcome
+        );
+        assert_eq!(result.outcome.exit, 1, "{value}");
+        assert!(
+            result.outcome.stdout.contains(detail),
+            "{value}: {}",
+            result.outcome.stdout
+        );
+        assert!(!result.fallback_allowed, "{value}");
+        assert_eq!(transport.api().counts().2, invocations, "{value}");
+    }
+}
+
+/// `fail-read:RECONCILE` fails the include read-back whichever of the two properties reads comes
+/// first, and leaves the resolution before the POST alone.
+#[test]
+fn the_include_read_back_failure_applies_to_every_read_after_the_post() {
+    let mut transport = RfcTransport::with_faults(
+        FakeRfcApi::ok(),
+        Fault::from_lookup(Some("fail-read:RECONCILE")).unwrap(),
+    );
+
+    // Before the POST both resolution reads are answered.
+    for uri in [
+        "/sap/bc/adt/programs/programs/zincl",
+        "/sap/bc/adt/programs/includes/zincl",
+    ] {
+        assert!(transport.request(Request::get(uri)).is_ok(), "{uri}");
+    }
+
+    assert!(transport.request(include_post()).is_ok());
+
+    for uri in [
+        "/sap/bc/adt/programs/programs/zincl",
+        "/sap/bc/adt/programs/includes/zincl",
+    ] {
+        assert_eq!(
+            transport.request(Request::get(uri)).unwrap_err(),
+            TransportError::NoResponse("injected fault: the reconciliation read failed".to_owned()),
+            "{uri}"
+        );
     }
 }
 
@@ -856,7 +1077,18 @@ mod delete_reconciliation {
             ),
             reply(200, "REPORT z."),
             reply(200, "<feed xmlns=\"http://www.w3.org/2005/Atom\"/>"),
+            // The where-used of a PROG is admitted over RFC-SADT (contract Revisi 7): no callers.
+            reply(
+                200,
+                "<usageReferences:usageReferenceResult xmlns:usageReferences=\"u\">\
+                 <usageReferences:referencedObjects/></usageReferences:usageReferenceResult>",
+            ),
         ]
+    }
+
+    /// The include check before a batch of two `PROG` rows: one properties read per name.
+    fn checks() -> Vec<RfcEndpointResponse> {
+        vec![reply(200, "<x/>"), reply(200, "<x/>")]
     }
 
     fn targets() -> Vec<DeleteTarget> {
@@ -876,8 +1108,9 @@ mod delete_reconciliation {
             policies: &policies,
             confirmer: &Yes,
         };
-        let mut both = reads();
+        let mut both = checks();
 
+        both.extend(reads());
         both.extend(reads());
 
         let mut plain = RfcTransport::new(FakeRfcApi::with_responses(both));
@@ -892,8 +1125,9 @@ mod delete_reconciliation {
                 .plan
                 .expect("a plan")
         };
-        let mut responses = reads();
+        let mut responses = checks();
 
+        responses.extend(reads());
         responses.push(reply(
             200,
             "<DATA><LOCK_HANDLE>a/b+c=</LOCK_HANDLE><CORRNR></CORRNR><IS_LOCAL>X</IS_LOCAL></DATA>",

@@ -105,6 +105,114 @@ A changed `FUNC` interface lists at most 50 callers, then `WHERE-USED ... <n> mo
 the 50-caller cap. The matrix (`func-signature-change`) checks on one caller that the list holds only
 caller kinds and that no `more` line appears.
 
+## `create PROG` grammar (0.15.0)
+
+The 0.15.0 grammar ports the create and delete cases of `tools/test_rfc_deploy.py`
+(`test_create_missing_flags`, `test_create_text_too_long`, `test_create_bad_flag_combinations`,
+`test_create_file_problems`). The intentional differences:
+
+- `create PROG <NAME> --text T` needs no `--package`: ABAPReach defaults to `$TMP`, as it already
+does for the M3 kinds (Python stops: `create PROG needs --package`).
+- `create` takes no FILE for the M3 kinds (source-free create, difference 4);
+`create PROG --subc I` refuses FILE with the Python message about deploying the source after the
+`INCLUDE` statement exists in the parent program; `create PROG --subc 1 FILE` accepts the file and
+runs a simulate deploy after `CREATE: ACTIVE`, never a source write (Python writes the source with
+create). Matrix: `create-prog-file`.
+- The create forms that the Rust grammar does not know are refused by the CLI parser instead of
+by validation: `--remote`, `--base`, `--force` on any create, and the DDIC kinds.
+
+## TRAN is not supported
+
+TRAN is not supported: SAP offers no standard remote path to create or delete a transaction.
+
+## `create PROG` operation (0.15.0)
+
+The create operation ports the `create PROG` cases of `tools/test_rfc_deploy.py`
+(`test_create_no_file_active`, `test_create_with_file_prog_and_clas`, `test_create_rejected`,
+`test_create_exception_unknown_status`, `test_create_failure_after_active_exit_1`,
+`test_create_read_failure_after_active_exit_1`, `test_create_simulate_prog_exact_kwargs`).
+The intentional differences:
+
+- An existing name, as a program or as an include, is `CREATE: REJECTED` (exit 1) from a read of
+`programs/programs` and `programs/includes` before any create request; both must answer 404.
+`create --simulate PROG` is that read plus the local checks and the package and `--tr` rules; the
+Python `CREATE_SIM` call to the function module has no ADT counterpart.
+- `programs/validation` is called and shown as a `W: validation:` line when it objects, and never
+decides anything: SAP answers `CHECK_RESULT X` even for a name outside `Z`/`Y`. The local `Z`/`Y`
+and length checks are the guard.
+- An include is created by one POST to `programs/includes` without a `containerRef`; its main
+program is bound by the first deploy (`--main`). A transportable package always sends `corrNr`, and
+`--tr` is required there (SAP otherwise generates a new request); the check is local, before any
+request, with exit 2.
+- A failed or lost create reply is settled by a read of the same properties: the object exists
+(`CREATE: PARTIAL`), it does not (`CREATE: REJECTED`), the read fails (`CREATE: PARTIAL`); the
+create is never repeated. The Python text `CREATE status unknown ...` (no status token) is
+replaced by these tokens.
+- With FILE, the simulate deploy after `CREATE: ACTIVE` runs on the same session and writes no
+source. When it does not end well, the result is `CREATE: PARTIAL` (exit 1) followed by the deploy
+output, replacing the Python text `object PROG <NAME> was created; source not yet deployed`.
+Python also stops with exit 1 when the read before its simulate fails; the simulate deploy of
+ABAPReach covers that read.
+- Over ADT HTTP an include created on a 7.40 system may not be visible right after the create (the
+HTTP session is stateless there); creates on that system run over the RFC path.
+
+## Program includes and ADT HTTP logoff (0.15.0)
+
+These differences were settled from the 0.15.0 matrix. Each entry names the
+evidence it rests on; where the matrix did not produce a case live, the entry says so.
+
+- **Include resolution.** A `PROG` name is read through `programs/programs/<name>` first. Only a
+404 on `<program>/source/main` makes ABAPReach try the include URI `programs/includes/<name>`; the
+program path keeps the request order of 0.14.0. When both answer 404, deploy prints
+`NOT_FOUND: PROG <N> (no program or include of that name)` (exit 1), and read prints
+`read PROG <N>: NOT_FOUND (no program or include of that name)`.
+- **`--main`.** A read of an include needs no `--main`. `--main` with a program is a STOP:
+`--main is only valid for an include; PROG <N> is a program` (exit 2). Deploy and simulate of an
+include print `main <PROG>` with the program that was used.
+- **Choosing the main program.** `--main` must be one of the programs that
+`GET programs/includes/<n>/mainprograms` lists, when any are listed; otherwise it is a STOP with
+`main program <P> is not a main program of include <I> (listed: ...)`. `--main` must also exist as a
+program and its active source must hold the statement `INCLUDE <I>.`; the STOPs are
+`main program <P> does not exist as a program` and
+`main program <P> does not contain the statement INCLUDE <I>.` (exit 2). When none is listed,
+`--main` supplies the program. Without `--main`, exactly one listed program is used; none listed
+gives `include <I> has no main program; pass --main <PROG>`, and several give
+`include <I> has several main programs (<list>); pass --main <PROG>`. Both are exit 2. A
+`mainprograms` entry that is not `programs/programs/<name>` (for example a function group) is a
+STOP.
+- **Not-processed check.** A checkrun that answers `notProcessed` is never `SIMULATED_OK`:
+`REJECTED: the check was not processed: <statusText>` (exit 1). The one exception is a new include
+whose `mainprograms` is empty and whose `--main` is given: see the next entry.
+- **New include.** The first simulate of a new include, with an empty `mainprograms` and `--main`,
+prints `W: no syntax check before the first activation of a new include (main <PROG>)`, and the
+deploy continues with the contextual activation as the check. The decision comes from the empty
+`mainprograms`, never from SAP's `statusText`. On the
+matrix systems this state was not produced live: activating a parent that holds `INCLUDE <name>.`
+always fills the index, so the warning path is covered by offline fixtures only.
+- **Activation worklist of an include.** Any worklist answer to an include activation ends
+`INACTIVE` (exit 1) and is not sent again. The Python tooling may behave differently; this was not
+compared.
+- **Include create.** One `create PROG <NAME> --subc I` POST creates the include, without a
+`containerRef`. Its source is a separate `deploy PROG <NAME> <FILE> --main <PROG>`; the parent
+program that holds the `INCLUDE <name>.` statement is deployed on its own.
+- **ADT HTTP logoff.** Every ADT HTTP stateful session ends with `GET /sap/public/bc/icf/logoff`,
+on every exit path, one per session (each independent read session included). 0.14.0 ended with a
+discovery GET and left enqueue locks in SM12. A failed logoff prints
+`W: session close failed: <reason>`, is not retried, and does not change the status or exit code.
+A call that never opened a session sends no logoff. RFC SADT is unchanged: its session ends with
+the connection. SIGKILL cannot be caught and can still leave locks. The process-level signal test
+runs on unix only; Windows console events (Ctrl-C) were not exercised live: the 0.15.0 matrix
+has no interrupt cell. It checks that no enqueue lock remains after every ADT HTTP cell.
+- **Delete batch over ADT HTTP.** After each row whose DELETE answered 2xx, the stateful session is
+logged off and the next row runs in a new session. A row that deletes nothing keeps its session. RFC
+SADT is unchanged. Within a batch, programs are deleted before their includes.
+- **Include delete and where-used.** The program and include where-used of the delete plan runs
+over RFC SADT as well, on both systems. SAP refuses to delete an include that a program still
+references (HTTP 403, `Program <N> is referenced in other programs`).
+- **Transportable packages.** Every POST, PUT and DELETE on an object in a transportable package
+carries `corrNr`. A create without `corrNr` makes SAP generate a new request, so a create in a
+non-`$TMP` package without `--tr` is refused before any request (exit 2).
+
 ## Observed parity notes
 
 These results come from a run that deployed the same change with the Python tooling and with
@@ -123,7 +231,7 @@ installed there.
 
 ### Inactive version after a failed activation
 
-The Python function module (`YFM_UTILS_SOURCE_DEPLOY`) discards the inactive
+The Python tooling discards the inactive
 version when activation fails. The ADT paths of `abapreach` (HTTP and
 RFC/SADT) do not: after a failed activation, the failed source remains as
 the program's inactive version (an entry in `DWINACTIV`), the active source
@@ -190,7 +298,7 @@ only after verifying the lock response.
 - Each command uses a fresh connection; the data preview over RFC fails on
   the 37th call of one connection.
 
-## `delete` (shared operation, M4)
+## `delete` (shared operation, 0.14.0)
 
 The Rust delete operation ports the cases of `tools/test_rfc_deploy.py` that apply to
 the ADT route (`tests/delete_operation_test.rs`). Intentional differences:
@@ -212,10 +320,10 @@ the ADT route (`tests/delete_operation_test.rs`). Intentional differences:
   (`DELETED (reconciled)` exits 1); Python reports an unknown status and stops.
 - `delete --simulate` prints the guards that apply and the function-module guards that
   do not apply on the ADT route (system change option, `CCNOCLIIND`, SE06 and software
-  component, server-side self-guard).
+  component).
 - Backend fallback: when ADT HTTP fails before sending (connect, DNS, TLS) while the batch only reads, the whole batch runs again on RFC SADT and prints the usual `falling back to RFC SADT` note. This holds until the first LOCK or DELETE request is started; after that, and after a post-send, authorization, conflict or validation failure, there is no fallback. A Ctrl-C or an MCP time limit that passed ends the call instead of opening RFC. The CLI plan file records no backend (as in Python), so `delete --plan` may therefore execute on a different backend than the one that simulated, before any write; the execute re-reads and re-hashes every object, so a difference between the two routes is a `REJECTED` object, never a wrong delete. An MCP `plan_token` pins the backend it was issued for: its execute never falls back and reports that the `plan_token` pins the backend.
 
-## MCP server and `read-table` (M4, 0.14.0)
+## MCP server and `read-table` (0.14.0)
 
 - The Python tooling has an MCP server. `abapreach mcp` ports its tools and its plan-token gate
   to the Rust CLI; see [MCP server](mcp.md).

@@ -828,21 +828,28 @@ pub fn classify_rfc_error(phase: RfcPhase, code: i32, message: &str) -> Transpor
 }
 
 /// Logon parameters in SDK naming; the password is only ever passed to `RfcOpenConnection`.
-pub fn connection_parameters(connection: &Connection) -> Vec<(String, String)> {
+/// A connection without an `rfc` block has no parameters and can never be opened.
+pub fn connection_parameters(connection: &Connection) -> Result<Vec<(String, String)>, String> {
+    let Some(rfc) = &connection.rfc else {
+        return Err(format!(
+            "RFC not configured for connection {}",
+            connection.id
+        ));
+    };
     let mut parameters = vec![
-        ("ASHOST".to_owned(), connection.rfc.ashost.clone()),
-        ("SYSNR".to_owned(), connection.rfc.sysnr.clone()),
+        ("ASHOST".to_owned(), rfc.ashost.clone()),
+        ("SYSNR".to_owned(), rfc.sysnr.clone()),
         ("CLIENT".to_owned(), connection.client.clone()),
         ("USER".to_owned(), connection.user.clone()),
         ("PASSWD".to_owned(), connection.password.clone()),
         ("LANG".to_owned(), connection.lang.clone()),
     ];
 
-    if let Some(router) = &connection.rfc.saprouter {
+    if let Some(router) = &rfc.saprouter {
         parameters.push(("SAPROUTER".to_owned(), router.clone()));
     }
 
-    parameters
+    Ok(parameters)
 }
 
 /// Both pointers address strings in the library's character size.
@@ -871,7 +878,30 @@ struct RfcErrorInfo {
 const NARROW_MESSAGE_OFFSET: usize = 8 + 128;
 const NARROW_MESSAGE_BYTES: usize = 512;
 
+/// Where a single-byte library stores the error key: right after `code` and `group`.
+const NARROW_KEY_OFFSET: usize = 8;
+const NARROW_KEY_BYTES: usize = 128;
+
 impl RfcErrorInfo {
+    /// The error key, for example the ABAP exception name; empty when the library set none.
+    fn key(&self, width: UcWidth) -> String {
+        match width {
+            UcWidth::Utf16 => from_sap_uc(&self.key).unwrap_or_default(),
+            UcWidth::Narrow => {
+                // `key` is a plain `u16` array, so every byte read here is initialized, and the
+                // range ends inside `key`.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        std::ptr::from_ref(self).cast::<u8>().add(NARROW_KEY_OFFSET),
+                        NARROW_KEY_BYTES,
+                    )
+                };
+
+                narrow_text(bytes)
+            }
+        }
+    }
+
     /// The error text. A single-byte library fills the same memory with a denser layout, so its
     /// text is read from the byte offset the layout gives, not from the UTF-16 field.
     fn text(&self, width: UcWidth) -> String {
@@ -963,6 +993,24 @@ type RfcInvoke = unsafe extern "C" fn(RfcHandle, RfcHandle, *mut RfcErrorInfo) -
 type RfcDestroyFunction = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcRc;
 type RfcCloseConnection = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcRc;
 type RfcSetTraceDir = unsafe extern "C" fn(*const c_void, *mut c_void) -> RfcRc;
+type RfcGetRowCount = unsafe extern "C" fn(RfcHandle, *mut c_uint, *mut RfcErrorInfo) -> RfcRc;
+type RfcMoveTo = unsafe extern "C" fn(RfcHandle, c_uint, *mut RfcErrorInfo) -> RfcRc;
+type RfcGetCurrentRow = unsafe extern "C" fn(RfcHandle, *mut RfcErrorInfo) -> RfcHandle;
+type RfcGetInt =
+    unsafe extern "C" fn(RfcHandle, *const c_void, *mut c_int, *mut RfcErrorInfo) -> RfcRc;
+type RfcGetChars =
+    unsafe extern "C" fn(RfcHandle, *const c_void, *mut c_void, c_uint, *mut RfcErrorInfo) -> RfcRc;
+type RfcSetChars = unsafe extern "C" fn(
+    RfcHandle,
+    *const c_void,
+    *const c_void,
+    c_uint,
+    *mut RfcErrorInfo,
+) -> RfcRc;
+type RfcGetParameterCount =
+    unsafe extern "C" fn(RfcHandle, *mut c_uint, *mut RfcErrorInfo) -> RfcRc;
+type RfcGetParameterDescByIndex =
+    unsafe extern "C" fn(RfcHandle, c_uint, *mut c_void, *mut RfcErrorInfo) -> RfcRc;
 
 /// Where the trace directory was set; the environment is the fallback when the symbol is absent
 /// or returned an error.
@@ -1036,6 +1084,11 @@ impl RfcSymbols {
         ]
     }
 
+    /// The symbols the function-module path loads optionally.
+    pub fn optional_names() -> Vec<&'static str> {
+        FUNCTION_SYMBOL_NAMES.to_vec()
+    }
+
     fn load(library: &Library) -> Result<Self, String> {
         Ok(Self {
             open_connection: load_symbol(library, b"RfcOpenConnection\0")?,
@@ -1065,6 +1118,86 @@ fn load_symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T, String> {
     })?;
 
     Ok(*symbol)
+}
+
+/// The symbols only the function-module path needs. They load optionally: a library that
+/// lacks one still serves ADT and SADT, and only a function call reports the missing names.
+#[derive(Clone, Copy)]
+struct FunctionSymbols {
+    get_row_count: RfcGetRowCount,
+    move_to: RfcMoveTo,
+    get_current_row: RfcGetCurrentRow,
+    get_int: RfcGetInt,
+    get_chars: RfcGetChars,
+    set_chars: RfcSetChars,
+    get_parameter_count: RfcGetParameterCount,
+    get_parameter_desc_by_index: RfcGetParameterDescByIndex,
+}
+
+const FUNCTION_SYMBOL_NAMES: [&str; 8] = [
+    "RfcGetRowCount",
+    "RfcMoveTo",
+    "RfcGetCurrentRow",
+    "RfcGetInt",
+    "RfcGetChars",
+    "RfcSetChars",
+    "RfcGetParameterCount",
+    "RfcGetParameterDescByIndex",
+];
+
+fn optional_symbol<T: Copy>(
+    library: &Library,
+    name: &'static str,
+    missing: &mut Vec<&'static str>,
+) -> Option<T> {
+    let symbol = load_symbol(library, format!("{name}\0").as_bytes()).ok();
+
+    if symbol.is_none() {
+        missing.push(name);
+    }
+
+    symbol
+}
+
+impl FunctionSymbols {
+    /// All symbols, or the names of the missing ones.
+    fn load(library: &Library) -> Result<Self, Vec<&'static str>> {
+        let mut missing = Vec::new();
+        let [a, b, c, d, e, f, g, h] = FUNCTION_SYMBOL_NAMES;
+        let loaded = (
+            optional_symbol(library, a, &mut missing),
+            optional_symbol(library, b, &mut missing),
+            optional_symbol(library, c, &mut missing),
+            optional_symbol(library, d, &mut missing),
+            optional_symbol(library, e, &mut missing),
+            optional_symbol(library, f, &mut missing),
+            optional_symbol(library, g, &mut missing),
+            optional_symbol(library, h, &mut missing),
+        );
+
+        match loaded {
+            (
+                Some(get_row_count),
+                Some(move_to),
+                Some(get_current_row),
+                Some(get_int),
+                Some(get_chars),
+                Some(set_chars),
+                Some(get_parameter_count),
+                Some(get_parameter_desc_by_index),
+            ) => Ok(Self {
+                get_row_count,
+                move_to,
+                get_current_row,
+                get_int,
+                get_chars,
+                set_chars,
+                get_parameter_count,
+                get_parameter_desc_by_index,
+            }),
+            _ => Err(missing),
+        }
+    }
 }
 
 fn rfc_error(
@@ -1103,6 +1236,8 @@ pub struct DynamicRfcApi {
     // Keeps the library mapped for as long as the copied function pointers are used.
     _library: RfcLibrary,
     symbols: RfcSymbols,
+    // The function-module symbols, or the names the library does not export.
+    function: Result<FunctionSymbols, Vec<&'static str>>,
     width: UcWidth,
     // Owns the buffers that `parameters` points into.
     _parameter_storage: Vec<UcString>,
@@ -1113,6 +1248,7 @@ pub struct DynamicRfcApi {
 impl DynamicRfcApi {
     pub fn load(library: RfcLibrary, parameters: Vec<(String, String)>) -> Result<Self, String> {
         let symbols = RfcSymbols::load(library.library())?;
+        let function = FunctionSymbols::load(library.library());
         let width = library.width();
         let mut storage = Vec::with_capacity(parameters.len() * 2);
 
@@ -1139,6 +1275,7 @@ impl DynamicRfcApi {
         Ok(Self {
             _library: library,
             symbols,
+            function,
             width,
             _parameter_storage: storage,
             parameters,
@@ -1226,14 +1363,19 @@ impl DynamicRfcApi {
         Ok(value)
     }
 
-    fn table(&self, container: RfcHandle, name: &str) -> Result<RfcHandle, TransportError> {
-        let name = encode(self.width, RfcPhase::Prepare, name)?;
+    fn table(
+        &self,
+        phase: RfcPhase,
+        container: RfcHandle,
+        name: &str,
+    ) -> Result<RfcHandle, TransportError> {
+        let name = encode(self.width, phase, name)?;
         let mut value = std::ptr::null_mut();
         let mut error = RfcErrorInfo::default();
         let result =
             unsafe { (self.symbols.get_table)(container, name.as_ptr(), &mut value, &mut error) };
 
-        check(self.width, RfcPhase::Prepare, "RfcGetTable", result, &error)?;
+        check(self.width, phase, "RfcGetTable", result, &error)?;
         Ok(value)
     }
 
@@ -1364,6 +1506,66 @@ impl DynamicRfcApi {
         Ok(buffer)
     }
 
+    fn append_row(&self, table: RfcHandle) -> Result<RfcHandle, TransportError> {
+        let mut error = RfcErrorInfo::default();
+        let row = unsafe { (self.symbols.append_new_row)(table, &mut error) };
+
+        if row.is_null() {
+            return Err(rfc_error(
+                self.width,
+                RfcPhase::Prepare,
+                "RfcAppendNewRow",
+                &error,
+            ));
+        }
+
+        Ok(row)
+    }
+
+    /// The function description handle, or the error of the lookup. The handle belongs to the
+    /// connection's repository and is never destroyed here.
+    fn function_descriptor(
+        &self,
+        connection: RfcHandle,
+        name: &UcString,
+    ) -> Result<RfcHandle, Box<RfcErrorInfo>> {
+        let mut error = RfcErrorInfo::default();
+        let descriptor =
+            unsafe { (self.symbols.get_function_desc)(connection, name.as_ptr(), &mut error) };
+
+        if descriptor.is_null() {
+            return Err(Box::new(error));
+        }
+
+        Ok(descriptor)
+    }
+
+    fn create_function(
+        &self,
+        connection: RfcHandle,
+        name: &str,
+    ) -> Result<RfcHandle, TransportError> {
+        let name = encode(self.width, RfcPhase::Prepare, name)?;
+        let descriptor = self
+            .function_descriptor(connection, &name)
+            .map_err(|error| {
+                rfc_error(self.width, RfcPhase::Prepare, "RfcGetFunctionDesc", &error)
+            })?;
+        let mut error = RfcErrorInfo::default();
+        let function = unsafe { (self.symbols.create_function)(descriptor, &mut error) };
+
+        if function.is_null() {
+            return Err(rfc_error(
+                self.width,
+                RfcPhase::Prepare,
+                "RfcCreateFunction",
+                &error,
+            ));
+        }
+
+        Ok(function)
+    }
+
     fn call(
         &self,
         connection: RfcHandle,
@@ -1375,20 +1577,10 @@ impl DynamicRfcApi {
         self.set_string(line, "METHOD", &request.method)?;
         self.set_string(line, "URI", &request.uri)?;
         self.set_string(line, "VERSION", &request.version)?;
-        let headers = self.table(request_data, "HEADER_FIELDS")?;
+        let headers = self.table(RfcPhase::Prepare, request_data, "HEADER_FIELDS")?;
 
         for (name, value) in &request.headers {
-            let mut error = RfcErrorInfo::default();
-            let row = unsafe { (self.symbols.append_new_row)(headers, &mut error) };
-
-            if row.is_null() {
-                return Err(rfc_error(
-                    self.width,
-                    RfcPhase::Prepare,
-                    "RfcAppendNewRow",
-                    &error,
-                ));
-            }
+            let row = self.append_row(headers)?;
 
             self.set_string(row, "NAME", name)?;
             self.set_string(row, "VALUE", value)?;
@@ -1426,30 +1618,7 @@ impl RfcApi for DynamicRfcApi {
         request: RfcEndpointRequest,
     ) -> Result<RfcEndpointResponse, TransportError> {
         let connection = self.ensure_open()?;
-        let name = encode(self.width, RfcPhase::Prepare, request.function)?;
-        let mut error = RfcErrorInfo::default();
-        let descriptor =
-            unsafe { (self.symbols.get_function_desc)(connection, name.as_ptr(), &mut error) };
-
-        if descriptor.is_null() {
-            return Err(rfc_error(
-                self.width,
-                RfcPhase::Prepare,
-                "RfcGetFunctionDesc",
-                &error,
-            ));
-        }
-
-        let function = unsafe { (self.symbols.create_function)(descriptor, &mut error) };
-
-        if function.is_null() {
-            return Err(rfc_error(
-                self.width,
-                RfcPhase::Prepare,
-                "RfcCreateFunction",
-                &error,
-            ));
-        }
+        let function = self.create_function(connection, request.function)?;
 
         let result = self.call(connection, function, &request);
         let mut destroy_error = RfcErrorInfo::default();
@@ -1474,6 +1643,646 @@ impl RfcApi for DynamicRfcApi {
     }
 }
 
+/// The longest text one field, one table cell or one name may carry through the generic call:
+/// the widest field of a source interface is a 255-character source line.
+pub const MAX_CALL_CHARS: usize = 255;
+/// The most rows one table may carry in or out of a generic call.
+pub const MAX_CALL_ROWS: usize = 100_000;
+/// The most parameters one function description may list.
+pub const MAX_CALL_PARAMETERS: usize = 1024;
+/// The error key of `RfcGetFunctionDesc` for a function module that does not exist.
+pub const FUNCTION_NOT_FOUND_KEY: &str = "FU_NOT_FOUND";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Direction {
+    Import,
+    Export,
+    Changing,
+    Tables,
+    Other(i32),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParameterType {
+    Char,
+    Table,
+    Other(i32),
+}
+
+/// One parameter of a function description. Lengths are in characters: `nuc_length` for a
+/// non-Unicode system, `uc_length` for a Unicode one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParameterInfo {
+    pub name: String,
+    pub kind: ParameterType,
+    pub direction: Direction,
+    pub nuc_length: u32,
+    pub uc_length: u32,
+    pub optional: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionInfo {
+    pub name: String,
+    pub parameters: Vec<ParameterInfo>,
+}
+
+/// A value read back from an exporting field or a table cell.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Cell {
+    Text(String),
+    Int(i32),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CellKind {
+    /// A character field of this many characters; trailing blanks are dropped.
+    Chars(usize),
+    /// An INT4 field.
+    Int,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ColumnRead {
+    pub name: String,
+    pub kind: CellKind,
+}
+
+/// An importing table: one `(field, value)` list per row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableWrite {
+    pub name: String,
+    pub rows: Vec<Vec<(String, String)>>,
+}
+
+/// An exporting table and the columns to read from each row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableRead {
+    pub name: String,
+    pub columns: Vec<ColumnRead>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FunctionCall {
+    pub function: String,
+    pub imports: Vec<(String, String)>,
+    pub tables: Vec<TableWrite>,
+    pub exports: Vec<ColumnRead>,
+    pub export_tables: Vec<TableRead>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FunctionResult {
+    pub exports: Vec<(String, Cell)>,
+    pub tables: Vec<(String, Vec<Vec<Cell>>)>,
+}
+
+/// The generic function-module primitive: metadata lookup and one invoke. The public CLI and MCP
+/// paths never call it: only the transport, the extension module and the factory forwarders name
+/// it, and `tests/public_boundary_test.rs` fails when any other source file does.
+pub trait FunctionApi {
+    /// `None` when the function module does not exist (`FU_NOT_FOUND`); any other failure is an error.
+    fn describe_function(&mut self, name: &str) -> Result<Option<FunctionInfo>, TransportError>;
+
+    fn call_function(&mut self, call: &FunctionCall) -> Result<FunctionResult, TransportError>;
+
+    /// Whether the library can serve function calls; `Err` is the library message.
+    fn function_support(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl<T: FunctionApi + ?Sized> FunctionApi for Box<T> {
+    fn describe_function(&mut self, name: &str) -> Result<Option<FunctionInfo>, TransportError> {
+        (**self).describe_function(name)
+    }
+
+    fn call_function(&mut self, call: &FunctionCall) -> Result<FunctionResult, TransportError> {
+        (**self).call_function(call)
+    }
+
+    fn function_support(&self) -> Result<(), String> {
+        (**self).function_support()
+    }
+}
+
+impl<T: FunctionApi + ?Sized> FunctionApi for &mut T {
+    fn describe_function(&mut self, name: &str) -> Result<Option<FunctionInfo>, TransportError> {
+        (**self).describe_function(name)
+    }
+
+    fn call_function(&mut self, call: &FunctionCall) -> Result<FunctionResult, TransportError> {
+        (**self).call_function(call)
+    }
+
+    fn function_support(&self) -> Result<(), String> {
+        (**self).function_support()
+    }
+}
+
+/// A name of a function, parameter or field as the SDK accepts it: at most 30 characters, no blank.
+fn valid_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 30 && name.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn too_long(what: &str, chars: usize) -> TransportError {
+    TransportError::Protocol(format!(
+        "RFC call: {what} has {chars} characters; the limit is {MAX_CALL_CHARS}"
+    ))
+}
+
+/// Checks a call before the first library call, so a bad request never reaches the SDK.
+fn validate_call(call: &FunctionCall) -> Result<(), TransportError> {
+    let name_error = |name: &str| {
+        TransportError::Protocol(format!(
+            "RFC call: {name:?} is not a function, parameter or field name"
+        ))
+    };
+    let column_error = |column: &ColumnRead| match column.kind {
+        CellKind::Chars(length) if length == 0 || length > MAX_CALL_CHARS => {
+            Some(too_long(&format!("column {}", column.name), length))
+        }
+        _ => None,
+    };
+
+    if !valid_name(&call.function) {
+        return Err(name_error(&call.function));
+    }
+
+    for (name, value) in &call.imports {
+        if !valid_name(name) {
+            return Err(name_error(name));
+        }
+
+        if value.chars().count() > MAX_CALL_CHARS {
+            return Err(too_long(&format!("field {name}"), value.chars().count()));
+        }
+    }
+
+    for table in &call.tables {
+        if !valid_name(&table.name) {
+            return Err(name_error(&table.name));
+        }
+
+        if table.rows.len() > MAX_CALL_ROWS {
+            return Err(TransportError::Protocol(format!(
+                "RFC call: table {} has {} rows; the limit is {MAX_CALL_ROWS}",
+                table.name,
+                table.rows.len()
+            )));
+        }
+
+        for (field, value) in table.rows.iter().flatten() {
+            if !valid_name(field) {
+                return Err(name_error(field));
+            }
+
+            if value.chars().count() > MAX_CALL_CHARS {
+                return Err(too_long(
+                    &format!("field {field} of table {}", table.name),
+                    value.chars().count(),
+                ));
+            }
+        }
+    }
+
+    let columns = call
+        .exports
+        .iter()
+        .chain(call.export_tables.iter().flat_map(|table| &table.columns));
+
+    for column in columns {
+        if !valid_name(&column.name) {
+            return Err(name_error(&column.name));
+        }
+
+        if let Some(error) = column_error(column) {
+            return Err(error);
+        }
+    }
+
+    for table in &call.export_tables {
+        if !valid_name(&table.name) {
+            return Err(name_error(&table.name));
+        }
+    }
+
+    Ok(())
+}
+
+/// Like `rfc_error`, plus the error key (an ABAP exception name, for example) when there is one.
+fn function_error(
+    width: UcWidth,
+    phase: RfcPhase,
+    operation: &str,
+    error: &RfcErrorInfo,
+) -> TransportError {
+    let key = error.key(width);
+
+    if key.is_empty() {
+        rfc_error(width, phase, operation, error)
+    } else {
+        rfc_error(width, phase, &format!("{operation} [{key}]"), error)
+    }
+}
+
+fn function_check(
+    width: UcWidth,
+    phase: RfcPhase,
+    operation: &str,
+    result: RfcRc,
+    error: &RfcErrorInfo,
+) -> Result<(), TransportError> {
+    if result == RFC_OK {
+        Ok(())
+    } else {
+        Err(function_error(width, phase, operation, error))
+    }
+}
+
+/// Byte offsets inside `RFC_PARAMETER_DESC` for a character size and a pointer size, following
+/// the field order of `sapnwrfc.h`: `name[31]`, `type`, `direction`, `nucLength`, `ucLength`,
+/// `decimals`, `typeDescHandle`, `defaultValue[31]`, `parameterText[80]`, `optional`,
+/// `extendedDescription`. A single-byte library lays the same struct out with one-byte characters.
+#[derive(Debug, Eq, PartialEq)]
+struct ParameterLayout {
+    name_bytes: usize,
+    kind: usize,
+    direction: usize,
+    nuc_length: usize,
+    uc_length: usize,
+    optional: usize,
+    size: usize,
+}
+
+fn align(offset: usize, to: usize) -> usize {
+    offset.div_ceil(to) * to
+}
+
+impl ParameterLayout {
+    fn new(char_bytes: usize, pointer_bytes: usize) -> Self {
+        let name_bytes = 31 * char_bytes;
+        let kind = align(name_bytes, 4);
+        let (direction, nuc_length, uc_length) = (kind + 4, kind + 8, kind + 12);
+        let handle = align(kind + 20, pointer_bytes);
+        let default_value = handle + pointer_bytes;
+        let text = default_value + 31 * char_bytes;
+        let optional = text + 80 * char_bytes;
+
+        Self {
+            name_bytes,
+            kind,
+            direction,
+            nuc_length,
+            uc_length,
+            optional,
+            size: align(
+                align(optional + 1, pointer_bytes) + pointer_bytes,
+                pointer_bytes,
+            ),
+        }
+    }
+
+    fn of(width: UcWidth) -> Self {
+        let char_bytes = match width {
+            UcWidth::Utf16 => 2,
+            UcWidth::Narrow => 1,
+        };
+
+        Self::new(char_bytes, std::mem::size_of::<*const c_void>())
+    }
+}
+
+/// Room for a parameter description of either width.
+const PARAMETER_DESC_WORDS: usize = 64;
+
+fn word(bytes: &[u8], at: usize) -> u32 {
+    u32::from_ne_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+impl DynamicRfcApi {
+    /// Whether this library can serve function calls: `Err` names the symbols it does not export.
+    /// ADT and SADT never need them.
+    pub fn function_support(&self) -> Result<(), String> {
+        self.function.as_ref().map(|_| ()).map_err(|missing| {
+            format!(
+                "the RFC library does not export {}; function module calls are unavailable, ADT and SADT are not affected",
+                missing.join(", ")
+            )
+        })
+    }
+
+    fn loaded_symbols(&self) -> Result<FunctionSymbols, TransportError> {
+        self.function_support()
+            .map(|()| *self.function.as_ref().expect("checked by function_support"))
+            .map_err(TransportError::Protocol)
+    }
+
+    fn set_chars(
+        &self,
+        symbols: &FunctionSymbols,
+        container: RfcHandle,
+        name: &str,
+        value: &str,
+    ) -> Result<(), TransportError> {
+        let name = encode(self.width, RfcPhase::Prepare, name)?;
+        let text = encode(self.width, RfcPhase::Prepare, value)?;
+        let mut error = RfcErrorInfo::default();
+        let result = unsafe {
+            (symbols.set_chars)(
+                container,
+                name.as_ptr(),
+                text.as_ptr(),
+                text.chars() as c_uint,
+                &mut error,
+            )
+        };
+
+        function_check(self.width, RfcPhase::Prepare, "RfcSetChars", result, &error)
+    }
+
+    fn read_cell(
+        &self,
+        symbols: &FunctionSymbols,
+        container: RfcHandle,
+        column: &ColumnRead,
+    ) -> Result<Cell, TransportError> {
+        let name = encode(self.width, RfcPhase::Invoke, &column.name)?;
+        let mut error = RfcErrorInfo::default();
+
+        match column.kind {
+            CellKind::Int => {
+                let mut value: c_int = 0;
+                let result =
+                    unsafe { (symbols.get_int)(container, name.as_ptr(), &mut value, &mut error) };
+
+                function_check(self.width, RfcPhase::Invoke, "RfcGetInt", result, &error)?;
+                Ok(Cell::Int(value))
+            }
+            CellKind::Chars(length) => {
+                let mut buffer = UcBuffer::new(self.width, length);
+                let result = unsafe {
+                    (symbols.get_chars)(
+                        container,
+                        name.as_ptr(),
+                        buffer.as_mut_ptr(),
+                        length as c_uint,
+                        &mut error,
+                    )
+                };
+
+                function_check(self.width, RfcPhase::Invoke, "RfcGetChars", result, &error)?;
+                // The SDK pads a character field with blanks and writes no terminator.
+                let text = buffer
+                    .text(length)
+                    .map_err(TransportError::PostSendUncertain)?;
+
+                Ok(Cell::Text(text.trim_end_matches(' ').to_owned()))
+            }
+        }
+    }
+
+    fn read_table(
+        &self,
+        symbols: &FunctionSymbols,
+        function: RfcHandle,
+        read: &TableRead,
+    ) -> Result<Vec<Vec<Cell>>, TransportError> {
+        let table = self.table(RfcPhase::Invoke, function, &read.name)?;
+        let mut count: c_uint = 0;
+        let mut error = RfcErrorInfo::default();
+        let result = unsafe { (symbols.get_row_count)(table, &mut count, &mut error) };
+
+        function_check(
+            self.width,
+            RfcPhase::Invoke,
+            "RfcGetRowCount",
+            result,
+            &error,
+        )?;
+
+        if count as usize > MAX_CALL_ROWS {
+            return Err(TransportError::PostSendUncertain(format!(
+                "RFC call: table {} returned {count} rows; the limit is {MAX_CALL_ROWS}",
+                read.name
+            )));
+        }
+
+        let mut rows = Vec::with_capacity(count as usize);
+
+        for index in 0..count {
+            let mut error = RfcErrorInfo::default();
+            let result = unsafe { (symbols.move_to)(table, index, &mut error) };
+
+            function_check(self.width, RfcPhase::Invoke, "RfcMoveTo", result, &error)?;
+            let row = unsafe { (symbols.get_current_row)(table, &mut error) };
+
+            if row.is_null() {
+                return Err(function_error(
+                    self.width,
+                    RfcPhase::Invoke,
+                    "RfcGetCurrentRow",
+                    &error,
+                ));
+            }
+
+            rows.push(
+                read.columns
+                    .iter()
+                    .map(|column| self.read_cell(symbols, row, column))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+
+        Ok(rows)
+    }
+
+    /// Fills the importing fields and tables, invokes, and reads what the call asks for.
+    fn run_function(
+        &self,
+        symbols: &FunctionSymbols,
+        connection: RfcHandle,
+        function: RfcHandle,
+        call: &FunctionCall,
+    ) -> Result<FunctionResult, TransportError> {
+        for (name, value) in &call.imports {
+            self.set_chars(symbols, function, name, value)?;
+        }
+
+        for table in &call.tables {
+            let handle = self.table(RfcPhase::Prepare, function, &table.name)?;
+
+            for row in &table.rows {
+                let row_handle = self.append_row(handle)?;
+
+                for (field, value) in row {
+                    self.set_chars(symbols, row_handle, field, value)?;
+                }
+            }
+        }
+
+        let mut error = RfcErrorInfo::default();
+        let result = unsafe { (self.symbols.invoke)(connection, function, &mut error) };
+
+        function_check(self.width, RfcPhase::Invoke, "RfcInvoke", result, &error)?;
+
+        let mut outcome = FunctionResult::default();
+
+        for column in &call.exports {
+            outcome.exports.push((
+                column.name.clone(),
+                self.read_cell(symbols, function, column)?,
+            ));
+        }
+
+        for table in &call.export_tables {
+            outcome.tables.push((
+                table.name.clone(),
+                self.read_table(symbols, function, table)?,
+            ));
+        }
+
+        Ok(outcome)
+    }
+
+    fn parameter(
+        &self,
+        symbols: &FunctionSymbols,
+        descriptor: RfcHandle,
+        index: c_uint,
+    ) -> Result<ParameterInfo, TransportError> {
+        let layout = ParameterLayout::of(self.width);
+        // Zeroed and 8-aligned, so the library fills it and every byte read back is initialized.
+        let mut raw = [0u64; PARAMETER_DESC_WORDS];
+        let mut error = RfcErrorInfo::default();
+        let result = unsafe {
+            (symbols.get_parameter_desc_by_index)(
+                descriptor,
+                index,
+                raw.as_mut_ptr().cast(),
+                &mut error,
+            )
+        };
+
+        function_check(
+            self.width,
+            RfcPhase::Prepare,
+            "RfcGetParameterDescByIndex",
+            result,
+            &error,
+        )?;
+
+        debug_assert!(layout.size <= PARAMETER_DESC_WORDS * 8);
+        let bytes = raw
+            .iter()
+            .flat_map(|word| word.to_ne_bytes())
+            .collect::<Vec<_>>();
+        let name = match self.width {
+            UcWidth::Utf16 => from_sap_uc(
+                &bytes[..layout.name_bytes]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(TransportError::Protocol)?,
+            UcWidth::Narrow => narrow_text(&bytes[..layout.name_bytes]),
+        };
+
+        Ok(ParameterInfo {
+            name,
+            kind: match word(&bytes, layout.kind) as i32 {
+                0 => ParameterType::Char,
+                5 => ParameterType::Table,
+                other => ParameterType::Other(other),
+            },
+            direction: match word(&bytes, layout.direction) as i32 {
+                1 => Direction::Import,
+                2 => Direction::Export,
+                3 => Direction::Changing,
+                7 => Direction::Tables,
+                other => Direction::Other(other),
+            },
+            nuc_length: word(&bytes, layout.nuc_length),
+            uc_length: word(&bytes, layout.uc_length),
+            optional: bytes[layout.optional] != 0,
+        })
+    }
+}
+
+impl FunctionApi for DynamicRfcApi {
+    fn function_support(&self) -> Result<(), String> {
+        DynamicRfcApi::function_support(self)
+    }
+
+    fn describe_function(&mut self, name: &str) -> Result<Option<FunctionInfo>, TransportError> {
+        let symbols = self.loaded_symbols()?;
+
+        if !valid_name(name) {
+            return Err(TransportError::Protocol(format!(
+                "RFC call: {name:?} is not a function name"
+            )));
+        }
+
+        let connection = self.ensure_open()?;
+        let encoded = encode(self.width, RfcPhase::Prepare, name)?;
+        let descriptor = match self.function_descriptor(connection, &encoded) {
+            Ok(descriptor) => descriptor,
+            Err(error) if error.key(self.width) == FUNCTION_NOT_FOUND_KEY => return Ok(None),
+            Err(error) => {
+                return Err(function_error(
+                    self.width,
+                    RfcPhase::Prepare,
+                    "RfcGetFunctionDesc",
+                    &error,
+                ));
+            }
+        };
+        let mut count: c_uint = 0;
+        let mut error = RfcErrorInfo::default();
+        let result = unsafe { (symbols.get_parameter_count)(descriptor, &mut count, &mut error) };
+
+        function_check(
+            self.width,
+            RfcPhase::Prepare,
+            "RfcGetParameterCount",
+            result,
+            &error,
+        )?;
+
+        if count as usize > MAX_CALL_PARAMETERS {
+            return Err(TransportError::Protocol(format!(
+                "RFC call: {name} lists {count} parameters; the limit is {MAX_CALL_PARAMETERS}"
+            )));
+        }
+
+        Ok(Some(FunctionInfo {
+            name: name.to_owned(),
+            parameters: (0..count)
+                .map(|index| self.parameter(&symbols, descriptor, index))
+                .collect::<Result<_, _>>()?,
+        }))
+    }
+
+    fn call_function(&mut self, call: &FunctionCall) -> Result<FunctionResult, TransportError> {
+        let symbols = self.loaded_symbols()?;
+
+        validate_call(call)?;
+        let connection = self.ensure_open()?;
+        let function = self.create_function(connection, &call.function)?;
+        let result = self.run_function(&symbols, connection, function, call);
+        let mut destroy_error = RfcErrorInfo::default();
+
+        // A failing destroy must not turn a sent request into a reported failure.
+        unsafe {
+            (self.symbols.destroy_function)(function, &mut destroy_error);
+        }
+
+        result
+    }
+}
+
 impl Drop for DynamicRfcApi {
     fn drop(&mut self) {
         self.close();
@@ -1489,6 +2298,8 @@ fn is_fault_target(target: crate::fault::Target, request: &Request) -> bool {
         crate::fault::Target::Activate => request.method == "POST" && request.uri == ACTIVATION_URI,
         crate::fault::Target::Create => is_create_post(request),
         crate::fault::Target::Delete => is_delete_request(request),
+        // A function call of an extension is not an ADT request.
+        crate::fault::Target::Named(_) => false,
     }
 }
 

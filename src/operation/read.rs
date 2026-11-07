@@ -10,6 +10,7 @@ use crate::config::{Connection, tls_warning};
 use crate::domain::{Outcome, Status};
 use crate::hash::{normalize, source_hash};
 use crate::object::check_group_match;
+use crate::operation::include::{Located, ResolveError, locate, resolve_main};
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use std::fs;
 use std::path::Path;
@@ -57,8 +58,8 @@ impl ReadError {
     }
 }
 
-/// What to read: the kind, its name, the function group of a FUNC, the class include, and the
-/// optional line interval.
+/// What to read: the kind, its name, the function group of a FUNC, the class include, the
+/// optional line interval, and the `--main` program of a `PROG` include.
 #[derive(Clone, Copy, Debug)]
 pub struct ReadTarget<'a> {
     pub kind: ObjectKind,
@@ -66,6 +67,7 @@ pub struct ReadTarget<'a> {
     pub group: Option<&'a str>,
     pub include: Option<IncludeKind>,
     pub lines: Option<LineRange>,
+    pub main: Option<&'a str>,
 }
 
 impl<'a> ReadTarget<'a> {
@@ -76,6 +78,7 @@ impl<'a> ReadTarget<'a> {
             group: None,
             include: None,
             lines: None,
+            main: None,
         }
     }
 
@@ -93,6 +96,12 @@ impl<'a> ReadTarget<'a> {
 
     pub fn lines(mut self, lines: Option<LineRange>) -> Self {
         self.lines = lines;
+
+        self
+    }
+
+    pub fn main(mut self, main: Option<&'a str>) -> Self {
+        self.main = main;
 
         self
     }
@@ -170,7 +179,10 @@ impl ReadProg {
             .kind
             .source_uri(name, group.as_deref(), target.include)
             .map_err(ReadError::validation)?;
-        let response = read_source(transport, &uri, target.kind, name, target.include)?;
+        let response = match target.kind {
+            ObjectKind::Prog => read_prog(transport, &uri, name, target.main)?,
+            _ => read_source(transport, &uri, target.kind, name, target.include)?,
+        };
 
         normalize_of(response, target.kind, name, target.include)
     }
@@ -200,50 +212,61 @@ impl ReadProg {
 
         let lines = Self::fetch_lines(transport, target)?;
 
-        let projected = project_lines(&lines, target.lines);
-
-        if !to_stdout {
-            write_source(output, &projected)?;
-        }
-
-        let mut report = match target.lines {
-            Some(range) => format!(
-                "{} lines -> - (lines {}-{})",
-                projected.len(),
-                range.start,
-                range.end
-            ),
-            None => format!("{} lines -> {}", projected.len(), output.display()),
-        };
-
-        report.push_str(&format!("\nhash {}", source_hash(&lines)));
-
-        // The partial source is printed instead of written: a projected file could be deployed
-        // as if it were the whole source.
-        let mut stdout = if to_stdout {
-            let mut block = projected.join("\n");
-
-            if !block.is_empty() {
-                block.push('\n');
-            }
-
-            report.insert_str(0, &block);
-            report
-        } else {
-            report
-        };
-
-        if let Some(warning) = connection.and_then(tls_warning) {
-            stdout = format!("{warning}\n{stdout}");
-        }
-
-        Ok(Outcome {
-            status: Some(Status::Active),
-            exit: 0,
-            stdout,
-            stderr: String::new(),
-        })
+        emit_lines(&lines, target.lines, output, connection)
     }
+}
+
+/// Writes the source to `output`, or for a line interval prints it, and reports lines and hash.
+pub fn emit_lines(
+    lines: &[String],
+    range: Option<LineRange>,
+    output: &Path,
+    connection: Option<&Connection>,
+) -> Result<Outcome, ReadError> {
+    let to_stdout = range.is_some();
+    let projected = project_lines(lines, range);
+
+    if !to_stdout {
+        write_source(output, &projected)?;
+    }
+
+    let mut report = match range {
+        Some(range) => format!(
+            "{} lines -> - (lines {}-{})",
+            projected.len(),
+            range.start,
+            range.end
+        ),
+        None => format!("{} lines -> {}", projected.len(), output.display()),
+    };
+
+    report.push_str(&format!("\nhash {}", source_hash(lines)));
+
+    // The partial source is printed instead of written: a projected file could be deployed
+    // as if it were the whole source.
+    let mut stdout = if to_stdout {
+        let mut block = projected.join("\n");
+
+        if !block.is_empty() {
+            block.push('\n');
+        }
+
+        report.insert_str(0, &block);
+        report
+    } else {
+        report
+    };
+
+    if let Some(warning) = connection.and_then(tls_warning) {
+        stdout = format!("{warning}\n{stdout}");
+    }
+
+    Ok(Outcome {
+        status: Some(Status::Active),
+        exit: 0,
+        stdout,
+        stderr: String::new(),
+    })
 }
 
 /// The function group of a FUNC: `--fugr` when it was supplied, otherwise the server resolution.
@@ -289,6 +312,60 @@ pub(crate) fn resolve_group(
     Ok(resolved)
 }
 
+/// The active source of a `PROG`. It is a program until the server says otherwise: only a 404
+/// asks whether the name is an include, which is then read from its own URI. `--main` is for an
+/// include only and is checked against the server the way a deploy checks it.
+fn read_prog(
+    transport: &mut dyn SadtTransport,
+    program_source: &str,
+    name: &str,
+    main: Option<&str>,
+) -> Result<Response, ReadError> {
+    let mut source = program_source.to_owned();
+    let mut response = fetch_source(transport, &source)?;
+    let mut include = false;
+
+    if response.status == 404 {
+        match locate(transport, name).map_err(resolve_failure)? {
+            Located::NotFound => {
+                return Err(ReadError::validation(format!(
+                    "read PROG {}: NOT_FOUND (no program or include of that name)",
+                    name.to_ascii_uppercase()
+                )));
+            }
+            Located::Found(target) if target.is_include() => {
+                source = target.source_uri();
+                include = true;
+                response = fetch_source(transport, &source)?;
+            }
+            Located::Found(_) => {}
+        }
+    }
+
+    if let Some(main) = main {
+        if include {
+            resolve_main(transport, name, Some(main)).map_err(resolve_failure)?;
+        } else if response.status == 200 {
+            return Err(ReadError::stop(format!(
+                "--main is only valid for an include; PROG {} is a program",
+                name.to_ascii_uppercase()
+            )));
+        }
+    }
+
+    accept_source(transport, response, ObjectKind::Prog, name, None)
+}
+
+fn resolve_failure(error: ResolveError) -> ReadError {
+    match error {
+        ResolveError::Transport(error) => ReadError::from_transport(&error),
+        ResolveError::Status { what, status } => {
+            ReadError::validation(format!("{what}: HTTP {status}"))
+        }
+        ResolveError::Stop(message) => ReadError::stop(message),
+    }
+}
+
 /// `GET <source>?version=active`. A fresh class answers 500 for its source and metadata; that is
 /// an unreadable created state, not an absent object.
 fn read_source(
@@ -298,6 +375,12 @@ fn read_source(
     name: &str,
     include: Option<IncludeKind>,
 ) -> Result<Response, ReadError> {
+    let response = fetch_source(transport, uri)?;
+
+    accept_source(transport, response, kind, name, include)
+}
+
+fn fetch_source(transport: &mut dyn SadtTransport, uri: &str) -> Result<Response, ReadError> {
     let mut request = Request::get(format!("{uri}?version=active"));
     request
         .headers
@@ -312,6 +395,16 @@ fn read_source(
         return Err(ReadError::from_transport(&error));
     }
 
+    Ok(response)
+}
+
+fn accept_source(
+    transport: &mut dyn SadtTransport,
+    response: Response,
+    kind: ObjectKind,
+    name: &str,
+    include: Option<IncludeKind>,
+) -> Result<Response, ReadError> {
     if response.status == 200 {
         return Ok(response);
     }

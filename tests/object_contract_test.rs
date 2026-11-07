@@ -1,5 +1,5 @@
 use abapreach::backend::{BackendKind, Failure, OperationKind, Router};
-use abapreach::cli::{Cli, Command, CreateKind, IncludeKind, LineRange, ObjectKind};
+use abapreach::cli::{Cli, Command, CreateKind, IncludeKind, LineRange, ObjectKind, Subc};
 use abapreach::config::Connection;
 use abapreach::hash::{normalize, source_hash};
 use abapreach::object::{
@@ -133,19 +133,27 @@ fn create_uris_and_validation_queries_follow_the_evidenced_forms() {
         "/sap/bc/adt/oo/interfaces"
     );
     assert_eq!(
-        CreateKind::Fugr.validation_uri("zfg", "My group", "$TMP"),
+        CreateKind::Fugr
+            .validation_uri("zfg", "My group", "$TMP")
+            .unwrap(),
         "/sap/bc/adt/functions/validation?objtype=FUGR%2FF&objname=ZFG&description=My%20group&packagename=%24TMP"
     );
     assert_eq!(
-        CreateKind::Func.validation_uri("ZFM", "Text", "ZFG"),
+        CreateKind::Func
+            .validation_uri("ZFM", "Text", "ZFG")
+            .unwrap(),
         "/sap/bc/adt/functions/validation?objtype=FUGR%2FFF&objname=ZFM&description=Text&fugrname=ZFG"
     );
     assert_eq!(
-        CreateKind::Clas.validation_uri("ZCL_X", "Text", "ZPKG"),
+        CreateKind::Clas
+            .validation_uri("ZCL_X", "Text", "ZPKG")
+            .unwrap(),
         "/sap/bc/adt/oo/validation/objectname?objtype=CLAS%2FOC&objname=ZCL_X&description=Text&packagename=ZPKG"
     );
     assert_eq!(
-        CreateKind::Intf.validation_uri("ZIF_X", "Text", "$TMP"),
+        CreateKind::Intf
+            .validation_uri("ZIF_X", "Text", "$TMP")
+            .unwrap(),
         "/sap/bc/adt/oo/validation/objectname?objtype=INTF%2FOI&objname=ZIF_X&description=Text&packagename=%24TMP"
     );
 }
@@ -153,7 +161,9 @@ fn create_uris_and_validation_queries_follow_the_evidenced_forms() {
 #[test]
 fn a_namespaced_name_is_percent_encoded_in_the_validation_query() {
     assert_eq!(
-        CreateKind::Func.validation_uri("/NS/ZFM", "T", "/NS/ZFG"),
+        CreateKind::Func
+            .validation_uri("/NS/ZFM", "T", "/NS/ZFG")
+            .unwrap(),
         "/sap/bc/adt/functions/validation?objtype=FUGR%2FFF&objname=%2FNS%2FZFM&description=T&fugrname=%2FNS%2FZFG"
     );
 }
@@ -172,14 +182,14 @@ fn name_and_text_limits_per_type() {
     ] {
         assert_eq!(kind.max_name(), max);
         assert!(
-            check_deploy_options(kind, &long(max), None, false, None).is_ok(),
+            check_deploy_options(kind, &long(max), None, false, None, None).is_ok(),
             "{kind:?}"
         );
         assert!(
-            check_deploy_options(kind, &long(max + 1), None, false, None).is_err(),
+            check_deploy_options(kind, &long(max + 1), None, false, None, None).is_err(),
             "{kind:?}"
         );
-        assert!(check_read(kind, &long(max + 1), stdout(), None, None, None).is_err());
+        assert!(check_read(kind, &long(max + 1), stdout(), None, None, None, None).is_err());
     }
 
     for (kind, name_max, text_max) in [
@@ -189,7 +199,9 @@ fn name_and_text_limits_per_type() {
         (CreateKind::Intf, 30, 60),
     ] {
         let fugr = (kind == CreateKind::Func).then_some("ZFG");
-        let ok = |name: &str, text: &str| check_create(kind, name, text, None, fugr, None);
+        let ok = |name: &str, text: &str| {
+            check_create(kind, name, text, None, fugr, None, None, None, None)
+        };
 
         assert!(
             ok(&long(name_max), &"t".repeat(text_max)).is_ok(),
@@ -204,14 +216,36 @@ fn name_and_text_limits_per_type() {
 fn created_names_are_z_or_y_only() {
     for name in ["ZNAME", "YNAME", "zname", "yname"] {
         assert!(
-            check_create(CreateKind::Intf, name, "t", None, None, None).is_ok(),
+            check_create(
+                CreateKind::Intf,
+                name,
+                "t",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )
+            .is_ok(),
             "{name}"
         );
     }
 
     for name in ["ANAME", "SAPNAME", "/NS/ZNAME", "Z NAME", ""] {
         assert!(
-            check_create(CreateKind::Intf, name, "t", None, None, None).is_err(),
+            check_create(
+                CreateKind::Intf,
+                name,
+                "t",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err(),
             "{name}"
         );
     }
@@ -222,13 +256,13 @@ fn read_and_deploy_keep_the_program_name_grammar() {
     for kind in [ObjectKind::Func, ObjectKind::Clas, ObjectKind::Intf] {
         for name in ["", "Z?X", "Z X", "/NS/", "ZX/"] {
             assert!(
-                check_read(kind, name, stdout(), None, None, None).is_err(),
+                check_read(kind, name, stdout(), None, None, None, None).is_err(),
                 "{kind:?} {name:?}"
             );
         }
 
         // Not Z/Y-only: read and deploy accept any valid existing name.
-        assert!(check_read(kind, "SAPLNAME", stdout(), None, None, None).is_ok());
+        assert!(check_read(kind, "SAPLNAME", stdout(), None, None, None, None).is_ok());
     }
 }
 
@@ -241,30 +275,41 @@ fn include_is_valid_only_for_clas() {
     for kind in [ObjectKind::Prog, ObjectKind::Func, ObjectKind::Intf] {
         let out = Path::new("out.abap");
 
-        assert!(check_read(kind, "ZX", out, include, None, None).is_err());
-        assert!(check_deploy_options(kind, "ZX", include, false, None).is_err());
+        assert!(check_read(kind, "ZX", out, include, None, None, None).is_err());
+        assert!(check_deploy_options(kind, "ZX", include, false, None, None).is_err());
     }
 
-    assert!(check_read(ObjectKind::Clas, "ZX", Path::new("o"), include, None, None).is_ok());
-    assert!(check_deploy_options(ObjectKind::Clas, "ZX", include, false, None).is_ok());
-    assert!(check_deploy_options(ObjectKind::Clas, "ZX", None, false, None).is_ok());
+    assert!(
+        check_read(
+            ObjectKind::Clas,
+            "ZX",
+            Path::new("o"),
+            include,
+            None,
+            None,
+            None
+        )
+        .is_ok()
+    );
+    assert!(check_deploy_options(ObjectKind::Clas, "ZX", include, false, None, None).is_ok());
+    assert!(check_deploy_options(ObjectKind::Clas, "ZX", None, false, None, None).is_ok());
 }
 
 #[test]
 fn fugr_is_valid_only_for_func() {
     for kind in [ObjectKind::Prog, ObjectKind::Clas, ObjectKind::Intf] {
-        assert!(check_read(kind, "ZX", Path::new("o"), None, Some("ZFG"), None).is_err());
-        assert!(check_deploy_options(kind, "ZX", None, false, Some("ZFG")).is_err());
+        assert!(check_read(kind, "ZX", Path::new("o"), None, Some("ZFG"), None, None).is_err());
+        assert!(check_deploy_options(kind, "ZX", None, false, Some("ZFG"), None).is_err());
     }
 
     let func = ObjectKind::Func;
 
-    assert!(check_read(func, "ZX", Path::new("o"), None, Some("ZFG"), None).is_ok());
-    assert!(check_deploy_options(func, "ZX", None, false, Some("ZFG")).is_ok());
-    assert!(check_deploy_options(func, "ZX", None, false, None).is_ok());
+    assert!(check_read(func, "ZX", Path::new("o"), None, Some("ZFG"), None, None).is_ok());
+    assert!(check_deploy_options(func, "ZX", None, false, Some("ZFG"), None).is_ok());
+    assert!(check_deploy_options(func, "ZX", None, false, None, None).is_ok());
     // The group name follows the group limit and has no verified namespaced path.
-    assert!(check_deploy_options(func, "ZX", None, false, Some(&"G".repeat(27))).is_err());
-    assert!(check_deploy_options(func, "ZX", None, false, Some("/NS/ZFG")).is_err());
+    assert!(check_deploy_options(func, "ZX", None, false, Some(&"G".repeat(27)), None).is_err());
+    assert!(check_deploy_options(func, "ZX", None, false, Some("/NS/ZFG"), None).is_err());
 }
 
 #[test]
@@ -280,7 +325,7 @@ fn a_supplied_group_must_equal_the_server_resolution() {
 
 #[test]
 fn create_include_needs_clas_with_include() {
-    let create = |kind, include| check_deploy_options(kind, "ZX", include, true, None);
+    let create = |kind, include| check_deploy_options(kind, "ZX", include, true, None, None);
 
     assert!(create(ObjectKind::Clas, Some(IncludeKind::Ccau)).is_ok());
     assert!(create(ObjectKind::Clas, None).is_err());
@@ -294,17 +339,28 @@ fn create_include_needs_clas_with_include() {
 #[test]
 fn namespaced_read_and_deploy_stop_for_the_new_kinds_but_not_for_prog() {
     for kind in [ObjectKind::Func, ObjectKind::Clas, ObjectKind::Intf] {
-        assert!(check_read(kind, "/NS/ZX", stdout(), None, None, None).is_err());
-        assert!(check_deploy_options(kind, "/NS/ZX", None, false, None).is_err());
+        assert!(check_read(kind, "/NS/ZX", stdout(), None, None, None, None).is_err());
+        assert!(check_deploy_options(kind, "/NS/ZX", None, false, None, None).is_err());
     }
 
-    assert!(check_read(ObjectKind::Prog, "/NS/ZX", Path::new("o"), None, None, None).is_ok());
+    assert!(
+        check_read(
+            ObjectKind::Prog,
+            "/NS/ZX",
+            Path::new("o"),
+            None,
+            None,
+            None,
+            None
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn create_option_rules() {
     let create = |kind: CreateKind, package: Option<&str>, fugr: Option<&str>, tr: Option<&str>| {
-        check_create(kind, "ZX", "t", package, fugr, tr)
+        check_create(kind, "ZX", "t", package, fugr, tr, None, None, None)
     };
 
     // --fugr: required for FUNC, invalid elsewhere.
@@ -420,7 +476,7 @@ fn lines_grammar_is_one_based_inclusive_with_a_not_after_b() {
 fn lines_require_stdout() {
     let range = Some(LineRange { start: 2, end: 4 });
 
-    assert!(check_read(ObjectKind::Prog, "ZX", stdout(), None, None, range).is_ok());
+    assert!(check_read(ObjectKind::Prog, "ZX", stdout(), None, None, range, None).is_ok());
     assert!(
         check_read(
             ObjectKind::Prog,
@@ -428,7 +484,8 @@ fn lines_require_stdout() {
             Path::new("out.abap"),
             None,
             None,
-            range
+            range,
+            None
         )
         .is_err()
     );
@@ -437,6 +494,7 @@ fn lines_require_stdout() {
             ObjectKind::Prog,
             "ZX",
             Path::new("out.abap"),
+            None,
             None,
             None,
             None
@@ -583,7 +641,7 @@ fn cli_parses_the_m3_commands() {
 fn cli_rejects_unknown_kinds_includes_and_missing_arguments() {
     let read = |kind: &'static str| ["abapreach", "read", kind, "ZX", "o", "--conn", "c"];
 
-    for kind in ["FUGR", "TRAN", "prog", ""] {
+    for kind in ["FUGR", "prog", ""] {
         assert!(Cli::try_parse_from(read(kind)).is_err(), "{kind:?}");
     }
 
@@ -619,6 +677,7 @@ fn cli_rejects_unknown_kinds_includes_and_missing_arguments() {
         ])
         .is_err()
     );
+    // M5 turns `create PROG` into a valid form, and `--text` is still required.
     assert!(
         parse(&[
             "abapreach",
@@ -630,7 +689,7 @@ fn cli_rejects_unknown_kinds_includes_and_missing_arguments() {
             "--conn",
             "c"
         ])
-        .is_err()
+        .is_ok()
     );
     assert!(parse(&["abapreach", "create", "INTF", "ZX", "--conn", "c"]).is_err());
     assert!(parse(&["abapreach", "create", "INTF", "ZX", "--text", "t"]).is_err());
@@ -856,7 +915,6 @@ fn invalid_combinations_stop_with_exit_2_before_any_transport_is_opened() {
             "--tr",
             "DEVK000001",
         ],
-        vec!["create", "PROG", "ZP", "--text", "t"],
     ];
 
     for args in cases {
@@ -870,4 +928,378 @@ fn invalid_combinations_stop_with_exit_2_before_any_transport_is_opened() {
     let message = stops(dir, &["read", "PROG", "ZP", "o.abap", "--lines", "1-2"]);
 
     assert!(message.contains("stdout"), "{message}");
+}
+
+// ---- M5: create PROG and --main ------------------------------------------------------------
+
+#[test]
+fn create_prog_and_trans_parse_the_m5_grammar() {
+    match parse(&[
+        "abapreach",
+        "create",
+        "PROG",
+        "YTEST_ABAPREACH_P1",
+        "source.abap",
+        "--text",
+        "probe",
+        "--subc",
+        "I",
+        "--package",
+        "$TMP",
+        "--backend",
+        "adt",
+        "--conn",
+        "c",
+    ])
+    .unwrap()
+    {
+        Command::Create {
+            kind,
+            name,
+            file,
+            subc,
+            ..
+        } => {
+            assert_eq!(kind, CreateKind::Prog);
+            assert_eq!(name, "YTEST_ABAPREACH_P1");
+            assert_eq!(file, Some(PathBuf::from("source.abap")));
+            assert_eq!(subc, Some(Subc::Include));
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // `create --subc X` is not a value of the grammar, and unknown flags stay impossible.
+    for bad in [
+        &[
+            "abapreach",
+            "create",
+            "PROG",
+            "ZX",
+            "--text",
+            "t",
+            "--subc",
+            "X",
+            "--conn",
+            "c",
+        ][..],
+        &[
+            "abapreach",
+            "create",
+            "PROG",
+            "ZX",
+            "--text",
+            "t",
+            "--base",
+            "h",
+            "--conn",
+            "c",
+        ],
+        &[
+            "abapreach",
+            "create",
+            "PROG",
+            "ZX",
+            "--text",
+            "t",
+            "--force",
+            "--conn",
+            "c",
+        ],
+        &[
+            "abapreach",
+            "create",
+            "PROG",
+            "ZX",
+            "--text",
+            "t",
+            "--main",
+            "ZM",
+            "--conn",
+            "c",
+        ],
+        // `--prog` belongs to no standard kind.
+        &[
+            "abapreach",
+            "create",
+            "PROG",
+            "ZX",
+            "--text",
+            "t",
+            "--prog",
+            "ZR",
+            "--conn",
+            "c",
+        ],
+        // The DDIC kinds are out of scope for 0.15.0.
+        &[
+            "abapreach",
+            "create",
+            "DTEL",
+            "YX",
+            "--text",
+            "t",
+            "--conn",
+            "c",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn create_limits_follow_each_kind() {
+    let long = |count: usize| "Z".repeat(count);
+    let create = |kind: CreateKind, name: &str, text: &str, file: Option<&str>| {
+        check_create(
+            kind,
+            name,
+            text,
+            None,
+            None,
+            None,
+            None,
+            None,
+            file.map(Path::new),
+        )
+    };
+
+    // PROG: name 40, text 70.
+    assert!(create(CreateKind::Prog, &long(40), &"t".repeat(70), None).is_ok());
+    assert!(create(CreateKind::Prog, &long(41), "t", None).is_err());
+    assert!(create(CreateKind::Prog, "ZNAME", &"t".repeat(71), None).is_err());
+    // A program accepts FILE; an include does not.
+    assert!(create(CreateKind::Prog, "ZNAME", "t", Some("source.abap")).is_ok());
+}
+
+#[test]
+fn create_wrong_combinations_stop_with_their_own_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+
+    for (args, expected) in [
+        // --subc only applies to PROG.
+        (
+            vec!["create", "CLAS", "ZCL_X", "--text", "t", "--subc", "1"],
+            "--subc only applies to PROG",
+        ),
+        // An include takes no FILE.
+        (
+            vec![
+                "create", "PROG", "ZPX", "t.abap", "--text", "t", "--subc", "I",
+            ],
+            "new include: deploy the source after the INCLUDE statement exists in the parent \
+             program (create PROG --subc I without FILE)",
+        ),
+        // FILE is a PROG program option only.
+        (
+            vec!["create", "FUGR", "ZFG", "t.abap", "--text", "t"],
+            "create FUGR does not accept FILE",
+        ),
+        (
+            vec![
+                "create", "FUNC", "ZFM", "t.abap", "--text", "t", "--fugr", "ZFG",
+            ],
+            "create FUNC does not accept FILE",
+        ),
+        // Z/Y only, and the existing package/--tr rules.
+        (
+            vec!["create", "PROG", "ANAME", "--text", "t"],
+            "must start with Z or Y",
+        ),
+        (
+            vec!["create", "PROG", "ZPX", "--text", "t", "--package", "ZPKG"],
+            "package ZPKG is transportable: --tr is required",
+        ),
+        (
+            vec!["create", "PROG", "ZPX", "--text", "t", "--tr", "DEVK000001"],
+            "--tr is not valid for the local package $TMP",
+        ),
+    ] {
+        let message = stops(dir, &args);
+
+        assert!(
+            message.contains(expected),
+            "{args:?}: {message} (expected {expected:?})"
+        );
+    }
+}
+
+#[test]
+fn main_is_a_prog_option_for_read_and_deploy_only() {
+    for command in [
+        &[
+            "abapreach",
+            "read",
+            "PROG",
+            "ZP",
+            "-",
+            "--main",
+            "ZMAIN",
+            "--conn",
+            "c",
+        ][..],
+        &[
+            "abapreach",
+            "deploy",
+            "PROG",
+            "ZP",
+            "f.abap",
+            "--main",
+            "ZMAIN",
+            "--conn",
+            "c",
+        ],
+        &[
+            "abapreach",
+            "deploy",
+            "PROG",
+            "ZP",
+            "f.abap",
+            "--simulate",
+            "--main",
+            "ZMAIN",
+            "--conn",
+            "c",
+        ],
+    ] {
+        match parse(command).unwrap() {
+            Command::Read { main, .. } | Command::Deploy { main, .. } => {
+                assert_eq!(main.as_deref(), Some("ZMAIN"), "{command:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+
+    let long_main = "M".repeat(41);
+
+    for (args, expected) in [
+        (
+            vec!["read", "CLAS", "ZCL_X", "o", "--main", "ZMAIN"],
+            "--main is only valid for PROG",
+        ),
+        (
+            vec!["read", "FUNC", "ZFM", "o", "--main", "ZMAIN"],
+            "--main is only valid for PROG",
+        ),
+        (
+            vec!["deploy", "INTF", "ZIF_X", "f.abap", "--main", "ZMAIN"],
+            "--main is only valid for PROG",
+        ),
+        (
+            vec![
+                "deploy", "FUNC", "ZFM", "f.abap", "--fugr", "ZFG", "--main", "ZMAIN",
+            ],
+            "--main is only valid for PROG",
+        ),
+        (
+            vec!["read", "PROG", "ZP", "o", "--main", &long_main],
+            "invalid --main",
+        ),
+        (
+            vec!["deploy", "PROG", "ZP", "f.abap", "--main", "Z MAIN"],
+            "invalid --main",
+        ),
+    ] {
+        let message = stops(dir, &args);
+
+        assert!(
+            message.contains(expected),
+            "{args:?}: {message} (expected {expected:?})"
+        );
+    }
+}
+
+#[test]
+fn the_python_create_prog_grammar_cases_keep_their_outcome() {
+    // Ported from tools/test_rfc_deploy.py: test_create_text_too_long and
+    // test_create_bad_flag_combinations. The Python file argument, --remote and the mandatory
+    // --package are M3/M5 intentional differences (docs/behavior-differences.md).
+    let long = |count: usize| "t".repeat(count);
+    let directory = tempfile::tempdir().unwrap();
+    let dir = directory.path();
+
+    for kind in [
+        CreateKind::Prog,
+        CreateKind::Fugr,
+        CreateKind::Func,
+        CreateKind::Clas,
+        CreateKind::Intf,
+    ] {
+        let text_max = kind.max_text();
+        let at_limit = long(text_max);
+        let fugr = (kind == CreateKind::Func).then_some("ZFG");
+        // A FUNC takes the package of its function group, so --package is not valid for it.
+        let package = (kind != CreateKind::Func).then_some("$TMP");
+
+        // Exactly at the limit passes local validation.
+        assert!(
+            check_create(kind, "ZX", &at_limit, package, fugr, None, None, None, None).is_ok(),
+            "{kind:?}: at the limit"
+        );
+
+        let over = long(text_max + 1);
+        let mut args = vec!["create", kind.token(), "ZX", "--text", &over];
+
+        if let Some(package) = package {
+            args.extend(["--package", package]);
+        }
+
+        if kind == CreateKind::Func {
+            args.extend(["--fugr", "ZFG"]);
+        }
+
+        assert!(stops(dir, &args).contains("--text is"), "{kind:?}");
+    }
+
+    // A FUNC create still needs --fugr, and a FUGR create accepts no FILE.
+    assert!(stops(dir, &["create", "FUNC", "ZFM", "--text", "t"]).contains("--fugr"));
+    assert!(
+        stops(dir, &["create", "FUGR", "ZFG", "f.abap", "--text", "t"])
+            .contains("does not accept FILE")
+    );
+
+    // `create PROG <name> --text T` has no FILE and needs no --package in ABAPReach (default $TMP).
+    assert!(
+        parse(&[
+            "abapreach",
+            "create",
+            "PROG",
+            "ZX",
+            "--text",
+            "Test",
+            "--conn",
+            "c",
+        ])
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_program_or_transaction_has_no_create_uri_and_every_builder_says_so_in_one_text() {
+    use abapreach::object::PackageScope;
+
+    let transportable = PackageScope::Transportable {
+        request: "DEVK900001".to_owned(),
+    };
+
+    let kind = CreateKind::Prog;
+    let text = "create PROG is not available yet";
+
+    assert_eq!(kind.creation_uri(None), Err(text.to_owned()));
+    assert_eq!(
+        kind.creation_request_uri(None, &PackageScope::Local),
+        Err(text.to_owned())
+    );
+    assert_eq!(
+        kind.creation_request_uri(None, &transportable),
+        Err(text.to_owned())
+    );
+    assert_eq!(kind.object_uri("ZNAME", None), Err(text.to_owned()));
+    assert_eq!(
+        kind.validation_uri("ZNAME", "text", "$TMP"),
+        Err(text.to_owned())
+    );
 }

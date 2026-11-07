@@ -417,7 +417,8 @@ fn create_validation_and_creation_posts_are_admitted_for_every_kind_and_scope() 
         };
 
         assert_admitted(&[Request::post(
-            kind.validation_uri("zobj", "A text, with: chars/é", scope_value),
+            kind.validation_uri("zobj", "A text, with: chars/é", scope_value)
+                .unwrap(),
             Vec::new(),
         )]);
 
@@ -970,7 +971,7 @@ fn unapproved_queries_and_repository_shapes_are_refused() {
         ),
         Request::get("/sap/bc/adt/activation/inactiveobjects?x=1"),
         Request::post("/sap/bc/adt/activation/inactiveobjects", Vec::new()),
-        // where-used: a function module only, one uri parameter.
+        // where-used: a function module, program or include only, one uri parameter.
         Request::post(usage_references_uri(CLASS), Vec::new()),
         Request::post(
             usage_references_uri("/sap/bc/adt/programs/programs/zprog"),
@@ -1107,7 +1108,6 @@ fn delete_of_a_part_mcp_function_module_fallback_and_unrelated_endpoints_are_ref
         Request::get("/sap/bc/adt/packages/ztest"),
         Request::get("/sap/bc/adt/cts/transportrequests"),
         Request::get("/sap/bc/adt/ddic/tables/zt/source/main?version=active"),
-        Request::get("/sap/bc/adt/programs/includes/zi/source/main?version=active"),
         Request::get("/sap/bc/adt/oo/classes.json"),
         Request::get("/sap/bc/adt/discovery/x"),
         Request::get("sap/bc/adt/discovery"),

@@ -191,6 +191,9 @@ jobs:
           mkdir inspect
           tar -xzf "dist/$ARCHIVE_FILE" -C inspect
 
+      - name: Check that the packaged executable names no custom function module
+        run: bash .github/scripts/check-no-custom-module.sh "inspect/$EXE"
+
       - name: Check the glibc baseline of the packaged executable
         if: runner.os == 'Linux'
         run: objdump -T "inspect/$EXE" | bash .github/scripts/check-glibc.sh 2.28
@@ -225,7 +228,7 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - label: macos-14
+          - label: macos-15
             target: aarch64-apple-darwin
             ext: tar.gz
             exe: abapreach
@@ -304,6 +307,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Expand-Archive -LiteralPath "dist\\$env:ARCHIVE_FILE" -DestinationPath inspect
+
+      - name: Check that the packaged executable names no custom function module
+        run: bash .github/scripts/check-no-custom-module.sh "inspect/$EXE"
 
       - name: Check the import table of the packaged executable
         if: runner.os == 'Windows'

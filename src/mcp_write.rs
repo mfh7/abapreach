@@ -6,25 +6,36 @@
 //! a passed simulation, and, under `confirm` and always for a delete, the human types the name of
 //! the object into a form. Nothing a client sends, annotations included, stands in for these.
 
-use crate::app::{Attempt, Exit, Factories, Opened, RfcLibraryInfo, route};
-use crate::backend::{BackendKind, Failure, OperationKind};
-use crate::cli::{CreateKind, DeleteTarget, IncludeKind, ObjectKind};
+use crate::app::{
+    Attempt, Exit, Factories, Opened, RfcLibraryInfo, RfcProbe, end_session, exit_of_outcome,
+    option_misuse, pin_of, route,
+};
+use crate::backend::{BackendKind, Failure, OperationKind, Selection};
+use crate::cli::{CreateKind, DeleteKind, DeleteTarget, IncludeKind, ObjectKind, Subc, TypeArg};
 use crate::config::{Connection, scrub};
 use crate::domain::{Outcome, Status};
+use crate::extension::{
+    CreateRequest, ExtensionDelete, ExtensionKind, ExtensionOp, ExtensionOptions, MixedDelete,
+    Normalize, Registry, RunContext, SharedFactories, Verbs, adt_label,
+};
 use crate::hash::local_source_lines;
 use crate::mcp::{Answer, Form, NoSession, Session, ToolHandler, ToolResult};
 use crate::mcp_read::{
     ReadTools, SECRET_REJECTED, diagnostic, holds_secret, optional, required, status_token,
 };
-use crate::object::{check_create, check_deploy_options, check_deploy_source};
+use crate::object::{
+    check_create, check_create_extension, check_deploy_options, check_deploy_source,
+};
 use crate::operation::create::{CreateInput, CreateProg};
-use crate::operation::delete::{self, Context, Plan, sha256_hex};
+use crate::operation::delete::{self, Context, DeleteBackend, DeleteReport, Plan, sha256_hex};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::deploy::{
-    CancelFlag, Change, DeployInput, DeployProg, DeployScope, known_lock_handles,
+    CancelFlag, Change, DeployInput, DeployProg, DeployScope, NEW_INCLUDE_WARNING,
+    known_lock_handles,
 };
 use crate::policy::{Confirmer, McpWrite};
-use crate::transport::TransportError;
+use crate::transport::rfc::FunctionApi;
+use crate::transport::{SadtTransport, TransportError};
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 use std::cell::RefCell;
@@ -84,6 +95,11 @@ pub struct Ticket {
     pub group: Option<String>,
     /// The live hash the simulation read; the write refuses a source that moved on.
     pub base: Option<String>,
+    /// The main program an include was resolved to; the write runs under the same one, so a
+    /// main program that changed since the simulation stops it before the lock.
+    pub main: Option<String>,
+    /// The `W:` line of a new include's first simulation, shown to the human before the write.
+    pub warning: Option<String>,
     /// The size and an excerpt of the change, for the confirmation.
     pub change: Option<Change>,
     /// A delete's objects, with the contents of a group, one line each.
@@ -105,6 +121,8 @@ impl Ticket {
             plan: None,
             group: None,
             base: None,
+            main: None,
+            warning: None,
             change: None,
             listing: Vec::new(),
         }
@@ -262,6 +280,24 @@ impl Factories for WithCancel<'_> {
         self.inner.rfc_ping(connection)
     }
 
+    fn rfc_probe(&mut self, connection: &Connection) -> RfcProbe {
+        self.inner.rfc_probe(connection)
+    }
+
+    fn function_api(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<Box<dyn FunctionApi>, TransportError> {
+        self.inner.function_api(connection)
+    }
+
+    fn function_api_fresh(
+        &mut self,
+        connection: &Connection,
+    ) -> Result<Box<dyn FunctionApi>, TransportError> {
+        self.inner.function_api_fresh(connection)
+    }
+
     fn cancel(&self) -> CancelFlag {
         self.cancel.clone()
     }
@@ -298,6 +334,8 @@ pub struct McpTools<'a, G> {
     limits: Limits,
     /// `W:` lines about writes the client gave up on, shown with the next tool result.
     notices: Vec<String>,
+    /// The extension whose types the write tools accept; none without a registry.
+    registry: Option<&'a Registry>,
 }
 
 impl<'a, G: WriteGate> McpTools<'a, G> {
@@ -307,7 +345,26 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             gate,
             limits: Limits::default(),
             notices: Vec::new(),
+            registry: None,
         }
+    }
+
+    /// Adds the types and options of a registered extension to the write tools.
+    #[must_use]
+    pub fn with_registry(mut self, registry: &'a Registry) -> Self {
+        self.registry = Some(registry);
+        self.read = self.read.with_registry(registry);
+
+        self
+    }
+
+    /// The extension types that accept a verb.
+    fn extension_kinds(&self, verb: Verbs) -> Vec<ExtensionKind> {
+        self.registry
+            .into_iter()
+            .flat_map(Registry::kinds)
+            .filter(|kind| kind.spec().verbs.contains(verb))
+            .collect()
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -365,7 +422,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             return Ok(stored);
         }
 
-        let summary = confirmation_summary(connection, &stored);
+        let summary = confirmation_summary_with(connection, &stored, self.registry);
 
         if holds_secret(connection, &summary) {
             return Err(SECRET_REJECTED.to_owned());
@@ -438,8 +495,9 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         };
         let fugr = optional(arguments, "fugr")?;
         let create_include = flag(arguments, "create_include")?;
+        let main = optional(arguments, "main")?;
 
-        check_deploy_options(kind, name, include, create_include, fugr)?;
+        check_deploy_options(kind, name, include, create_include, fugr, main)?;
 
         let lines = local_source_lines(source);
 
@@ -452,6 +510,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             ("tr", tr.map(str::to_ascii_uppercase)),
             ("include", include.map(|include| include.token().to_owned())),
             ("fugr", fugr.map(str::to_ascii_uppercase)),
+            ("main", main.map(str::to_ascii_uppercase)),
         ]);
 
         fields.insert("create_include".to_owned(), create_include.to_string());
@@ -471,10 +530,15 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             .as_ref()
             .and_then(|stored| stored.group.clone())
             .or_else(|| fugr.map(str::to_owned));
+        // The execute resolves the main program as the simulation did (a client `main` is checked
+        // again, a listed one is not) and stops before the lock when it is no longer the stored one.
+        let expected_main = stored.as_ref().and_then(|stored| stored.main.as_deref());
         let scope = DeployScope::new(kind)
             .group(group.as_deref())
             .include(include)
             .create_include(create_include)
+            .main(main)
+            .expected_main(expected_main)
             .cancel_before_lock(true);
         let input = DeployInput {
             name: name.to_owned(),
@@ -512,6 +576,13 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                 seen.group = result.group.clone();
                 seen.base = result.base.clone();
                 seen.change = result.change.clone();
+                seen.main = result.main.clone();
+                seen.warning = result
+                    .outcome
+                    .stderr
+                    .lines()
+                    .find(|line| line.starts_with(NEW_INCLUDE_WARNING))
+                    .map(str::to_owned);
 
                 Attempt {
                     outcome: result.outcome,
@@ -528,6 +599,8 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             backend: seen.backend,
             group: seen.group.clone(),
             base: seen.base.clone(),
+            main: seen.main.clone(),
+            warning: seen.warning.clone(),
             change: seen.change.clone(),
             ..ticket
         });
@@ -551,30 +624,128 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
     ) -> Result<ToolResult, String> {
         let mut deadline = Deadline::start(self.limits.call);
         let connection = self.writer(arguments)?;
-        let kind = parse::<CreateKind>(
-            required(arguments, "type")?,
-            "type must be one of FUGR, FUNC, CLAS, INTF",
-        )?;
+        let registry = self.registry;
+        let empty = Registry::new();
+        let registry = registry.unwrap_or(&empty);
+        let extension_kinds = self.extension_kinds(Verbs::CREATE);
+        let type_text = required(arguments, "type")?;
+        let kind = match extension_kinds
+            .iter()
+            .find(|kind| kind.token() == type_text)
+        {
+            Some(kind) => TypeArg::Extension(*kind),
+            None => TypeArg::Standard(parse::<CreateKind>(
+                type_text,
+                &format!(
+                    "type must be one of PROG, FUGR, FUNC, CLAS, INTF{}",
+                    extension_kinds
+                        .iter()
+                        .map(|kind| format!(", {}", kind.token()))
+                        .collect::<String>()
+                ),
+            )?),
+        };
         let name = required(arguments, "name")?;
         let text = required(arguments, "text")?;
         let package = optional(arguments, "package")?;
         let fugr = optional(arguments, "fugr")?;
         let tr = optional(arguments, "tr")?;
+        let subc = match optional(arguments, "subc")? {
+            Some(subc) => Some(parse::<Subc>(subc, "subc must be one of 1, I")?),
+            None => None,
+        };
+        let mut options = ExtensionOptions::new();
 
-        check_create(kind, name, text, package, fugr, tr)?;
+        for option in extension_kinds
+            .iter()
+            .flat_map(|kind| kind.spec().create_options)
+        {
+            if let Some(value) = optional(arguments, option.id)? {
+                options.insert(option.id, value.to_owned());
+            }
+        }
 
-        let ticket = Ticket::new(
-            Operation::Create,
-            connection.id.clone(),
-            bind([
-                ("type", Some(kind.token().to_owned())),
-                ("name", Some(name.to_ascii_uppercase())),
-                ("text", Some(text.to_owned())),
-                ("package", package.map(str::to_ascii_uppercase)),
-                ("tr", tr.map(str::to_ascii_uppercase)),
-                ("fugr", fugr.map(str::to_ascii_uppercase)),
-            ]),
-        );
+        // The MCP create has no FILE: it creates the object and writes no source. The local rules
+        // are the ones of the CLI, in the same order.
+        let request = CreateRequest {
+            name,
+            text,
+            package,
+            tr,
+            simulate: !execute,
+            options: &options,
+        };
+
+        match kind {
+            TypeArg::Standard(kind) => check_create(
+                kind,
+                name,
+                text,
+                package,
+                fugr,
+                tr,
+                subc,
+                option_misuse(None, &options, registry),
+                None,
+            )?,
+            TypeArg::Extension(kind) => {
+                let extension = registry.extension().ok_or("no extension is registered")?;
+
+                check_create_extension(
+                    kind.spec(),
+                    name,
+                    text,
+                    package,
+                    fugr,
+                    tr,
+                    subc,
+                    option_misuse(Some(kind), &options, registry),
+                    &|| extension.check_create(kind, &request),
+                    None,
+                )?;
+                // A refusal needs no connection, so it comes before the ticket and the human.
+                extension.preflight(ExtensionOp::Create, kind, &connection, None)?;
+            }
+        }
+
+        let subc = (kind == CreateKind::Prog).then(|| subc.unwrap_or(Subc::Program));
+        let mut fields = bind([
+            (
+                "type",
+                Some(match kind {
+                    TypeArg::Standard(kind) => kind.token().to_owned(),
+                    TypeArg::Extension(kind) => kind.token().to_owned(),
+                }),
+            ),
+            ("name", Some(name.to_ascii_uppercase())),
+            ("text", Some(text.to_owned())),
+            ("package", package.map(str::to_ascii_uppercase)),
+            ("tr", tr.map(str::to_ascii_uppercase)),
+            ("fugr", fugr.map(str::to_ascii_uppercase)),
+            (
+                "subc",
+                subc.and_then(|subc| subc.to_possible_value())
+                    .map(|value| value.get_name().to_owned()),
+            ),
+        ]);
+
+        // An absent option adds no key, so a token without an extension option is unchanged.
+        for option in extension_kinds
+            .iter()
+            .flat_map(|kind| kind.spec().create_options)
+        {
+            if let Some(value) = options.get(option.id) {
+                fields.insert(
+                    option.id.to_owned(),
+                    match option.normalize {
+                        Normalize::Upper => value.to_ascii_uppercase(),
+                        Normalize::Verbatim => value.clone(),
+                    },
+                );
+            }
+        }
+
+        let ticket = Ticket::new(Operation::Create, connection.id.clone(), fields);
         let stored = if execute {
             Some(self.authorize(&connection, arguments, &ticket, session, &mut deadline)?)
         } else {
@@ -584,15 +755,6 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
 
         Self::proceed(&deadline, &cancel, self.limits)?;
 
-        let input = CreateInput {
-            kind,
-            name: name.to_owned(),
-            text: text.to_owned(),
-            package: package.map(str::to_owned),
-            group: fugr.map(str::to_owned),
-            tr: tr.map(str::to_owned),
-            simulate: !execute,
-        };
         let explicit = stored.as_ref().and_then(|stored| stored.backend);
         let mut seen = Seen::default();
         let _write = execute.then(|| cancel.hold_write());
@@ -600,33 +762,65 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             inner: self.read.factories(),
             cancel: cancel.clone(),
         };
-        let exit = route(
-            OperationKind::Create(kind),
-            explicit,
-            false,
-            &connection,
-            &mut factories,
-            |transport, selection, cancel, _| {
-                seen.backend = Some(selection.backend);
+        let exit = match kind {
+            TypeArg::Extension(kind) => {
+                // Over the extension only, never routed; the token's backend is its pin.
+                let extension = registry.extension().ok_or("no extension is registered")?;
+                let shared = SharedFactories::new(&mut factories);
+                let run = RunContext {
+                    connection: &connection,
+                    cancel: &cancel,
+                    pin: explicit.map(pin_of),
+                    factories: &shared,
+                };
+                let outcome = extension.create(kind, &request, run);
 
-                let result = CreateProg::run_with_cancel(
-                    transport,
-                    input.clone(),
-                    Some(selection),
-                    Some(&connection),
-                    cancel,
-                );
+                seen.status = outcome.status;
 
-                seen.status = result.outcome.status;
+                exit_of_outcome(outcome)
+            }
+            TypeArg::Standard(kind) => {
+                let input = CreateInput {
+                    kind,
+                    name: name.to_owned(),
+                    text: text.to_owned(),
+                    package: package.map(str::to_owned),
+                    group: fugr.map(str::to_owned),
+                    tr: tr.map(str::to_owned),
+                    simulate: !execute,
+                    subc: subc.unwrap_or(Subc::Program),
+                    source: None,
+                };
 
-                Attempt {
-                    outcome: result.outcome,
-                    failure: result.failure,
-                    fallback_allowed: result.fallback_allowed,
-                    detail: result.detail,
-                }
-            },
-        );
+                route(
+                    OperationKind::Create(kind),
+                    explicit,
+                    false,
+                    &connection,
+                    &mut factories,
+                    |transport, selection, cancel, _| {
+                        seen.backend = Some(selection.backend);
+
+                        let result = CreateProg::run_with_cancel(
+                            transport,
+                            input.clone(),
+                            Some(selection),
+                            Some(&connection),
+                            cancel,
+                        );
+
+                        seen.status = result.outcome.status;
+
+                        Attempt {
+                            outcome: result.outcome,
+                            failure: result.failure,
+                            fallback_allowed: result.fallback_allowed,
+                            detail: result.detail,
+                        }
+                    },
+                )
+            }
+        };
 
         drop(factories);
 
@@ -654,8 +848,30 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
     ) -> Result<ToolResult, String> {
         let mut deadline = Deadline::start(self.limits.call);
         let connection = self.writer(arguments)?;
-        let targets = targets(arguments)?;
+        let extension_kinds = self.extension_kinds(Verbs::DELETE);
+        let targets = targets(arguments, &extension_kinds)?;
         let tr = optional(arguments, "tr")?;
+        let registry = self.registry;
+        let empty = Registry::new();
+        let registry = registry.unwrap_or(&empty);
+        let mut batch_kinds: Vec<ExtensionKind> = Vec::new();
+
+        for target in &targets {
+            if let DeleteKind::Extension(kind) = target.kind
+                && !batch_kinds.contains(&kind)
+            {
+                batch_kinds.push(kind);
+            }
+        }
+
+        // A batch with an extension type is refused before any connection and before the token is
+        // looked at: its rows never run over ADT.
+        for kind in &batch_kinds {
+            let extension = registry.extension().ok_or("no extension is registered")?;
+
+            extension.preflight(ExtensionOp::Delete, *kind, &connection, None)?;
+        }
+
         // The local rules of the batch run before a connection is opened.
         let (rows, normalized_tr) = delete::prepare(&targets, tr)?;
         let mut objects: Vec<String> = rows
@@ -689,125 +905,76 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             None => None,
         };
         let explicit = stored.and_then(|stored| stored.backend);
-        let mut selected = None;
-        let mut report = None;
         let _write = execute.then(|| cancel.hold_write());
         let mut factories = WithCancel {
             inner: self.read.factories(),
             cancel: cancel.clone(),
         };
-        let exit = route(
-            OperationKind::Delete,
-            explicit,
-            false,
-            &connection,
-            &mut factories,
-            |transport, selection, cancel, fresh| {
-                selected = Some(selection.backend);
+        let mut call = DeleteCall {
+            connection: &connection,
+            targets: &targets,
+            tr,
+            plan: plan.as_ref(),
+            deadline: &deadline,
+            selected: None,
+            report: None,
+        };
+        let exit = if batch_kinds.is_empty() {
+            route(
+                OperationKind::Delete,
+                explicit,
+                false,
+                &connection,
+                &mut factories,
+                |transport, selection, cancel, fresh| {
+                    call.attempt(transport, selection, cancel, fresh, None)
+                },
+            )
+        } else {
+            // The extension rows run on its backend and the other objects over the backend the
+            // plan names: an execute is pinned to it, so nothing falls back between simulate and
+            // delete.
+            let extension = registry.extension().ok_or("no extension is registered")?;
+            let shared = SharedFactories::new(&mut factories);
+            let run = RunContext {
+                connection: &connection,
+                cancel: &cancel,
+                pin: explicit.map(pin_of),
+                factories: &shared,
+            };
 
-                // The server would answer the LOCK and then refuse the DELETE, so nothing is sent
-                // and the router may try RFC.
-                if transport.stateful_supported() == Some(false) {
-                    let _ = transport.close();
-
-                    return Attempt {
-                        fallback_allowed: true,
-                        ..Attempt::failed(
-                            NO_STATEFUL_SESSION.to_owned(),
-                            Failure::CapabilityUnavailable,
-                        )
-                    };
-                }
-
-                let context = Context {
-                    conn: &connection.id,
-                    user: &connection.user,
-                    policies: &connection.policies,
-                    confirmer: &NoTerminal,
-                };
-                let (result, unsent) = {
-                    let mut backend = AdtDelete::with_cancel(
-                        &mut *transport,
-                        &connection.user,
-                        fresh,
-                        cancel.clone(),
-                    );
-                    let result = match &plan {
-                        Some(plan) => delete::execute_until(
-                            &mut backend,
-                            &context,
-                            &targets,
-                            tr,
-                            plan,
-                            &mut || cancel.is_set() || deadline.passed(),
-                        ),
-                        None => delete::simulate(&mut backend, &context, &targets, tr),
-                    };
-
-                    (result, backend.unsent_failure())
-                };
-
-                // The batch is over and the lock, if any, is reported by the outcome.
-                let _ = transport.close();
-
-                // A read that never left the process and no delete request sent: another backend
-                // may run the whole batch, unless the call was cancelled or ran out of time. A
-                // token pins its backend, so the router refuses there; the report stays for the
-                // per-object results.
-                let fallback = unsent.filter(|_| !cancel.is_set() && !deadline.passed());
-
-                match result {
-                    Ok(done) => {
-                        let outcome = done.outcome.clone();
-
-                        report = Some(done);
-
-                        if let Some((failure, message)) = fallback {
-                            // A simulation that moves on must not leave its results behind: if the
-                            // next backend cannot even open, they would read as SIMULATED_OK.
-                            // Only an execute pinned to this backend keeps them.
-                            if plan.is_none() {
-                                report = None;
-                            }
-
-                            return Attempt {
-                                fallback_allowed: true,
-                                ..Attempt::failed(message, failure)
-                            };
-                        }
-
-                        Attempt {
-                            outcome,
-                            failure: None,
-                            fallback_allowed: false,
-                            detail: None,
-                        }
-                    }
-                    Err(message) => {
-                        report = None;
-
-                        if let Some((failure, message)) = fallback {
-                            return Attempt {
-                                fallback_allowed: true,
-                                ..Attempt::failed(message, failure)
-                            };
-                        }
-
-                        Attempt {
-                            outcome: Outcome {
-                                status: None,
-                                exit: 2,
-                                stdout: String::new(),
-                                stderr: format!("STOP: {message}"),
+            match extension.delete_backend(run) {
+                Err(outcome) => exit_of_outcome(outcome),
+                Ok(mut backend) => {
+                    if targets
+                        .iter()
+                        .all(|target| matches!(target.kind, DeleteKind::Extension(_)))
+                    {
+                        call.extension_only(&mut *backend, &cancel)
+                    } else {
+                        route(
+                            OperationKind::Delete,
+                            explicit,
+                            false,
+                            &connection,
+                            &mut shared.lend(),
+                            |transport, selection, cancel, fresh| {
+                                call.attempt(
+                                    transport,
+                                    selection,
+                                    cancel,
+                                    fresh,
+                                    Some(&mut *backend),
+                                )
                             },
-                            failure: None,
-                            fallback_allowed: false,
-                            detail: None,
-                        }
+                        )
                     }
                 }
-            },
-        );
+            }
+        };
+        let DeleteCall {
+            selected, report, ..
+        } = call;
 
         drop(factories);
 
@@ -972,7 +1139,194 @@ struct Seen {
     status: Option<Status>,
     group: Option<String>,
     base: Option<String>,
+    main: Option<String>,
+    warning: Option<String>,
     change: Option<Change>,
+}
+
+/// One delete call: the batch, the plan of an execute, and what the attempts on the routed
+/// backend leave behind.
+struct DeleteCall<'a> {
+    connection: &'a Connection,
+    targets: &'a [DeleteTarget],
+    tr: Option<&'a str>,
+    plan: Option<&'a Plan>,
+    deadline: &'a Deadline,
+    selected: Option<BackendKind>,
+    report: Option<DeleteReport>,
+}
+
+impl DeleteCall<'_> {
+    /// The simulation, or with a plan the execution that checks it. Between two objects a
+    /// cancellation or the deadline ends the batch; a request in flight is never interrupted.
+    fn run(
+        &self,
+        backend: &mut dyn DeleteBackend,
+        cancel: &CancelFlag,
+    ) -> Result<DeleteReport, String> {
+        let context = Context {
+            conn: &self.connection.id,
+            user: &self.connection.user,
+            policies: &self.connection.policies,
+            confirmer: &NoTerminal,
+        };
+
+        match self.plan {
+            Some(plan) => {
+                delete::execute_until(backend, &context, self.targets, self.tr, plan, &mut || {
+                    cancel.is_set() || self.deadline.passed()
+                })
+            }
+            None => delete::simulate(backend, &context, self.targets, self.tr),
+        }
+    }
+
+    /// A batch of extension rows only: no ADT or SADT session is opened.
+    fn extension_only(&mut self, extension: &mut dyn ExtensionDelete, cancel: &CancelFlag) -> Exit {
+        match self.run(extension, cancel) {
+            Ok(done) => {
+                let exit = Exit {
+                    code: done.outcome.exit,
+                    stdout: done.outcome.stdout.clone(),
+                    stderr: done.outcome.stderr.clone(),
+                };
+
+                self.report = Some(done);
+
+                exit
+            }
+            Err(message) => {
+                let (code, stderr) = extension.begin_failure(&message);
+
+                Exit {
+                    code,
+                    stdout: String::new(),
+                    stderr,
+                }
+            }
+        }
+    }
+
+    fn attempt(
+        &mut self,
+        transport: &mut dyn SadtTransport,
+        selection: &Selection,
+        cancel: &CancelFlag,
+        fresh: &mut dyn FnMut() -> Opened,
+        mut extension: Option<&mut dyn ExtensionDelete>,
+    ) -> Attempt {
+        self.selected = Some(selection.backend);
+
+        // The server would answer the LOCK and then refuse the DELETE, so nothing is sent
+        // and the router may try RFC.
+        if transport.stateful_supported() == Some(false) {
+            let note = end_session(transport);
+
+            return Attempt {
+                fallback_allowed: true,
+                ..Attempt::failed(
+                    NO_STATEFUL_SESSION.to_owned(),
+                    Failure::CapabilityUnavailable,
+                )
+            }
+            .noted(note);
+        }
+
+        let (result, unsent, fresh_note) = {
+            let mut backend = AdtDelete::with_cancel(
+                &mut *transport,
+                &self.connection.user,
+                fresh,
+                cancel.clone(),
+            );
+            let result = match extension.as_deref_mut() {
+                Some(extension) => {
+                    let mut mixed =
+                        MixedDelete::new(&mut backend, adt_label(selection.backend), extension);
+
+                    self.run(&mut mixed, cancel)
+                        .map_err(|message| mixed.begin_failure(&message))
+                }
+                None => self
+                    .run(&mut backend, cancel)
+                    .map_err(|message| backend.begin_failure(&message)),
+            };
+
+            (result, backend.unsent_failure(), backend.close_note())
+        };
+
+        // The batch is over and the lock, if any, is reported by the outcome; a failed
+        // session end is only a note.
+        let note = end_session(transport);
+
+        // A read that never left the process and no delete request sent: another backend
+        // may run the whole batch, unless the call was cancelled or ran out of time. A
+        // token pins its backend, so the router refuses there; the report stays for the
+        // per-object results. An extension delete that was sent keeps its report too.
+        let sent = extension
+            .as_ref()
+            .is_some_and(|extension| extension.wrote());
+        let fallback = unsent.filter(|_| !sent && !cancel.is_set() && !self.deadline.passed());
+
+        match result {
+            Ok(done) => {
+                let outcome = done.outcome.clone();
+
+                self.report = Some(done);
+
+                if let Some((failure, message)) = fallback {
+                    // A simulation that moves on must not leave its results behind: if the
+                    // next backend cannot even open, they would read as SIMULATED_OK.
+                    // Only an execute pinned to this backend keeps them.
+                    if self.plan.is_none() {
+                        self.report = None;
+                    }
+
+                    return Attempt {
+                        fallback_allowed: true,
+                        ..Attempt::failed(message, failure)
+                    }
+                    .noted(fresh_note)
+                    .noted(note);
+                }
+
+                Attempt {
+                    outcome,
+                    failure: None,
+                    fallback_allowed: false,
+                    detail: None,
+                }
+                .noted(fresh_note)
+                .noted(note)
+            }
+            Err((exit, stderr)) => {
+                self.report = None;
+
+                if let Some((failure, message)) = fallback {
+                    return Attempt {
+                        fallback_allowed: true,
+                        ..Attempt::failed(message, failure)
+                    }
+                    .noted(fresh_note)
+                    .noted(note);
+                }
+
+                Attempt {
+                    outcome: Outcome {
+                        status: None,
+                        exit,
+                        stdout: String::new(),
+                        stderr,
+                    },
+                    failure: None,
+                    fallback_allowed: false,
+                    detail: None,
+                }
+                .noted(fresh_note)
+                .noted(note)
+            }
+        }
+    }
 }
 
 fn listing_of(report: &delete::DeleteReport) -> Vec<String> {
@@ -1058,15 +1412,51 @@ fn sanitize(text: &str, limit: usize) -> String {
     cut
 }
 
+/// The backend a confirmation names: the one the simulation ran on, or the label of an extension
+/// for what has no ADT path (an extension create, a batch of extension rows).
+fn backend_text(ticket: &Ticket, registry: Option<&Registry>) -> String {
+    if let Some(backend) = ticket.backend {
+        return backend.token().to_owned();
+    }
+
+    let kinds = || registry.into_iter().flat_map(Registry::kinds);
+    let created = ticket.fields.get("type").and_then(|token| {
+        kinds()
+            .find(|kind| kind.token() == token)
+            .map(|kind| kind.spec().backend_label)
+    });
+    let only = ticket.plan.as_ref().and_then(|plan| {
+        let (_, _, first) = plan.backends.first()?;
+
+        plan.backends
+            .iter()
+            .all(|(_, _, label)| label == first)
+            .then(|| kinds().find(|kind| kind.spec().backend_label == first))
+            .flatten()
+            .map(|kind| kind.spec().backend_label)
+    });
+
+    created.or(only).unwrap_or("unknown").to_owned()
+}
+
 /// What the human sees before a write: where, what, how big, and a bounded excerpt. Every string
 /// that came from SAP or the client is sanitized, and the whole is bounded.
 pub fn confirmation_summary(connection: &Connection, ticket: &Ticket) -> String {
+    confirmation_summary_with(connection, ticket, None)
+}
+
+/// [`confirmation_summary`] for a server whose registry adds types and options.
+pub fn confirmation_summary_with(
+    connection: &Connection,
+    ticket: &Ticket,
+    registry: Option<&Registry>,
+) -> String {
     let what = match ticket.operation {
         Operation::Deploy => "DEPLOY",
         Operation::Create => "CREATE",
         Operation::Delete => "DELETE (permanent)",
     };
-    let backend = ticket.backend.map_or("unknown", BackendKind::token);
+    let backend = backend_text(ticket, registry);
     let mut lines = vec![format!(
         "{what} on {} (SID {}, client {}), backend {backend}",
         sanitize(&connection.id, SUMMARY_LINE),
@@ -1107,12 +1497,39 @@ pub fn confirmation_summary(connection: &Connection, ticket: &Ticket) -> String 
         if let Some(tr) = ticket.fields.get("tr") {
             lines.push(format!("tr: {}", sanitize(tr, SUMMARY_LINE)));
         }
+
+        // A mixed batch runs each object on the backend it was simulated on.
+        if let Some(plan) = ticket.plan.as_ref().filter(|_| ticket.backend.is_some()) {
+            lines.extend(plan.backends.iter().take(SUMMARY_OBJECT_LINES).map(
+                |(kind, name, label)| {
+                    sanitize(&format!("backend {kind}:{name} {label}"), SUMMARY_LINE)
+                },
+            ));
+        }
     } else {
-        for key in ["type", "name", "include", "fugr", "package", "tr", "text"] {
+        let options = registry
+            .into_iter()
+            .flat_map(Registry::kinds)
+            .flat_map(|kind| kind.spec().create_options)
+            .map(|option| option.id);
+        let keys = ["type", "name", "subc"]
+            .into_iter()
+            .chain(options)
+            .chain(["include", "fugr", "package", "tr", "text"]);
+
+        for key in keys {
             if let Some(value) = ticket.fields.get(key) {
                 lines.push(format!("{key}: {}", sanitize(value, SUMMARY_LINE)));
             }
         }
+
+        if let Some(main) = ticket.fields.get("main").or(ticket.main.as_ref()) {
+            lines.push(format!("main: {}", sanitize(main, SUMMARY_LINE)));
+        }
+    }
+
+    if let Some(warning) = &ticket.warning {
+        lines.push(sanitize(warning, SUMMARY_LINE));
     }
 
     if let Some(change) = &ticket.change {
@@ -1211,7 +1628,10 @@ fn flag(arguments: &Map<String, Value>, key: &str) -> Result<bool, String> {
 }
 
 /// The `objects` argument: a non-empty array of `TYPE:NAME` strings.
-fn targets(arguments: &Map<String, Value>) -> Result<Vec<DeleteTarget>, String> {
+fn targets(
+    arguments: &Map<String, Value>,
+    extensions: &[ExtensionKind],
+) -> Result<Vec<DeleteTarget>, String> {
     let objects = arguments
         .get("objects")
         .and_then(Value::as_array)
@@ -1224,7 +1644,7 @@ fn targets(arguments: &Map<String, Value>) -> Result<Vec<DeleteTarget>, String> 
             object
                 .as_str()
                 .ok_or_else(|| "objects must be strings of the form TYPE:NAME".to_owned())
-                .and_then(str::parse)
+                .and_then(|text| DeleteTarget::parse(text, extensions))
         })
         .collect()
 }

@@ -1,0 +1,16 @@
+Usage: abapreach read [OPTIONS] --conn <CONN> <KIND> <NAME> <OUT>
+
+Arguments:
+  <KIND>  [possible values: PROG, FUNC, CLAS, INTF]
+  <NAME>  
+  <OUT>   
+
+Options:
+      --force              
+      --include <INCLUDE>  [possible values: CCIMP, CCDEF, CCMAC, CCAU]
+      --fugr <FUGR>        
+      --lines <LINES>      
+      --main <MAIN>        The main program of a `PROG` include, as `INCLUDE <NAME>.` names it
+      --backend <BACKEND>  [possible values: adt, rfc]
+      --conn <CONN>        
+  -h, --help               Print help

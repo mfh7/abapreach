@@ -3,7 +3,7 @@
 //! single POST and the read-only reconciliation are part of what the tests assert.
 
 use abapreach::backend::{BackendKind, Failure, Selection, SelectionReason};
-use abapreach::cli::CreateKind;
+use abapreach::cli::{CreateKind, Subc};
 use abapreach::config::Connection;
 use abapreach::domain::Status;
 use abapreach::object::PackageScope;
@@ -145,6 +145,7 @@ impl SadtTransport for Fake {
 
 fn name_of(kind: CreateKind) -> &'static str {
     match kind {
+        CreateKind::Prog => "YTEST_ABAPREACH_NEW",
         CreateKind::Fugr => "YTEST_ABAPREACH_FG",
         CreateKind::Func => "YTEST_ABAPREACH_FM",
         CreateKind::Clas => "YTEST_ABAPREACH_CL",
@@ -154,6 +155,7 @@ fn name_of(kind: CreateKind) -> &'static str {
 
 fn object_uri(kind: CreateKind) -> &'static str {
     match kind {
+        CreateKind::Prog => "",
         CreateKind::Fugr => GROUP_URI,
         CreateKind::Func => FM_URI,
         CreateKind::Clas => CLAS_URI,
@@ -163,6 +165,7 @@ fn object_uri(kind: CreateKind) -> &'static str {
 
 fn creation_uri(kind: CreateKind) -> &'static str {
     match kind {
+        CreateKind::Prog => "",
         CreateKind::Fugr => "/sap/bc/adt/functions/groups",
         CreateKind::Func => "/sap/bc/adt/functions/groups/ytest_abapreach_fg/fmodules",
         CreateKind::Clas => "/sap/bc/adt/oo/classes",
@@ -179,6 +182,8 @@ fn input(kind: CreateKind, package: Option<&str>, tr: Option<&str>, simulate: bo
         group: (kind == CreateKind::Func).then(|| GROUP.to_owned()),
         tr: tr.map(str::to_owned),
         simulate,
+        subc: Subc::Program,
+        source: None,
     }
 }
 
@@ -190,7 +195,7 @@ fn validation_uri(kind: CreateKind, package: &str) -> String {
         package
     };
 
-    kind.validation_uri(name_of(kind), TEXT, scope)
+    kind.validation_uri(name_of(kind), TEXT, scope).unwrap()
 }
 
 fn status_message(severity: &str, text: &str) -> String {
@@ -361,7 +366,9 @@ fn the_default_package_is_tmp_and_the_posted_bodies_carry_name_text_and_package(
 fn the_description_is_escaped_in_the_body() {
     let mut text_input = input(CreateKind::Intf, None, None, false);
     text_input.text = r#"A & B <"x">"#.to_owned();
-    let uri = CreateKind::Intf.validation_uri(name_of(CreateKind::Intf), &text_input.text, "$TMP");
+    let uri = CreateKind::Intf
+        .validation_uri(name_of(CreateKind::Intf), &text_input.text, "$TMP")
+        .unwrap();
     let mut fake =
         Fake::new()
             .post(&uri, 200, CHECK_OK)

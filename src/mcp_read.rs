@@ -3,11 +3,12 @@
 //! The result carries the same data in `content` text and in `structuredContent`; the status
 //! comes from the operation's own state, never from formatted text.
 
-use crate::app::{Attempt, Factories, route};
+use crate::app::{Attempt, Factories, end_session, route};
 use crate::backend::OperationKind;
 use crate::cli::{IncludeKind, LineRange, ObjectKind};
 use crate::config::{Config, Connection, scrub};
 use crate::domain::{Outcome, Status};
+use crate::extension::Registry;
 use crate::hash::source_hash;
 use crate::mcp::{ToolHandler, ToolResult};
 use crate::object::check_read;
@@ -27,6 +28,8 @@ pub struct ReadTools<'a> {
     config: Config,
     env: BTreeMap<String, String>,
     factories: &'a mut dyn Factories,
+    /// The extension types the tools refuse by name; none without a registry.
+    registry: Option<&'a Registry>,
 }
 
 impl<'a> ReadTools<'a> {
@@ -39,7 +42,16 @@ impl<'a> ReadTools<'a> {
             config,
             env,
             factories,
+            registry: None,
         }
+    }
+
+    /// Lets `abap_read_source` name the refusal of an extension type.
+    #[must_use]
+    pub fn with_registry(mut self, registry: &'a Registry) -> Self {
+        self.registry = Some(registry);
+
+        self
     }
 
     pub(crate) fn connection(&self, arguments: &Map<String, Value>) -> Result<Connection, String> {
@@ -54,8 +66,15 @@ impl<'a> ReadTools<'a> {
 
     fn read_source(&mut self, arguments: &Map<String, Value>) -> Result<ToolResult, String> {
         let kind = required(arguments, "type")?;
-        let kind = ObjectKind::from_str(kind, false)
-            .map_err(|_| "type must be one of PROG, FUNC, CLAS, INTF".to_owned())?;
+        let token = kind;
+        let kind = ObjectKind::from_str(token, false).map_err(|_| {
+            self.registry
+                .and_then(|registry| registry.kind(token))
+                .and_then(|kind| kind.spec().mcp_read_refusal)
+                .unwrap_or("type must be one of PROG, FUNC, CLAS, INTF")
+                .to_owned()
+        })?;
+
         let name = required(arguments, "name")?;
         let include = match optional(arguments, "include")? {
             Some(include) => Some(
@@ -65,18 +84,20 @@ impl<'a> ReadTools<'a> {
             None => None,
         };
         let fugr = optional(arguments, "fugr")?;
+        let main = optional(arguments, "main")?;
         let range = match optional(arguments, "lines")? {
             Some(lines) => Some(lines.parse::<LineRange>()?),
             None => None,
         };
 
-        check_read(kind, name, Path::new("-"), include, fugr, range)?;
+        check_read(kind, name, Path::new("-"), include, fugr, range, main)?;
 
         let connection = self.connection(arguments)?;
         let target = ReadTarget::new(kind, name)
             .group(fugr)
             .include(include)
-            .lines(range);
+            .lines(range)
+            .main(main);
         let mut found = None;
         let exit = route(
             OperationKind::Read(kind),
@@ -87,10 +108,9 @@ impl<'a> ReadTools<'a> {
             |transport, _, _, _| {
                 let read = ReadProg::fetch_lines(transport, target);
 
-                // A read holds no lock, so a failed session end changes nothing here.
-                let _ = transport.close();
-
-                match read {
+                // A read holds no lock, so a failed session end is only a note.
+                let note = end_session(transport);
+                let attempt = match read {
                     Ok(lines) => {
                         found = Some(lines);
 
@@ -108,7 +128,9 @@ impl<'a> ReadTools<'a> {
                         detail: None,
                     },
                     Err(error) => Attempt::failed(error.message, error.failure),
-                }
+                };
+
+                attempt.noted(note)
             },
         );
         let notes = diagnostic(&connection, &exit.stderr);
@@ -206,10 +228,9 @@ impl<'a> ReadTools<'a> {
             |transport, _, _, _| {
                 let read = ReadTable::run(transport, &query, &connection.policies);
 
-                // A read holds no lock, so a failed session end changes nothing here.
-                let _ = transport.close();
-
-                match read {
+                // A read holds no lock, so a failed session end is only a note.
+                let note = end_session(transport);
+                let attempt = match read {
                     Ok(data) => {
                         found = Some(data);
 
@@ -229,7 +250,9 @@ impl<'a> ReadTools<'a> {
                     Err(ReadTableError::Failed { failure, message }) => {
                         Attempt::failed(message, failure)
                     }
-                }
+                };
+
+                attempt.noted(note)
             },
         );
         let notes = diagnostic(&connection, &exit.stderr);

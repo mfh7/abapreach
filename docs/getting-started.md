@@ -396,16 +396,16 @@ response. Deploy can leave an inactive version after failed activation. Read
 [Deploy safety](deploy-safety.md) and [Behavior differences](behavior-differences.md)
 before the first write.
 
-ABAPReach has no MCP server yet; it is part of 1.0.0 (see the
-[roadmap](roadmap.md#mcp-server)). An AI tool may invoke the CLI as part of a
-user-controlled workflow, but the CLI does not grant the AI any SAP
+ABAPReach also runs as an MCP server; see [MCP server](mcp.md). An AI tool may invoke the CLI
+as part of a user-controlled workflow, but the CLI does not grant the AI any SAP
 permissions of its own.
 
 ## Other source objects
 
 Besides programs, ABAPReach reads and deploys function modules (`FUNC`), classes with their
 local includes (`CLAS`), and interfaces (`INTF`). It also creates function groups (`FUGR`),
-`FUNC`, `CLAS` and `INTF` objects. The commands take the same guards and status tokens as
+`FUNC`, `CLAS` and `INTF` objects, and programs and includes (`PROG`);
+see [Program includes](#program-includes). The commands take the same guards and status tokens as
 `PROG` (see [Deploy safety](deploy-safety.md)).
 
 ```sh
@@ -454,18 +454,55 @@ follows with `deploy`:
 ```
 
 Create accepts names that start with `Z` or `Y` only. Limits, checked before the create
-request: names up to 26 characters for `FUGR` and 30 for `FUNC`, `CLAS` and `INTF`; texts up to
-40 for `FUGR`, 74 for `FUNC` and 60 for `CLAS` and `INTF`. A `FUNC` is created inside an existing
+request: names up to 40 characters for `PROG`, 26 for `FUGR` and 30 for `FUNC`, `CLAS`
+and `INTF`; texts up to 70 for `PROG`, 40 for `FUGR`, 74 for `FUNC` and 60 for `CLAS`
+and `INTF`. A `FUNC` is created inside an existing
 function group named with `--fugr`; `--package` is not valid for `create FUNC`. `--tr` is refused
 for a `$TMP` package, and a transportable package requires `--tr`. The live matrix does not
 exercise the name and text limits.
+
+## Program includes
+
+`create PROG` makes a program (`--subc 1`, the default) or an include (`--subc I`). `--package`
+defaults to `$TMP`; a transportable package needs `--tr`.
+
+```sh
+./target/release/abapreach create PROG ZEXAMPLE --text 'Demo program' --simulate --conn A4H_001
+./target/release/abapreach create PROG ZEXAMPLE --text 'Demo program' --conn A4H_001
+./target/release/abapreach create PROG ZEXAMPLE_INC --subc I --text 'Demo include' --conn A4H_001
+```
+
+An include is read, deployed and deleted under its own name, as `PROG`. Its checks and its activation
+need a main program as context. Give it with `--main`, or let ABAPReach use the one program that the
+include's main program list names:
+
+```sh
+./target/release/abapreach read PROG ZEXAMPLE_INC ./ZEXAMPLE_INC.abap --conn A4H_001
+./target/release/abapreach deploy PROG ZEXAMPLE_INC ./ZEXAMPLE_INC.abap --main ZEXAMPLE --simulate --base HASH_FROM_READ --conn A4H_001
+./target/release/abapreach delete --simulate PROG:ZEXAMPLE_INC --plan delete.plan --conn A4H_001
+```
+
+- `--main` is only valid for a `PROG` include. On a program it stops with exit 2. Read needs no `--main`.
+- Deploy and simulate print `main <PROG>` with the program that was used. If the list names several
+  programs and no `--main` is given, the command stops with exit 2 and names them.
+- A new include has no main program list yet, so its first simulate cannot run a syntax check. It
+  prints `W: no syntax check before the first activation of a new include (main <PROG>)`; the
+  contextual activation of the deploy is then the check. On the matrix systems this state did not
+  arise live, so the warning path is covered by offline fixtures only.
+- A `delete` of a program deletes it before the includes of the same batch. SAP refuses to delete an
+  include that a program still references.
+
+`create` with a FILE is accepted only for `PROG --subc 1`. It runs a simulate deploy after
+`CREATE: ACTIVE` and writes no source; the source is deployed afterwards with `deploy`. `create PROG
+--subc I` takes no FILE: deploy the include source after the `INCLUDE` statement exists in the parent
+program.
 
 ## Read a table and delete objects
 
 `read-table` reads rows of one table through the ADT data preview:
 
 ```text
-abapreach read-table T000 --fields MANDT,MTEXT --rows 3 --conn DEV
+abapreach read-table T000 --fields MANDT,MTEXT --rows 3 --conn A4H_001
 ```
 
 `--rows` takes 1 to 5000 (default 100). `--where` takes a condition with fields, comparison
@@ -475,8 +512,8 @@ refused; see [MCP server: Trust boundaries](mcp.md#trust-boundaries).
 `delete` removes objects only from a plan written by `--simulate`:
 
 ```text
-abapreach delete --simulate PROG:ZEXAMPLE --plan delete.plan --conn DEV
-abapreach delete PROG:ZEXAMPLE --plan delete.plan --conn DEV
+abapreach delete --simulate PROG:ZEXAMPLE --plan delete.plan --conn A4H_001
+abapreach delete PROG:ZEXAMPLE --plan delete.plan --conn A4H_001
 ```
 
 Add `--tr TRKORR` when the object is transportable. Delete has a reconciliation and recovery
@@ -486,67 +523,69 @@ To use ABAPReach from an AI assistant, see [MCP server](mcp.md).
 
 ## Tested environment
 
-The 0.14.0 release matrix ran on `v0.14.0-rc.4` with the release and the fault-injection builds,
+The 0.15.0 release matrix ran on `v0.15.0-rc.3`, with the release and the fault-injection builds,
 on each platform and path, against two systems. It covers the core, platform, fault-injection, ca,
-delete, read-table, policy, MCP and Python-parity groups. The interactive group (prompts and Ctrl-C)
-is from the 0.13.0 matrix (`v0.13.0-rc.4`) and was not rerun for 0.14.0. The final `v0.14.0`
-binaries are byte-identical to `v0.14.0-rc.5`; rc.5 differs from rc.4 only in documentation, and
-its macOS and Linux binaries are byte-identical to rc.4 (the Windows binaries differ only in the
-link timestamp and PDB identifier). The two systems:
+delete, read-table, policy, MCP and Python-parity groups, and the 0.15.0 scenarios (program create
+and include, include delete, Python parity, the MCP write tools).
+The interactive group (prompts and Ctrl-C) is from the 0.13.0 matrix (`v0.13.0-rc.4`) and was not
+rerun for 0.15.0. The two systems:
 
 - a SAP 7.50 system with a stateful ADT HTTP session, a second developer user and transport
   requests;
-- a SAP 7.40 system with local objects only (`$TMP`) and no stateful ADT HTTP session.
+- a SAP 7.40 system with local objects only (`$TMP`), no stateful ADT HTTP session.
 
 Each cell has one of three results:
 
 - **PASS**: the scenario ran on that platform and path and its checks held.
 - **UNSUPPORTED**: the scenario could not run there, for the reason the cell gives. It is not
   a failure. It is also not evidence that the feature works in that case.
-- **FAIL**: the scenario ran on a supported path and a check did not hold. No cell is FAIL in
-  the release matrix.
+- **FAIL**: the scenario ran on a supported path and a check did not hold. No cell failed in the
+  0.15.0 matrix on its final run (see the note under the table).
 
 ### Support by platform and path
 
-Each cell shows PASS / UNSUPPORTED / FAIL counts per path.
+Each row is one platform. Each cell shows PASS / UNSUPPORTED / FAIL counts over the matrix cells of
+that platform on that system.
 
-| Platform | System | ADT HTTP | RFC, SAP GUI library | RFC, NW RFC SDK |
-| :--- | :--- | :---: | :---: | :---: |
-| macOS arm64 | SAP 7.40 | 52 / 82 / 0 | 106 / 24 / 0 | 106 / 24 / 0 |
-| macOS arm64 | SAP 7.50 | 109 / 25 / 0 | 118 / 12 / 0 | 118 / 12 / 0 |
-| Windows x64, native | SAP 7.40 | 52 / 82 / 0 | 106 / 24 / 0 | 106 / 24 / 0 |
-| Windows x64, native | SAP 7.50 | 109 / 25 / 0 | 118 / 12 / 0 | 118 / 12 / 0 |
-| Windows x64, emulated on an ARM64 virtual machine | SAP 7.40 | 52 / 82 / 0 | 106 / 24 / 0 | 106 / 24 / 0 |
-| Windows x64, emulated on an ARM64 virtual machine | SAP 7.50 | 109 / 25 / 0 | 118 / 12 / 0 | 118 / 12 / 0 |
-| Linux x64 | SAP 7.40 | 52 / 84 / 0 | 107 / 23 / 0 | 107 / 23 / 0 |
-| Linux x64 | SAP 7.50 | 109 / 27 / 0 | 119 / 11 / 0 | 119 / 11 / 0 |
-| Linux arm64 | SAP 7.40 | 52 / 84 / 0 | 0 / 130 / 0 | 107 / 23 / 0 |
-| Linux arm64 | SAP 7.50 | 109 / 27 / 0 | 0 / 130 / 0 | 119 / 11 / 0 |
+| Platform | SAP 7.50 system | SAP 7.40 system |
+| :--- | :---: | :---: |
+| macOS arm64 | 484 / 68 / 0 | 322 / 230 / 0 |
+| Windows x64, native | 484 / 68 / 0 | 322 / 230 / 0 |
+| Windows x64, emulated on an ARM64 virtual machine | 484 / 68 / 0 | 321 / 230 / 1 ¹ |
+| Linux x64 | 486 / 68 / 0 | 324 / 230 / 0 |
+| Linux arm64 | 317 / 237 / 0 | 191 / 363 / 0 |
 
-Totals: the SAP 7.50 system has 1610 PASS, 364 UNSUPPORTED and 0 FAIL cells; the SAP 7.40
-system has 1217 PASS, 757 UNSUPPORTED and 0 FAIL cells. Path-independent setup, sweep and
-credential-permission cells are not counted. The MCP cells drive the server with a scripted client
-that reproduces each client's advertised capabilities; the real clients were tested separately
-(see [MCP server: Support by client](mcp.md#support-by-client)).
+¹ One cell (`policy-doctor`, rfc-gui) ended as a harness error: the test harness could not read its
+own file over SSH, and the product did not run. The rerun of that group passed on the same host and
+binary. The count above is from the first run.
+
+Totals: the SAP 7.50 system has 2255 PASS, 509 UNSUPPORTED and 0 FAIL cells. The SAP 7.40 system has
+1480 PASS, 1283 UNSUPPORTED and 1 FAIL cell (the harness error above, which passed on rerun). Every
+lane reported no leftover test objects, and the sweeps at start and end passed on every run, each
+verified in a fresh session.
+
+The MCP cells drive the server with a scripted client that reproduces each client's advertised
+capabilities. The real clients were tested separately (see
+[MCP server: Support by client](mcp.md#support-by-client)).
 
 ### Unsupported cells
 
 An UNSUPPORTED cell has one of these reasons:
 
-- **Availability.** The 7.40 system has no stateful ADT HTTP session, so ADT HTTP writes do not
-  run there. `deploy --backend adt` on that system stops before the lock and names
-  `--backend rfc`; a deploy without the pin runs over RFC (`deploy-pinned`, `deploy-default-fallback`).
-  The 7.40 system holds only `$TMP` objects, so `--tr` and transportable-package scenarios do not
-  run there.
+- **Availability.** The SAP 7.40 system holds only `$TMP` objects, so `--tr` and
+  transportable-package cells are UNSUPPORTED there.
+- **Stateful session.** The SAP 7.40 system has no stateful ADT HTTP session, so ADT HTTP write cells
+  run there only in their pinned and fallback form. The RFC paths cover the same scenarios.
 - **Platform.** SAP GUI for Java for Linux is x86_64 only, so Linux arm64 has no SAP GUI library.
   `LD_LIBRARY_PATH` is a Linux loader variable and does not apply on macOS or Windows.
-- **Console.** The prompt (`ask`) and Ctrl-C need a terminal. The emulated Windows host's remote
-  execution gives the process none, so the interactive group there runs over ssh with a
-  pseudo-terminal. The native Windows host ran them over a pseudo-terminal as well.
+- **Console.** The prompt (`ask`) and Ctrl-C need a terminal. This applies to the interactive group
+  of the 0.13.0 matrix, which the 0.15.0 matrix did not rerun. There, the emulated Windows host's
+  remote execution gave the process none, so that group ran over ssh with a pseudo-terminal. The
+  native Windows host ran it over a pseudo-terminal as well.
 - **Fault injection.** Fault injection drops RFC replies only. ADT HTTP has no fault cell.
-- **Python parity.** The parity cells run the same delete through the Python tooling. Its deploy
-  function module is not installed on the 7.40 system, so delete parity runs on the 7.50 system only;
-  `read-table` parity passes on both systems.
+- **Python parity.** The parity cells run the same operation through the Python tooling. Its deploy
+  function module is not installed on the 7.40 system, so parity runs on the 7.50 system only, except
+  `read-table`, which passes on both systems.
 - **Testability.** A condition that a live run cannot produce is covered only by an offline fake.
   Those cells carry no live evidence (see [Fixture-only cases](#fixture-only-cases)).
 
@@ -554,8 +593,8 @@ An UNSUPPORTED cell has one of these reasons:
 
 The fault-injection build (`--features fault-injection`) reads `ABAPREACH_FAULT`, a
 comma-separated list. Its targets are `drop-reply:PUT`, `drop-reply:ACTIVATE`,
-`drop-reply:CREATE`, `drop-reply:DELETE` and `fail-read:RECONCILE`. Each drops one RFC reply or fails one reconciliation
-read. Results on the RFC paths of the matrix:
+`drop-reply:CREATE`, `drop-reply:DELETE` and `fail-read:RECONCILE`. Each drops one RFC
+reply or fails one reconciliation read. The matrix runs these cells on the RFC paths of the SAP 7.50 system; the ADT HTTP cells are UNSUPPORTED. Results on the RFC paths of the matrix:
 
 | Target | Result | Exit |
 | :--- | :--- | :---: |
@@ -618,6 +657,10 @@ models them, so they carry no live evidence:
   `include-uncertain-unreadable`: the uncertain `--create-include` POST, in each reconciliation state.
 - `create-uncertain-absent`: the object-absent branch after an uncertain create.
 - `tr-owner-mismatch`: a lock owned by another request owner.
+- The first-activation warning of a new include (`W: no syntax check before the first activation of a
+  new include`): the state (empty main program list with `--main`) did not arise on the matrix
+  systems, because activating a parent that holds the `INCLUDE` statement fills the list.
+- A transportable include delete over RFC SADT: covered by fixtures; the 0.15.0 matrix has no live run.
 
 The `--create-include` uncertain-POST tokens (`PARTIAL`, `REJECTED`, `INCLUDE_SOURCE_DIFFERS`)
 therefore have no live evidence. The implementation does not send the include POST again in that

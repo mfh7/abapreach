@@ -13,7 +13,7 @@ const WORKFLOW_PATH: &str = ".github/workflows/ci.yml";
 
 /// The four release targets, exactly as the milestone contract lists them.
 const RUNNERS: [(&str, &str); 4] = [
-    ("macos-14", "arm64"),
+    ("macos-15", "arm64"),
     ("windows-latest", "x64"),
     ("ubuntu-24.04", "x64"),
     ("ubuntu-24.04-arm", "arm64"),

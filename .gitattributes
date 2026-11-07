@@ -1,2 +1,5 @@
 # Shell scripts run on Windows runners under Git Bash, which cannot execute CRLF.
 *.sh text eol=lf
+# The golden help texts are clap output: compared byte for byte, so they keep LF on every
+# platform, and their trailing whitespace is part of the output (not a `git diff --check` error).
+tests/golden/** text eol=lf -whitespace

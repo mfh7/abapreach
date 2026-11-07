@@ -156,8 +156,10 @@ run there. The warning-only and error responses of that activation (`clas-activa
   A second run of the same create is refused the same way (`create-second-run-rejected`).
 - `--tr` for a `$TMP` package and a missing `--tr` for a transportable package stop with exit 2
   (`create-tr-on-tmp`, `create-transportable-no-tr`).
-- Name and text limits are checked before the create request is sent. See
+- Name and text limits are checked before the create request is sent. `PROG`: name 40, text 70.
+  Names start with `Z` or `Y`. See
   [Getting started](getting-started.md#other-source-objects). The matrix does not exercise them.
+- `create PROG --subc I` creates an include; see [Program includes](#program-includes).
 
 **Uncertain create.** When the create POST outcome is unknown, ABAPReach reads the object (a
 read-only GET) and does not send the POST again:
@@ -174,8 +176,53 @@ passed, the ADT HTTP cells are UNSUPPORTED because fault injection drops RFC rep
 `does not exist` branch (`create-uncertain-absent`) has no live evidence.
 
 **No automatic rollback.** A failed or uncertain create is not rolled back. An object that was
-created and left behind stays in SAP until someone removes it. Deleting objects is not part of
-this release.
+created and left behind stays in SAP until someone removes it. Deleting objects is covered in
+[Delete](#delete); there is no restore.
+
+## Program includes
+
+A program include (`PROG` with `--subc I`) is read, deployed and deleted as a `PROG` name. Its
+checkrun and activation need a main program as context, which is either `--main <PROG>` or the
+single program that the include's `mainprograms` lists.
+
+- Read needs no main. `--main` on a program is refused (`STOP`, exit 2).
+- Deploy and simulate print `main <PROG>`. More than one listed program with no `--main`, or none
+  listed with no `--main`, is a `STOP` with exit 2; the text names the programs found.
+- A given `--main` must exist as a program and its active source must hold the `INCLUDE <I>.`
+  statement. Otherwise the command stops with exit 2: `main program <P> does not exist as a program`
+  or `main program <P> does not contain the statement INCLUDE <I>.`.
+- The include is never activated without its main program as context. A standalone activation
+  would skip the check, so the contextual activation is the check.
+- An include whose checkrun answers `notProcessed` is `REJECTED` (exit 1, `REJECTED: the check was
+  not processed: <statusText>`), with one exception: a new include, whose `mainprograms` is empty and
+  whose `--main` is given. Its first simulate prints
+  `W: no syntax check before the first activation of a new include (main <PROG>)` and the deploy
+  continues; the contextual activation is then the check. The exception is decided from the empty
+  `mainprograms`, not from the SAP status text.
+- A worklist on an include activation ends `INACTIVE` (exit 1). It is not sent again.
+- The first-activation warning is covered by offline fixtures only. On the matrix systems, activating
+  a parent that holds `INCLUDE <name>.` always fills the index, so the state never arose live.
+- A transportable package carries `corrNr` on every request (see
+  [Transport requests and failed activation](#transport-requests-and-failed-activation)). Creating
+  in a transportable package without `--tr` is refused before any request.
+- Delete: a program is deleted before the includes of its batch. An include that a program still
+  references is refused by SAP (HTTP 403, `Program <N> is referenced in other programs`). Program and
+  include where-used run over ADT HTTP and over RFC SADT. A transportable include delete over RFC
+  SADT has fixture coverage only; the 0.15.0 matrix has no live run of it.
+
+## Lost create and delete replies
+
+A `create` or `delete` whose reply is lost is settled by one read from a new
+connection. It is never sent again, and no rollback is attempted. Exit codes:
+- `CREATE: PARTIAL` (exit 1): the object is found, or the read fails.
+- `DELETED (reconciled)` (exit 1): a new connection no longer finds the object.
+- `PARTIAL` (exit 1): the state is unknown.
+
+An uncertain create ends its message with `the create is not repeated; check with read before
+repeating; a lock may remain`. An uncertain delete prints `W: reply lost (<reason>); a new session
+no longer finds the object: check before retrying` for `DELETED (reconciled)`, or `W: status
+unknown: reply lost (<reason>); ...` for `PARTIAL`, and then `W: a lock may remain on the object`.
+Read the object before any retry.
 
 ## Transport requests and failed activation
 
@@ -232,10 +279,15 @@ their transport request and where-used references; no object is changed.
 - **Backend.** ADT HTTP runs first. When ADT fails before anything is sent (connect, DNS, TLS),
   the batch runs again on RFC SADT with the usual note. After the first LOCK or DELETE is sent,
   there is no fallback. An MCP `plan_token` pins its backend and never falls back.
+- **Sessions (ADT HTTP, 0.15.0).** A batch logs off the stateful session after each row it deleted
+  and runs the next row in a new session (`W: session close failed: <reason>` if a logoff fails). A
+  row that deletes nothing keeps its session. Within a batch, programs come before their includes.
 - **Transport request.** An object in your own request follows that request. An explicit `--tr`
   that differs from the request of the lock is rejected. An object locked in another user's
   request is rejected, and so is a transportable object without a request. Transport-request
   checks run at execute time, because simulate does not lock the object.
+- **Where-used of a program (0.15.0).** The simulate of a `PROG` lists the programs that include it,
+  then the transactions that start it as `WHERE-USED TRAN <tcode>` (over ADT HTTP and over RFC SADT).
 - **Rollback.** There is no automatic rollback and no restore step in this release. A deleted
   object is not restored by ABAPReach; restore is in the [roadmap](roadmap.md) (`Versions, restore,
   activation`).
@@ -247,6 +299,11 @@ their transport request and where-used references; no object is changed.
   `PARTIAL: the new source is saved inactive and nothing was activated`. Through MCP, the next
   tool result carries a `W:` line that ends with `check the object before retrying`.
 - A cancel before the request starts sends nothing.
+- **Session logoff (0.15.0).** Every ADT HTTP stateful session ends with a logoff
+  (`GET /sap/public/bc/icf/logoff`) on every exit path: success, error and interrupt. This releases the
+  enqueue locks that 0.14.0 left in SM12. A failed logoff prints `W: session close failed: <reason>`;
+  the status and exit code stay as they were, and the logoff is not retried. A call that never opened
+  a session sends no logoff. RFC SADT is unchanged.
 - SIGKILL cannot be caught. A write killed while it holds an ADT lock can leave that lock on the
   object. Check the lock in transaction `SM12` before any retry. This release did not test
   clearing it by hand.
@@ -260,6 +317,8 @@ their transport request and where-used references; no object is changed.
 | `INACTIVE`, `REJECTED`, `PARTIAL` | 1 | inspect the SAP state |
 | `CREATE: REJECTED`, `CREATE: PARTIAL` | 1 | inspect the SAP state; read before retrying |
 | `INCLUDE_MISSING: ...` | 1 | the class include does not exist; nothing written |
+| `NOT_FOUND: PROG <N> ...` | 1 | no program or include of that name; nothing written |
+| `DELETED (reconciled)`, `PARTIAL` (delete) | 1 | inspect the SAP state; read before retrying |
 | `ACTIVE (reconciled)` | 1 | file is active; verify with `read` |
 | `STOP: ...` | 2 | input, configuration, or guard |
 

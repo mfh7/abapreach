@@ -165,6 +165,80 @@ fn a_forbidden_unlock_still_ends_an_open_session() {
     );
 }
 
+const LOGOFF_URI: &str = "/sap/public/bc/icf/logoff";
+
+#[test]
+fn close_sends_exactly_one_logoff_for_an_open_session() {
+    let mut transport = HttpTransport::for_test(vec![Ok(Response::empty(200)); 3]);
+
+    transport.request(Request::get("/lock")).unwrap();
+    transport.close().unwrap();
+    transport.close().unwrap();
+
+    let recorded = transport.recorded();
+
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[1].method, "GET");
+    assert_eq!(recorded[1].uri, LOGOFF_URI);
+}
+
+#[test]
+fn the_logoff_carries_no_csrf_token() {
+    let mut required = Response::empty(403);
+    required
+        .headers
+        .insert("x-csrf-token".to_owned(), "Required".to_owned());
+    let mut token = Response::empty(200);
+    token
+        .headers
+        .insert("x-csrf-token".to_owned(), "secret-token".to_owned());
+    let mut transport = HttpTransport::for_test(vec![
+        Ok(required),
+        Ok(token),
+        Ok(Response::empty(200)),
+        Ok(Response::empty(200)),
+    ]);
+
+    transport.request(Request::post("/x", Vec::new())).unwrap();
+    transport.close().unwrap();
+
+    let recorded = transport.recorded();
+
+    assert_eq!(recorded[2].headers["x-csrf-token"], "secret-token");
+    assert_eq!(recorded[3].uri, LOGOFF_URI);
+    assert!(!recorded[3].headers.contains_key("x-csrf-token"));
+}
+
+#[test]
+fn a_logoff_the_server_refuses_is_an_error_and_is_not_retried() {
+    let mut transport =
+        HttpTransport::for_test(vec![Ok(Response::empty(200)), Ok(Response::empty(500))]);
+
+    transport.request(Request::get("/lock")).unwrap();
+
+    assert_eq!(
+        transport.close(),
+        Err(TransportError::Http {
+            status: 500,
+            message: "HTTP request failed".to_owned()
+        })
+    );
+    assert_eq!(transport.close(), Ok(()));
+    assert_eq!(transport.recorded().len(), 2);
+}
+
+#[test]
+fn a_connect_failure_opens_no_session_and_closing_sends_nothing() {
+    let mut transport = HttpTransport::for_test(vec![Err(TransportError::PreSendConnectivity(
+        "no route".to_owned(),
+    ))]);
+
+    assert!(transport.request(Request::get("/lock")).is_err());
+    transport.close().unwrap();
+
+    assert_eq!(transport.recorded().len(), 1);
+}
+
 #[test]
 fn a_first_request_unauthorized_does_not_end_a_session() {
     let mut transport = HttpTransport::for_test(vec![Ok(Response::empty(401))]);
@@ -373,7 +447,29 @@ fn cookie_store_keeps_every_set_cookie_and_close_ends_the_session() {
         assert!(cookie.contains("a=1") && cookie.contains("b=2"));
     }
     assert!(heads[1].contains("x-sap-adt-sessiontype: stateful"));
+    assert!(heads[2].starts_with("get /sap/public/bc/icf/logoff?sap-client=100 http/1.1"));
     assert!(heads[2].contains("x-sap-adt-sessiontype: stateless"));
+}
+
+#[test]
+fn a_session_that_is_only_dropped_is_still_logged_off() {
+    let (base_url, server) = serve(vec![COOKIES, OK]);
+    let mut transport = HttpTransport::connect(config(&base_url, 5000)).unwrap();
+
+    transport
+        .request(Request::get("/sap/bc/adt/discovery"))
+        .unwrap();
+    drop(transport);
+
+    let heads = server.join().unwrap();
+
+    assert_eq!(heads.len(), 2);
+    assert!(heads[1].starts_with("GET /sap/public/bc/icf/logoff?sap-client=100 HTTP/1.1"));
+    assert!(
+        heads[1].to_ascii_lowercase().contains("cookie:") && heads[1].contains("a=1"),
+        "the logoff carries the session cookies: {}",
+        heads[1]
+    );
 }
 
 #[test]

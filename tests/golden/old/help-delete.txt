@@ -1,0 +1,13 @@
+Deletes objects from a plan written by `--simulate`
+
+Usage: abapreach delete [OPTIONS] --plan <PLAN> --conn <CONN> <TYPE:NAME>...
+
+Arguments:
+  <TYPE:NAME>...  
+
+Options:
+      --simulate     
+      --tr <TR>      
+      --plan <PLAN>  
+      --conn <CONN>  
+  -h, --help         Print help

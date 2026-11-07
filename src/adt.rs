@@ -599,6 +599,43 @@ pub fn parse_messages(xml: &str) -> Result<Vec<AdtMessage>, String> {
     Ok(messages)
 }
 
+/// The `statusText` of the first checkrun report that SAP did not process, or `None` when every
+/// report was processed. A report that was not processed carries no messages, so a reader of the
+/// messages alone would take it for a pass.
+pub fn check_not_processed(xml: &str) -> Result<Option<String>, String> {
+    let mut reader = Reader::from_str(xml);
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(&element) == "checkReport" =>
+            {
+                let (mut status, mut text) = (String::new(), String::new());
+
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|error| error.to_string())?;
+                    let value = attribute
+                        .normalized_value(XmlVersion::Implicit1_0)
+                        .map_err(|error| error.to_string())?
+                        .into_owned();
+
+                    match attribute.key.local_name().into_inner() {
+                        "status" => status = value,
+                        "statusText" => text = value,
+                        _ => {}
+                    }
+                }
+
+                if status == "notProcessed" {
+                    return Ok(Some(text));
+                }
+            }
+            Event::Eof => return Ok(None),
+            _ => {}
+        }
+    }
+}
+
 /// Messages as `TYPE row N: MSG` lines; an unparsable body yields no lines (use
 /// `parse_messages` to detect that case).
 pub fn format_messages(xml: &str) -> Vec<String> {

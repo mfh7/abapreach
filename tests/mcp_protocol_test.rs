@@ -428,7 +428,7 @@ fn tool_arguments_follow_the_contract() {
 
     assert_eq!(
         properties("abap_read_source"),
-        set(&["conn", "type", "name", "include", "fugr", "lines"])
+        set(&["conn", "type", "name", "include", "fugr", "main", "lines"])
     );
     assert_eq!(
         properties("abap_read_table"),
@@ -445,12 +445,15 @@ fn tool_arguments_follow_the_contract() {
             "include",
             "fugr",
             "create_include",
+            "main",
             "plan_token"
         ])
     );
     assert_eq!(
         properties("abap_create_simulate"),
-        set(&["conn", "type", "name", "text", "package", "tr", "fugr"])
+        set(&[
+            "conn", "type", "name", "text", "package", "tr", "fugr", "subc"
+        ])
     );
     assert_eq!(
         properties("abap_delete"),

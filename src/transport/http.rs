@@ -6,11 +6,64 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 const SESSION_HEADER: &str = "X-sap-adt-sessiontype";
 const DISCOVERY_URI: &str = "/sap/bc/adt/discovery";
+const LOGOFF_URI: &str = "/sap/public/bc/icf/logoff";
 const CONTEXT_COOKIE: &str = "sap-contextid";
+/// The most an interrupt handler waits for one logoff before the process exits.
+const INTERRUPT_LOGOFF_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What it takes to end one open stateful session from any thread.
+struct OpenSession {
+    id: u64,
+    client: Client,
+    url: Url,
+    username: String,
+    password: String,
+}
+
+impl OpenSession {
+    fn logoff(&self, timeout: Option<Duration>) -> Result<u16, reqwest::Error> {
+        let mut builder = self
+            .client
+            .get(self.url.clone())
+            .basic_auth(&self.username, Some(&self.password));
+
+        if let Some(timeout) = timeout {
+            builder = builder.timeout(timeout);
+        }
+
+        builder.send().map(|response| response.status().as_u16())
+    }
+}
+
+/// The sessions of real connections that sent a stateful reply and were not ended yet. The
+/// interrupt handler ends them when it must leave at once; whoever removes an entry owns the
+/// one logoff of that session.
+static OPEN_SESSIONS: Mutex<Vec<OpenSession>> = Mutex::new(Vec::new());
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
+
+fn open_sessions() -> std::sync::MutexGuard<'static, Vec<OpenSession>> {
+    OPEN_SESSIONS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Ends every session that is still open with a logoff, for a process that leaves at once
+/// (Ctrl-C, SIGTERM, SIGHUP). Best effort: a failure is ignored and nothing is retried.
+pub fn end_open_sessions() {
+    let sessions: Vec<OpenSession> = open_sessions().drain(..).collect();
+
+    for session in sessions {
+        let _ = session.logoff(Some(INTERRUPT_LOGOFF_TIMEOUT));
+    }
+}
+
+/// What answers instead of the network in a test.
+#[cfg(feature = "test-support")]
+type Responder = Box<dyn FnMut(&Request) -> Result<Response, TransportError>>;
 
 pub struct HttpConfig {
     pub base_url: String,
@@ -30,10 +83,12 @@ pub struct HttpTransport {
     password: String,
     csrf_token: Option<String>,
     session_open: bool,
+    /// The registry key of a real connection; `None` for a scripted one.
+    session_id: Option<u64>,
     /// `None` until a stateful reply is seen; then whether any reply set the context cookie.
     stateful_supported: Option<bool>,
     #[cfg(feature = "test-support")]
-    replies: Option<VecDeque<Result<Response, TransportError>>>,
+    responder: Option<Responder>,
     #[cfg(feature = "test-support")]
     recorded: Vec<Request>,
 }
@@ -72,9 +127,10 @@ impl HttpTransport {
             password: config.password,
             csrf_token: None,
             session_open: false,
+            session_id: Some(NEXT_SESSION.fetch_add(1, Ordering::Relaxed)),
             stateful_supported: None,
             #[cfg(feature = "test-support")]
-            replies: None,
+            responder: None,
             #[cfg(feature = "test-support")]
             recorded: Vec::new(),
         })
@@ -104,6 +160,26 @@ impl HttpTransport {
 
     #[cfg(feature = "test-support")]
     pub fn for_test(replies: Vec<Result<Response, TransportError>>) -> Self {
+        let mut replies = VecDeque::from(replies);
+
+        Self::answering(Box::new(move |_| {
+            replies.pop_front().unwrap_or_else(|| {
+                Err(TransportError::PreSendConnectivity(
+                    "no scripted HTTP reply".to_owned(),
+                ))
+            })
+        }))
+    }
+
+    /// A transport whose replies come from `inner`, which sees each request as the caller built
+    /// it (without the session headers) and the logoff of every session it ends.
+    #[cfg(feature = "test-support")]
+    pub fn wrapping(mut inner: impl SadtTransport + 'static) -> Self {
+        Self::answering(Box::new(move |request| inner.request(request.clone())))
+    }
+
+    #[cfg(feature = "test-support")]
+    fn answering(responder: Responder) -> Self {
         Self {
             client: ClientBuilder::new()
                 .redirect(reqwest::redirect::Policy::none())
@@ -115,8 +191,9 @@ impl HttpTransport {
             password: "password".to_owned(),
             csrf_token: None,
             session_open: false,
+            session_id: None,
             stateful_supported: None,
-            replies: Some(replies.into()),
+            responder: Some(responder),
             recorded: Vec::new(),
         }
     }
@@ -234,7 +311,7 @@ impl HttpTransport {
 
         // Real requests get their cookies from the client's cookie store.
         #[cfg(feature = "test-support")]
-        if self.replies.is_some() {
+        if self.responder.is_some() {
             prepared
                 .headers
                 .insert("Cookie".to_owned(), "sid=test".to_owned());
@@ -247,13 +324,9 @@ impl HttpTransport {
         let prepared = self.prepare(request, stateful);
 
         #[cfg(feature = "test-support")]
-        let response = if let Some(replies) = self.replies.as_mut() {
+        let response = if let Some(responder) = self.responder.as_mut() {
             self.recorded.push(prepared);
-            replies.pop_front().unwrap_or_else(|| {
-                Err(TransportError::PreSendConnectivity(
-                    "no scripted HTTP reply".to_owned(),
-                ))
-            })
+            responder(request)
         } else {
             self.send_real(prepared)
         };
@@ -268,7 +341,7 @@ impl HttpTransport {
             && ((200..300).contains(&response.status)
                 || Self::header(&response.headers, "set-cookie").is_some())
         {
-            self.session_open = true;
+            self.open_session();
         }
 
         // A cookie on any reply settles the capability; a later reply that leaves it out
@@ -278,6 +351,38 @@ impl HttpTransport {
         }
 
         Ok(response)
+    }
+
+    fn open_session(&mut self) {
+        if std::mem::replace(&mut self.session_open, true) {
+            return;
+        }
+
+        if let (Some(id), Ok(url)) = (self.session_id, self.request_url(LOGOFF_URI)) {
+            open_sessions().push(OpenSession {
+                id,
+                client: self.client.clone(),
+                url,
+                username: self.username.clone(),
+                password: self.password.clone(),
+            });
+        }
+    }
+
+    /// Whether this transport still owns the logoff of its session: the interrupt handler may
+    /// have taken it.
+    fn owns_logoff(&self) -> bool {
+        match self.session_id {
+            Some(id) => {
+                let mut sessions = open_sessions();
+                let before = sessions.len();
+
+                sessions.retain(|session| session.id != id);
+
+                sessions.len() < before
+            }
+            None => true,
+        }
     }
 
     /// Whether a lock can survive to the PUT. Sticky: one stateful reply that sets the context
@@ -383,7 +488,8 @@ impl SadtTransport for HttpTransport {
         self.stateful_supported
     }
 
-    /// Ends the stateful ADT session with one stateless request; the caller reports a failure.
+    /// Ends the stateful ADT session with one logoff request, which also releases its enqueue
+    /// locks; the caller reports a failure.
     fn close(&mut self) -> Result<(), TransportError> {
         if !self.session_open {
             return Ok(());
@@ -392,7 +498,25 @@ impl SadtTransport for HttpTransport {
         // The session stays closed locally even when the request fails: no second attempt.
         self.session_open = false;
         self.csrf_token = None;
-        self.send_once(&Request::get(DISCOVERY_URI), false)
-            .map(|_| ())
+
+        if !self.owns_logoff() {
+            return Ok(());
+        }
+
+        let response = self.send_once(&Request::get(LOGOFF_URI), false)?;
+
+        if response.status >= 400 {
+            return Err(Self::classify(response.status, None));
+        }
+
+        Ok(())
+    }
+}
+
+/// A transport that goes away on any path that skipped `close` (an early return, a panic) still
+/// ends its session.
+impl Drop for HttpTransport {
+    fn drop(&mut self) {
+        let _ = self.close();
     }
 }

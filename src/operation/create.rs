@@ -4,11 +4,16 @@
 
 use crate::adt::package_of;
 use crate::backend::{Failure, Selection, SelectionReason};
-use crate::cli::CreateKind;
+use crate::cli::{CreateKind, ObjectKind, Subc};
 use crate::config::Connection;
 use crate::domain::{Outcome, Status};
-use crate::object::{DEFAULT_PACKAGE, PackageScope};
-use crate::operation::deploy::{CancelFlag, DeployResult, INTERRUPT_EXIT_CODE, leaf_texts};
+use crate::object::{
+    DEFAULT_PACKAGE, PackageScope, program_creation_request_uri, program_validation_uri,
+};
+use crate::operation::deploy::{
+    CancelFlag, DeployInput, DeployProg, DeployResult, DeployScope, INTERRUPT_EXIT_CODE, leaf_texts,
+};
+use crate::operation::include::{Located, ProgKind, ResolveError, locate};
 use crate::operation::read::OBJECT_STRUCTURE;
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use quick_xml::escape::escape;
@@ -29,6 +34,11 @@ pub struct CreateInput {
     pub group: Option<String>,
     pub tr: Option<String>,
     pub simulate: bool,
+    /// A `PROG` create only: a program or an include.
+    pub subc: Subc,
+    /// A `PROG` create only: the source a simulate deploy checks after `CREATE: ACTIVE`; it is
+    /// never written.
+    pub source: Option<Vec<String>>,
 }
 
 /// What a validation request answered.
@@ -71,10 +81,12 @@ pub fn classify_validation(kind: CreateKind, status: u16, body: &str) -> Validat
                 )),
             }
         }
-        (200, CreateKind::Clas | CreateKind::Intf) => match field("CHECK_RESULT").as_deref() {
-            Some("X") => Validation::Accepted(None),
-            _ => Validation::Rejected(UNCONFIRMED.to_owned()),
-        },
+        (200, CreateKind::Clas | CreateKind::Intf | CreateKind::Prog) => {
+            match field("CHECK_RESULT").as_deref() {
+                Some("X") => Validation::Accepted(None),
+                _ => Validation::Rejected(UNCONFIRMED.to_owned()),
+            }
+        }
         (status, _) => Validation::Failed(status),
     }
 }
@@ -109,6 +121,13 @@ pub fn creation_body(
             r#"xmlns:intf="http://www.sap.com/adt/oo/interfaces""#,
             "INTF/OI",
         ),
+        // A program or include has its own body (`program_creation_body`); nothing is sent here.
+        CreateKind::Prog => {
+            return Err(format!(
+                "create {} is not available yet",
+                input.kind.token()
+            ));
+        }
     };
     let mut attributes = format!(
         r#"adtcore:description="{description}" adtcore:name="{name}" adtcore:type="{object_type}""#
@@ -154,6 +173,55 @@ pub fn creation_body(
         attributes = attributes,
         inner = inner
     ))
+}
+
+/// The body of the create POST of a program or include. An include carries no `containerRef`:
+/// its main program is bound by the first deploy.
+pub fn program_creation_body(
+    subc: Subc,
+    name: &str,
+    text: &str,
+    package: &str,
+    responsible: &str,
+    language: &str,
+) -> String {
+    let (element, namespace, object_type) = match subc {
+        Subc::Program => (
+            "program:abapProgram",
+            r#"xmlns:program="http://www.sap.com/adt/programs/programs""#,
+            "PROG/P",
+        ),
+        Subc::Include => (
+            "include:abapInclude",
+            r#"xmlns:include="http://www.sap.com/adt/programs/includes""#,
+            "PROG/I",
+        ),
+    };
+    let mut attributes = format!(
+        r#"adtcore:description="{}" adtcore:name="{}" adtcore:type="{object_type}" adtcore:language="{language}" adtcore:masterLanguage="{language}""#,
+        escape(text),
+        escape(name.to_ascii_uppercase()),
+        language = escape(language),
+    );
+
+    if !responsible.is_empty() {
+        attributes.push_str(&format!(
+            r#" adtcore:responsible="{}""#,
+            escape(responsible)
+        ));
+    }
+
+    format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><{element} {namespace} "#,
+            r#"xmlns:adtcore="http://www.sap.com/adt/core" {attributes}>"#,
+            r#"<adtcore:packageRef adtcore:name="{package}"/></{element}>"#,
+        ),
+        element = element,
+        namespace = namespace,
+        attributes = attributes,
+        package = escape(package.to_ascii_uppercase()),
+    )
 }
 
 pub struct CreateProg;
@@ -204,8 +272,10 @@ impl CreateProg {
         let mut end = match run.flow() {
             Ok(end) | Err(end) => end,
         };
+        let deployed = run.check_file(&mut end, connection, cancel);
 
-        if let Err(error) = run.transport.close() {
+        // The simulate deploy ends the session itself; without one the create does.
+        if !deployed && let Err(error) = run.transport.close() {
             end.warn(format!("W: session close failed: {error}"));
         }
 
@@ -228,6 +298,7 @@ impl CreateProg {
             group: None,
             base: None,
             change: None,
+            main: None,
         }
     }
 }
@@ -352,6 +423,10 @@ impl Run<'_> {
         let package = self.package()?;
         let scope = PackageScope::of(&package, self.input.tr.as_deref()).map_err(End::stop)?;
 
+        if self.input.kind == CreateKind::Prog {
+            self.require_free()?;
+        }
+
         self.validate(&package)?;
 
         // The server accepts a create over a session that cannot keep state, and leaves
@@ -370,8 +445,9 @@ impl Run<'_> {
 
         if self.input.simulate {
             self.stdout.push(format!(
-                "WILL CREATE {} {} in package {package}{}",
+                "WILL CREATE {}{} {} in package {package}{}",
                 self.input.kind.token(),
+                if self.is_include() { " (include)" } else { "" },
                 self.input.name.to_ascii_uppercase(),
                 match &scope {
                     PackageScope::Local => String::new(),
@@ -428,7 +504,62 @@ impl Run<'_> {
         }
     }
 
+    fn is_include(&self) -> bool {
+        self.input.kind == CreateKind::Prog && self.input.subc == Subc::Include
+    }
+
+    /// A program or include create needs a name that neither `programs/programs` nor
+    /// `programs/includes` knows: the properties of both must answer 404.
+    fn require_free(&mut self) -> Result<(), End> {
+        let name = self.input.name.to_ascii_uppercase();
+
+        match locate(self.transport, &self.input.name) {
+            Ok(Located::NotFound) => Ok(()),
+            Ok(Located::Found(target)) => Err(End::rejected(format!(
+                "PROG {name} already exists as {}",
+                match target.kind {
+                    ProgKind::Program => "a program",
+                    ProgKind::Include => "an include",
+                }
+            ))),
+            Err(ResolveError::Transport(error)) => Err(End::error(&error, !self.write_sent)),
+            Err(ResolveError::Status { what, status }) => Err(End::http(&what, status)),
+            Err(ResolveError::Stop(message)) => Err(End::stop(message)),
+        }
+    }
+
+    /// The validation of a program or include name answers `CHECK_RESULT X` even for a name
+    /// outside Z/Y, so it is shown and never a guard: whatever it answers, the run goes on.
+    fn note_program_validation(&mut self, package: &str) {
+        let uri =
+            program_validation_uri(self.input.subc, &self.input.name, &self.input.text, package);
+        let mut request = Request::post(uri, Vec::new());
+        request.headers.insert("Accept".to_owned(), ANY.to_owned());
+
+        let note = match self.transport.request(request) {
+            Ok(response) if response.authorization_failure().is_none() => {
+                let body = String::from_utf8_lossy(&response.body);
+
+                match classify_validation(CreateKind::Prog, response.status, &body) {
+                    Validation::Accepted(_) => return,
+                    Validation::Rejected(reason) => reason,
+                    Validation::Failed(status) => format!("HTTP {status}"),
+                }
+            }
+            Ok(_) => "logon refused".to_owned(),
+            Err(error) => error.to_string(),
+        };
+
+        self.notes.push(format!("W: validation: {note}"));
+    }
+
     fn validate(&mut self, package: &str) -> Result<(), End> {
+        if self.input.kind == CreateKind::Prog {
+            self.note_program_validation(package);
+
+            return Ok(());
+        }
+
         let scope = match self.input.kind {
             CreateKind::Func => self.input.group.clone().unwrap_or_default(),
             _ => package.to_owned(),
@@ -436,7 +567,8 @@ impl Run<'_> {
         let uri = self
             .input
             .kind
-            .validation_uri(&self.input.name, &self.input.text, &scope);
+            .validation_uri(&self.input.name, &self.input.text, &scope)
+            .map_err(End::stop)?;
         let mut request = Request::post(uri, Vec::new());
         request.headers.insert("Accept".to_owned(), ANY.to_owned());
         let response = self.call(request)?;
@@ -458,13 +590,28 @@ impl Run<'_> {
     /// The only write of the run. It is sent once; any answer that does not settle the outcome
     /// is read back, never sent again.
     fn post(&mut self, scope: &PackageScope, package: &str) -> Result<End, End> {
-        let uri = self
-            .input
-            .kind
-            .creation_request_uri(self.input.group.as_deref(), scope)
-            .map_err(End::stop)?;
-        let body =
-            creation_body(&self.input, package, &self.user, &self.language).map_err(End::stop)?;
+        let (uri, body) = if self.input.kind == CreateKind::Prog {
+            (
+                program_creation_request_uri(self.input.subc, scope),
+                program_creation_body(
+                    self.input.subc,
+                    &self.input.name,
+                    &self.input.text,
+                    package,
+                    &self.user,
+                    &self.language,
+                ),
+            )
+        } else {
+            (
+                self.input
+                    .kind
+                    .creation_request_uri(self.input.group.as_deref(), scope)
+                    .map_err(End::stop)?,
+                creation_body(&self.input, package, &self.user, &self.language)
+                    .map_err(End::stop)?,
+            )
+        };
         let mut request = Request::post(uri, body.into_bytes());
         request
             .headers
@@ -544,6 +691,11 @@ impl Run<'_> {
     fn reconcile(&mut self, cause: &str) -> End {
         let kind = self.input.kind;
         let name = self.input.name.to_ascii_uppercase();
+
+        if kind == CreateKind::Prog {
+            return self.reconcile_program(cause, &name);
+        }
+
         let uri = match kind.object_uri(&self.input.name, self.input.group.as_deref()) {
             // A fresh class answers 500 for its metadata and source; its structure answers 200.
             Ok(uri) if kind == CreateKind::Clas => format!("{uri}/{OBJECT_STRUCTURE}"),
@@ -583,6 +735,87 @@ impl Run<'_> {
                 "the create POST {cause} and the object cannot be read back ({error}); {CLEANUP}"
             )),
         }
+    }
+
+    /// The same settlement for a program or include, through the properties resolution of the
+    /// name: found is `PARTIAL`, absent is `REJECTED`, unreadable is `PARTIAL`.
+    fn reconcile_program(&mut self, cause: &str, name: &str) -> End {
+        match locate(self.transport, &self.input.name) {
+            Ok(Located::Found(_)) => End::partial(format!(
+                "the create POST {cause} and PROG {name} exists; the create is not repeated; \
+                 {CLEANUP}"
+            )),
+            Ok(Located::NotFound) => End::rejected(format!(
+                "the create POST {cause} and PROG {name} was not found at read-back; verify \
+                 before repeating"
+            )),
+            Err(ResolveError::Status { status, .. }) => End::partial(format!(
+                "the create POST {cause} and the object cannot be read back (HTTP {status}); \
+                 {CLEANUP}"
+            )),
+            Err(ResolveError::Transport(error)) => End::partial(format!(
+                "the create POST {cause} and the object cannot be read back ({error}); {CLEANUP}"
+            )),
+            Err(ResolveError::Stop(message)) => End::partial(format!(
+                "the create POST {cause} and the object cannot be read back ({message}); \
+                 {CLEANUP}"
+            )),
+        }
+    }
+
+    /// After `CREATE: ACTIVE` with a FILE: a simulate deploy of that source, which writes none.
+    /// A deploy that does not end well leaves the created object without its source, which is
+    /// `PARTIAL`. Returns whether a deploy ran (and ended the session).
+    fn check_file(
+        &mut self,
+        end: &mut End,
+        connection: Option<&Connection>,
+        cancel: &CancelFlag,
+    ) -> bool {
+        let Some(source) = self.input.source.clone() else {
+            return false;
+        };
+
+        if end.status != Some(Status::Active) || end.exit != 0 {
+            return false;
+        }
+
+        let result = DeployProg::run_scoped(
+            &mut *self.transport,
+            DeployInput {
+                name: self.input.name.clone(),
+                source,
+                base: None,
+                simulate: true,
+                tr: self.input.tr.clone(),
+            },
+            DeployScope::new(ObjectKind::Prog),
+            None,
+            connection,
+            cancel,
+        );
+        let name = self.input.name.to_ascii_uppercase();
+
+        if result.outcome.exit == 0 {
+            if !result.outcome.stdout.is_empty() {
+                end.stdout.push(result.outcome.stdout);
+            }
+        } else {
+            let mut partial = End::partial(format!(
+                "PROG {name} was created; the simulate deploy of the file ended with exit {}, \
+                 so the source is not deployed",
+                result.outcome.exit
+            ));
+
+            partial.stdout.push(result.outcome.stdout);
+            *end = partial;
+        }
+
+        if !result.outcome.stderr.is_empty() {
+            end.warn(result.outcome.stderr);
+        }
+
+        true
     }
 
     fn read(&mut self, uri: String) -> Result<Response, End> {
