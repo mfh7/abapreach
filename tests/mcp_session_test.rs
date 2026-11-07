@@ -10,7 +10,7 @@ mod replay;
 use abapreach::mcp::{Server, serve_with};
 use abapreach::mcp_write::Limits;
 use abapreach::operation::deploy::{CancelFlag, InterruptAction};
-use abapreach::transport::Request;
+use abapreach::transport::{Request, Response};
 use mcprig::*;
 use replay::{Step, fx, no_inactive, replay};
 use serde_json::{Value, json};
@@ -882,4 +882,164 @@ fn eof_before_the_put_unlocks_and_sends_no_write() {
         "{}",
         run.log
     );
+}
+
+// ---- logoff on the interrupted paths ---------------------------------------------------------
+
+/// The steps of a session followed by the answer to its logoff.
+fn with_logoff(mut steps: Vec<Step>) -> Vec<Step> {
+    steps.push(Step::Any(Ok(Response::empty(200))));
+    steps
+}
+
+/// Asserts that each of the two sessions of a simulate-then-deploy ended with its own logoff, and
+/// that the one of the deploy came after the unlock.
+fn assert_both_sessions_logged_off(requests: &Log) {
+    let lines = requests.borrow();
+    let unlock = lines
+        .iter()
+        .position(|line| line.contains("_action=UNLOCK") && !line.contains("PUT"))
+        .expect("an unlock");
+    let last = lines
+        .iter()
+        .rposition(|line| line.starts_with("GET /sap/public/bc/icf/logoff"));
+
+    drop(lines);
+
+    assert_eq!(logoffs(requests), 2, "{:?}", requests.borrow());
+    assert!(last.unwrap() > unlock, "the logoff follows the unlock");
+    assert_eq!(
+        last,
+        Some(requests.borrow().len() - 1),
+        "the logoff is the last request"
+    );
+}
+
+#[test]
+fn an_mcp_cancel_after_the_lock_unlocks_and_then_logs_off() {
+    let requests = log();
+    let cancel = CancelFlag::new();
+    let (wire, input) = wire();
+    let (hook_wire, hook_cancel) = (wire.clone(), cancel.clone());
+    let mut rig = rig(r#"{"mcp_write":"token"}"#);
+
+    rig.adt(http(recording(
+        replay(FIXTURE, with_logoff(simulate_steps())),
+        &requests,
+    )));
+    rig.adt(http(recording(
+        Hooked {
+            inner: replay(
+                FIXTURE,
+                with_logoff(vec![fx(6), no_inactive(), fx(7), fx(9)]),
+            ),
+            hook: Box::new(move |request: &Request| {
+                if request.uri.contains("_action=LOCK") {
+                    hook_wire.send(
+                        &json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                                           "params": {"requestId": 4}}),
+                    );
+                    wait_until(|| hook_cancel.is_set());
+                }
+            }),
+        },
+        &requests,
+    )));
+
+    let run = serve(&mut rig, &cancel, (wire, input), |client| {
+        client.initialize("2025-11-25", false);
+
+        let token = simulate(client, 3);
+
+        deploy(client, 4, &token);
+
+        let reply = client.reply_to(4);
+
+        assert!(text_of(&reply).contains("CANCELED"), "{}", text_of(&reply));
+        client.wire.close();
+    });
+
+    assert!(!run.watchdog_fired);
+    assert!(!any(&requests, "PUT "));
+    assert_both_sessions_logged_off(&requests);
+}
+
+#[test]
+fn eof_after_the_put_unlocks_and_then_logs_off() {
+    let requests = log();
+    let cancel = CancelFlag::new();
+    let (wire, input) = wire();
+    let (hook_wire, hook_cancel) = (wire.clone(), cancel.clone());
+    let mut rig = rig(r#"{"mcp_write":"token"}"#);
+
+    rig.adt(http(recording(
+        replay(FIXTURE, with_logoff(simulate_steps())),
+        &requests,
+    )));
+    rig.adt(http(recording(
+        Hooked {
+            inner: replay(FIXTURE, with_logoff(execute_steps(&[18]))),
+            hook: Box::new(move |request: &Request| {
+                if request.method == "PUT" {
+                    hook_wire.close();
+                    wait_until(|| hook_cancel.is_set());
+                }
+            }),
+        },
+        &requests,
+    )));
+
+    let run = serve(&mut rig, &cancel, (wire, input), |client| {
+        client.initialize("2025-11-25", false);
+
+        let token = simulate(client, 3);
+
+        deploy(client, 4, &token);
+
+        assert!(text_of(&client.reply_to(4)).contains("PARTIAL"));
+    });
+
+    assert!(!run.watchdog_fired);
+    assert!(!any(&requests, "activation"));
+    assert_both_sessions_logged_off(&requests);
+}
+
+#[test]
+fn sigterm_in_the_write_window_unlocks_and_then_logs_off() {
+    let requests = log();
+    let cancel = CancelFlag::new();
+    let (wire, input) = wire();
+    let hook_cancel = cancel.clone();
+    let mut rig = rig(r#"{"mcp_write":"token"}"#);
+
+    rig.adt(http(recording(
+        replay(FIXTURE, with_logoff(simulate_steps())),
+        &requests,
+    )));
+    rig.adt(http(recording(
+        Hooked {
+            inner: replay(FIXTURE, with_logoff(execute_steps(&[18]))),
+            hook: Box::new(move |request: &Request| {
+                if request.method == "PUT" {
+                    // What the signal handler of `main` does.
+                    assert_eq!(hook_cancel.on_interrupt(), InterruptAction::Deferred);
+                }
+            }),
+        },
+        &requests,
+    )));
+
+    let run = serve(&mut rig, &cancel, (wire, input), |client| {
+        client.initialize("2025-11-25", false);
+
+        let token = simulate(client, 3);
+
+        deploy(client, 4, &token);
+
+        assert!(text_of(&client.reply_to(4)).contains("PARTIAL"));
+    });
+
+    assert!(!run.watchdog_fired);
+    assert!(!any(&requests, "activation"));
+    assert_both_sessions_logged_off(&requests);
 }

@@ -5,7 +5,7 @@
 **Read and deploy ABAP source from the command line, over ADT HTTP or RFC, including
 systems you can only reach through SAProuter.**
 
-![version](https://img.shields.io/badge/version-0.14.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
+![version](https://img.shields.io/badge/version-0.15.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
 
 ```text
 $ abapreach deploy PROG ZDEMO ZDEMO.abap --base 63886692bf65... --conn A4H_001
@@ -178,12 +178,13 @@ use the same two paths; the result of each path is in
 
 ## Platforms
 
-Release 0.14.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
+Release 0.15.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
 library lookup per OS, the release file checks, the Linux glibc baseline, the credential
 file permission rules and the test matrix are in
 [Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
-The 0.14.0 release matrix ran on `v0.14.0-rc.4`; it has no FAIL cell on any path, and it lists every
-UNSUPPORTED cell with its reason. Interrupt-while-locked cells are from the 0.13.0 matrix. See
+The 0.15.0 release matrix ran on `v0.15.0-rc.3`; its final runs have no FAIL cell, and every
+UNSUPPORTED cell is listed with its reason. The interactive group (prompts and Ctrl-C), including
+the interrupt-while-locked cells, is from the 0.13.0 matrix and was not rerun. See
 [Tested environment](docs/getting-started.md#tested-environment).
 
 An explicit `ABAPREACH_RFC_LIBRARY` that cannot be loaded stops the command with an
@@ -234,6 +235,12 @@ active and inactive source and reports what it finds. Creating an object whose o
 uncertain is handled the same way: a read-only check, no second POST, and no automatic rollback.
 [Deploy safety](docs/deploy-safety.md) has the details.
 
+`TRAN` (report transactions) has no ADT endpoint. It is written only through the EXT path: the
+`YFM_UTILS_SOURCE_DEPLOY` function module over RFC. The gate sends only that function module, with the
+object type `TRAN` and one of five modes (`READ`, `CREATE_SIM`, `CREATE`, `DELETE_SIM`, `DELETE`);
+source deploy and the tooling's own objects are refused before the call. See
+[Deploy safety: TRAN and the EXT path](docs/deploy-safety.md#tran-and-the-ext-path).
+
 ### Exit codes
 
 Scripts can rely on four exit codes. Any result that needs a human look exits 1, including a
@@ -257,6 +264,10 @@ activation: the command reports the real result (for example `ACTIVE`, exit code
   </tr>
   <tr>
     <td align="left"><code>INCLUDE_MISSING: ...</code> (a class include that does not exist)</td>
+    <td align="center">1</td>
+  </tr>
+  <tr>
+    <td align="left"><code>NOT_FOUND: PROG ...</code> (no program or include of that name)</td>
     <td align="center">1</td>
   </tr>
   <tr>
@@ -289,8 +300,12 @@ and passes a live test.
     <td align="left"><b>0.13.0</b> (read and deploy)</td>
   </tr>
   <tr>
+    <td align="left">Program includes: read, deploy, delete</td>
+    <td align="left"><b>0.15.0</b></td>
+  </tr>
+  <tr>
     <td align="left">Create objects</td>
-    <td align="left"><b>0.13.0</b> for function groups, function modules, classes and interfaces; <b>0.14.0</b> delete; programs and includes planned</td>
+    <td align="left"><b>0.13.0</b> for function groups, function modules, classes and interfaces; <b>0.14.0</b> delete; <b>0.15.0</b> programs, includes and report transactions (<code>TRAN</code>, through the EXT path)</td>
   </tr>
   <tr>
     <td align="left">DDIC, messages, text pools, CDS, enhancements</td>
@@ -324,19 +339,26 @@ Every planned row is part of 1.0.0. The full list, with the path each feature us
 ## Command reference
 
 ```text
-abapreach read PROG|FUNC|CLAS|INTF <NAME> <OUT_FILE> [--force] [--include CCIMP|CCDEF|CCMAC|CCAU]
-    [--fugr <GROUP>] [--lines A-B] --conn <SID>_<client>
+abapreach read PROG|FUNC|CLAS|INTF|TRAN <NAME> <OUT_FILE> [--force] [--include CCIMP|CCDEF|CCMAC|CCAU]
+    [--fugr <GROUP>] [--lines A-B] [--main <PROG>] --conn <SID>_<client>
 abapreach deploy PROG|FUNC|CLAS|INTF <NAME> <FILE> [--simulate] [--base <hash>] [--tr <request>]
-    [--include CCIMP|CCDEF|CCMAC|CCAU] [--create-include] [--fugr <GROUP>]
+    [--include CCIMP|CCDEF|CCMAC|CCAU] [--create-include] [--fugr <GROUP>] [--main <PROG>]
     [--backend adt|rfc] --conn <SID>_<client>
-abapreach create FUGR|FUNC|CLAS|INTF <NAME> --text '<text>' [--package <PACKAGE>] [--fugr <GROUP>]
-    [--tr <request>] [--simulate] [--backend adt|rfc] --conn <SID>_<client>
+abapreach create PROG|FUGR|FUNC|CLAS|INTF|TRAN <NAME> [FILE] --text '<text>' [--package <PACKAGE>]
+    [--subc 1|I] [--fugr <GROUP>] [--prog <REPORT>] [--tr <request>] [--simulate]
+    [--backend adt|rfc] --conn <SID>_<client>
+abapreach delete TYPE:NAME... [--simulate] [--tr <request>] --plan <FILE> --conn <SID>_<client>
+abapreach read-table <TABLE> [--fields <A,B>] [--where '<condition>'] [--rows 1-5000] --conn <SID>_<client>
 abapreach doctor --conn <SID>_<client>
+abapreach mcp
 ```
 
 `read` refuses to overwrite an existing file unless `--force` is set; with `--lines`, the output
 must be `-` (stdout). `--base` and `--backend` both pin the backend, so a failed attempt never
-switches to the other one. `--include` and `--create-include` apply to `CLAS` only.
+switches to the other one. `--include` and `--create-include` apply to `CLAS` only. `--main` applies to
+a `PROG` include only. `--subc` applies to `PROG` only. `TRAN` is created, read and deleted through
+the EXT path and needs an RFC connection and the installed `YFM_UTILS_SOURCE_DEPLOY` function module.
+The grammar and the limits are in [Getting started](docs/getting-started.md#program-includes-and-transactions).
 [Getting started](docs/getting-started.md#other-source-objects) has examples.
 
 ## Documentation

@@ -115,7 +115,8 @@ pub struct Connection {
     pub lang: String,
     /// `None` for an RFC-only server: the config has no `host`/`port` ADT endpoint.
     pub adt: Option<AdtConfig>,
-    pub rfc: RfcConfig,
+    /// `None` for an ADT-only server: the config has no `rfc` block.
+    pub rfc: Option<RfcConfig>,
     /// Where the route in `rfc.saprouter` came from; `None` when no route is configured.
     pub saprouter_source: Option<SaprouterSource>,
     /// The effective write-guard policies of this connection.
@@ -128,7 +129,9 @@ impl Connection {
     pub fn secrets(&self) -> Vec<String> {
         let mut secrets = vec![self.password.clone()];
 
-        if let Some(route) = &self.rfc.saprouter {
+        if let Some(rfc) = &self.rfc
+            && let Some(route) = &rfc.saprouter
+        {
             secrets.push(route.clone());
             for pair in route.split('/').collect::<Vec<_>>().windows(2) {
                 if matches!(pair[0], "H" | "W") && pair[1].len() >= 3 {
@@ -144,7 +147,11 @@ impl Connection {
     /// The server hosts. Only the doctor hides them: its probe errors may quote them, while a
     /// read or deploy prints source text that has no business being rewritten.
     pub fn hosts(&self) -> Vec<String> {
-        let mut hosts = vec![self.rfc.ashost.clone()];
+        let mut hosts = self
+            .rfc
+            .iter()
+            .map(|rfc| rfc.ashost.clone())
+            .collect::<Vec<_>>();
 
         hosts.extend(self.adt.iter().map(|adt| adt.host.clone()));
         hosts
@@ -166,11 +173,11 @@ impl Connection {
                 ca_file: None,
                 insecure: true,
             }),
-            rfc: RfcConfig {
+            rfc: Some(RfcConfig {
                 ashost: "example.com".to_owned(),
                 sysnr: "00".to_owned(),
                 saprouter: None,
-            },
+            }),
             saprouter_source: None,
             policies: Policies::default(),
         }
@@ -321,10 +328,7 @@ impl Config {
             .iter()
             .find(|server| server.system_id == system_id)
             .ok_or_else(|| format!("unknown system {system_id}"))?;
-        let rfc = server
-            .rfc
-            .clone()
-            .ok_or_else(|| format!("{system_id} has no rfc/clients block in config"))?;
+        let rfc = server.rfc.clone();
         if !server
             .clients
             .iter()
@@ -333,8 +337,20 @@ impl Config {
             return Err(format!("client {client} not configured for {system_id}"));
         }
         let (user, password) = Self::credentials(&system_id, &client, env, &self.local)?;
-        let (rfc, saprouter_source) = Self::saprouter(&system_id, rfc, env, &self.local);
         let adt = Self::adt_endpoint(&system_id, server)?;
+        let (rfc, saprouter_source) = match rfc {
+            Some(rfc) => {
+                let (rfc, source) = Self::saprouter(&system_id, rfc, env, &self.local);
+
+                (Some(rfc), source)
+            }
+            None => (None, None),
+        };
+        if adt.is_none() && rfc.is_none() {
+            return Err(format!(
+                "{system_id} has neither an ADT endpoint (host/port) nor an rfc block in config"
+            ));
+        }
         let policies = self.effective_policies(server);
 
         Ok(Connection {

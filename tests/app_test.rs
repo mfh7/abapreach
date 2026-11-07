@@ -844,15 +844,20 @@ fn a_failing_rfc_fallback_is_final_and_keeps_both_errors() {
 
 #[test]
 fn a_post_send_or_http_failure_never_falls_back() {
-    for reply in [
-        Err(TransportError::PostSendUncertain("timeout".to_owned())),
-        Ok(Response::empty(404)),
+    for replies in [
+        vec![Err(TransportError::PostSendUncertain("timeout".to_owned()))],
+        // The name is neither a program nor an include: the source and both properties answer 404.
+        vec![
+            Ok(Response::empty(404)),
+            Ok(Response::empty(404)),
+            Ok(Response::empty(404)),
+        ],
     ] {
         let directory = tempfile::tempdir().unwrap();
         let out = directory.path().join("out.abap");
         let mut fake = Fake::default();
 
-        fake.adt.push_back(scripted(vec![reply]));
+        fake.adt.push_back(scripted(replies));
 
         let exit = go(
             &read_args(out.to_str().unwrap(), "dev_100"),
@@ -2329,8 +2334,16 @@ fn delete_facts() -> Vec<Result<Response, TransportError>> {
              <adtcore:packageRef adtcore:name=\"$TMP\"/></x>",
         ),
         source("REPORT ztest_del."),
+        // The where-used search of a PROG, between its source and its version list.
+        source("<usageReferences:usageReferenceResult xmlns:usageReferences=\"u\"/>"),
         source("<feed xmlns=\"http://www.w3.org/2005/Atom\"/>"),
     ]
+}
+
+/// The answers to the include check that runs before a batch of two or more `PROG` rows: each
+/// name is a program, so one properties read each.
+fn program_checks(count: usize) -> Vec<Result<Response, TransportError>> {
+    (0..count).map(|_| source("<x/>")).collect()
 }
 
 fn delete_args(plan: &str, simulate: bool) -> Vec<&str> {
@@ -2768,8 +2781,10 @@ fn ctrl_c_in_a_cli_delete_batch_skips_the_rest_without_a_lock() {
         args
     };
     let mut fake = Fake::default();
-    let mut both = delete_facts();
+    // Two PROG rows: the include check reads each object first, then every object is inspected.
+    let mut both = program_checks(2);
 
+    both.extend(delete_facts());
     both.extend(delete_facts());
     fake.adt.push_back(scripted(both));
 
@@ -2782,7 +2797,9 @@ fn ctrl_c_in_a_cli_delete_batch_skips_the_rest_without_a_lock() {
     );
 
     // The second object has no replies: any request for it fails the call count below.
-    let mut replies = delete_facts();
+    let mut replies = program_checks(2);
+
+    replies.extend(delete_facts());
     replies.push(Ok(Response::text(200, DELETE_LOCK)));
     replies.push(Ok(Response::empty(200))); // UNLOCK after the deferred interrupt
     let (cell, opened) = shared(InterruptOnLock {
@@ -2817,7 +2834,11 @@ fn ctrl_c_in_a_cli_delete_batch_skips_the_rest_without_a_lock() {
         1,
         "{uris:?}"
     );
-    assert_eq!(uris.len(), 5, "three reads, one lock, one unlock: {uris:?}");
+    assert_eq!(
+        uris.len(),
+        8,
+        "two include checks, four reads, one lock, one unlock: {uris:?}"
+    );
     assert!(
         uris.iter().all(|uri| !uri.starts_with("DELETE ")),
         "{uris:?}"
@@ -2897,5 +2918,136 @@ fn delete_on_a_session_without_state_falls_back_to_rfc_before_anything_is_sent()
     let exit = go(&delete_args(plan, true), directory.path(), &mut fake);
 
     assert_eq!(exit.code, 0, "{} {}", exit.stdout, exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+// ---- create PROG -----------------------------------------------------------------------
+
+const PROG_VALIDATION: &str = "<asx:abap xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA><CHECK_RESULT>X</CHECK_RESULT></DATA></asx:values></asx:abap>";
+
+fn create_prog_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "abapreach",
+        "create",
+        "PROG",
+        "YTEST_ABAPREACH_P1",
+        "--text",
+        "probe",
+    ];
+
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&["--conn", "dev_100"]);
+
+    args
+}
+
+#[test]
+fn create_prog_include_resolves_both_uris_then_posts_once_and_reports_the_token() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let (adt, opened) = shared(ScriptedTransport::replies(vec![
+        Ok(Response::empty(404)),
+        Ok(Response::empty(404)),
+        source(PROG_VALIDATION),
+        Ok(Response::empty(200)),
+    ]));
+
+    fake.adt.push_back(opened);
+
+    let exit = go(
+        &create_prog_args(&["--subc", "I"]),
+        directory.path(),
+        &mut fake,
+    );
+    let uris: Vec<String> = adt
+        .borrow()
+        .calls
+        .iter()
+        .map(|call| format!("{} {}", call.method, call.uri))
+        .collect();
+
+    assert_eq!(exit.code, 0, "{} {}", exit.stdout, exit.stderr);
+    assert!(
+        exit.stdout.lines().any(|line| line == "CREATE: ACTIVE"),
+        "{}",
+        exit.stdout
+    );
+    assert_eq!(
+        (uris.first(), uris.last()),
+        (
+            Some(&"GET /sap/bc/adt/programs/programs/ytest_abapreach_p1".to_owned()),
+            Some(&"POST /sap/bc/adt/programs/includes".to_owned())
+        ),
+        "{uris:?}"
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+}
+
+#[test]
+fn create_prog_with_an_unreadable_file_stops_before_any_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.abap");
+    let mut fake = Fake::default();
+    let exit = go(
+        &create_prog_args(&[missing.to_str().unwrap()]),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert!(
+        exit.stderr.starts_with("STOP: cannot read "),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+#[test]
+fn create_prog_in_a_transportable_package_without_tr_stops_before_any_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let exit = go(
+        &create_prog_args(&["--package", "ZPKG"]),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .contains("package ZPKG is transportable: --tr is required"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+#[test]
+fn create_prog_falls_back_to_rfc_when_the_resolution_cannot_reach_adt() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(scripted(vec![
+        Ok(Response::empty(404)),
+        Ok(Response::empty(404)),
+        source(PROG_VALIDATION),
+    ]));
+
+    let exit = go(
+        &create_prog_args(&["--simulate"]),
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{} {}", exit.stdout, exit.stderr);
+    assert!(
+        exit.stdout
+            .lines()
+            .any(|line| line == "CREATE_SIM: SIMULATED_OK"),
+        "{}",
+        exit.stdout
+    );
     assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
 }

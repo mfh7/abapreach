@@ -1,14 +1,17 @@
 use crate::adt::{
-    ActivationBody, AdtMessage, Caller, ObjectRef, USAGE_REQUEST_XML, classify_activation,
-    parse_callers, parse_inactive_feed_refs, parse_messages, parse_object_refs, parse_versions,
-    prog_uri, usage_references_uri,
+    ActivationBody, AdtMessage, Caller, ObjectRef, USAGE_REQUEST_XML, check_not_processed,
+    classify_activation, parse_callers, parse_inactive_feed_refs, parse_messages,
+    parse_object_refs, parse_versions, prog_uri, usage_references_uri,
 };
 use crate::backend::{Failure, Selection, SelectionReason};
 use crate::cli::{IncludeKind, ObjectKind};
 use crate::config::{Connection, tls_warning};
 use crate::domain::{Outcome, Status};
 use crate::hash::{normalize, source_hash};
-use crate::object::{check_deploy_source, check_request};
+use crate::object::{check_deploy_source, check_request, context_uri};
+use crate::operation::include::{
+    Located, MainProgram, ProgKind, ProgTarget, ResolveError, locate, resolve_main,
+};
 use crate::operation::read::{ReadError, resolve_group};
 use crate::policy::{Confirmer, Decision, InactiveVersion, Policies, Prompt, Terminal};
 use crate::signature::{interface_diff, validate_signature};
@@ -19,7 +22,7 @@ use quick_xml::{Reader, XmlVersion};
 use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 use std::fmt::Display;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub use crate::adt::format_messages;
@@ -45,7 +48,8 @@ pub struct DeployInput {
 }
 
 /// What a deploy targets besides its name: the kind, the `--fugr` of a FUNC, the class include
-/// and the opt-in creation of a missing include. The default is the PROG of milestone 1.
+/// and the opt-in creation of a missing include, plus the `--main` program of a `PROG` include.
+/// The default is the PROG of milestone 1.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeployScope {
     pub kind: ObjectKind,
@@ -55,6 +59,10 @@ pub struct DeployScope {
     /// Stop before the LOCK when the cancel flag is already set. The CLI exits on its own
     /// before a lock, so only a long-lived process (the MCP server) needs this.
     pub cancel_before_lock: bool,
+    pub main: Option<String>,
+    /// The main program the simulation resolved: the execute resolves exactly as the simulation
+    /// did and stops before the lock when the result differs.
+    pub expected_main: Option<String>,
 }
 
 impl DeployScope {
@@ -65,6 +73,8 @@ impl DeployScope {
             include: None,
             create_include: false,
             cancel_before_lock: false,
+            main: None,
+            expected_main: None,
         }
     }
 
@@ -88,6 +98,20 @@ impl DeployScope {
 
     pub fn create_include(mut self, create_include: bool) -> Self {
         self.create_include = create_include;
+
+        self
+    }
+
+    /// The `--main` program of a `PROG` include; the deploy tasks use it for the contextual
+    /// check and activation.
+    pub fn main(mut self, main: Option<&str>) -> Self {
+        self.main = main.map(str::to_owned);
+
+        self
+    }
+
+    pub fn expected_main(mut self, main: Option<&str>) -> Self {
+        self.expected_main = main.map(str::to_owned);
 
         self
     }
@@ -115,7 +139,9 @@ pub enum InterruptAction {
 pub struct CancelFlag {
     cancelled: Arc<AtomicBool>,
     lock_held: Arc<AtomicBool>,
-    write_in_flight: Arc<AtomicBool>,
+    /// A count, not a flag: the MCP delete holds the whole call while an extension delete of one
+    /// object holds its own request inside it.
+    write_in_flight: Arc<AtomicUsize>,
     /// The process was told to end (signal or closed input), not just one request cancelled.
     shutdown: Arc<AtomicBool>,
 }
@@ -165,7 +191,7 @@ impl CancelFlag {
     /// until the outcome is known: a server may have created the object even when its reply races
     /// with Ctrl-C.
     pub fn hold_write(&self) -> WriteScope<'_> {
-        self.write_in_flight.store(true, Ordering::SeqCst);
+        self.write_in_flight.fetch_add(1, Ordering::SeqCst);
 
         WriteScope(self)
     }
@@ -173,7 +199,7 @@ impl CancelFlag {
     /// A SIGINT must not end the process while a lock is held or a create write is unresolved.
     /// The flag then makes the operation settle safely before it reports.
     pub fn on_interrupt(&self) -> InterruptAction {
-        if !self.lock_held() && !self.write_in_flight.load(Ordering::SeqCst) {
+        if !self.lock_held() && self.write_in_flight.load(Ordering::SeqCst) == 0 {
             return InterruptAction::ExitNow;
         }
 
@@ -197,7 +223,7 @@ pub struct WriteScope<'a>(&'a CancelFlag);
 
 impl Drop for WriteScope<'_> {
     fn drop(&mut self) {
-        self.0.write_in_flight.store(false, Ordering::SeqCst);
+        self.0.write_in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -217,7 +243,14 @@ pub struct DeployResult {
     pub base: Option<String>,
     /// What the simulated change adds and removes, for a human to confirm.
     pub change: Option<Change>,
+    /// The main program an include was checked and activated under (resolved from the server or
+    /// `--main`); `None` for everything else.
+    pub main: Option<String>,
 }
+
+/// The start of the `W:` line of a new include's first simulation (no check before the first
+/// activation); a confirmation shows the whole line.
+pub const NEW_INCLUDE_WARNING: &str = "W: no syntax check before the first activation";
 
 /// The size of a change and a bounded excerpt of its diff.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -365,6 +398,9 @@ impl DeployProg {
             change: None,
             cancel_before_lock: scope.cancel_before_lock,
             lock_sent: false,
+            main_arg: scope.main,
+            expected_main: scope.expected_main,
+            include_main: None,
         };
         // `--base` and an explicit `--backend` bind the run to the backend that was picked.
         let pinned = input.base.is_some()
@@ -399,6 +435,7 @@ impl DeployProg {
             group: run.group.clone(),
             base: run.live_hash.clone(),
             change: run.change.take(),
+            main: run.include_main.as_ref().map(|main| main.name.clone()),
         }
     }
 }
@@ -714,6 +751,13 @@ struct Run<'a> {
     /// Whether a lock may exist: a LOCK reply that was a 2xx, or a LOCK request whose reply was
     /// lost. A refused LOCK leaves no lock, so a later session-end failure stays quiet about it.
     lock_sent: bool,
+    /// The `--main` of the command; only an include takes it.
+    main_arg: Option<String>,
+    /// The main program the simulation resolved; a different one now is a STOP.
+    expected_main: Option<String>,
+    /// Set once the name resolved to an include: the main program its check and activation run
+    /// under. The include's own URI stays in `uri` for the lock.
+    include_main: Option<MainProgram>,
 }
 
 enum InactiveOwnerError {
@@ -1013,7 +1057,11 @@ impl Run<'_> {
     /// lock; if the class itself exists the include is missing, which stops the run unless
     /// `--create-include` was given.
     fn read_live(&mut self) -> Result<Vec<String>, Finish> {
-        let response = self.get_active()?;
+        let mut response = self.get_active()?;
+
+        if self.kind == ObjectKind::Prog {
+            response = self.resolve_prog(response)?;
+        }
 
         if response.status == 404
             && let Some(include) = self.include
@@ -1022,6 +1070,76 @@ impl Run<'_> {
         }
 
         self.source_lines(response, "read live source")
+    }
+
+    /// A `PROG` is a program until the server says otherwise: the first read answers for the
+    /// program URI, and only a 404 asks `programs/programs` and `programs/includes` which one
+    /// the name is. An include takes over every later request and needs its main program; `--main`
+    /// on a program is a `STOP`.
+    fn resolve_prog(&mut self, response: Response) -> Result<Response, Finish> {
+        let mut response = response;
+        let mut target = ProgTarget::program(&self.name);
+
+        if response.status == 404 {
+            match locate(&mut *self.transport, &self.name)
+                .map_err(|error| self.resolve_failure(error))?
+            {
+                Located::NotFound => {
+                    return Err(Finish {
+                        stdout: vec![format!(
+                            "NOT_FOUND: PROG {} (no program or include of that name)",
+                            self.name.to_ascii_uppercase()
+                        )],
+                        ..Finish::new(None, 1)
+                    });
+                }
+                Located::Found(found) => target = found,
+            }
+
+            if target.is_include() {
+                self.uri = target.uri.clone();
+                self.source_uri = target.source_uri();
+                self.feeds = vec![target.versions_uri()];
+                response = self.get_active()?;
+            }
+        }
+
+        match target.kind {
+            ProgKind::Program if self.main_arg.is_some() && response.status == 200 => {
+                Err(Finish::stop(format!(
+                    "--main is only valid for an include; PROG {} is a program",
+                    self.name.to_ascii_uppercase()
+                )))
+            }
+            ProgKind::Program => Ok(response),
+            ProgKind::Include => {
+                let main = resolve_main(&mut *self.transport, &self.name, self.main_arg.as_deref())
+                    .map_err(|error| self.resolve_failure(error))?;
+
+                if let Some(expected) = self.expected_main.as_deref()
+                    && !expected.eq_ignore_ascii_case(&main.name)
+                {
+                    return Err(Finish::stop(format!(
+                        "the main program of include {} changed since the simulation ({expected}, now {})",
+                        self.name.to_ascii_uppercase(),
+                        main.name
+                    )));
+                }
+
+                self.stdout.push(format!("main {}", main.name));
+                self.include_main = Some(main);
+
+                Ok(response)
+            }
+        }
+    }
+
+    fn resolve_failure(&self, error: ResolveError) -> Finish {
+        match error {
+            ResolveError::Transport(error) => Finish::error(&error, !self.write_sent),
+            ResolveError::Status { what, status } => Finish::stop_http(what, status),
+            ResolveError::Stop(message) => Finish::stop(message),
+        }
     }
 
     /// Whether the class exists, probed with its structure, which answers 200 in every state of
@@ -1534,7 +1652,7 @@ impl Run<'_> {
     ) -> Result<Response, Finish> {
         let body = match references {
             Some(references) => worklist_request_xml(references),
-            None => activation_request_xml(name, &self.uri),
+            None => activation_request_xml(name, &self.checked_uri()),
         };
         let mut request = Request::post(
             format!("/sap/bc/adt/activation?method=activate&preauditRequested={preaudit}"),
@@ -1575,6 +1693,12 @@ impl Run<'_> {
                 && classify_activation(&String::from_utf8_lossy(&response.body))
                     == ActivationBody::Worklist
         };
+
+        // An include is only ever activated under its main program, and nothing evidences a
+        // resend for it, so a worklist is never resent: the include stays inactive.
+        if self.include_main.is_some() && is_worklist(&response) {
+            return Err(self.include_worklist(&response));
+        }
 
         if self.kind != ObjectKind::Clas || !is_worklist(&response) {
             return Ok(response);
@@ -1619,6 +1743,40 @@ impl Run<'_> {
         }
 
         Ok(second)
+    }
+
+    /// The activation of an include answered a worklist, which activated nothing.
+    fn include_worklist(&self, response: &Response) -> Finish {
+        let references = match parse_object_refs(&String::from_utf8_lossy(&response.body)) {
+            Ok(references) => references,
+            Err(error) => {
+                return Finish::status(
+                    Status::Inactive,
+                    format!("INACTIVE: cannot read the activation worklist: {error}"),
+                );
+            }
+        };
+        let outside = references.iter().find(|object| {
+            let path = object.uri.split(['?', '#']).next().unwrap_or_default();
+
+            !under(&self.uri, path)
+        });
+
+        match outside {
+            Some(outside) => Finish::status(
+                Status::Inactive,
+                format!(
+                    "INACTIVE: the activation worklist lists an object outside the include, \
+                     nothing was resent: {}",
+                    outside.uri
+                ),
+            ),
+            None => Finish::status(
+                Status::Inactive,
+                "INACTIVE: the activation answered a worklist and activated nothing; \
+                 an include is never resent",
+            ),
+        }
     }
 
     /// The active source equals what was deployed. A class is also read inactive, because its
@@ -1776,7 +1934,7 @@ impl Run<'_> {
     fn check(&mut self, file: &[String]) -> Result<(), Finish> {
         let mut request = Request::post(
             "/sap/bc/adt/checkruns?reporters=abapCheckRun",
-            checkrun_xml_for(&self.uri, &self.source_uri, file).into_bytes(),
+            checkrun_xml_for(&self.checked_uri(), &self.source_uri, file).into_bytes(),
         );
         request
             .headers
@@ -1793,11 +1951,13 @@ impl Run<'_> {
             ));
         }
 
-        let messages = parse_messages(&String::from_utf8_lossy(&response.body))
+        let body = String::from_utf8_lossy(&response.body);
+        let messages = parse_messages(&body)
             .map_err(|message| Finish::stop(format!("cannot read the check result: {message}")))?;
 
         self.stdout
             .extend(messages.iter().map(|message| message.render()));
+        self.require_processed(&body)?;
 
         if messages.iter().any(|message| message.is_error()) {
             return Err(Finish::status(
@@ -1807,6 +1967,42 @@ impl Run<'_> {
         }
 
         Ok(())
+    }
+
+    /// The URI a checkrun and an activation name: an include only under its main program.
+    fn checked_uri(&self) -> String {
+        match &self.include_main {
+            Some(main) => context_uri(&self.name, &main.name),
+            None => self.uri.clone(),
+        }
+    }
+
+    /// A report that was not processed checked nothing, and carries no messages that would say
+    /// so. For an include that is `REJECTED`, except for its first activation under `--main`: the
+    /// index of main programs is empty until that activation, so it is the check.
+    fn require_processed(&mut self, body: &str) -> Result<(), Finish> {
+        let Some(main) = &self.include_main else {
+            return Ok(());
+        };
+        let Some(text) = check_not_processed(body)
+            .map_err(|message| Finish::stop(format!("cannot read the check result: {message}")))?
+        else {
+            return Ok(());
+        };
+
+        if main.first_activation {
+            self.warnings.push(format!(
+                "{NEW_INCLUDE_WARNING} of a new include (main {})",
+                main.name
+            ));
+
+            return Ok(());
+        }
+
+        Err(Finish::status(
+            Status::Rejected,
+            format!("REJECTED: the check was not processed: {text}"),
+        ))
     }
 
     fn release(&mut self, lock: &LockInfo, name: &str, finish: Finish) -> Finish {

@@ -848,7 +848,11 @@ fn build_tools(write_offered: bool, writable: &[String]) -> Vec<Value> {
         "Create the include of a program if it does not exist",
     );
     let source_kinds = ["PROG", "FUNC", "CLAS", "INTF"];
-    let create_kinds = ["FUGR", "FUNC", "CLAS", "INTF"];
+    let create_kinds = ["PROG", "FUGR", "FUNC", "CLAS", "INTF"];
+    let main = property(
+        "string",
+        "Main program of a PROG include (optional; the server's single main program is used when omitted)",
+    );
     let objects = json!({
         "type": "array",
         "description": "Objects as TYPE:NAME, TYPE PROG|FUGR|FUNC|CLAS|INTF",
@@ -857,11 +861,17 @@ fn build_tools(write_offered: bool, writable: &[String]) -> Vec<Value> {
     let deploy_properties = json!({
         "conn": conn, "type": object_type(&source_kinds), "name": name, "source": source,
         "tr": tr, "include": include, "fugr": fugr, "create_include": create_include,
+        "main": main,
     });
     let create_properties = json!({
         "conn": conn, "type": object_type(&create_kinds), "name": name,
         "text": property("string", "Object description"),
         "package": property("string", "Package (required except FUNC)"), "tr": tr, "fugr": fugr,
+        "subc": json!({
+            "type": "string",
+            "description": "PROG only: 1 for a program (default) or I for an include",
+            "enum": ["1", "I"],
+        }),
     });
     let delete_properties = json!({"conn": conn, "objects": objects, "tr": tr});
     let with_token = |properties: &Value| {
@@ -876,7 +886,7 @@ fn build_tools(write_offered: bool, writable: &[String]) -> Vec<Value> {
             "Read live source and its hash. Read-only.",
             json!({
                 "conn": conn, "type": object_type(&source_kinds), "name": name,
-                "include": include, "fugr": fugr,
+                "include": include, "fugr": fugr, "main": main,
                 "lines": property("string", "Line range A-B (one-based, inclusive); returns a partial excerpt without hash"),
             }),
             &["conn", "type", "name"],

@@ -219,7 +219,11 @@ fn a_local_rule_and_a_failed_read_are_error_results_equal_in_text_and_structure(
     assert_eq!(stop.structured["message"], stop.text);
     assert_eq!(rig.fake.adt_opened.get(), 0);
 
-    rig.adt(vec![Ok(Response::text(404, ""))]);
+    rig.adt(vec![
+        Ok(Response::text(404, "")),
+        Ok(Response::text(404, "")),
+        Ok(Response::text(404, "")),
+    ]);
 
     let failed = rig.call(
         "abap_read_source",

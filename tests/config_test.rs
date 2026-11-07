@@ -1,10 +1,19 @@
 use abapreach::config::{
-    Config, ConfigPaths, Connection, LocalCredentialsPermission, SaprouterSource,
+    Config, ConfigPaths, Connection, LocalCredentialsPermission, RfcConfig, SaprouterSource,
     classify_credentials_mode, local_credentials_permission, scrub, tls_warning,
 };
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// The RFC block of a connection the test expects to have one.
+fn rfc(connection: &Connection) -> &RfcConfig {
+    connection.rfc.as_ref().expect("RFC configured")
+}
+
+fn rfc_mut(connection: &mut Connection) -> &mut RfcConfig {
+    connection.rfc.as_mut().expect("RFC configured")
+}
 
 #[test]
 fn resolves_config_env_credentials_and_defaults() {
@@ -45,9 +54,9 @@ fn resolves_config_env_credentials_and_defaults() {
     assert_eq!(adt.scheme, "https");
     assert_eq!(adt.ca_file, None);
     assert!(!adt.insecure);
-    assert_eq!(connection.rfc.ashost, "example.com");
-    assert_eq!(connection.rfc.sysnr, "00");
-    assert_eq!(connection.rfc.saprouter, None);
+    assert_eq!(rfc(&connection).ashost, "example.com");
+    assert_eq!(rfc(&connection).sysnr, "00");
+    assert_eq!(rfc(&connection).saprouter, None);
     let http_connection = Config::load(
         ConfigPaths {
             connections: directory.path().join("connections.json"),
@@ -95,8 +104,8 @@ fn a_server_without_an_adt_endpoint_resolves_as_rfc_only() {
 
     assert_eq!(rfc_only.id, "QAS_100");
     assert_eq!(rfc_only.adt, None);
-    assert_eq!(rfc_only.rfc.ashost, "example.com");
-    assert_eq!(rfc_only.rfc.sysnr, "02");
+    assert_eq!(rfc(&rfc_only).ashost, "example.com");
+    assert_eq!(rfc(&rfc_only).sysnr, "02");
     assert_eq!(tls_warning(&rfc_only), None);
     assert_eq!(
         config.resolve("dev_100", &env).unwrap().adt.unwrap().host,
@@ -564,7 +573,10 @@ fn resolve_route(
         .resolve(connection_id, env)
         .unwrap();
 
-    (connection.rfc.saprouter, connection.saprouter_source)
+    (
+        rfc(&connection).saprouter.clone(),
+        connection.saprouter_source,
+    )
 }
 
 #[test]
@@ -633,7 +645,7 @@ fn secrets_hide_the_password_the_route_and_only_its_host_and_password_fragments(
 
     let route = "/H/router.example.com/S/3299/H/ab/W/secret";
 
-    connection.rfc.saprouter = Some(route.to_owned());
+    rfc_mut(&mut connection).saprouter = Some(route.to_owned());
 
     // Only the value after an `H` or `W` marker counts, and only from three characters on: the
     // port after `S` and the short value after `H` stay readable. Longest first.
@@ -834,4 +846,55 @@ fn writes_are_offered_only_when_some_server_allows_them() {
     assert!(offered(&[off, token]));
     assert!(offered(&[confirm, off]));
     assert!(offered(&[confirm, token]));
+}
+
+#[test]
+fn a_server_without_an_rfc_block_resolves_as_adt_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let connections = directory.path().join("connections.json");
+    let config =
+        r#"{"servers":[{"systemId":"DEV","host":"example.com","port":443,"clients":["100"]}]}"#;
+    fs::write(&connections, config).unwrap();
+    let env = BTreeMap::from([
+        ("DEV_100_USER".to_owned(), "dev-user".to_owned()),
+        ("DEV_100_PASS".to_owned(), "dev-password".to_owned()),
+    ]);
+    let adt_only = Config::load(
+        ConfigPaths {
+            connections,
+            local: directory.path().join("connections.local.json"),
+        },
+        &env,
+    )
+    .unwrap()
+    .resolve("dev_100", &env)
+    .unwrap();
+
+    assert!(adt_only.adt.is_some());
+    assert!(adt_only.rfc.is_none());
+    assert_eq!(adt_only.saprouter_source, None);
+    assert_eq!(adt_only.hosts(), ["example.com"]);
+}
+
+#[test]
+fn a_server_with_neither_backend_stops_at_resolve() {
+    let directory = tempfile::tempdir().unwrap();
+    let connections = directory.path().join("connections.json");
+    let config = r#"{"servers":[{"systemId":"DEV","clients":["100"]}]}"#;
+    fs::write(&connections, config).unwrap();
+    let env = BTreeMap::from([
+        ("DEV_100_USER".to_owned(), "dev-user".to_owned()),
+        ("DEV_100_PASS".to_owned(), "dev-password".to_owned()),
+    ]);
+    let config = Config::load(
+        ConfigPaths {
+            connections,
+            local: directory.path().join("connections.local.json"),
+        },
+        &env,
+    )
+    .unwrap();
+    let error = config.resolve("dev_100", &env).unwrap_err();
+
+    assert!(error.contains("neither"), "{error}");
 }

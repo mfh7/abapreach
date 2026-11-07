@@ -456,7 +456,15 @@ fn a_delete_batch_stops_between_objects_at_the_deadline() {
     let other = "/sap/bc/adt/programs/programs/zother";
     let reads = |script: Script| {
         script
+            // The include check reads each PROG once before the batch is inspected.
+            .get(PROG, 200, &metadata("OWNER"))
             .get(other, 200, &metadata("OWNER"))
+            .get(other, 200, &metadata("OWNER"))
+            .post(
+                &abapreach::adt::usage_references_uri(other),
+                200,
+                "<usageReferences:usageReferenceResult xmlns:usageReferences=\"u\"/>",
+            )
             .get(
                 &format!("{other}/source/main?version=active"),
                 200,
@@ -543,6 +551,170 @@ fn a_cancel_before_the_operation_starts_sends_nothing() {
     assert!(result.is_error);
     assert!(result.text.starts_with("CANCELED: "), "{}", result.text);
     assert_eq!(rig.opened(), opened);
+}
+
+// ---- logoff ----------------------------------------------------------------------------------
+
+#[test]
+fn an_mcp_read_ends_its_session_with_one_logoff() {
+    let mut rig = rig(TOKEN);
+    let requests = log();
+
+    rig.adt(http(
+        Script::new(&requests)
+            .get(
+                &format!("{PROG}/source/main?version=active"),
+                200,
+                "REPORT zprog.",
+            )
+            .get(LOGOFF_URI, 200, ""),
+    ));
+
+    let result = rig.bare(
+        "abap_read_source",
+        json!({"conn": "DEV_100", "type": "PROG", "name": "ZPROG"}),
+    );
+
+    assert!(!result.is_error, "{}", result.text);
+    assert!(!result.text.contains("W: "), "{}", result.text);
+    assert_eq!(logoffs(&requests), 1);
+    assert!(
+        requests
+            .borrow()
+            .last()
+            .unwrap()
+            .starts_with("GET /sap/public/bc/icf/logoff")
+    );
+}
+
+#[test]
+fn an_mcp_simulation_ends_with_one_logoff_after_the_unlock() {
+    let mut rig = rig(TOKEN);
+    let mut session = token_session();
+    let requests = log();
+    let mut steps = simulate_steps();
+
+    steps.push(Step::Any(Ok(Response::empty(200))));
+    rig.adt(http(recording(replay(FIXTURE, steps), &requests)));
+
+    let result = rig.call(&mut session, "abap_simulate", deploy_arguments());
+
+    assert!(!result.is_error, "{}", result.text);
+    assert!(!result.text.contains("W: session close"), "{}", result.text);
+
+    let lines = requests.borrow();
+    let unlock = lines
+        .iter()
+        .position(|line| line.contains("_action=UNLOCK"))
+        .unwrap();
+
+    drop(lines);
+
+    assert_eq!(logoffs(&requests), 1);
+    assert_eq!(unlock + 2, requests.borrow().len(), "the logoff comes last");
+}
+
+#[test]
+fn an_mcp_call_cancelled_in_flight_still_logs_its_session_off() {
+    let mut rig = rig(TOKEN);
+    let requests = log();
+    let mut session = FakeSession::new(false);
+    let cancel = session.cancel.clone();
+
+    rig.adt(http(
+        prog_reads(&requests, "OWNER")
+            .get(LOGOFF_URI, 200, "")
+            .hook(move |_| cancel.set()),
+    ));
+
+    let result = rig.call(
+        &mut session,
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["PROG:ZPROG"]}),
+    );
+
+    // A simulation reads only, so the cancel changes nothing about its verdict; the session ends.
+    assert!(!result.text.contains("W: session close"), "{}", result.text);
+    assert_eq!(logoffs(&requests), 1);
+    assert!(!any(&requests, "_action=LOCK"));
+}
+
+#[test]
+fn a_delete_batch_stopped_at_the_deadline_logs_off_every_session_it_opened() {
+    let mut rig = rig(TOKEN);
+    let requests = log();
+    let other = "/sap/bc/adt/programs/programs/zother";
+    let reads = |script: Script| {
+        script
+            // The include check reads each PROG once before the batch is inspected.
+            .get(PROG, 200, &metadata("OWNER"))
+            .get(other, 200, &metadata("OWNER"))
+            .get(other, 200, &metadata("OWNER"))
+            .post(
+                &abapreach::adt::usage_references_uri(other),
+                200,
+                "<usageReferences:usageReferenceResult xmlns:usageReferences=\"u\"/>",
+            )
+            .get(
+                &format!("{other}/source/main?version=active"),
+                200,
+                "REPORT zother.",
+            )
+            .get(
+                &format!("{other}/source/main/versions"),
+                200,
+                "<feed xmlns=\"http://www.w3.org/2005/Atom\"/>",
+            )
+    };
+    let delete = json!({"conn": "DEV_100", "objects": ["PROG:ZPROG", "PROG:ZOTHER"]});
+    let mut session = FakeSession::typing("DELETE 2");
+
+    rig.adt(http(
+        reads(prog_reads(&requests, "OWNER")).get(LOGOFF_URI, 200, ""),
+    ));
+
+    let token = token_of(&rig.call(&mut session, "abap_delete_simulate", delete.clone()));
+
+    assert_eq!(logoffs(&requests), 1);
+
+    rig.limits = Limits {
+        call: Duration::from_millis(250),
+        ..Limits::default()
+    };
+    rig.adt(http(
+        reads(
+            prog_reads(&requests, "OWNER")
+                .post(
+                    &format!("{PROG}?_action=LOCK&accessMode=MODIFY"),
+                    200,
+                    &lock_xml(),
+                )
+                .on(
+                    "DELETE",
+                    &format!("{PROG}?lockHandle={ENCODED}"),
+                    Ok(Response::empty(200)),
+                )
+                .hook(|request| {
+                    if request.method == "DELETE" {
+                        std::thread::sleep(Duration::from_millis(400));
+                    }
+                }),
+        )
+        .get(LOGOFF_URI, 200, ""),
+    ));
+    // The proof read of the deleted object opens a session of its own: it has its own logoff.
+    rig.adt(http(
+        Script::new(&requests)
+            .get(PROG, 404, "")
+            .get(LOGOFF_URI, 200, ""),
+    ));
+
+    let result = rig.call(&mut session, "abap_delete", with_token(delete, &token));
+
+    assert!(result.is_error, "a skipped object makes the batch exit 1");
+    assert!(result.text.contains("SKIPPED"), "{}", result.text);
+    assert!(!result.text.contains("W: session close"), "{}", result.text);
+    assert_eq!(logoffs(&requests), 3);
 }
 
 // ---- scrub -----------------------------------------------------------------------------------

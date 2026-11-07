@@ -2,7 +2,7 @@
 //! connection is opened, whether a command is valid. Every `Err` is the text of a `STOP`.
 
 use crate::adt::prog_uri;
-use crate::cli::{CreateKind, IncludeKind, LineRange, ObjectKind};
+use crate::cli::{CreateKind, IncludeKind, LineRange, ObjectKind, Subc};
 use crate::hash::{validate_name_within, validate_source};
 use std::path::Path;
 
@@ -162,6 +162,7 @@ impl IncludeKind {
 impl CreateKind {
     pub fn token(self) -> &'static str {
         match self {
+            Self::Prog => "PROG",
             Self::Fugr => "FUGR",
             Self::Func => "FUNC",
             Self::Clas => "CLAS",
@@ -171,6 +172,7 @@ impl CreateKind {
 
     pub fn max_name(self) -> usize {
         match self {
+            Self::Prog => 40,
             Self::Fugr => MAX_GROUP,
             Self::Func | Self::Clas | Self::Intf => 30,
         }
@@ -179,6 +181,7 @@ impl CreateKind {
     /// The limit of `--text`, the same as `MAX_TEXT` of the Python tool.
     pub fn max_text(self) -> usize {
         match self {
+            Self::Prog => 70,
             Self::Fugr => 40,
             Self::Func => 74,
             Self::Clas | Self::Intf => 60,
@@ -188,6 +191,7 @@ impl CreateKind {
     /// The URI the create POST goes to. A FUNC is created inside its function group.
     pub fn creation_uri(self, group: Option<&str>) -> Result<String, String> {
         match self {
+            Self::Prog => Err(self.not_created_here()),
             Self::Fugr => Ok("/sap/bc/adt/functions/groups".to_owned()),
             Self::Clas => Ok("/sap/bc/adt/oo/classes".to_owned()),
             Self::Intf => Ok("/sap/bc/adt/oo/interfaces".to_owned()),
@@ -220,10 +224,15 @@ impl CreateKind {
     /// The metadata URI of the created object, which the reconciliation of an uncertain create
     /// reads. A FUNC needs its function group.
     pub fn object_uri(self, name: &str, group: Option<&str>) -> Result<String, String> {
+        if self == Self::Prog {
+            return Err(self.not_created_here());
+        }
+
         let kind = match self {
             Self::Fugr | Self::Func => ObjectKind::Func,
             Self::Clas => ObjectKind::Clas,
             Self::Intf => ObjectKind::Intf,
+            Self::Prog => unreachable!("returned above"),
         };
         let segment = path_segment(kind, name)?;
 
@@ -239,14 +248,16 @@ impl CreateKind {
                     path_segment(kind, group)?
                 ))
             }
+            Self::Prog => unreachable!("returned above"),
         }
     }
 
     /// The read-only validation request of the create. `scope` is the package, or for a FUNC its
     /// function group. Values are percent-encoded; the server parses a namespaced name from
     /// both the encoded and the literal form.
-    pub fn validation_uri(self, name: &str, text: &str, scope: &str) -> String {
+    pub fn validation_uri(self, name: &str, text: &str, scope: &str) -> Result<String, String> {
         let (path, object_type, scope_key) = match self {
+            Self::Prog => return Err(self.not_created_here()),
             Self::Fugr => ("/sap/bc/adt/functions/validation", "FUGR/F", "packagename"),
             Self::Func => ("/sap/bc/adt/functions/validation", "FUGR/FF", "fugrname"),
             Self::Clas => (
@@ -261,14 +272,75 @@ impl CreateKind {
             ),
         };
 
-        format!(
+        Ok(format!(
             "{path}?objtype={}&objname={}&description={}&{scope_key}={}",
             query_value(object_type),
             query_value(&name.to_ascii_uppercase()),
             query_value(text),
             query_value(&scope.to_ascii_uppercase()),
-        )
+        ))
     }
+
+    /// A `PROG` is created by its own operation, not by the ADT collection URIs of this type.
+    fn not_created_here(self) -> String {
+        format!("create {} is not available yet", self.token())
+    }
+}
+
+/// The URI of a program include collection or member.
+const INCLUDES_URI: &str = "/sap/bc/adt/programs/includes";
+
+/// The ADT URI of a program include: lowercase name, a namespace `/` becomes `%2f` like a program.
+pub fn include_uri(name: &str) -> String {
+    format!(
+        "{INCLUDES_URI}/{}",
+        name.to_ascii_lowercase().replace('/', "%2f")
+    )
+}
+
+/// `GET` on this lists the main programs of an include.
+pub fn mainprograms_uri(name: &str) -> String {
+    format!("{}/mainprograms", include_uri(name))
+}
+
+/// The URI an include is checked or activated under: the include itself with its main program
+/// as the only query, `?context=<encoded URI of the program>`. Nothing else may carry it.
+pub fn context_uri(include: &str, main: &str) -> String {
+    format!(
+        "{}?context={}",
+        include_uri(include),
+        query_value(&prog_uri(main))
+    )
+}
+
+/// The URI the create POST of a program or include goes to; a transportable package adds its
+/// `corrNr` so that SAP records the object in that request instead of generating one.
+pub fn program_creation_request_uri(subc: Subc, scope: &PackageScope) -> String {
+    let uri = match subc {
+        Subc::Program => "/sap/bc/adt/programs/programs",
+        Subc::Include => INCLUDES_URI,
+    };
+
+    match scope {
+        PackageScope::Local => uri.to_owned(),
+        PackageScope::Transportable { request } => format!("{uri}?corrNr={request}"),
+    }
+}
+
+/// The informational validation of a program or include name. Keys, their order and the raw
+/// object type are the recorded exchange; the answer is never a guard.
+pub fn program_validation_uri(subc: Subc, name: &str, text: &str, package: &str) -> String {
+    let object_type = match subc {
+        Subc::Program => "PROG/P",
+        Subc::Include => "PROG/I",
+    };
+
+    format!(
+        "/sap/bc/adt/programs/validation?objname={}&packagename={}&description={}&objtype={object_type}",
+        query_value(&name.to_ascii_uppercase()),
+        query_value(&package.to_ascii_uppercase()),
+        query_value(text),
+    )
 }
 
 /// Percent-encodes everything except RFC 3986 unreserved characters.
@@ -327,6 +399,21 @@ fn check_scope(
     Ok(())
 }
 
+/// The `--main` option names the program an include belongs to; it is a `PROG` option only, and
+/// its program-vs-include decision happens after URI resolution on the server.
+fn check_main(kind: ObjectKind, main: Option<&str>) -> Result<(), String> {
+    let Some(main) = main else {
+        return Ok(());
+    };
+
+    if kind != ObjectKind::Prog {
+        return Err("--main is only valid for PROG".to_owned());
+    }
+
+    validate_name_within(main, ObjectKind::Prog.max_name())
+        .map_err(|error| format!("invalid --main: {error}"))
+}
+
 fn check_group(group: &str) -> Result<(), String> {
     validate_name_within(group, MAX_GROUP)?;
     path_segment(ObjectKind::Func, group).map(drop)
@@ -349,8 +436,10 @@ pub fn check_read(
     include: Option<IncludeKind>,
     fugr: Option<&str>,
     lines: Option<LineRange>,
+    main: Option<&str>,
 ) -> Result<(), String> {
     check_scope(kind, name, include, fugr)?;
+    check_main(kind, main)?;
 
     // A partial file must never be deployed as the full source.
     if lines.is_some() && out != Path::new("-") {
@@ -366,8 +455,10 @@ pub fn check_deploy_options(
     include: Option<IncludeKind>,
     create_include: bool,
     fugr: Option<&str>,
+    main: Option<&str>,
 ) -> Result<(), String> {
     check_scope(kind, name, include, fugr)?;
+    check_main(kind, main)?;
 
     if create_include && (kind != ObjectKind::Clas || include.is_none()) {
         return Err("--create-include requires CLAS with --include".to_owned());
@@ -394,6 +485,9 @@ pub fn check_deploy_source(kind: ObjectKind, name: &str, lines: &[String]) -> Re
     }
 }
 
+/// `check_create` takes every option the grammar allows; the alternatives, a struct of options,
+/// would hide which option a caller supplied.
+#[allow(clippy::too_many_arguments)]
 pub fn check_create(
     kind: CreateKind,
     name: &str,
@@ -401,6 +495,9 @@ pub fn check_create(
     package: Option<&str>,
     fugr: Option<&str>,
     tr: Option<&str>,
+    subc: Option<Subc>,
+    misuse: Option<&str>,
+    file: Option<&Path>,
 ) -> Result<(), String> {
     validate_name_within(name, kind.max_name())?;
 
@@ -423,6 +520,29 @@ pub fn check_create(
         (CreateKind::Func, Some(group)) => check_group(group)?,
         (_, Some(_)) => return Err("--fugr is only valid for FUNC".to_owned()),
         _ => {}
+    }
+
+    if subc.is_some() && kind != CreateKind::Prog {
+        return Err("--subc only applies to PROG".to_owned());
+    }
+
+    // The text of an option that belongs to another kind and was given with this one.
+    if let Some(message) = misuse {
+        return Err(message.to_owned());
+    }
+
+    if file.is_some() {
+        if kind == CreateKind::Prog && subc == Some(Subc::Include) {
+            return Err(
+                "new include: deploy the source after the INCLUDE statement exists in the \
+                 parent program (create PROG --subc I without FILE)"
+                    .to_owned(),
+            );
+        }
+
+        if kind != CreateKind::Prog {
+            return Err(format!("create {} does not accept FILE", kind.token()));
+        }
     }
 
     // A FUNC takes the package of its function group, which only the server knows.

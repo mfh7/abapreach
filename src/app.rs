@@ -1,5 +1,5 @@
 use crate::backend::{BackendKind, Failure, OperationKind, Router, Selection, SelectionReason};
-use crate::cli::{Backend, Cli, Command};
+use crate::cli::{Backend, Cli, Command, DeleteTarget, ObjectKind, Subc};
 use crate::config::{
     Config, ConfigPaths, Connection, LocalCredentialsPermission, local_credentials_permission,
     scrub, tls_warning,
@@ -28,6 +28,7 @@ use crate::transport::{SadtTransport, TransportError};
 use clap::Parser;
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -90,8 +91,11 @@ impl RealFactories {
     }
 
     fn rfc_api(connection: &Connection) -> Result<DynamicRfcApi, TransportError> {
+        let parameters =
+            connection_parameters(connection).map_err(TransportError::PreSendConnectivity)?;
+
         RfcLibrary::load(&Env::current())
-            .and_then(|library| DynamicRfcApi::load(library, connection_parameters(connection)))
+            .and_then(|library| DynamicRfcApi::load(library, parameters))
             .map_err(TransportError::PreSendConnectivity)
     }
 }
@@ -324,6 +328,13 @@ impl Attempt {
         Self::failed(error.to_string(), Failure::from(error))
     }
 
+    /// Adds the `W:` note of a session end that failed; the verdict stays as it was.
+    pub(crate) fn noted(mut self, note: Option<String>) -> Self {
+        append_note(&mut self.outcome.stderr, note);
+
+        self
+    }
+
     pub(crate) fn failed(message: String, failure: Failure) -> Self {
         Self {
             outcome: Outcome {
@@ -336,6 +347,25 @@ impl Attempt {
             fallback_allowed: failure == Failure::PreSendConnectivity,
             detail: Some(message),
         }
+    }
+}
+
+/// Ends the session of an operation whose lock, if any, is reported elsewhere. A failed logoff is
+/// best effort: it is only this `W:` note, never another status or exit code.
+pub(crate) fn end_session(transport: &mut dyn SadtTransport) -> Option<String> {
+    transport
+        .close()
+        .err()
+        .map(|error| format!("W: session close failed: {error}"))
+}
+
+pub(crate) fn append_note(stderr: &mut String, note: Option<String>) {
+    if let Some(note) = note {
+        if !stderr.is_empty() {
+            stderr.push('\n');
+        }
+
+        stderr.push_str(&note);
     }
 }
 
@@ -382,10 +412,9 @@ fn execute(
                 |transport, _, _, _| {
                     let read = ReadTable::run(transport, &query, &connection.policies);
 
-                    // A read holds no lock, so a failed session end changes nothing here.
-                    let _ = transport.close();
-
-                    match read {
+                    // A read holds no lock, so a failed session end is only a note.
+                    let note = end_session(transport);
+                    let attempt = match read {
                         Ok(data) => {
                             let (stdout, omitted) = data.render(MAX_OUTPUT_BYTES);
                             let stderr = if omitted == 0 {
@@ -422,7 +451,9 @@ fn execute(
                         Err(ReadTableError::Failed { failure, message }) => {
                             Attempt::failed(message, failure)
                         }
-                    }
+                    };
+
+                    attempt.noted(note)
                 },
             )
         }
@@ -439,71 +470,16 @@ fn execute(
             connection,
             factories,
             |transport, _, cancel, fresh| {
-                // The server would answer the LOCK and then refuse the DELETE, so nothing is sent
-                // and the router may try RFC.
-                if transport.stateful_supported() == Some(false) {
-                    let _ = transport.close();
-
-                    return Attempt {
-                        fallback_allowed: true,
-                        ..Attempt::failed(
-                            NO_STATEFUL_SESSION.to_owned(),
-                            Failure::CapabilityUnavailable,
-                        )
-                    };
-                }
-
-                let context = Context {
-                    conn: &connection.id,
-                    user: &connection.user,
-                    policies: &connection.policies,
-                    confirmer: &Terminal,
-                };
-                let (mut outcome, unsent) = {
-                    let mut backend = AdtDelete::with_cancel(
-                        &mut *transport,
-                        &connection.user,
-                        fresh,
-                        cancel.clone(),
-                    );
-                    let outcome = delete::run_until(
-                        &mut backend,
-                        &context,
-                        &targets,
-                        tr.as_deref(),
-                        simulate,
-                        &plan,
-                        &mut || cancel.is_set(),
-                    );
-
-                    (outcome, backend.unsent_failure())
-                };
-                if !simulate && cancel.is_set() {
-                    outcome.exit = 130;
-                }
-
-                // The batch is over and the lock, if any, is reported by the outcome.
-                let _ = transport.close();
-
-                // A read that never left the process and no delete request sent: the plan file
-                // pins no backend, so RFC may run the whole batch, unless Ctrl-C came first.
-                if let Some((failure, message)) = unsent {
-                    if !cancel.is_set() {
-                        return Attempt {
-                            fallback_allowed: true,
-                            ..Attempt::failed(message, failure)
-                        };
-                    }
-
-                    outcome.exit = 130;
-                }
-
-                Attempt {
-                    outcome,
-                    failure: None,
-                    fallback_allowed: false,
-                    detail: None,
-                }
+                delete_attempt(
+                    transport,
+                    cancel,
+                    fresh,
+                    connection,
+                    &targets,
+                    tr.as_deref(),
+                    simulate,
+                    &plan,
+                )
             },
         ),
         Command::Mcp => stop("the MCP server needs no connection"),
@@ -515,9 +491,19 @@ fn execute(
             include,
             fugr,
             lines,
+            main,
+            backend,
             ..
         } => {
-            if let Err(message) = check_read(kind, &name, &out, include, fugr.as_deref(), lines) {
+            if let Err(message) = check_read(
+                kind,
+                &name,
+                &out,
+                include,
+                fugr.as_deref(),
+                lines,
+                main.as_deref(),
+            ) {
                 return stop(message);
             }
 
@@ -532,11 +518,12 @@ fn execute(
             let target = ReadTarget::new(kind, &name)
                 .group(fugr.as_deref())
                 .include(include)
-                .lines(lines);
+                .lines(lines)
+                .main(main.as_deref());
 
             route(
                 OperationKind::Read(kind),
-                None,
+                backend.map(backend_kind),
                 false,
                 connection,
                 factories,
@@ -544,10 +531,9 @@ fn execute(
                     let read =
                         ReadProg::run_target_classified(transport, target, &out, force, None);
 
-                    // A read holds no lock, so a failed session end changes nothing here.
-                    let _ = transport.close();
-
-                    match read {
+                    // A read holds no lock, so a failed session end is only a note.
+                    let note = end_session(transport);
+                    let attempt = match read {
                         Ok(outcome) => Attempt {
                             outcome,
                             failure: None,
@@ -566,16 +552,20 @@ fn execute(
                             detail: None,
                         },
                         Err(error) => Attempt::failed(error.message, error.failure),
-                    }
+                    };
+
+                    attempt.noted(note)
                 },
             )
         }
         Command::Create {
             kind,
             name,
+            file,
             text,
             package,
             fugr,
+            subc,
             tr,
             simulate,
             backend,
@@ -588,10 +578,33 @@ fn execute(
                 package.as_deref(),
                 fugr.as_deref(),
                 tr.as_deref(),
+                subc,
+                None,
+                file.as_deref(),
             ) {
                 return stop(message);
             }
 
+            // The FILE of a `PROG` create is read and checked before any connection, like a deploy
+            // source; it is never written.
+            let source = match file {
+                Some(file) => {
+                    let text = match fs::read_to_string(&file) {
+                        Ok(text) => text,
+                        Err(error) => {
+                            return stop(format!("cannot read {}: {error}", file.display()));
+                        }
+                    };
+                    let source = local_source_lines(&text);
+
+                    if let Err(message) = check_deploy_source(ObjectKind::Prog, &name, &source) {
+                        return stop(message);
+                    }
+
+                    Some(source)
+                }
+                None => None,
+            };
             let input = CreateInput {
                 kind,
                 name,
@@ -600,6 +613,8 @@ fn execute(
                 group: fugr,
                 tr,
                 simulate,
+                subc: subc.unwrap_or(Subc::Program),
+                source,
             };
 
             route(
@@ -637,11 +652,17 @@ fn execute(
             include,
             create_include,
             fugr,
+            main,
             ..
         } => {
-            if let Err(message) =
-                check_deploy_options(kind, &name, include, create_include, fugr.as_deref())
-            {
+            if let Err(message) = check_deploy_options(
+                kind,
+                &name,
+                include,
+                create_include,
+                fugr.as_deref(),
+                main.as_deref(),
+            ) {
                 return stop(message);
             }
 
@@ -659,7 +680,8 @@ fn execute(
             let scope = DeployScope::new(kind)
                 .group(fugr.as_deref())
                 .include(include)
-                .create_include(create_include);
+                .create_include(create_include)
+                .main(main.as_deref());
             let input = DeployInput {
                 name,
                 source,
@@ -703,6 +725,87 @@ fn backend_kind(backend: Backend) -> BackendKind {
     }
 }
 
+/// One attempt of a delete batch on the transport the router opened.
+#[allow(clippy::too_many_arguments)]
+fn delete_attempt(
+    transport: &mut dyn SadtTransport,
+    cancel: &CancelFlag,
+    fresh: &mut dyn FnMut() -> Opened,
+    connection: &Connection,
+    targets: &[DeleteTarget],
+    tr: Option<&str>,
+    simulate: bool,
+    plan: &Path,
+) -> Attempt {
+    // The server would answer the LOCK and then refuse the DELETE, so nothing is sent
+    // and the router may try RFC.
+    if transport.stateful_supported() == Some(false) {
+        let note = end_session(transport);
+
+        return Attempt {
+            fallback_allowed: true,
+            ..Attempt::failed(
+                NO_STATEFUL_SESSION.to_owned(),
+                Failure::CapabilityUnavailable,
+            )
+        }
+        .noted(note);
+    }
+
+    let context = Context {
+        conn: &connection.id,
+        user: &connection.user,
+        policies: &connection.policies,
+        confirmer: &Terminal,
+    };
+    let (mut outcome, unsent, fresh_note) = {
+        let mut backend =
+            AdtDelete::with_cancel(&mut *transport, &connection.user, fresh, cancel.clone());
+        let outcome = delete::run_until(
+            &mut backend,
+            &context,
+            targets,
+            tr,
+            simulate,
+            plan,
+            &mut || cancel.is_set(),
+        );
+
+        (outcome, backend.unsent_failure(), backend.close_note())
+    };
+    if !simulate && cancel.is_set() {
+        outcome.exit = 130;
+    }
+
+    // The batch is over and the lock, if any, is reported by the outcome; a failed
+    // session end is only a note.
+    let note = end_session(transport);
+
+    // A read that never left the process and no delete request sent: the plan file pins no
+    // backend, so RFC may run the whole batch, unless Ctrl-C came first.
+    if let Some((failure, message)) = unsent {
+        if !cancel.is_set() {
+            return Attempt {
+                fallback_allowed: true,
+                ..Attempt::failed(message, failure)
+            }
+            .noted(fresh_note)
+            .noted(note);
+        }
+
+        outcome.exit = 130;
+    }
+
+    Attempt {
+        outcome,
+        failure: None,
+        fallback_allowed: false,
+        detail: None,
+    }
+    .noted(fresh_note)
+    .noted(note)
+}
+
 /// Runs the operation on the backend the router picks. A second backend is tried only when the
 /// first one failed before it sent a write request and neither `--backend` nor `--base` pins it.
 pub(crate) fn route(
@@ -718,7 +821,7 @@ pub(crate) fn route(
         &mut dyn FnMut() -> Opened,
     ) -> Attempt,
 ) -> Exit {
-    let router = Router::new(connection.adt.is_some(), true);
+    let router = Router::new(connection.adt.is_some(), connection.rfc.is_some());
     let cancel = factories.cancel();
     let mut failure = Failure::Initial;
     let mut earlier: Vec<String> = Vec::new();

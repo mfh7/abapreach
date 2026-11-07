@@ -19,8 +19,10 @@ use crate::operation::delete::{
 use crate::operation::deploy::{
     CancelFlag, LOCK_ACCEPT, LockInfo, VERSIONS_ACCEPT, encode_lock_handle, leaf_texts, parse_lock,
 };
+use crate::operation::include::{ProgTarget, ResolveError, locate_properties};
 use crate::operation::read::resolve_group;
 use crate::transport::{Request, Response, SadtTransport, TransportError};
+use std::collections::HashMap;
 
 const LOCK_MAY_REMAIN: &str = "a lock may remain on the object";
 pub const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
@@ -44,11 +46,22 @@ pub struct AdtDelete<'a> {
     /// The logon user: another user's inactive version outranks the user's own.
     user: String,
     open: &'a mut Opener<'a>,
+    /// The session that replaced `transport` after a delete; `None` while `transport` is in use.
+    renewed: Option<Box<dyn SadtTransport>>,
+    /// A delete ended the active stateful session: the next row opens a new one first.
+    renew: bool,
+    /// Why the new session could not be opened; the batch stops there and nothing is retried.
+    open_failure: Option<String>,
     cancel: Option<CancelFlag>,
     /// The first read that did not leave the process, for the router's fallback.
     unsent: Option<String>,
     /// A delete request has started: nothing can fall back to another backend any more.
     wrote: bool,
+    /// `W:` lines for the fresh sessions whose logoff failed.
+    close_notes: Vec<String>,
+    /// What each `PROG` name resolved to (program or include), by upper-case name. Set when the
+    /// object is first resolved, so that lock, DELETE and reconciliation use the URI that answered.
+    resolved: HashMap<String, ProgTarget>,
 }
 
 impl<'a> AdtDelete<'a> {
@@ -57,9 +70,14 @@ impl<'a> AdtDelete<'a> {
             transport,
             user: user.to_owned(),
             open,
+            renewed: None,
+            renew: false,
+            open_failure: None,
             cancel: None,
             unsent: None,
             wrote: false,
+            close_notes: Vec::new(),
+            resolved: HashMap::new(),
         }
     }
 
@@ -74,9 +92,14 @@ impl<'a> AdtDelete<'a> {
             transport,
             user: user.to_owned(),
             open,
+            renewed: None,
+            renew: false,
+            open_failure: None,
             cancel: Some(cancel),
             unsent: None,
             wrote: false,
+            close_notes: Vec::new(),
+            resolved: HashMap::new(),
         }
     }
 
@@ -91,12 +114,85 @@ impl<'a> AdtDelete<'a> {
 
         match &self.unsent {
             Some(message) => Some((Failure::PreSendConnectivity, message.clone())),
-            None if self.transport.stateful_supported() == Some(false) => Some((
+            None if self.active_ref().stateful_supported() == Some(false) => Some((
                 Failure::CapabilityUnavailable,
                 NO_STATEFUL_SESSION.to_owned(),
             )),
             None => None,
         }
+    }
+
+    /// Ends the session this backend opened after a delete, then returns the `W:` lines for the
+    /// sessions whose logoff failed; they change no verdict.
+    pub fn close_note(&mut self) -> Option<String> {
+        if let Some(mut session) = self.renewed.take()
+            && let Err(error) = session.close()
+        {
+            self.close_notes
+                .push(format!("W: session close failed: {error}"));
+        }
+
+        (!self.close_notes.is_empty()).then(|| self.close_notes.join("\n"))
+    }
+
+    fn active_ref(&self) -> &dyn SadtTransport {
+        match self.renewed.as_deref() {
+            Some(session) => session,
+            None => &*self.transport,
+        }
+    }
+
+    /// The session the batch currently works in: the one the caller opened until a delete ends
+    /// it, then the one opened for the following row.
+    fn active(&mut self) -> &mut dyn SadtTransport {
+        match self.renewed.as_deref_mut() {
+            Some(session) => session,
+            None => &mut *self.transport,
+        }
+    }
+
+    /// Opens the session for the next row once a delete has ended the previous one. A failure is
+    /// final: the batch stops and the open is not tried again.
+    fn ensure_session(&mut self) -> Result<(), String> {
+        if let Some(reason) = &self.open_failure {
+            return Err(reason.clone());
+        }
+
+        if !self.renew {
+            return Ok(());
+        }
+
+        match (self.open)() {
+            Ok(session) => {
+                self.renewed = Some(session);
+                self.renew = false;
+
+                Ok(())
+            }
+            Err(error) => {
+                let reason = format!("cannot open a new session: {error}");
+
+                self.open_failure = Some(reason.clone());
+
+                Err(reason)
+            }
+        }
+    }
+
+    /// A DELETE answered 2xx: its stateful session is logged off and the next row gets a new one.
+    /// SAP kills a session that reads an include whose program was just deleted.
+    fn end_stateful_session(&mut self) {
+        if self.active_ref().stateful_supported() != Some(true) {
+            return;
+        }
+
+        if let Err(error) = self.active().close() {
+            self.close_notes
+                .push(format!("W: session close failed: {error}"));
+        }
+
+        self.renewed = None;
+        self.renew = true;
     }
 
     fn get(&mut self, uri: &str, accept: &str) -> Result<Response, String> {
@@ -109,7 +205,7 @@ impl<'a> AdtDelete<'a> {
     }
 
     fn send(&mut self, request: Request) -> Result<Response, String> {
-        let response = self.transport.request(request).map_err(|error| {
+        let response = self.active().request(request).map_err(|error| {
             if Failure::from(&error) == Failure::PreSendConnectivity {
                 self.unsent.get_or_insert_with(|| error.to_string());
             }
@@ -150,7 +246,17 @@ impl<'a> AdtDelete<'a> {
         name: &str,
     ) -> Result<Option<(String, Option<String>)>, String> {
         let object = match kind {
-            DeleteKind::Prog => ObjectKind::Prog,
+            // The URI that answered 200 at inspect. A PROG that was never inspected here has no
+            // answer to follow; it is addressed as a program.
+            // shortcut: unresolved means program, safe because every batch path inspects first.
+            DeleteKind::Prog => {
+                let uri = self.resolved.get(&name.to_ascii_uppercase()).map_or_else(
+                    || ProgTarget::program(name).uri,
+                    |target| target.uri.clone(),
+                );
+
+                return Ok(Some((uri, None)));
+            }
             DeleteKind::Clas => ObjectKind::Clas,
             DeleteKind::Intf => ObjectKind::Intf,
             DeleteKind::Fugr => return Ok(Some((group_uri(name), None))),
@@ -171,7 +277,7 @@ impl<'a> AdtDelete<'a> {
 
     /// The function group of a module; `None` when the search knows no such module.
     fn group_of(&mut self, name: &str) -> Result<Option<String>, String> {
-        match resolve_group(&mut *self.transport, name, None) {
+        match resolve_group(self.active(), name, None) {
             Ok(group) => Ok(Some(group)),
             Err(error) if error.message.contains("returned no reference") => Ok(None),
             Err(error) => {
@@ -247,9 +353,8 @@ impl<'a> AdtDelete<'a> {
         }
     }
 
-    /// Reports only: callers are never part of the plan identity, so a failure is a line, not an
-    /// error.
-    fn where_used(&mut self, uri: &str) -> Vec<String> {
+    /// The calling objects of `uri` as the usage search lists them.
+    fn callers(&mut self, uri: &str) -> Result<Vec<Caller>, String> {
         let mut request = Request::post(
             usage_references_uri(uri),
             USAGE_REQUEST_XML.as_bytes().to_vec(),
@@ -261,20 +366,83 @@ impl<'a> AdtDelete<'a> {
                 .insert(header.to_owned(), "application/*".to_owned());
         }
 
-        let callers = match self.send(request) {
+        match self.send(request) {
             Ok(response) if response.status == 200 => {
                 parse_callers(&String::from_utf8_lossy(&response.body))
             }
             Ok(response) => Err(format!("HTTP {}", response.status)),
             Err(error) => Err(error),
-        };
+        }
+    }
 
-        match callers {
+    /// Reports only: callers are never part of the plan identity, so a failure is a line, not an
+    /// error.
+    fn where_used(&mut self, uri: &str) -> Vec<String> {
+        match self.callers(uri) {
             Ok(callers) => callers
                 .iter()
                 .map(|Caller { kind, name }| format!("{kind} {name}"))
                 .collect(),
             Err(reason) => vec![format!("unavailable ({reason})")],
+        }
+    }
+
+    /// Reports only: the programs that include the object, then the transactions that start it
+    /// (`TRAN <tcode>`, from the same usage search). A failed lookup is the M3 warning line.
+    fn prog_where_used(&mut self, uri: &str) -> Vec<String> {
+        match self.callers(uri) {
+            Ok(callers) => {
+                let (transactions, others): (Vec<&Caller>, Vec<&Caller>) = callers
+                    .iter()
+                    .partition(|caller| caller.kind.split('/').next() == Some("TRAN"));
+
+                others
+                    .into_iter()
+                    .map(|Caller { kind, name }| format!("{kind} {name}"))
+                    .chain(
+                        transactions
+                            .into_iter()
+                            .map(|Caller { name, .. }| format!("TRAN {name}")),
+                    )
+                    .collect()
+            }
+            Err(reason) => vec![format!("W: where-used unavailable: {reason}")],
+        }
+    }
+
+    /// What a `PROG` name is: the cached answer is read again, otherwise `programs/programs`
+    /// then `programs/includes`; the answering GET is returned with it.
+    fn resolve_prog(&mut self, name: &str) -> Result<Option<(ProgTarget, Response)>, String> {
+        let key = name.to_ascii_uppercase();
+
+        if let Some(target) = self.resolved.get(&key).cloned() {
+            let response = self.get(&target.uri, "application/*")?;
+
+            return Ok(Some((target, response)));
+        }
+
+        match locate_properties(self.active(), name) {
+            Ok(Some((target, response))) => {
+                self.resolved.insert(key, target.clone());
+
+                Ok(Some((target, response)))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => Err(self.resolve_failure(error)),
+        }
+    }
+
+    fn resolve_failure(&mut self, error: ResolveError) -> String {
+        match error {
+            ResolveError::Transport(error) => {
+                if Failure::from(&error) == Failure::PreSendConnectivity {
+                    self.unsent.get_or_insert_with(|| error.to_string());
+                }
+
+                error.to_string()
+            }
+            ResolveError::Status { status, .. } => format!("HTTP {status}"),
+            ResolveError::Stop(message) => message,
         }
     }
 
@@ -319,7 +487,7 @@ impl<'a> AdtDelete<'a> {
             target.push_str(&format!("&corrNr={request}"));
         }
 
-        self.transport.request(Request::delete(target))
+        self.active().request(Request::delete(target))
     }
 
     fn unlock(&mut self, uri: &str, lock: &LockInfo) -> bool {
@@ -332,7 +500,7 @@ impl<'a> AdtDelete<'a> {
         );
 
         matches!(
-            self.transport.request(request),
+            self.active().request(request),
             Ok(response) if (200..300).contains(&response.status)
         )
     }
@@ -370,8 +538,11 @@ impl<'a> AdtDelete<'a> {
             .map(|response| response.status)
             .map_err(|error| error.to_string());
 
-        // A read holds no lock, so a failed end of the session changes nothing.
-        let _ = session.close();
+        // A read holds no lock, so a failed end of the session is only a note.
+        if let Err(error) = session.close() {
+            self.close_notes
+                .push(format!("W: session close failed: {error}"));
+        }
 
         status
     }
@@ -379,10 +550,21 @@ impl<'a> AdtDelete<'a> {
 
 impl DeleteBackend for AdtDelete<'_> {
     fn inspect(&mut self, kind: DeleteKind, name: &str) -> Result<Option<ObjectFacts>, String> {
-        let Some((uri, group)) = self.locate(kind, name)? else {
-            return Ok(None);
+        self.ensure_session()?;
+
+        let (uri, group, response) = if kind == DeleteKind::Prog {
+            match self.resolve_prog(name)? {
+                Some((target, response)) => (target.uri, None, response),
+                None => return Ok(None),
+            }
+        } else {
+            let Some((uri, group)) = self.locate(kind, name)? else {
+                return Ok(None);
+            };
+            let response = self.get(&uri, "application/*")?;
+
+            (uri, group, response)
         };
-        let response = self.get(&uri, "application/*")?;
 
         match response.status {
             200 => {}
@@ -433,8 +615,10 @@ impl DeleteBackend for AdtDelete<'_> {
             }
         }
 
-        if kind == DeleteKind::Func {
-            where_used = self.where_used(&uri);
+        match kind {
+            DeleteKind::Func => where_used = self.where_used(&uri),
+            DeleteKind::Prog => where_used = self.prog_where_used(&uri),
+            _ => {}
         }
 
         let inactive = if feeds.is_empty() {
@@ -465,7 +649,11 @@ impl DeleteBackend for AdtDelete<'_> {
     fn delete(&mut self, kind: DeleteKind, name: &str, tr: Option<&str>) -> DeleteReply {
         // The server would answer the LOCK and then refuse the DELETE (423), so the capability is
         // checked before the first request that locks.
-        if self.transport.stateful_supported() == Some(false) {
+        if let Err(reason) = self.ensure_session() {
+            return DeleteReply::Rejected(reason);
+        }
+
+        if self.active_ref().stateful_supported() == Some(false) {
             return DeleteReply::Rejected(NO_STATEFUL_SESSION.to_owned());
         }
 
@@ -492,7 +680,11 @@ impl DeleteBackend for AdtDelete<'_> {
         };
 
         match self.send_delete(&uri, &lock, request.as_deref()) {
-            Ok(response) if (200..300).contains(&response.status) => self.verify(&uri, name),
+            Ok(response) if (200..300).contains(&response.status) => {
+                self.end_stateful_session();
+
+                self.verify(&uri, name)
+            }
             Ok(response) if response.status == 404 => DeleteReply::NotFound,
             Ok(response) if response.status >= 500 => {
                 DeleteReply::Uncertain(scrub(&failure("DELETE failed", &response), &lock.handle))
@@ -511,6 +703,22 @@ impl DeleteBackend for AdtDelete<'_> {
                 self.refuse(&uri, &lock, reason)
             }
         }
+    }
+
+    fn is_include(&mut self, kind: DeleteKind, name: &str) -> bool {
+        if kind != DeleteKind::Prog || self.ensure_session().is_err() {
+            return false;
+        }
+
+        if let Some(target) = self.resolved.get(&name.to_ascii_uppercase()) {
+            return target.is_include();
+        }
+
+        matches!(self.resolve_prog(name), Ok(Some((target, _))) if target.is_include())
+    }
+
+    fn halted(&self) -> bool {
+        self.open_failure.is_some()
     }
 
     fn reconcile(&mut self, kind: DeleteKind, name: &str) -> Reconcile {
@@ -544,7 +752,7 @@ impl AdtDelete<'_> {
         request
             .headers
             .insert("Accept".to_owned(), LOCK_ACCEPT.to_owned());
-        let response = self.transport.request(request).map_err(|error| {
+        let response = self.active().request(request).map_err(|error| {
             if error.was_sent() {
                 DeleteReply::Rejected(format!(
                     "lock request unanswered: {error}; {LOCK_MAY_REMAIN}"

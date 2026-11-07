@@ -5,7 +5,9 @@
 //! parameter is refused. Pure logic with no platform dependency.
 
 use super::Request;
-use crate::adt::{ActivationBody, ObjectRef, classify_activation, parse_object_refs};
+use crate::adt::{
+    ActivationBody, ObjectRef, USAGE_REQUEST_XML, classify_activation, parse_object_refs,
+};
 use crate::operation::read_table::validate_preview_body;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -23,6 +25,10 @@ const GROUPS: &str = "/sap/bc/adt/functions/groups";
 const CLASSES: &str = "/sap/bc/adt/oo/classes";
 const INTERFACES: &str = "/sap/bc/adt/oo/interfaces";
 const PROGRAMS: &str = "/sap/bc/adt/programs/programs";
+const PROGRAM_INCLUDES: &str = "/sap/bc/adt/programs/includes";
+const PROGRAM_VALIDATION: &str = "/sap/bc/adt/programs/validation";
+/// The only `context` an include request carries: the encoded URI prefix of a main program.
+const CONTEXT_PREFIX: &str = "context=%2Fsap%2Fbc%2Fadt%2Fprograms%2Fprograms%2F";
 const DATA_PREVIEW: &str = "/sap/bc/adt/datapreview/ddic";
 /// The row limit of the 740 data preview.
 const MAX_PREVIEW_ROWS: u32 = 5000;
@@ -43,6 +49,8 @@ enum Kind {
     Func,
     Clas,
     Intf,
+    /// A program include; its activation always names a main program.
+    Incl,
     /// A function group: readable as metadata, locked only for a delete, never written.
     Group,
 }
@@ -57,6 +65,8 @@ enum Part {
     IncludeSource,
     IncludeVersions,
     Structure,
+    /// `GET <include>/mainprograms`, the master programs of an include.
+    MainPrograms,
 }
 
 struct Path {
@@ -122,7 +132,7 @@ impl Admission {
         let [reference] = references.as_slice() else {
             return false;
         };
-        let Some(parsed) = parse_path(&reference.uri) else {
+        let Some(parsed) = activation_target(reference) else {
             return false;
         };
 
@@ -194,6 +204,188 @@ pub fn is_delete_request(request: &Request) -> bool {
     request.method == "DELETE" && !request.uri.contains('#') && is_delete(path, query)
 }
 
+/// The object an activation reference names. An include is only ever activated with its main
+/// program as context, so its reference carries `?context=` and nothing else; every other kind
+/// has no query and no `context` anywhere in its reference.
+fn activation_target(reference: &ObjectRef) -> Option<Path> {
+    if reference
+        .parent_uri
+        .as_deref()
+        .is_some_and(has_query_marker)
+    {
+        return None;
+    }
+
+    match split_query(&reference.uri) {
+        (path, Some(query)) => {
+            let parsed = parse_path(path)?;
+
+            (parsed.kind == Kind::Incl
+                && parsed.part == Part::Object
+                && reference.parent_uri.is_none()
+                && is_context(query))
+            .then_some(parsed)
+        }
+        (path, None) => parse_path(path).filter(|parsed| parsed.kind != Kind::Incl),
+    }
+}
+
+/// `context=<encoded /sap/bc/adt/programs/programs/<name>>`, the only query of a body URI.
+fn is_context(query: &str) -> bool {
+    query
+        .strip_prefix(CONTEXT_PREFIX)
+        .is_some_and(|name| is_name(name, false))
+}
+
+/// Whether `text` holds a query or fragment delimiter, raw or percent-encoded. An object name
+/// that merely contains the word "context" is not a marker.
+fn has_query_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+
+    ["?", "#", "%3f", "%23"]
+        .iter()
+        .any(|mark| lower.contains(mark))
+}
+
+fn mentions_context(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("context")
+}
+
+/// A checkrun body names objects by URI. Its `checkObject` of an include may carry the main
+/// program as `?context=`; no other URI of the body may carry a query, a fragment or a context,
+/// whichever element holds it. A body without any such URI is judged as before.
+fn is_checkrun_body(body: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(body) else {
+        return !mentions_context(&String::from_utf8_lossy(body));
+    };
+
+    if body.is_empty() {
+        return true;
+    }
+
+    let mut reader = Reader::from_str(text);
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                let is_check_object = element.local_name().into_inner() == "checkObject";
+
+                if !attributes_are_clean(&element, is_check_object) {
+                    return false;
+                }
+            }
+            Ok(Event::Eof) => return true,
+            Ok(_) => {}
+            Err(_) => return !mentions_context(text),
+        }
+    }
+}
+
+/// Whether no `uri` attribute of the element carries a query, fragment or context except the
+/// contextual include URI of a `checkObject`.
+fn attributes_are_clean(element: &BytesStart<'_>, is_check_object: bool) -> bool {
+    for attribute in element.attributes() {
+        let Ok(attribute) = attribute else {
+            return false;
+        };
+        let Ok(value) = attribute.normalized_value(quick_xml::XmlVersion::Implicit1_0) else {
+            return false;
+        };
+        let is_uri = attribute.key.local_name().into_inner() == "uri";
+
+        if !has_query_marker(&value) {
+            continue;
+        }
+
+        if !(is_uri && is_check_object && is_contextual_include(&value)) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// `<include>?context=<main program>`, the URI of an include checked or activated with context.
+fn is_contextual_include(uri: &str) -> bool {
+    let (path, query) = split_query(uri);
+
+    parse_path(path).is_some_and(|parsed| parsed.kind == Kind::Incl && parsed.part == Part::Object)
+        && query.is_some_and(is_context)
+}
+
+/// The create body of a program or include names the endpoint's own object type and, for an
+/// include, no container: the parent is bound later. The other collections are not inspected.
+fn is_create_body(path: &str, body: &[u8]) -> bool {
+    let (root, object_type) = match path {
+        PROGRAMS => ("abapProgram", "PROG/P"),
+        PROGRAM_INCLUDES => ("abapInclude", "PROG/I"),
+        _ => return true,
+    };
+    let Ok(text) = std::str::from_utf8(body) else {
+        return false;
+    };
+    let mut reader = Reader::from_str(text);
+    let mut root_seen = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                if root_seen {
+                    if element.local_name().into_inner() == "containerRef" {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                root_seen = true;
+
+                if element.local_name().into_inner() != root || !has_type(&element, object_type) {
+                    return false;
+                }
+            }
+            Ok(Event::Eof) => return root_seen,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+}
+
+fn has_type(element: &BytesStart<'_>, expected: &str) -> bool {
+    element.attributes().flatten().any(|attribute| {
+        attribute.key.local_name().into_inner() == "type"
+            && attribute
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .is_ok_and(|value| value == expected)
+    })
+}
+
+/// `objname=<n>&packagename=<p>&description=<t>&objtype=PROG/P|PROG/I`, the order and the raw
+/// object type the recorded exchanges used; the answer is informational and never a guard.
+fn is_program_validation(query: &str) -> bool {
+    let mut parts = query.split('&');
+    let (Some(name), Some(package), Some(text), Some(object_type), None) = (
+        parts.next().and_then(|part| part.strip_prefix("objname=")),
+        parts
+            .next()
+            .and_then(|part| part.strip_prefix("packagename=")),
+        parts
+            .next()
+            .and_then(|part| part.strip_prefix("description=")),
+        parts.next().and_then(|part| part.strip_prefix("objtype=")),
+        parts.next(),
+    ) else {
+        return false;
+    };
+
+    !name.is_empty()
+        && is_encoded(name)
+        && !package.is_empty()
+        && is_encoded(package)
+        && is_encoded(text)
+        && matches!(object_type, "PROG/P" | "PROG/I")
+}
+
 fn split_query(uri: &str) -> (&str, Option<&str>) {
     match uri.split_once('?') {
         Some((path, query)) => (path, Some(query)),
@@ -216,7 +408,7 @@ fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
 
     match (parsed.part, query) {
         (Part::Source | Part::IncludeSource, Some("version=active" | "version=inactive")) => true,
-        (Part::SourceVersions | Part::IncludeVersions, None) => true,
+        (Part::SourceVersions | Part::IncludeVersions | Part::MainPrograms, None) => true,
         (Part::Structure, Some(OBJECT_STRUCTURE)) => true,
         // The metadata the create reconciliation and the group package lookup read, and the
         // read that proves a delete (404 from a fresh session).
@@ -254,7 +446,7 @@ fn is_put(path: &str, query: Option<&str>) -> bool {
 
 fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> bool {
     if uri == CHECKRUNS {
-        return has_content_type(request, "application/*");
+        return has_content_type(request, "application/*") && is_checkrun_body(&request.body);
     }
 
     if path == DATA_PREVIEW {
@@ -264,7 +456,7 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
     }
 
     if path == USAGE_REFERENCES {
-        return query.is_some_and(is_where_used_object);
+        return query.is_some_and(|query| is_where_used_object(query, &request.body));
     }
 
     if path == NODE_STRUCTURE {
@@ -275,8 +467,12 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
         return query.is_some_and(|query| is_validation(path, query));
     }
 
+    if path == PROGRAM_VALIDATION {
+        return request.body.is_empty() && query.is_some_and(is_program_validation);
+    }
+
     if is_create(path, query) {
-        return has_content_type(request, "application/*");
+        return has_content_type(request, "application/*") && is_create_body(path, &request.body);
     }
 
     let Some(parsed) = parse_path(path) else {
@@ -296,8 +492,8 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
     }
 }
 
-/// `DELETE <object>?lockHandle=<handle>[&corrNr=<request>]`: one object of the five delete kinds,
-/// under its lock, never a part, a collection or another endpoint.
+/// `DELETE <object>?lockHandle=<handle>[&corrNr=<request>]`: one object of the delete kinds
+/// (a program include included), under its lock, never a part, a collection or another endpoint.
 fn is_delete(path: &str, query: Option<&str>) -> bool {
     parse_path(path).is_some_and(|parsed| parsed.part == Part::Object)
         && query.is_some_and(is_lock_and_request)
@@ -378,7 +574,7 @@ fn is_lock_and_request(query: &str) -> bool {
 /// The create `POST` collections; a transportable package adds `?corrNr=<request>`.
 fn is_create(path: &str, query: Option<&str>) -> bool {
     let known = match path {
-        GROUPS | CLASSES | INTERFACES => true,
+        GROUPS | CLASSES | INTERFACES | PROGRAMS | PROGRAM_INCLUDES => true,
         _ => path
             .strip_prefix(GROUPS)
             .and_then(|rest| rest.strip_prefix('/'))
@@ -425,12 +621,21 @@ fn is_validation(path: &str, query: &str) -> bool {
         && is_encoded(text)
 }
 
-/// `uri=<function module>`, the object a where-used request asks for.
-fn is_where_used_object(query: &str) -> bool {
-    query
-        .strip_prefix("uri=")
-        .and_then(parse_path)
-        .is_some_and(|parsed| parsed.kind == Kind::Func && parsed.part == Part::Object)
+/// `uri=<function module>`, the object a where-used request asks for; or a program or include
+/// as `usage_references_uri` emits it, with exactly `USAGE_REQUEST_XML` as the body.
+fn is_where_used_object(query: &str, body: &[u8]) -> bool {
+    let Some(uri) = query.strip_prefix("uri=") else {
+        return false;
+    };
+
+    uri.strip_prefix(PROGRAMS)
+        .or_else(|| uri.strip_prefix(PROGRAM_INCLUDES))
+        .and_then(|rest| rest.strip_prefix('/'))
+        .map_or_else(
+            || parse_path(uri).is_some_and(|p| p.kind == Kind::Func && p.part == Part::Object),
+            // Plain names only: the M1 program rule would admit `$`, `-`, `.` and `%2f`.
+            |name| is_name(name, false) && body == USAGE_REQUEST_XML.as_bytes(),
+        )
 }
 
 /// Splits an ADT path into its object and the part below it. Names are checked as path segments:
@@ -438,6 +643,7 @@ fn is_where_used_object(query: &str) -> bool {
 fn parse_path(path: &str) -> Option<Path> {
     for (prefix, kind) in [
         (PROGRAMS, Kind::Prog),
+        (PROGRAM_INCLUDES, Kind::Incl),
         (CLASSES, Kind::Clas),
         (INTERFACES, Kind::Intf),
     ] {
@@ -496,9 +702,11 @@ fn part_of(kind: Kind, tail: &str) -> Option<Part> {
         (_, "") => Some(Part::Object),
         (Kind::Group, _) => None,
         (_, "/source/main") => Some(Part::Source),
-        (Kind::Prog | Kind::Func | Kind::Intf, "/source/main/versions") => {
+        (Kind::Prog | Kind::Func | Kind::Intf | Kind::Incl, "/source/main/versions") => {
             Some(Part::SourceVersions)
         }
+        (Kind::Incl, "/mainprograms") => Some(Part::MainPrograms),
+        (Kind::Incl, _) => None,
         (Kind::Clas, "/objectstructure") => Some(Part::Structure),
         (Kind::Clas, "/includes") => Some(Part::Includes),
         (Kind::Clas, tail) => {

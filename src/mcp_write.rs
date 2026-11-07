@@ -6,9 +6,9 @@
 //! a passed simulation, and, under `confirm` and always for a delete, the human types the name of
 //! the object into a form. Nothing a client sends, annotations included, stands in for these.
 
-use crate::app::{Attempt, Exit, Factories, Opened, RfcLibraryInfo, route};
-use crate::backend::{BackendKind, Failure, OperationKind};
-use crate::cli::{CreateKind, DeleteTarget, IncludeKind, ObjectKind};
+use crate::app::{Attempt, Exit, Factories, Opened, RfcLibraryInfo, end_session, route};
+use crate::backend::{BackendKind, Failure, OperationKind, Selection};
+use crate::cli::{CreateKind, DeleteTarget, IncludeKind, ObjectKind, Subc};
 use crate::config::{Connection, scrub};
 use crate::domain::{Outcome, Status};
 use crate::hash::local_source_lines;
@@ -18,13 +18,14 @@ use crate::mcp_read::{
 };
 use crate::object::{check_create, check_deploy_options, check_deploy_source};
 use crate::operation::create::{CreateInput, CreateProg};
-use crate::operation::delete::{self, Context, Plan, sha256_hex};
+use crate::operation::delete::{self, Context, DeleteBackend, DeleteReport, Plan, sha256_hex};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::deploy::{
-    CancelFlag, Change, DeployInput, DeployProg, DeployScope, known_lock_handles,
+    CancelFlag, Change, DeployInput, DeployProg, DeployScope, NEW_INCLUDE_WARNING,
+    known_lock_handles,
 };
 use crate::policy::{Confirmer, McpWrite};
-use crate::transport::TransportError;
+use crate::transport::{SadtTransport, TransportError};
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 use std::cell::RefCell;
@@ -84,6 +85,11 @@ pub struct Ticket {
     pub group: Option<String>,
     /// The live hash the simulation read; the write refuses a source that moved on.
     pub base: Option<String>,
+    /// The main program an include was resolved to; the write runs under the same one, so a
+    /// main program that changed since the simulation stops it before the lock.
+    pub main: Option<String>,
+    /// The `W:` line of a new include's first simulation, shown to the human before the write.
+    pub warning: Option<String>,
     /// The size and an excerpt of the change, for the confirmation.
     pub change: Option<Change>,
     /// A delete's objects, with the contents of a group, one line each.
@@ -105,6 +111,8 @@ impl Ticket {
             plan: None,
             group: None,
             base: None,
+            main: None,
+            warning: None,
             change: None,
             listing: Vec::new(),
         }
@@ -438,8 +446,9 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         };
         let fugr = optional(arguments, "fugr")?;
         let create_include = flag(arguments, "create_include")?;
+        let main = optional(arguments, "main")?;
 
-        check_deploy_options(kind, name, include, create_include, fugr)?;
+        check_deploy_options(kind, name, include, create_include, fugr, main)?;
 
         let lines = local_source_lines(source);
 
@@ -452,6 +461,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             ("tr", tr.map(str::to_ascii_uppercase)),
             ("include", include.map(|include| include.token().to_owned())),
             ("fugr", fugr.map(str::to_ascii_uppercase)),
+            ("main", main.map(str::to_ascii_uppercase)),
         ]);
 
         fields.insert("create_include".to_owned(), create_include.to_string());
@@ -471,10 +481,15 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             .as_ref()
             .and_then(|stored| stored.group.clone())
             .or_else(|| fugr.map(str::to_owned));
+        // The execute resolves the main program as the simulation did (a client `main` is checked
+        // again, a listed one is not) and stops before the lock when it is no longer the stored one.
+        let expected_main = stored.as_ref().and_then(|stored| stored.main.as_deref());
         let scope = DeployScope::new(kind)
             .group(group.as_deref())
             .include(include)
             .create_include(create_include)
+            .main(main)
+            .expected_main(expected_main)
             .cancel_before_lock(true);
         let input = DeployInput {
             name: name.to_owned(),
@@ -512,6 +527,13 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                 seen.group = result.group.clone();
                 seen.base = result.base.clone();
                 seen.change = result.change.clone();
+                seen.main = result.main.clone();
+                seen.warning = result
+                    .outcome
+                    .stderr
+                    .lines()
+                    .find(|line| line.starts_with(NEW_INCLUDE_WARNING))
+                    .map(str::to_owned);
 
                 Attempt {
                     outcome: result.outcome,
@@ -528,6 +550,8 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             backend: seen.backend,
             group: seen.group.clone(),
             base: seen.base.clone(),
+            main: seen.main.clone(),
+            warning: seen.warning.clone(),
             change: seen.change.clone(),
             ..ticket
         });
@@ -553,16 +577,22 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         let connection = self.writer(arguments)?;
         let kind = parse::<CreateKind>(
             required(arguments, "type")?,
-            "type must be one of FUGR, FUNC, CLAS, INTF",
+            "type must be one of PROG, FUGR, FUNC, CLAS, INTF",
         )?;
         let name = required(arguments, "name")?;
         let text = required(arguments, "text")?;
         let package = optional(arguments, "package")?;
         let fugr = optional(arguments, "fugr")?;
         let tr = optional(arguments, "tr")?;
+        let subc = match optional(arguments, "subc")? {
+            Some(subc) => Some(parse::<Subc>(subc, "subc must be one of 1, I")?),
+            None => None,
+        };
 
-        check_create(kind, name, text, package, fugr, tr)?;
+        // The MCP create has no FILE: it creates the object and writes no source.
+        check_create(kind, name, text, package, fugr, tr, subc, None, None)?;
 
+        let subc = (kind == CreateKind::Prog).then(|| subc.unwrap_or(Subc::Program));
         let ticket = Ticket::new(
             Operation::Create,
             connection.id.clone(),
@@ -573,6 +603,11 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                 ("package", package.map(str::to_ascii_uppercase)),
                 ("tr", tr.map(str::to_ascii_uppercase)),
                 ("fugr", fugr.map(str::to_ascii_uppercase)),
+                (
+                    "subc",
+                    subc.and_then(|subc| subc.to_possible_value())
+                        .map(|value| value.get_name().to_owned()),
+                ),
             ]),
         );
         let stored = if execute {
@@ -592,6 +627,8 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             group: fugr.map(str::to_owned),
             tr: tr.map(str::to_owned),
             simulate: !execute,
+            subc: subc.unwrap_or(Subc::Program),
+            source: None,
         };
         let explicit = stored.as_ref().and_then(|stored| stored.backend);
         let mut seen = Seen::default();
@@ -656,6 +693,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         let connection = self.writer(arguments)?;
         let targets = targets(arguments)?;
         let tr = optional(arguments, "tr")?;
+
         // The local rules of the batch run before a connection is opened.
         let (rows, normalized_tr) = delete::prepare(&targets, tr)?;
         let mut objects: Vec<String> = rows
@@ -689,12 +727,19 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             None => None,
         };
         let explicit = stored.and_then(|stored| stored.backend);
-        let mut selected = None;
-        let mut report = None;
         let _write = execute.then(|| cancel.hold_write());
         let mut factories = WithCancel {
             inner: self.read.factories(),
             cancel: cancel.clone(),
+        };
+        let mut call = DeleteCall {
+            connection: &connection,
+            targets: &targets,
+            tr,
+            plan: plan.as_ref(),
+            deadline: &deadline,
+            selected: None,
+            report: None,
         };
         let exit = route(
             OperationKind::Delete,
@@ -702,112 +747,11 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             false,
             &connection,
             &mut factories,
-            |transport, selection, cancel, fresh| {
-                selected = Some(selection.backend);
-
-                // The server would answer the LOCK and then refuse the DELETE, so nothing is sent
-                // and the router may try RFC.
-                if transport.stateful_supported() == Some(false) {
-                    let _ = transport.close();
-
-                    return Attempt {
-                        fallback_allowed: true,
-                        ..Attempt::failed(
-                            NO_STATEFUL_SESSION.to_owned(),
-                            Failure::CapabilityUnavailable,
-                        )
-                    };
-                }
-
-                let context = Context {
-                    conn: &connection.id,
-                    user: &connection.user,
-                    policies: &connection.policies,
-                    confirmer: &NoTerminal,
-                };
-                let (result, unsent) = {
-                    let mut backend = AdtDelete::with_cancel(
-                        &mut *transport,
-                        &connection.user,
-                        fresh,
-                        cancel.clone(),
-                    );
-                    let result = match &plan {
-                        Some(plan) => delete::execute_until(
-                            &mut backend,
-                            &context,
-                            &targets,
-                            tr,
-                            plan,
-                            &mut || cancel.is_set() || deadline.passed(),
-                        ),
-                        None => delete::simulate(&mut backend, &context, &targets, tr),
-                    };
-
-                    (result, backend.unsent_failure())
-                };
-
-                // The batch is over and the lock, if any, is reported by the outcome.
-                let _ = transport.close();
-
-                // A read that never left the process and no delete request sent: another backend
-                // may run the whole batch, unless the call was cancelled or ran out of time. A
-                // token pins its backend, so the router refuses there; the report stays for the
-                // per-object results.
-                let fallback = unsent.filter(|_| !cancel.is_set() && !deadline.passed());
-
-                match result {
-                    Ok(done) => {
-                        let outcome = done.outcome.clone();
-
-                        report = Some(done);
-
-                        if let Some((failure, message)) = fallback {
-                            // A simulation that moves on must not leave its results behind: if the
-                            // next backend cannot even open, they would read as SIMULATED_OK.
-                            // Only an execute pinned to this backend keeps them.
-                            if plan.is_none() {
-                                report = None;
-                            }
-
-                            return Attempt {
-                                fallback_allowed: true,
-                                ..Attempt::failed(message, failure)
-                            };
-                        }
-
-                        Attempt {
-                            outcome,
-                            failure: None,
-                            fallback_allowed: false,
-                            detail: None,
-                        }
-                    }
-                    Err(message) => {
-                        report = None;
-
-                        if let Some((failure, message)) = fallback {
-                            return Attempt {
-                                fallback_allowed: true,
-                                ..Attempt::failed(message, failure)
-                            };
-                        }
-
-                        Attempt {
-                            outcome: Outcome {
-                                status: None,
-                                exit: 2,
-                                stdout: String::new(),
-                                stderr: format!("STOP: {message}"),
-                            },
-                            failure: None,
-                            fallback_allowed: false,
-                            detail: None,
-                        }
-                    }
-                }
-            },
+            |transport, selection, cancel, fresh| call.attempt(transport, selection, cancel, fresh),
         );
+        let DeleteCall {
+            selected, report, ..
+        } = call;
 
         drop(factories);
 
@@ -972,7 +916,155 @@ struct Seen {
     status: Option<Status>,
     group: Option<String>,
     base: Option<String>,
+    main: Option<String>,
+    warning: Option<String>,
     change: Option<Change>,
+}
+
+/// One delete call: the batch, the plan of an execute, and what the attempts on the routed
+/// backend leave behind.
+struct DeleteCall<'a> {
+    connection: &'a Connection,
+    targets: &'a [DeleteTarget],
+    tr: Option<&'a str>,
+    plan: Option<&'a Plan>,
+    deadline: &'a Deadline,
+    selected: Option<BackendKind>,
+    report: Option<DeleteReport>,
+}
+
+impl DeleteCall<'_> {
+    /// The simulation, or with a plan the execution that checks it. Between two objects a
+    /// cancellation or the deadline ends the batch; a request in flight is never interrupted.
+    fn run(
+        &self,
+        backend: &mut dyn DeleteBackend,
+        cancel: &CancelFlag,
+    ) -> Result<DeleteReport, String> {
+        let context = Context {
+            conn: &self.connection.id,
+            user: &self.connection.user,
+            policies: &self.connection.policies,
+            confirmer: &NoTerminal,
+        };
+
+        match self.plan {
+            Some(plan) => {
+                delete::execute_until(backend, &context, self.targets, self.tr, plan, &mut || {
+                    cancel.is_set() || self.deadline.passed()
+                })
+            }
+            None => delete::simulate(backend, &context, self.targets, self.tr),
+        }
+    }
+
+    fn attempt(
+        &mut self,
+        transport: &mut dyn SadtTransport,
+        selection: &Selection,
+        cancel: &CancelFlag,
+        fresh: &mut dyn FnMut() -> Opened,
+    ) -> Attempt {
+        self.selected = Some(selection.backend);
+
+        // The server would answer the LOCK and then refuse the DELETE, so nothing is sent
+        // and the router may try RFC.
+        if transport.stateful_supported() == Some(false) {
+            let note = end_session(transport);
+
+            return Attempt {
+                fallback_allowed: true,
+                ..Attempt::failed(
+                    NO_STATEFUL_SESSION.to_owned(),
+                    Failure::CapabilityUnavailable,
+                )
+            }
+            .noted(note);
+        }
+
+        let (result, unsent, fresh_note) = {
+            let mut backend = AdtDelete::with_cancel(
+                &mut *transport,
+                &self.connection.user,
+                fresh,
+                cancel.clone(),
+            );
+            let result = self
+                .run(&mut backend, cancel)
+                .map_err(|message| backend.begin_failure(&message));
+
+            (result, backend.unsent_failure(), backend.close_note())
+        };
+
+        // The batch is over and the lock, if any, is reported by the outcome; a failed
+        // session end is only a note.
+        let note = end_session(transport);
+
+        // A read that never left the process and no delete request sent: another backend
+        // may run the whole batch, unless the call was cancelled or ran out of time. A
+        // token pins its backend, so the router refuses there; the report stays for the
+        // per-object results.
+        let fallback = unsent.filter(|_| !cancel.is_set() && !self.deadline.passed());
+
+        match result {
+            Ok(done) => {
+                let outcome = done.outcome.clone();
+
+                self.report = Some(done);
+
+                if let Some((failure, message)) = fallback {
+                    // A simulation that moves on must not leave its results behind: if the
+                    // next backend cannot even open, they would read as SIMULATED_OK.
+                    // Only an execute pinned to this backend keeps them.
+                    if self.plan.is_none() {
+                        self.report = None;
+                    }
+
+                    return Attempt {
+                        fallback_allowed: true,
+                        ..Attempt::failed(message, failure)
+                    }
+                    .noted(fresh_note)
+                    .noted(note);
+                }
+
+                Attempt {
+                    outcome,
+                    failure: None,
+                    fallback_allowed: false,
+                    detail: None,
+                }
+                .noted(fresh_note)
+                .noted(note)
+            }
+            Err((exit, stderr)) => {
+                self.report = None;
+
+                if let Some((failure, message)) = fallback {
+                    return Attempt {
+                        fallback_allowed: true,
+                        ..Attempt::failed(message, failure)
+                    }
+                    .noted(fresh_note)
+                    .noted(note);
+                }
+
+                Attempt {
+                    outcome: Outcome {
+                        status: None,
+                        exit,
+                        stdout: String::new(),
+                        stderr,
+                    },
+                    failure: None,
+                    fallback_allowed: false,
+                    detail: None,
+                }
+                .noted(fresh_note)
+                .noted(note)
+            }
+        }
+    }
 }
 
 fn listing_of(report: &delete::DeleteReport) -> Vec<String> {
@@ -1058,6 +1150,14 @@ fn sanitize(text: &str, limit: usize) -> String {
     cut
 }
 
+/// The backend a confirmation names: the one the simulation ran on.
+fn backend_text(ticket: &Ticket) -> String {
+    ticket.backend.map_or_else(
+        || "unknown".to_owned(),
+        |backend| backend.token().to_owned(),
+    )
+}
+
 /// What the human sees before a write: where, what, how big, and a bounded excerpt. Every string
 /// that came from SAP or the client is sanitized, and the whole is bounded.
 pub fn confirmation_summary(connection: &Connection, ticket: &Ticket) -> String {
@@ -1066,7 +1166,7 @@ pub fn confirmation_summary(connection: &Connection, ticket: &Ticket) -> String 
         Operation::Create => "CREATE",
         Operation::Delete => "DELETE (permanent)",
     };
-    let backend = ticket.backend.map_or("unknown", BackendKind::token);
+    let backend = backend_text(ticket);
     let mut lines = vec![format!(
         "{what} on {} (SID {}, client {}), backend {backend}",
         sanitize(&connection.id, SUMMARY_LINE),
@@ -1107,12 +1207,31 @@ pub fn confirmation_summary(connection: &Connection, ticket: &Ticket) -> String 
         if let Some(tr) = ticket.fields.get("tr") {
             lines.push(format!("tr: {}", sanitize(tr, SUMMARY_LINE)));
         }
+
+        // A mixed batch runs each object on the backend it was simulated on.
+        if let Some(plan) = ticket.plan.as_ref().filter(|_| ticket.backend.is_some()) {
+            lines.extend(plan.backends.iter().take(SUMMARY_OBJECT_LINES).map(
+                |(kind, name, label)| {
+                    sanitize(&format!("backend {kind}:{name} {label}"), SUMMARY_LINE)
+                },
+            ));
+        }
     } else {
-        for key in ["type", "name", "include", "fugr", "package", "tr", "text"] {
+        for key in [
+            "type", "name", "subc", "include", "fugr", "package", "tr", "text",
+        ] {
             if let Some(value) = ticket.fields.get(key) {
                 lines.push(format!("{key}: {}", sanitize(value, SUMMARY_LINE)));
             }
         }
+
+        if let Some(main) = ticket.fields.get("main").or(ticket.main.as_ref()) {
+            lines.push(format!("main: {}", sanitize(main, SUMMARY_LINE)));
+        }
+    }
+
+    if let Some(warning) = &ticket.warning {
+        lines.push(sanitize(warning, SUMMARY_LINE));
     }
 
     if let Some(change) = &ticket.change {

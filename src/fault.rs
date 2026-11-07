@@ -72,8 +72,8 @@ impl Target {
 pub enum Fault {
     /// The request is sent and executed, then its reply is discarded.
     DropReply(Target),
-    /// The read-only reconciliation GET that follows a create `POST` or a delete whose reply was
-    /// dropped fails without being sent.
+    /// The read-only reconciliation that follows a create `POST` or a delete whose reply was
+    /// dropped (the GET over ADT) fails without being sent.
     FailReconcileRead,
     /// The deploy pauses this many milliseconds right after its LOCK succeeded.
     HoldLock(u64),
@@ -325,6 +325,9 @@ mod tests {
             "drop-reply:put",
             "drop-reply:create",
             "drop-reply:delete",
+            "drop-reply:FUNCTION",
+            "drop-reply:FM",
+            "fail-read:FM",
             "drop-reply:INCLUDE",
             "drop-reply:GET",
             "drop-reply:RECONCILE",

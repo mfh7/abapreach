@@ -28,6 +28,13 @@ pub enum Command {
         #[arg(long)]
         lines: Option<LineRange>,
 
+        /// The main program of a `PROG` include, as `INCLUDE <NAME>.` names it.
+        #[arg(long)]
+        main: Option<String>,
+
+        #[arg(long)]
+        backend: Option<Backend>,
+
         #[arg(long)]
         conn: String,
     },
@@ -57,12 +64,19 @@ pub enum Command {
         #[arg(long)]
         fugr: Option<String>,
 
+        /// The main program of a `PROG` include, as `INCLUDE <NAME>.` names it.
+        #[arg(long)]
+        main: Option<String>,
+
         #[arg(long)]
         conn: String,
     },
     Create {
         kind: CreateKind,
         name: String,
+
+        /// A `PROG` create only: the source a simulate deploy checks after `CREATE: ACTIVE`.
+        file: Option<PathBuf>,
 
         #[arg(long)]
         text: String,
@@ -72,6 +86,10 @@ pub enum Command {
 
         #[arg(long)]
         fugr: Option<String>,
+
+        /// A `PROG` create only: `1` for a program (the default) or `I` for an include.
+        #[arg(long)]
+        subc: Option<Subc>,
 
         #[arg(long)]
         tr: Option<String>,
@@ -181,9 +199,11 @@ pub enum ObjectKind {
     Intf,
 }
 
-/// The object kinds `create` accepts; PROG is not among them.
+/// The object kinds `create` accepts; DDIC, `MSAG`, `TEXT`, `DDLS` and `ENHO` are out of scope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum CreateKind {
+    #[value(name = "PROG")]
+    Prog,
     #[value(name = "FUGR")]
     Fugr,
     #[value(name = "FUNC")]
@@ -192,6 +212,15 @@ pub enum CreateKind {
     Clas,
     #[value(name = "INTF")]
     Intf,
+}
+
+/// `--subc` of a `PROG` create: a program (`1`, the default) or an include (`I`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum Subc {
+    #[value(name = "1")]
+    Program,
+    #[value(name = "I")]
+    Include,
 }
 
 /// A local include of a class: `CCIMP`, `CCDEF`, `CCMAC` or `CCAU`.

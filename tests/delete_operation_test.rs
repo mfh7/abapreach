@@ -8,7 +8,7 @@ use abapreach::operation::delete::{
     Plan, Reconcile, SourceFact, TrLock, execute, execute_until, run, simulate,
 };
 use abapreach::policy::{Confirmer, ForeignInactive, Policies};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 struct Yes(bool);
 
@@ -30,9 +30,17 @@ struct Fake {
     inspected: Vec<String>,
     deleted: Vec<(String, Option<String>)>,
     reconciled: Vec<String>,
+    includes: BTreeSet<String>,
+    include_asked: Vec<String>,
 }
 
 impl Fake {
+    fn include(mut self, name: &str) -> Self {
+        self.includes.insert(name.to_owned());
+
+        self
+    }
+
     fn with(mut self, name: &str, facts: ObjectFacts) -> Self {
         self.facts.insert(name.to_owned(), Some(facts));
 
@@ -74,6 +82,12 @@ impl DeleteBackend for Fake {
             .get(name)
             .cloned()
             .unwrap_or(DeleteReply::Deleted)
+    }
+
+    fn is_include(&mut self, _kind: DeleteKind, name: &str) -> bool {
+        self.include_asked.push(name.to_owned());
+
+        self.includes.contains(name)
     }
 
     fn reconcile(&mut self, _kind: DeleteKind, name: &str) -> Reconcile {
@@ -1321,4 +1335,168 @@ fn adt_simulation_does_not_claim_a_transport_ownership_guard() {
     let report = sim(&mut fake, &["PROG:ZP"], None);
 
     assert!(!report.outcome.stdout.contains("TR ownership"));
+}
+
+// ---------- program includes ----------
+
+fn position(text: &str, needle: &str) -> usize {
+    text.find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} not in {text:?}"))
+}
+
+#[test]
+fn a_program_is_deleted_before_an_include_in_a_mixed_batch() {
+    let mut fake = Fake::default().include("ZINC");
+    let report = sim(&mut fake, &["PROG:ZINC", "PROG:ZPROG"], None);
+    let out = &report.outcome.stdout;
+
+    assert!(position(out, "== PROG ZPROG ==") < position(out, "== PROG ZINC =="));
+    assert_eq!(
+        plan_of(&report)
+            .objects
+            .iter()
+            .map(|(_, name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["ZPROG", "ZINC"]
+    );
+
+    let plan = plan_of(&report);
+    let real = exec(&mut fake, &["PROG:ZINC", "PROG:ZPROG"], None, &plan);
+
+    assert_eq!(real.outcome.exit, 0);
+    assert_eq!(fake.names_deleted(), ["ZPROG", "ZINC"]);
+}
+
+#[test]
+fn includes_follow_the_programs_but_the_kind_order_is_kept() {
+    let mut fake = Fake::default().include("ZINC");
+    let report = sim(
+        &mut fake,
+        &["PROG:ZINC", "PROG:ZPROG", "CLAS:ZCL_A", "FUGR:ZFG"],
+        None,
+    );
+    let owned: Vec<String> = plan_of(&report)
+        .objects
+        .iter()
+        .map(|(_, name, _)| name.clone())
+        .collect();
+
+    assert_eq!(owned, ["ZCL_A", "ZPROG", "ZINC", "ZFG"]);
+}
+
+#[test]
+fn two_programs_keep_their_given_order() {
+    let mut fake = Fake::default();
+    let report = sim(&mut fake, &["PROG:ZB", "PROG:ZA"], None);
+
+    assert_eq!(
+        plan_of(&report)
+            .objects
+            .iter()
+            .map(|(_, name, _)| name.clone())
+            .collect::<Vec<_>>(),
+        ["ZB", "ZA"]
+    );
+}
+
+#[test]
+fn a_single_program_asks_nothing_about_includes() {
+    let mut fake = Fake::default();
+
+    sim(&mut fake, &["PROG:ZPROG", "CLAS:ZCL_A"], None);
+
+    assert!(fake.include_asked.is_empty());
+}
+
+#[test]
+fn a_referenced_include_is_rejected_and_the_batch_continues() {
+    let referenced = "DELETE failed: HTTP 403: Program ZINC is referenced in other programs";
+    let mut fake = Fake::default()
+        .include("ZINC")
+        .reply("ZINC", DeleteReply::Rejected(referenced.to_owned()));
+    let texts = ["PROG:ZINC", "PROG:ZPROG", "CLAS:ZCL_A"];
+    let plan = plan_of(&sim(&mut fake, &texts, None));
+    let report = exec(&mut fake, &texts, None, &plan);
+
+    assert_eq!(status_of(&report, "ZINC"), DeleteStatus::Rejected);
+    assert_eq!(reason_of(&report, "ZINC"), referenced);
+    assert_eq!(status_of(&report, "ZPROG"), DeleteStatus::Deleted);
+    assert_eq!(status_of(&report, "ZCL_A"), DeleteStatus::Deleted);
+    assert_eq!(report.outcome.exit, 1);
+    assert_eq!(fake.names_deleted(), ["ZCL_A", "ZPROG", "ZINC"]);
+}
+
+#[test]
+fn an_include_source_change_changes_the_hash_and_rejects_the_old_plan() {
+    let include = |lines: &[&str]| ObjectFacts {
+        sources: vec![SourceFact::active("MAIN", lines)],
+        ..facts_of("ZINC")
+    };
+    let mut before = Fake::default().with("ZINC", include(&["WRITE 1."]));
+    let plan = plan_of(&sim(&mut before, &["PROG:ZINC"], None));
+    let mut after = Fake::default().with("ZINC", include(&["WRITE 1.", "WRITE 2."]));
+    let changed = plan_of(&sim(&mut after, &["PROG:ZINC"], None));
+
+    assert_ne!(plan.objects[0].2, changed.objects[0].2);
+
+    let report = exec(&mut after, &["PROG:ZINC"], None, &plan);
+
+    assert_eq!(status_of(&report, "ZINC"), DeleteStatus::Rejected);
+    assert_eq!(
+        reason_of(&report, "ZINC"),
+        "Plan changed since simulate; simulate again"
+    );
+    assert!(after.deleted.is_empty());
+}
+
+#[test]
+fn an_include_without_an_active_source_is_no_active() {
+    let absent = ObjectFacts {
+        sources: vec![SourceFact::no_active("MAIN")],
+        ..facts_of("ZINC")
+    };
+    let mut plain = Fake::default();
+    let mut never_active = Fake::default().with("ZINC", absent);
+    let first = plan_of(&sim(&mut plain, &["PROG:ZINC"], None));
+    let report = sim(&mut never_active, &["PROG:ZINC"], None);
+
+    assert_ne!(first.objects[0].2, plan_of(&report).objects[0].2);
+    assert!(report.outcome.stdout.contains("SOURCE MAIN NO_ACTIVE"));
+}
+
+#[test]
+fn where_used_lines_name_programs_transactions_and_warnings() {
+    let used = |entries: &[&str]| {
+        let mut fake = Fake::default().with(
+            "ZP",
+            ObjectFacts {
+                where_used: entries.iter().map(|entry| (*entry).to_owned()).collect(),
+                ..facts_of("ZP")
+            },
+        );
+
+        sim(&mut fake, &["PROG:ZP"], None)
+    };
+    let report = used(&["PROG/P ZCALLER", "TRAN ZTRAN"]);
+    let out = &report.outcome.stdout;
+
+    assert!(out.contains("\nWHERE-USED: PROG/P ZCALLER\n"));
+    assert!(out.contains("\nWHERE-USED TRAN ZTRAN\n"));
+    assert!(!out.contains("WHERE-USED: TRAN"));
+
+    let failed = used(&["W: where-used unavailable: HTTP 500"]);
+
+    assert!(
+        failed
+            .outcome
+            .stdout
+            .contains("\nW: where-used unavailable: HTTP 500\n")
+    );
+    assert!(!failed.outcome.stdout.contains("WHERE-USED:"));
+    assert_eq!(failed.outcome.exit, 0, "a failed lookup never blocks");
+    assert_eq!(
+        plan_of(&used(&[])).objects,
+        plan_of(&used(&["TRAN ZTRAN", "PROG/P ZCALLER"])).objects,
+        "where-used is never hashed"
+    );
 }

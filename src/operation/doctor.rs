@@ -1,4 +1,4 @@
-use crate::app::{Factories, RfcLibraryInfo};
+use crate::app::{Factories, RfcLibraryInfo, end_session};
 use crate::config::{Connection, LocalCredentialsPermission, tls_warning};
 use crate::transport::Request;
 use crate::transport::rfc::identity_report;
@@ -84,10 +84,13 @@ impl Doctor {
         }
 
         // The application server host is as internal as a route host, so it is never printed.
-        lines.push(format!(
-            "RFC SADT configured: {HOST_MASK} system {}",
-            connection.rfc.sysnr
-        ));
+        match &connection.rfc {
+            Some(rfc) => lines.push(format!(
+                "RFC SADT configured: {HOST_MASK} system {}",
+                rfc.sysnr
+            )),
+            None => lines.push("RFC SADT: not configured".to_owned()),
+        }
 
         // The route may carry a `/W/<password>`, so only its source is ever printed.
         if let Some(source) = connection.saprouter_source {
@@ -100,45 +103,61 @@ impl Doctor {
         let mut stateful = None;
 
         match connection.adt {
-            Some(_) => match adt_probe(connection, factories) {
-                Ok(probe) => {
-                    adt_passed = true;
-                    lines.push(format!("ADT HTTP probe: ok (HTTP {})", probe.status));
+            Some(_) => {
+                let (probe, close_note) = adt_probe(connection, factories);
 
-                    if let Some(supported) = probe.stateful {
-                        stateful = Some(supported);
-                        lines.push(if supported {
-                            "ADT HTTP stateful session: ok".to_owned()
-                        } else {
-                            "ADT HTTP stateful session: unavailable (no sap-contextid)".to_owned()
-                        });
+                match probe {
+                    Ok(probe) => {
+                        adt_passed = true;
+                        lines.push(format!("ADT HTTP probe: ok (HTTP {})", probe.status));
+
+                        if let Some(supported) = probe.stateful {
+                            stateful = Some(supported);
+                            lines.push(if supported {
+                                "ADT HTTP stateful session: ok".to_owned()
+                            } else {
+                                "ADT HTTP stateful session: unavailable (no sap-contextid)"
+                                    .to_owned()
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        passed = false;
+                        lines.push(format!("ADT HTTP probe: failed: {error}"));
                     }
                 }
-                Err(error) => {
-                    passed = false;
-                    lines.push(format!("ADT HTTP probe: failed: {error}"));
-                }
-            },
+
+                lines.extend(close_note);
+            }
             None => lines.push("ADT HTTP probe: not run (ADT not configured)".to_owned()),
         }
 
-        // A ping needs the library, so a missing library skips (never fails) the ping probe.
-        let library_found = match factories.rfc_library(connection) {
-            Ok(info) => {
-                lines.push(format!("RFC library: {}", library_line(&info)));
-                lines.extend(info.notes);
+        // A ping needs the library, so a missing library skips (never fails) the ping probe. An
+        // ADT-only connection has no RFC to probe at all.
+        let library_found = if connection.rfc.is_none() {
+            lines.push("RFC library: not run (no RFC)".to_owned());
 
-                true
-            }
-            Err(error) => {
-                passed = false;
-                lines.push(format!("RFC library: not found: {error}"));
+            false
+        } else {
+            match factories.rfc_library(connection) {
+                Ok(info) => {
+                    lines.push(format!("RFC library: {}", library_line(&info)));
+                    lines.extend(info.notes);
 
-                false
+                    true
+                }
+                Err(error) => {
+                    passed = false;
+                    lines.push(format!("RFC library: not found: {error}"));
+
+                    false
+                }
             }
         };
 
-        if library_found {
+        if connection.rfc.is_none() {
+            lines.push("RFC SADT probe: not run (no RFC)".to_owned());
+        } else if library_found {
             match factories.rfc_ping(connection) {
                 Ok(()) => {
                     rfc_passed = true;
@@ -196,23 +215,31 @@ fn capability(backends: &[Option<&str>]) -> String {
     }
 }
 
-/// One discovery request on its own session; a read holds no lock, so a failed close changes
-/// nothing here.
-fn adt_probe(connection: &Connection, factories: &mut dyn Factories) -> Result<AdtProbe, String> {
-    let mut transport = factories
-        .adt(connection)
-        .map_err(|error| error.to_string())?;
+/// One discovery request on its own session. A read holds no lock, so a failed close is only the
+/// `W:` line returned beside the result.
+fn adt_probe(
+    connection: &Connection,
+    factories: &mut dyn Factories,
+) -> (Result<AdtProbe, String>, Option<String>) {
+    let mut transport = match factories.adt(connection) {
+        Ok(transport) => transport,
+        Err(error) => return (Err(error.to_string()), None),
+    };
     let response = transport.request(Request::get(DISCOVERY_URI));
     let stateful = transport.stateful_supported();
-    let _ = transport.close();
-    let response = response.map_err(|error| error.to_string())?;
+    let note = end_session(transport.as_mut());
+    let probe = response
+        .map_err(|error| error.to_string())
+        .and_then(|response| {
+            if response.status == 200 {
+                Ok(AdtProbe {
+                    status: response.status,
+                    stateful,
+                })
+            } else {
+                Err(format!("HTTP {}", response.status))
+            }
+        });
 
-    if response.status != 200 {
-        return Err(format!("HTTP {}", response.status));
-    }
-
-    Ok(AdtProbe {
-        status: response.status,
-        stateful,
-    })
+    (probe, note)
 }

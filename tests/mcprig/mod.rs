@@ -8,6 +8,7 @@ use abapreach::mcp::{Answer, Form, Session, ToolHandler, ToolResult};
 use abapreach::mcp_read::ReadTools;
 use abapreach::mcp_write::{Limits, McpTools, TokenGate};
 use abapreach::operation::deploy::CancelFlag;
+use abapreach::transport::http::HttpTransport;
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use abapreach::{Factories, RfcLibraryInfo};
 use serde_json::{Map, Value, json};
@@ -376,6 +377,11 @@ pub fn prog_reads(requests: &Log, responsible: &str) -> Script {
             200,
             "<feed xmlns=\"http://www.w3.org/2005/Atom\"/>",
         )
+        .post(
+            &abapreach::adt::usage_references_uri(PROG),
+            200,
+            "<usageReferences:usageReferenceResult xmlns:usageReferences=\"u\"/>",
+        )
 }
 
 /// Logs every request of `inner` as `METHOD uri` into `log` and lets it answer.
@@ -393,4 +399,39 @@ pub fn recording<T: SadtTransport>(inner: T, log: &Log) -> Hooked<T> {
 
 pub fn any(log: &Log, needle: &str) -> bool {
     log.borrow().iter().any(|line| line.contains(needle))
+}
+
+pub const LOGOFF_URI: &str = "/sap/public/bc/icf/logoff";
+
+/// Gives every reply of `inner` the context cookie of a stateful ADT session.
+pub struct Cookied<T>(pub T);
+
+impl<T: SadtTransport> SadtTransport for Cookied<T> {
+    fn request(&mut self, request: Request) -> Reply {
+        self.0.request(request).map(|mut response| {
+            response.headers.insert(
+                "Set-Cookie".to_owned(),
+                "SAP_SESSIONID_DEV_100=s1; path=/; sap-contextid=ctx".to_owned(),
+            );
+
+            response
+        })
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.0.close()
+    }
+}
+
+/// A real `HttpTransport` whose network is `inner`, so the logoff it sends reaches `inner`.
+pub fn http(inner: impl SadtTransport + 'static) -> HttpTransport {
+    HttpTransport::wrapping(Cookied(inner))
+}
+
+/// How many logoff requests the log holds.
+pub fn logoffs(log: &Log) -> usize {
+    log.borrow()
+        .iter()
+        .filter(|line| line.starts_with(&format!("GET {LOGOFF_URI}")))
+        .count()
 }

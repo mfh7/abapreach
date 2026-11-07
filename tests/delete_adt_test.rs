@@ -7,6 +7,7 @@ use abapreach::operation::delete::{
     DeleteBackend, DeleteReply, InactiveFact, ObjectFacts, Reconcile, TrLock,
 };
 use abapreach::operation::delete_adt::AdtDelete;
+use abapreach::transport::rfc::{FakeRfcApi, RfcTransport};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -35,6 +36,10 @@ struct Fake {
     calls: Calls,
     closes: Rc<RefCell<usize>>,
     stateful: Option<bool>,
+    /// Every request after a 2xx DELETE answers 500, as a session that SAP dumped.
+    dies_after_delete: bool,
+    dead: bool,
+    close_fails: bool,
 }
 
 impl Fake {
@@ -71,6 +76,18 @@ impl Fake {
         self
     }
 
+    fn dies_after_delete(mut self) -> Self {
+        self.dies_after_delete = true;
+
+        self
+    }
+
+    fn close_fails(mut self) -> Self {
+        self.close_fails = true;
+
+        self
+    }
+
     fn lock(self, uri: &str, local: bool, corrnr: &str) -> Self {
         self.lock_by(uri, local, corrnr, "")
     }
@@ -88,7 +105,12 @@ impl SadtTransport for Fake {
     fn request(&mut self, request: Request) -> Reply {
         self.calls.borrow_mut().push(request.clone());
 
-        self.rules
+        if self.dead {
+            return Ok(Response::text(500, "<exc>session dumped</exc>"));
+        }
+
+        let reply = self
+            .rules
             .iter_mut()
             .find(|(method, uri, _)| *method == request.method && *uri == request.uri)
             .and_then(|(_, _, replies)| replies.pop_front())
@@ -97,11 +119,26 @@ impl SadtTransport for Fake {
                     "unscripted {} {}",
                     request.method, request.uri
                 )))
-            })
+            });
+
+        if self.dies_after_delete
+            && request.method == "DELETE"
+            && matches!(&reply, Ok(response) if (200..300).contains(&response.status))
+        {
+            self.dead = true;
+        }
+
+        reply
     }
 
     fn close(&mut self) -> Result<(), TransportError> {
         *self.closes.borrow_mut() += 1;
+
+        if self.close_fails {
+            return Err(TransportError::PreSendConnectivity(
+                "logoff refused".to_owned(),
+            ));
+        }
 
         Ok(())
     }
@@ -155,6 +192,29 @@ fn count(calls: &Calls, method: &str) -> usize {
         .count()
 }
 
+/// A scripted ADT behind the RFC-SADT request boundary: every request must pass the same
+/// admission the RFC transport applies before the script sees it.
+struct Gated {
+    gate: RfcTransport<FakeRfcApi>,
+    inner: Fake,
+}
+
+impl SadtTransport for Gated {
+    fn request(&mut self, request: Request) -> Reply {
+        self.gate.request(request.clone())?;
+
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        self.gate.stateful_supported()
+    }
+}
+
 /// Runs `body` with a backend on `main`; `fresh` are the transports a new session opens.
 fn with_backend<T>(
     main: Fake,
@@ -195,6 +255,14 @@ fn facts(result: Result<Option<ObjectFacts>, String>) -> ObjectFacts {
 // ---- inspect ---------------------------------------------------------------------------------
 
 fn prog_reads(package: &str) -> Fake {
+    prog_reads_without_usage(package).post(
+        &abapreach::adt::usage_references_uri(PROG),
+        200,
+        "<usageReferences:usageReferenceResult xmlns:usageReferences=\"u\"/>",
+    )
+}
+
+fn prog_reads_without_usage(package: &str) -> Fake {
     Fake::default()
         .get(PROG, 200, &metadata(package, "OWNER"))
         .get(
@@ -234,10 +302,17 @@ fn a_local_program_reads_package_author_source_and_no_inactive_version() {
         [
             format!("GET {PROG}"),
             format!("GET {PROG}/source/main?version=active"),
+            format!("POST {}", abapreach::adt::usage_references_uri(PROG)),
             format!("GET {PROG}/source/main/versions"),
         ]
     );
-    assert!(calls.borrow().iter().all(|call| call.method == "GET"));
+    // The usage search is the only POST; it changes nothing on the server.
+    assert!(
+        calls
+            .borrow()
+            .iter()
+            .all(|call| call.method == "GET" || call.uri.contains("/usageReferences?"))
+    );
 }
 
 #[test]
@@ -247,12 +322,19 @@ fn a_transportable_package_is_not_locked_until_the_delete_asks_for_the_lock() {
     });
 
     assert_eq!(facts(result).tr, TrLock::Unlocked);
-    assert_eq!(count(&calls, "POST"), 0);
+    assert!(
+        calls
+            .borrow()
+            .iter()
+            .all(|call| !call.uri.contains("_action=LOCK")),
+        "inspect never locks"
+    );
 }
 
 #[test]
 fn an_absent_object_is_none_and_an_unreadable_one_is_an_error() {
-    let (result, _, _) = with_backend(gone(PROG), vec![], |backend| {
+    let neither = gone(PROG).get("/sap/bc/adt/programs/includes/zprog", 404, "<exc/>");
+    let (result, _, _) = with_backend(neither, vec![], |backend| {
         backend.inspect(DeleteKind::Prog, "ZPROG")
     });
 
@@ -1147,4 +1229,837 @@ fn a_function_module_is_reconciled_by_its_own_uri() {
 
     assert_eq!(outcome, Reconcile::Gone);
     assert_eq!(uris(&fresh[0]), [format!("GET {FM}")]);
+}
+
+// ---- program includes ------------------------------------------------------------------------
+
+const INCL: &str = "/sap/bc/adt/programs/includes/zinc";
+/// The program URI of the include's name: the first place resolution asks.
+const INCL_AS_PROG: &str = "/sap/bc/adt/programs/programs/zinc";
+const USAGE_TRAN: &str = include_str!("fixtures/m5/usage-references-tran-hd1.xml");
+const INCL_LOCK: &str = include_str!("fixtures/m5/include-lock-hd1-transportable.xml");
+
+fn usage_with(callers: &[(&str, &str)]) -> String {
+    let objects: String = callers
+        .iter()
+        .map(|(kind, name)| {
+            format!(
+                "<usageReferences:referencedObject><usageReferences:adtObject \
+                 adtcore:name=\"{name}\" adtcore:type=\"{kind}\" \
+                 xmlns:adtcore=\"http://www.sap.com/adt/core\"/>\
+                 </usageReferences:referencedObject>"
+            )
+        })
+        .collect();
+
+    format!(
+        "<usageReferences:usageReferenceResult xmlns:usageReferences=\"u\">\
+         <usageReferences:referencedObjects>{objects}</usageReferences:referencedObjects>\
+         </usageReferences:usageReferenceResult>"
+    )
+}
+
+fn usage_of(uri: &str) -> String {
+    abapreach::adt::usage_references_uri(uri)
+}
+
+/// The reads of an include `ZINC`: resolution, properties, active source, versions, usage.
+fn incl_reads(package: &str, usage: &str) -> Fake {
+    Fake::default()
+        .get(INCL_AS_PROG, 404, "<exc/>")
+        .get(INCL, 200, &metadata(package, "OWNER"))
+        .get(
+            &format!("{INCL}/source/main?version=active"),
+            200,
+            "WRITE 1.",
+        )
+        .get(
+            &format!("{INCL}/source/main/versions"),
+            200,
+            &feed(&[("00000", "OWNER")]),
+        )
+        .post(&usage_of(INCL), 200, usage)
+}
+
+#[test]
+fn an_include_resolves_to_its_own_uri_and_reads_source_versions_and_callers() {
+    let usage = usage_with(&[("PROG/P", "ZPROG"), ("DEVC/K", "$TMP")]);
+    let (result, calls, _) = with_backend(incl_reads("$TMP", &usage), vec![], |backend| {
+        backend.inspect(DeleteKind::Prog, "ZINC")
+    });
+    let facts = facts(result);
+
+    assert_eq!(facts.package, "$TMP");
+    assert_eq!(facts.tr, TrLock::Local);
+    assert_eq!(facts.sources.len(), 1);
+    assert_eq!(facts.sources[0].label, "MAIN");
+    assert_eq!(
+        facts.sources[0].active.as_deref(),
+        Some(&["WRITE 1.".to_owned()][..])
+    );
+    assert_eq!(facts.where_used, ["PROG/P ZPROG"]);
+    assert_eq!(
+        uris(&calls),
+        [
+            format!("GET {INCL_AS_PROG}"),
+            format!("GET {INCL}"),
+            format!("GET {INCL}/source/main?version=active"),
+            format!("POST {}", usage_of(INCL)),
+            format!("GET {INCL}/source/main/versions"),
+        ]
+    );
+}
+
+#[test]
+fn an_include_that_neither_uri_knows_is_none_and_a_failed_resolution_is_an_error() {
+    let both = Fake::default()
+        .get(INCL_AS_PROG, 404, "<exc/>")
+        .get(INCL, 404, "<exc/>");
+    let (result, _, _) = with_backend(both, vec![], |backend| {
+        backend.inspect(DeleteKind::Prog, "ZINC")
+    });
+
+    assert_eq!(result, Ok(None));
+
+    let broken = Fake::default()
+        .get(INCL_AS_PROG, 404, "<exc/>")
+        .get(INCL, 500, "<exc/>");
+    let (result, _, _) = with_backend(broken, vec![], |backend| {
+        backend.inspect(DeleteKind::Prog, "ZINC")
+    });
+
+    assert_eq!(result.unwrap_err(), "HTTP 500");
+}
+
+#[test]
+fn an_include_without_an_active_source_is_no_active_here_too() {
+    let main = Fake::default()
+        .get(INCL_AS_PROG, 404, "<exc/>")
+        .get(INCL, 200, &metadata("$TMP", "OWNER"))
+        .get(&format!("{INCL}/source/main?version=active"), 404, "<exc/>")
+        .get(
+            &format!("{INCL}/source/main/versions"),
+            200,
+            &feed(&[("99999", "OWNER")]),
+        )
+        .post(&usage_of(INCL), 200, &usage_with(&[]));
+    let (result, _, _) = with_backend(main, vec![], |backend| {
+        backend.inspect(DeleteKind::Prog, "ZINC")
+    });
+    let facts = facts(result);
+
+    assert_eq!(facts.sources[0].active, None);
+    assert_eq!(facts.inactive, InactiveFact::Owned("OWNER".to_owned()));
+}
+
+fn prog_with_usage(usage: Fake) -> Fake {
+    let mut main = prog_reads_without_usage("$TMP");
+
+    main.rules.extend(usage.rules);
+
+    main
+}
+
+fn prog_where_used(answer: Fake) -> Result<Option<ObjectFacts>, String> {
+    with_backend(prog_with_usage(answer), vec![], |backend| {
+        backend.inspect(DeleteKind::Prog, "ZPROG")
+    })
+    .0
+}
+
+#[test]
+fn a_program_reports_the_transaction_of_the_recorded_usage_answer() {
+    let answer = Fake::default().post(&usage_of(PROG), 200, USAGE_TRAN);
+
+    assert_eq!(facts(prog_where_used(answer)).where_used, ["TRAN ZTRAN"]);
+}
+
+#[test]
+fn programs_come_before_transactions_and_packages_are_dropped() {
+    let usage = usage_with(&[
+        ("TRAN/T", "ZTRAN"),
+        ("PROG/P", "ZCALLER"),
+        ("DEVC/K", "$TMP"),
+        ("TRAN/T", "ZTRAN2"),
+    ]);
+    let answer = Fake::default().post(&usage_of(PROG), 200, &usage);
+
+    assert_eq!(
+        facts(prog_where_used(answer)).where_used,
+        ["PROG/P ZCALLER", "TRAN ZTRAN", "TRAN ZTRAN2"]
+    );
+}
+
+#[test]
+fn a_program_without_users_reports_nothing() {
+    let answer = Fake::default().post(&usage_of(PROG), 200, &usage_with(&[("DEVC/K", "$TMP")]));
+
+    assert!(facts(prog_where_used(answer)).where_used.is_empty());
+}
+
+#[test]
+fn a_failed_usage_lookup_is_the_m3_warning_and_does_not_fail_the_plan() {
+    let refused = Fake::default().post(&usage_of(PROG), 500, "<exc/>");
+    let lost = Fake::default().on(
+        "POST",
+        &usage_of(PROG),
+        Err(TransportError::NoResponse("closed".to_owned())),
+    );
+    let unscripted = Fake::default();
+
+    for (answer, reason) in [
+        (refused, "HTTP 500"),
+        (lost, "no response to a read-only request: closed"),
+        (unscripted, "SADT request is not allowed: unscripted POST"),
+    ] {
+        let facts = facts(prog_where_used(answer));
+
+        assert_eq!(facts.where_used.len(), 1);
+        assert!(
+            facts.where_used[0].starts_with(&format!("W: where-used unavailable: {reason}")),
+            "{:?}",
+            facts.where_used
+        );
+        assert_eq!(facts.sources.len(), 1, "the plan is still complete");
+    }
+}
+
+#[test]
+fn only_a_resolved_program_include_is_asked_once() {
+    let main = Fake::default()
+        .get(INCL_AS_PROG, 404, "<exc/>")
+        .get(INCL, 200, "<x/>")
+        .get(PROG, 200, "<x/>");
+    let (answers, calls, _) = with_backend(main, vec![], |backend| {
+        (
+            backend.is_include(DeleteKind::Prog, "ZINC"),
+            backend.is_include(DeleteKind::Prog, "zinc"),
+            backend.is_include(DeleteKind::Prog, "ZPROG"),
+            backend.is_include(DeleteKind::Clas, "ZINC"),
+        )
+    });
+
+    assert_eq!(answers, (true, true, false, false));
+    assert_eq!(
+        uris(&calls),
+        [
+            format!("GET {INCL_AS_PROG}"),
+            format!("GET {INCL}"),
+            format!("GET {PROG}"),
+        ]
+    );
+
+    let failing = Fake::default().get(INCL_AS_PROG, 500, "<exc/>");
+    let (answer, _, _) = with_backend(failing, vec![], |backend| {
+        backend.is_include(DeleteKind::Prog, "ZINC")
+    });
+
+    assert!(!answer, "a failed read surfaces at inspect, not here");
+}
+
+#[test]
+fn an_include_is_locked_deleted_and_proved_gone_by_its_own_uri() {
+    let main = incl_reads("$TMP", &usage_with(&[]))
+        .lock(INCL, true, "")
+        .delete(
+            &format!("{INCL}?lockHandle={ENCODED}"),
+            Ok(Response::empty(200)),
+        );
+    let (reply, calls, fresh) = with_backend(main, vec![gone(INCL)], |backend| {
+        backend.inspect(DeleteKind::Prog, "ZINC").unwrap();
+
+        backend.delete(DeleteKind::Prog, "ZINC", None)
+    });
+
+    assert_eq!(reply, DeleteReply::Deleted);
+    assert_eq!(
+        &uris(&calls)[5..],
+        [
+            format!("POST {INCL}{LOCK}"),
+            format!("DELETE {INCL}?lockHandle={ENCODED}"),
+        ]
+    );
+    assert_eq!(uris(&fresh[0]), [format!("GET {INCL}")]);
+}
+
+#[test]
+fn a_transportable_include_delete_follows_the_recorded_lock_and_sends_its_request() {
+    let lock = INCL_LOCK
+        .replace("a/b+c=", HANDLE)
+        .replace("DEVK900001", TR);
+    let main = incl_reads("ZABAPTEST", &usage_with(&[]))
+        .post(&format!("{INCL}{LOCK}"), 200, &lock)
+        .delete(
+            &format!("{INCL}?lockHandle={ENCODED}&corrNr={TR}"),
+            Ok(Response::empty(200)),
+        );
+    let (outcome, calls, _) = with_backend(main, vec![gone(INCL)], |backend| {
+        let inspected = facts(backend.inspect(DeleteKind::Prog, "ZINC"));
+
+        (inspected.tr, backend.delete(DeleteKind::Prog, "ZINC", None))
+    });
+
+    assert_eq!(outcome, (TrLock::Unlocked, DeleteReply::Deleted));
+    assert_eq!(count(&calls, "DELETE"), 1);
+    assert!(uris(&calls).contains(&format!("DELETE {INCL}?lockHandle={ENCODED}&corrNr={TR}")));
+}
+
+#[test]
+fn an_include_that_a_program_still_references_is_rejected_and_unlocked() {
+    let refused = "<exc:exception xmlns:exc=\"e\"><localizedMessage>Program ZINC is referenced in \
+                   other programs</localizedMessage></exc:exception>";
+    let main = incl_reads("$TMP", &usage_with(&[("PROG/P", "ZPROG")]))
+        .lock(INCL, true, "")
+        .delete(
+            &format!("{INCL}?lockHandle={ENCODED}"),
+            Ok(Response::text(403, refused)),
+        )
+        .post(
+            &format!("{INCL}?_action=UNLOCK&lockHandle={ENCODED}"),
+            200,
+            "",
+        );
+    let (reply, calls, _) = with_backend(main, vec![], |backend| {
+        backend.inspect(DeleteKind::Prog, "ZINC").unwrap();
+
+        backend.delete(DeleteKind::Prog, "ZINC", None)
+    });
+
+    assert_eq!(
+        reply,
+        DeleteReply::Rejected(
+            "DELETE failed: HTTP 403: Program ZINC is referenced in other programs".to_owned()
+        )
+    );
+    assert_eq!(count(&calls, "DELETE"), 1);
+    assert!(uris(&calls).contains(&format!("POST {INCL}?_action=UNLOCK&lockHandle={ENCODED}")));
+}
+
+#[test]
+fn an_include_is_reconciled_by_its_own_uri() {
+    let (outcome, _, fresh) = with_backend(
+        incl_reads("$TMP", &usage_with(&[])),
+        vec![gone(INCL)],
+        |backend| {
+            backend.inspect(DeleteKind::Prog, "ZINC").unwrap();
+
+            backend.reconcile(DeleteKind::Prog, "ZINC")
+        },
+    );
+
+    assert_eq!(outcome, Reconcile::Gone);
+    assert_eq!(uris(&fresh[0]), [format!("GET {INCL}")]);
+}
+
+struct Never;
+
+impl abapreach::policy::Confirmer for Never {
+    fn interactive(&self) -> bool {
+        false
+    }
+
+    fn confirm(&self, _prompt: &str) -> bool {
+        false
+    }
+}
+
+/// The inspect reads of the program `ZPROG` and the include `ZINC`, once, in `ZPROG`, `ZINC` order
+/// after the resolution answers `resolution` gave.
+fn mixed_reads(main: Fake) -> Fake {
+    let mut main = main
+        .get(PROG, 200, &metadata("$TMP", "OWNER"))
+        .get(
+            &format!("{PROG}/source/main?version=active"),
+            200,
+            "REPORT zprog.\nINCLUDE zinc.",
+        )
+        .get(
+            &format!("{PROG}/source/main/versions"),
+            200,
+            &feed(&[("00000", "OWNER")]),
+        )
+        .post(&usage_of(PROG), 200, &usage_with(&[]))
+        .get(INCL, 200, &metadata("$TMP", "OWNER"))
+        .get(
+            &format!("{INCL}/source/main?version=active"),
+            200,
+            "WRITE 1.",
+        )
+        .get(
+            &format!("{INCL}/source/main/versions"),
+            200,
+            &feed(&[("00000", "OWNER")]),
+        )
+        .post(&usage_of(INCL), 200, &usage_with(&[("PROG/P", "ZPROG")]));
+
+    main.stateful = Some(true);
+
+    main
+}
+
+#[test]
+fn a_mixed_batch_deletes_the_program_before_its_include_with_the_same_plan() {
+    use abapreach::cli::DeleteTarget;
+    use abapreach::operation::delete::{Context, execute, simulate};
+    use abapreach::policy::Policies;
+
+    let targets: Vec<DeleteTarget> = ["PROG:ZINC", "PROG:ZPROG"]
+        .iter()
+        .map(|text| text.parse().expect("target"))
+        .collect();
+    let policies = Policies::default();
+    let context = Context {
+        conn: "DEV_100",
+        user: USER,
+        policies: &policies,
+        confirmer: &Never,
+    };
+    // Ordering asks the include, then the program; each inspect reads its object again.
+    let resolution = || {
+        Fake::default()
+            .get(INCL_AS_PROG, 404, "<exc/>")
+            .get(INCL, 200, "<x/>")
+            .get(PROG, 200, "<x/>")
+    };
+    let simulation = mixed_reads(resolution());
+    let (report, sim_calls, _) = with_backend(simulation, vec![], |backend| {
+        simulate(backend, &context, &targets, None).unwrap()
+    });
+    let plan = report.plan.clone().expect("plan");
+    let out = &report.outcome.stdout;
+
+    assert_eq!(report.outcome.exit, 0, "{out}");
+    assert_eq!(
+        plan.objects
+            .iter()
+            .map(|(_, name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["ZPROG", "ZINC"]
+    );
+    assert!(out.contains("WHERE-USED: PROG/P ZPROG"), "{out}");
+    assert_eq!(count(&sim_calls, "DELETE"), 0);
+
+    let execution = mixed_reads(resolution()).lock(PROG, true, "").delete(
+        &format!("{PROG}?lockHandle={ENCODED}"),
+        Ok(Response::empty(200)),
+    );
+    // The delete of the program ends its session: the include runs in a new one, and each
+    // delete is verified from a short-lived session of its own.
+    let include_session = Fake::default()
+        .stateful(true)
+        .get(INCL, 200, &metadata("$TMP", "OWNER"))
+        .get(
+            &format!("{INCL}/source/main?version=active"),
+            200,
+            "WRITE 1.",
+        )
+        .get(
+            &format!("{INCL}/source/main/versions"),
+            200,
+            &feed(&[("00000", "OWNER")]),
+        )
+        .post(&usage_of(INCL), 200, &usage_with(&[("PROG/P", "ZPROG")]))
+        .lock(INCL, true, "")
+        .delete(
+            &format!("{INCL}?lockHandle={ENCODED}"),
+            Ok(Response::empty(200)),
+        );
+    let include_calls = include_session.calls.clone();
+    let (report, calls, _) = with_backend(
+        execution,
+        vec![gone(PROG), include_session, gone(INCL)],
+        |backend| execute(backend, &context, &targets, None, &plan).unwrap(),
+    );
+    let deletes: Vec<String> = uris(&calls)
+        .into_iter()
+        .chain(uris(&include_calls))
+        .filter(|call| call.starts_with("DELETE"))
+        .collect();
+
+    assert_eq!(report.outcome.exit, 0, "{}", report.outcome.stdout);
+    assert_eq!(
+        deletes,
+        [
+            format!("DELETE {PROG}?lockHandle={ENCODED}"),
+            format!("DELETE {INCL}?lockHandle={ENCODED}"),
+        ]
+    );
+}
+
+#[test]
+fn a_mixed_batch_runs_through_the_rfc_sadt_boundary_and_prints_the_program_where_used() {
+    use abapreach::cli::DeleteTarget;
+    use abapreach::operation::delete::{Context, execute, simulate};
+    use abapreach::policy::Policies;
+
+    let targets: Vec<DeleteTarget> = ["PROG:ZINC", "PROG:ZPROG"]
+        .iter()
+        .map(|text| text.parse().expect("target"))
+        .collect();
+    let policies = Policies::default();
+    let context = Context {
+        conn: "DEV_100",
+        user: USER,
+        policies: &policies,
+        confirmer: &Never,
+    };
+    let resolution = || {
+        Fake::default()
+            .get(INCL_AS_PROG, 404, "<exc/>")
+            .get(INCL, 200, "<x/>")
+            .get(PROG, 200, "<x/>")
+    };
+    let gated = |inner: Fake| Gated {
+        gate: RfcTransport::new(FakeRfcApi::ok()),
+        inner,
+    };
+    let simulation = mixed_reads(resolution());
+    let sim_calls = simulation.calls.clone();
+    let mut main = gated(simulation);
+    let mut open = || -> Result<Box<dyn SadtTransport>, TransportError> {
+        Err(TransportError::PreSendConnectivity("no session".to_owned()))
+    };
+    let report = {
+        let mut backend = AdtDelete::new(&mut main, USER, &mut open);
+
+        simulate(&mut backend, &context, &targets, None).unwrap()
+    };
+    let plan = report.plan.clone().expect("plan");
+    let out = &report.outcome.stdout;
+
+    assert_eq!(report.outcome.exit, 0, "{out}");
+    assert!(out.contains("WHERE-USED: PROG/P ZPROG"), "{out}");
+    assert_eq!(count(&sim_calls, "DELETE"), 0);
+
+    let execution = mixed_reads(resolution())
+        .lock(PROG, true, "")
+        .delete(
+            &format!("{PROG}?lockHandle={ENCODED}"),
+            Ok(Response::empty(200)),
+        )
+        .lock(INCL, true, "")
+        .delete(
+            &format!("{INCL}?lockHandle={ENCODED}"),
+            Ok(Response::empty(200)),
+        );
+    let exec_calls = execution.calls.clone();
+    let mut main = gated(execution);
+    let mut fresh = VecDeque::from([gated(gone(PROG)), gated(gone(INCL))]);
+    let mut open = move || -> Result<Box<dyn SadtTransport>, TransportError> {
+        match fresh.pop_front() {
+            Some(session) => Ok(Box::new(session)),
+            None => Err(TransportError::PreSendConnectivity("no session".to_owned())),
+        }
+    };
+    let report = {
+        let mut backend = AdtDelete::new(&mut main, USER, &mut open);
+
+        execute(&mut backend, &context, &targets, None, &plan).unwrap()
+    };
+
+    assert_eq!(report.outcome.exit, 0, "{}", report.outcome.stdout);
+    assert!(
+        uris(&exec_calls).contains(&format!("DELETE {INCL}?lockHandle={ENCODED}")),
+        "{:?}",
+        uris(&exec_calls)
+    );
+}
+
+// ---- one stateful session per deleted row ------------------------------------------------------
+
+struct Session {
+    calls: Calls,
+    closes: Rc<RefCell<usize>>,
+}
+
+impl Session {
+    fn of(fake: &Fake) -> Self {
+        Self {
+            calls: fake.calls.clone(),
+            closes: fake.closes.clone(),
+        }
+    }
+
+    fn closes(&self) -> usize {
+        *self.closes.borrow()
+    }
+}
+
+fn batch_context<'a>(
+    policies: &'a abapreach::policy::Policies,
+) -> abapreach::operation::delete::Context<'a> {
+    abapreach::operation::delete::Context {
+        conn: "DEV_100",
+        user: USER,
+        policies,
+        confirmer: &Never,
+    }
+}
+
+fn targets(texts: &[&str]) -> Vec<abapreach::cli::DeleteTarget> {
+    texts
+        .iter()
+        .map(|text| text.parse().expect("target"))
+        .collect()
+}
+
+fn include_reads(session: Fake) -> Fake {
+    session
+        .get(INCL, 200, &metadata("$TMP", "OWNER"))
+        .get(
+            &format!("{INCL}/source/main?version=active"),
+            200,
+            "WRITE 1.",
+        )
+        .get(
+            &format!("{INCL}/source/main/versions"),
+            200,
+            &feed(&[("00000", "OWNER")]),
+        )
+        .post(&usage_of(INCL), 200, &usage_with(&[("PROG/P", "ZPROG")]))
+}
+
+fn include_delete(session: Fake) -> Fake {
+    session.lock(INCL, true, "").delete(
+        &format!("{INCL}?lockHandle={ENCODED}"),
+        Ok(Response::empty(200)),
+    )
+}
+
+fn parent_delete(session: Fake) -> Fake {
+    session.lock(PROG, true, "").delete(
+        &format!("{PROG}?lockHandle={ENCODED}"),
+        Ok(Response::empty(200)),
+    )
+}
+
+/// The simulate of `PROG:ZINC PROG:ZPROG` and its plan; the execute needs the same plan.
+fn include_and_parent_plan() -> abapreach::operation::delete::Plan {
+    use abapreach::operation::delete::simulate;
+
+    let policies = abapreach::policy::Policies::default();
+    let context = batch_context(&policies);
+    let simulation = mixed_reads(
+        Fake::default()
+            .get(INCL_AS_PROG, 404, "<exc/>")
+            .get(INCL, 200, "<x/>")
+            .get(PROG, 200, "<x/>"),
+    );
+    let (report, _, _) = with_backend(simulation, vec![], |backend| {
+        simulate(
+            backend,
+            &context,
+            &targets(&["PROG:ZINC", "PROG:ZPROG"]),
+            None,
+        )
+        .unwrap()
+    });
+
+    report.plan.expect("plan")
+}
+
+fn resolution() -> Fake {
+    Fake::default()
+        .get(INCL_AS_PROG, 404, "<exc/>")
+        .get(INCL, 200, "<x/>")
+        .get(PROG, 200, "<x/>")
+}
+
+/// The main session of the batch: ordering, then everything the parent program needs.
+fn main_session() -> Fake {
+    let mut main = parent_delete(mixed_reads(resolution())).dies_after_delete();
+
+    main.stateful = Some(true);
+
+    main
+}
+
+#[test]
+fn a_session_that_dies_after_the_parent_delete_does_not_fail_the_include() {
+    use abapreach::operation::delete::execute;
+
+    let plan = include_and_parent_plan();
+    let policies = abapreach::policy::Policies::default();
+    let context = batch_context(&policies);
+    let main = main_session();
+    let main_log = Session::of(&main);
+    let parent_check = gone(PROG);
+    let parent_check_log = Session::of(&parent_check);
+    let include_session = include_delete(include_reads(Fake::default().stateful(true)));
+    let include_log = Session::of(&include_session);
+    let include_check = gone(INCL);
+    let include_check_log = Session::of(&include_check);
+    let (report, _, _) = with_backend(
+        main,
+        vec![parent_check, include_session, include_check],
+        |backend| {
+            let report = execute(
+                backend,
+                &context,
+                &targets(&["PROG:ZINC", "PROG:ZPROG"]),
+                None,
+                &plan,
+            )
+            .unwrap();
+
+            assert_eq!(backend.close_note(), None);
+
+            report
+        },
+    );
+    let out = &report.outcome.stdout;
+
+    assert_eq!(report.outcome.exit, 0, "{out}");
+    assert!(out.contains("DELETE: DELETED"), "{out}");
+    assert_eq!(out.matches("DELETE: DELETED").count(), 2, "{out}");
+    // Nothing reaches the dead session after the parent DELETE.
+    assert_eq!(
+        uris(&main_log.calls).last().map(String::as_str),
+        Some(format!("DELETE {PROG}?lockHandle={ENCODED}").as_str())
+    );
+    // Logoffs equal stateful sessions: the main session and the include session once each, and
+    // no logoff for the sessions that only verify.
+    assert_eq!(main_log.closes(), 1);
+    assert_eq!(include_log.closes(), 1);
+    assert_eq!(parent_check_log.closes(), 1);
+    assert_eq!(include_check_log.closes(), 1);
+    assert!(
+        uris(&include_log.calls)
+            .iter()
+            .any(|call| call == &format!("DELETE {INCL}?lockHandle={ENCODED}")),
+        "{:?}",
+        uris(&include_log.calls)
+    );
+}
+
+#[test]
+fn a_batch_without_a_successful_delete_keeps_one_session() {
+    use abapreach::operation::delete::{execute, simulate};
+
+    let policies = abapreach::policy::Policies::default();
+    let context = batch_context(&policies);
+    let rejecting = || {
+        let mut main = prog_reads("$TMP")
+            .lock(PROG, true, "")
+            .on(
+                "DELETE",
+                &format!("{PROG}?lockHandle={ENCODED}"),
+                Ok(Response::text(403, "<exc/>")),
+            )
+            .post(
+                &format!("{PROG}?_action=UNLOCK&lockHandle={ENCODED}"),
+                200,
+                "",
+            );
+
+        main.stateful = Some(true);
+
+        main
+    };
+    let (sim, _, _) = with_backend(prog_reads("$TMP"), vec![], |backend| {
+        simulate(backend, &context, &targets(&["PROG:ZPROG"]), None).unwrap()
+    });
+    let plan = sim.plan.expect("plan");
+    let main = rejecting();
+    let main_log = Session::of(&main);
+    let (report, _, _) = with_backend(main, vec![], |backend| {
+        let report = execute(backend, &context, &targets(&["PROG:ZPROG"]), None, &plan).unwrap();
+
+        assert_eq!(backend.close_note(), None);
+
+        report
+    });
+
+    assert_eq!(report.outcome.exit, 1, "{}", report.outcome.stdout);
+    assert!(report.outcome.stdout.contains("REJECTED"));
+    // The backend never ends the caller's session itself when nothing was deleted; the caller does.
+    assert_eq!(main_log.closes(), 0);
+}
+
+#[test]
+fn a_logoff_failure_between_rows_prints_the_note_and_the_batch_continues() {
+    use abapreach::operation::delete::execute;
+
+    let plan = include_and_parent_plan();
+    let policies = abapreach::policy::Policies::default();
+    let context = batch_context(&policies);
+    let main = main_session().close_fails();
+    let include_session = include_delete(include_reads(Fake::default().stateful(true)));
+    let (report, _, _) = with_backend(
+        main,
+        vec![gone(PROG), include_session, gone(INCL)],
+        |backend| {
+            let report = execute(
+                backend,
+                &context,
+                &targets(&["PROG:ZINC", "PROG:ZPROG"]),
+                None,
+                &plan,
+            )
+            .unwrap();
+            let note = backend.close_note().expect("note");
+
+            assert_eq!(
+                note,
+                "W: session close failed: pre-send connectivity failure: logoff refused"
+            );
+
+            report
+        },
+    );
+
+    assert_eq!(report.outcome.exit, 0, "{}", report.outcome.stdout);
+    assert_eq!(
+        report.outcome.stdout.matches("DELETE: DELETED").count(),
+        2,
+        "{}",
+        report.outcome.stdout
+    );
+}
+
+#[test]
+fn a_new_session_that_cannot_be_opened_stops_the_batch_after_the_row() {
+    use abapreach::operation::delete::{execute, simulate};
+
+    let policies = abapreach::policy::Policies::default();
+    let context = batch_context(&policies);
+    let rows = ["INTF:ZIF_A", "PROG:ZINC", "PROG:ZPROG"];
+    let reads = || {
+        let mut main = mixed_reads(resolution())
+            .get(INTF, 200, &metadata("$TMP", "OWNER"))
+            .get(
+                &format!("{INTF}/source/main?version=active"),
+                200,
+                "INTERFACE zif_a PUBLIC.",
+            )
+            .get(
+                &format!("{INTF}/source/main/versions"),
+                200,
+                &feed(&[("00000", "OWNER")]),
+            );
+
+        main.stateful = Some(true);
+
+        main
+    };
+    let (sim, _, _) = with_backend(reads(), vec![], |backend| {
+        simulate(backend, &context, &targets(&rows), None).unwrap()
+    });
+    let plan = sim.plan.expect("plan");
+    let main = reads().lock(INTF, true, "").delete(
+        &format!("{INTF}?lockHandle={ENCODED}"),
+        Ok(Response::empty(200)),
+    );
+    let main_log = Session::of(&main);
+    // Only the verification session is available: the one for the next row cannot be opened.
+    let (report, _, _) = with_backend(main, vec![gone(INTF)], |backend| {
+        execute(backend, &context, &targets(&rows), None, &plan).unwrap()
+    });
+    let out = &report.outcome.stdout;
+
+    assert_eq!(report.outcome.exit, 1, "{out}");
+    assert!(out.contains("cannot open a new session"), "{out}");
+    assert!(out.contains("SUMMARY: 1 OK, 1 FAILED, 1 SKIPPED"), "{out}");
+    assert_eq!(main_log.closes(), 1);
+    assert_eq!(count(&main_log.calls, "DELETE"), 1);
 }

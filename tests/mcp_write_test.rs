@@ -784,7 +784,8 @@ fn a_delete_simulation_sends_the_requests_of_the_cli() {
         ],
     );
 
-    assert_eq!(mcp.len(), 2);
+    // A PROG missing from `programs/programs` is asked of `programs/includes` too.
+    assert_eq!(mcp.len(), 3);
     assert_eq!(mcp, command);
 }
 
@@ -882,7 +883,9 @@ fn a_passed_simulation_issues_a_token_bound_to_the_contract_fields() {
 fn a_create_simulation_ticket_carries_the_backend_it_ran_on() {
     let mut rig = rig();
     let requests = log();
-    let validation = abapreach::cli::CreateKind::Fugr.validation_uri("ZTESTFG", "T", "$TMP");
+    let validation = abapreach::cli::CreateKind::Fugr
+        .validation_uri("ZTESTFG", "T", "$TMP")
+        .unwrap();
     let ok = concat!(
         r#"<asx:abap xmlns:asx="http://www.sap.com/abapxml"><asx:values><DATA>"#,
         r#"<SEVERITY>OK</SEVERITY><SHORT_TEXT></SHORT_TEXT><LONG_TEXT/>"#,
@@ -1035,6 +1038,11 @@ fn prog_reads(requests: &Log, responsible: &str) -> Script {
             &format!("{PROG}/source/main/versions"),
             200,
             "<feed xmlns=\"http://www.w3.org/2005/Atom\"/>",
+        )
+        .post(
+            &abapreach::adt::usage_references_uri(PROG),
+            200,
+            "<usageReferences:usageReferenceResult xmlns:usageReferences=\"u\"/>",
         )
 }
 
@@ -1285,12 +1293,12 @@ fn a_delete_token_pinned_to_adt_does_not_fall_back_when_adt_keeps_no_session() {
     assert_eq!(rig.opened(), (2, 0));
     assert!(result.text.contains("plan_token"), "{}", result.text);
     assert!(!result.text.contains("--backend"), "{}", result.text);
-    // Only reads left: no lock, no delete.
+    // Only reads left: no lock, no delete. The usage search is a POST that changes nothing.
     assert!(
         requests
             .borrow()
             .iter()
-            .all(|request| request.starts_with("GET ")),
+            .all(|request| request.starts_with("GET ") || request.contains("/usageReferences?")),
         "{:?}",
         requests.borrow()
     );
@@ -1448,7 +1456,7 @@ fn a_delete_on_an_adt_without_a_stateful_session_sends_nothing_and_falls_back_to
         simulated.text
     );
     // Nothing went over the stateless connection, and the ticket pins the backend that worked.
-    assert_eq!(requests.borrow().len(), 3);
+    assert_eq!(requests.borrow().len(), 4);
     assert_eq!(rig.gate.issued()[0].backend, Some(BackendKind::RfcSadt));
 }
 

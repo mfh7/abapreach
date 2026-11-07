@@ -16,7 +16,7 @@ const CI_JOB: &str = "ci";
 
 /// Target triple, runner label, archive extension, executable name.
 const TARGETS: [(&str, &str, &str, &str); 4] = [
-    ("aarch64-apple-darwin", "macos-14", "tar.gz", "abapreach"),
+    ("aarch64-apple-darwin", "macos-15", "tar.gz", "abapreach"),
     (
         "x86_64-pc-windows-msvc",
         "windows-latest",
@@ -365,6 +365,19 @@ fn release_workflow_inspects_the_executable_extracted_from_the_packaged_archive(
             );
             assert_eq!(scalar(get(&steps[imports], "if")), "runner.os == 'Windows'");
         }
+    }
+}
+
+#[test]
+fn release_workflow_rejects_a_package_version_that_differs_from_the_tag() {
+    // The rc build must report the tag's base version: a Cargo.toml mismatch stops the plan step.
+    let scripts = run_scripts(&document(), "plan").join("\n");
+    for needle in [
+        "cargo_version=\"$(sed -n 's/^version = \"\\(.*\\)\"$/\\1/p' Cargo.toml | head -n 1)\"",
+        "if [ \"$cargo_version\" != \"$base_version\" ]; then",
+        "::error::Cargo.toml says $cargo_version but tag $tag releases $base_version",
+    ] {
+        assert!(scripts.contains(needle), "missing `{needle}`: {scripts}");
     }
 }
 
@@ -1119,4 +1132,16 @@ fn promotion_refuses_to_overwrite_an_existing_output_directory_content() {
     );
     assert!(!outcome.success, "{}", outcome.text);
     assert!(outcome.text.contains("not empty"), "{}", outcome.text);
+}
+
+#[test]
+fn the_changelog_keeps_the_released_0_14_0_section_above_its_entries() {
+    let text = std::fs::read_to_string(root().join("CHANGELOG.md")).unwrap();
+    let heading = text
+        .find("## [0.14.0] - 2026-11-04")
+        .expect("the 0.14.0 heading");
+    let entry = text.find("- `read-table` command").expect("a 0.14.0 entry");
+    let current = text.find("## [0.15.0]").expect("the 0.15.0 heading");
+
+    assert!(current < heading && heading < entry);
 }

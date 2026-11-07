@@ -134,7 +134,7 @@ fn names(parameters: &[(String, String)]) -> Vec<&str> {
 #[test]
 fn connection_parameters_use_sdk_names_and_optional_saprouter() {
     let mut connection = Connection::test_insecure();
-    let parameters = connection_parameters(&connection);
+    let parameters = connection_parameters(&connection).unwrap();
 
     assert_eq!(
         names(&parameters),
@@ -143,8 +143,8 @@ fn connection_parameters_use_sdk_names_and_optional_saprouter() {
     assert_eq!(parameters[0].1, "example.com");
     assert_eq!(parameters[2].1, "100");
 
-    connection.rfc.saprouter = Some("/H/router.example.com/S/3299/H/".to_owned());
-    let parameters = connection_parameters(&connection);
+    connection.rfc.as_mut().unwrap().saprouter = Some("/H/router.example.com/S/3299/H/".to_owned());
+    let parameters = connection_parameters(&connection).unwrap();
 
     assert_eq!(parameters.last().unwrap().0, "SAPROUTER");
 }

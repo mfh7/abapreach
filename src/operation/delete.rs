@@ -53,11 +53,11 @@ impl DeleteKind {
     /// includes.
     fn rank(self) -> u8 {
         match self {
-            Self::Func => 0,
-            Self::Clas => 1,
-            Self::Intf => 2,
-            Self::Prog => 3,
-            Self::Fugr => 4,
+            Self::Func => 1,
+            Self::Clas => 2,
+            Self::Intf => 3,
+            Self::Prog => 4,
+            Self::Fugr => 5,
         }
     }
 }
@@ -175,6 +175,38 @@ pub trait DeleteBackend {
 
     /// A read-only look from a new session.
     fn reconcile(&mut self, kind: DeleteKind, name: &str) -> Reconcile;
+
+    /// Whether the `PROG` is an include (`subc I`), which runs after the programs of the batch:
+    /// SAP refuses to delete an include that a program still references. A backend that cannot
+    /// tell, or whose read fails (the failure surfaces when the object is inspected), answers no.
+    fn is_include(&mut self, _kind: DeleteKind, _name: &str) -> bool {
+        false
+    }
+
+    /// The backend cannot go on (no session for the next row): the batch stops after the current
+    /// row and the rest is `SKIPPED`.
+    fn halted(&self) -> bool {
+        false
+    }
+
+    /// The batch is about to start: its rows in execution order (before the include order of
+    /// `PROG`) and the normalized `--tr`. An `Err` is a STOP before the first object. A backend
+    /// with a batch-wide state takes it here.
+    fn begin(&mut self, _rows: &[(DeleteKind, String)], _tr: Option<&str>) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// The exit code and the line for an `Err` that `begin` returned. A `STOP` (exit 2) unless the
+    /// backend could not reach SAP, which is a failed request (exit 1) as for create and read.
+    fn begin_failure(&self, message: &str) -> (i32, String) {
+        (2, format!("STOP: {message}"))
+    }
+
+    /// The backend that handles the kind. A batch that mixes backends prints it per object and
+    /// records it in the plan; a backend that does not name itself answers `None`.
+    fn backend_label(&self, _kind: DeleteKind) -> Option<String> {
+        None
+    }
 }
 
 /// The simulated plan: the Python plan file, `{conn, tr, objects: [[kind, name, hash]]}`.
@@ -183,6 +215,30 @@ pub struct Plan {
     pub conn: String,
     pub tr: Option<String>,
     pub objects: Vec<(String, String, String)>,
+    /// `[kind, name, backend]` per object, only for a batch that mixes backends: the delete runs
+    /// each object on the one it was simulated on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backends: Vec<(String, String, String)>,
+}
+
+impl Plan {
+    /// The backend recorded for the object.
+    pub fn backend_of(&self, kind: DeleteKind, name: &str) -> Option<&str> {
+        self.backends
+            .iter()
+            .find(|(recorded, known, _)| recorded == kind.token() && known == name)
+            .map(|(_, _, backend)| backend.as_str())
+    }
+}
+
+/// Reads the plan file of a real delete.
+pub fn load_plan(path: &Path) -> Result<Plan, String> {
+    std::fs::read_to_string(path)
+        .map_err(|error| format!("plan file cannot be read: {}: {error}", path.display()))
+        .and_then(|text| {
+            serde_json::from_str::<Plan>(&text)
+                .map_err(|error| format!("plan file cannot be read: {}: {error}", path.display()))
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -304,6 +360,46 @@ fn is_self(kind: DeleteKind, name: &str, group: Option<&str>) -> bool {
         DeleteKind::Clas => class(),
         DeleteKind::Prog => name == "SAPLYFG_UTILS" || name.starts_with("LYFG_UTILS") || class(),
         DeleteKind::Intf => false,
+    }
+}
+
+/// Within `PROG` a program (subc 1) runs before an include. The order is only asked for when the
+/// batch holds two `PROG` rows, so a single `PROG` costs no extra read.
+fn programs_before_includes(backend: &mut dyn DeleteBackend, rows: &mut [Row]) {
+    if rows
+        .iter()
+        .filter(|(kind, _)| *kind == DeleteKind::Prog)
+        .count()
+        < 2
+    {
+        return;
+    }
+
+    let mut keyed: Vec<(u8, bool, Row)> = rows
+        .iter()
+        .map(|(kind, name)| {
+            let include = *kind == DeleteKind::Prog && backend.is_include(*kind, name);
+
+            (kind.rank(), include, (*kind, name.clone()))
+        })
+        .collect();
+
+    keyed.sort_by_key(|(rank, include, _)| (*rank, *include));
+
+    for (slot, (_, _, row)) in rows.iter_mut().zip(keyed) {
+        *slot = row;
+    }
+}
+
+/// One reported user of the object. A transaction is `TRAN <tcode>` (the line the RFC path
+/// prints as well) and a `W:` entry is already a warning line; anything else is a calling object.
+fn where_used_line(entry: &str) -> String {
+    if entry.starts_with("W: ") {
+        entry.to_owned()
+    } else if entry.starts_with("TRAN ") {
+        format!("WHERE-USED {entry}")
+    } else {
+        format!("WHERE-USED: {entry}")
     }
 }
 
@@ -502,12 +598,7 @@ fn evaluate(
         shown.push(source.marker());
     }
 
-    shown.extend(
-        facts
-            .where_used
-            .iter()
-            .map(|user| format!("WHERE-USED: {user}")),
-    );
+    shown.extend(facts.where_used.iter().map(|entry| where_used_line(entry)));
     lines.extend(shown);
 
     Eval::Ready(Ready {
@@ -643,12 +734,17 @@ pub fn simulate(
     targets: &[DeleteTarget],
     tr: Option<&str>,
 ) -> Result<DeleteReport, String> {
-    let (rows, tr) = prepare(targets, tr)?;
+    let (mut rows, tr) = prepare(targets, tr)?;
+
+    backend.begin(&rows, tr.as_deref())?;
+    programs_before_includes(backend, &mut rows);
+
     let mut batch = Batch::new("DELETE_SIM");
     let mut plan = Plan {
         conn: context.conn.to_owned(),
         tr: tr.clone(),
         objects: Vec::new(),
+        backends: Vec::new(),
     };
 
     batch
@@ -666,6 +762,7 @@ pub fn simulate(
                 batch.out.extend(ready.lines);
                 plan.objects
                     .push((row.0.token().to_owned(), row.1.clone(), ready.hash.clone()));
+
                 batch.finish(row, DeleteStatus::SimulatedOk, Some(ready.hash), None);
 
                 if let Some(result) = batch.results.last_mut() {
@@ -700,7 +797,7 @@ pub fn execute_until(
     plan: &Plan,
     stop: &mut dyn FnMut() -> bool,
 ) -> Result<DeleteReport, String> {
-    let (rows, tr) = prepare(targets, tr)?;
+    let (mut rows, tr) = prepare(targets, tr)?;
     let wanted: BTreeSet<(&str, &str)> = rows
         .iter()
         .map(|(kind, name)| (kind.token(), name.as_str()))
@@ -721,6 +818,9 @@ pub fn execute_until(
         );
     }
 
+    backend.begin(&rows, tr.as_deref())?;
+    programs_before_includes(backend, &mut rows);
+
     let mut batch = Batch::new("DELETE");
 
     for (index, row) in rows.iter().enumerate() {
@@ -738,6 +838,12 @@ pub fn execute_until(
         let ready = match evaluate(backend, context, row, tr.as_deref(), &rows) {
             Eval::Rejected(reason) => {
                 batch.fail(row, DeleteStatus::Rejected, reason);
+
+                if backend.halted() {
+                    batch.skip_rest(&rows[index + 1..]);
+                    break;
+                }
+
                 continue;
             }
             Eval::NotFound => {
@@ -870,23 +976,21 @@ pub fn run_until(
             Ok(report)
         })
     } else {
-        std::fs::read_to_string(plan_path)
-            .map_err(|error| format!("plan file cannot be read: {}: {error}", plan_path.display()))
-            .and_then(|text| {
-                serde_json::from_str::<Plan>(&text).map_err(|error| {
-                    format!("plan file cannot be read: {}: {error}", plan_path.display())
-                })
-            })
+        load_plan(plan_path)
             .and_then(|plan| execute_until(backend, context, targets, tr, &plan, stop))
     };
 
     match result {
         Ok(report) => report.outcome,
-        Err(message) => Outcome {
-            status: None,
-            exit: 2,
-            stdout: String::new(),
-            stderr: format!("STOP: {message}"),
-        },
+        Err(message) => {
+            let (exit, stderr) = backend.begin_failure(&message);
+
+            Outcome {
+                status: None,
+                exit,
+                stdout: String::new(),
+                stderr,
+            }
+        }
     }
 }

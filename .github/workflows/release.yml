@@ -225,7 +225,7 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - label: macos-14
+          - label: macos-15
             target: aarch64-apple-darwin
             ext: tar.gz
             exe: abapreach

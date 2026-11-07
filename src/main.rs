@@ -1,4 +1,5 @@
 use abapreach::operation::deploy::{CancelFlag, INTERRUPT_EXIT_CODE, InterruptAction};
+use abapreach::transport::http::end_open_sessions;
 use abapreach::transport::rfc::after_trace_environment;
 use abapreach::{RealFactories, run};
 use std::collections::BTreeMap;
@@ -17,6 +18,8 @@ fn main() {
     after_trace_environment(|| {
         let _ = ctrlc::set_handler(move || {
             if on_interrupt.on_interrupt() == InterruptAction::ExitNow {
+                // No lock is held, but an open ADT session still keeps its context on SAP.
+                end_open_sessions();
                 std::process::exit(INTERRUPT_EXIT_CODE);
             }
         });
