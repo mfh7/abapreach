@@ -6,12 +6,14 @@
 mod common;
 
 use abapreach::backend::BackendKind;
+use abapreach::backend::Failure;
 use abapreach::cli::{DeleteKind, DeleteTarget};
 use abapreach::domain::Outcome;
 use abapreach::operation::delete::{
     self, Context, DeleteBackend, DeleteReply, ObjectFacts, Plan, Reconcile, RowPlan,
 };
-use abapreach::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch};
+use abapreach::operation::delete_adt::AdtDelete;
+use abapreach::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch, batch_unsent_failure};
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::operation::payload::Kind;
 use abapreach::operation::runner_reconcile::Clock;
@@ -19,7 +21,7 @@ use abapreach::operation::runner_template::{
     DTEL_TEMPLATE, TRAN_TEMPLATE, TypeTemplate, template_lines,
 };
 use abapreach::policy::{Confirmer, Policies};
-use abapreach::transport::TransportError;
+use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use common::runner_fake::{
     Evolution, Opened, PostReply, Shared, Tick, World, http_session, new_sap, rfc_session,
 };
@@ -1966,5 +1968,112 @@ fn a_mixed_batch_stops_when_the_runner_side_says_so() {
         let mixed = RunnerBatch::new(&mut adt, &mut runner);
 
         assert_eq!(mixed.stops_batch(), runner_stops);
+    }
+}
+
+// --- a start failure and the fallback ----------------------------------------------------------
+
+const PROG_URI: &str = "/sap/bc/adt/programs/programs/zprog";
+const HANDLE: &str = "a%2Bb";
+
+/// An ADT that answers only the local delete of `ZPROG` and then its absence.
+struct ProgAdt {
+    gone: bool,
+}
+
+impl SadtTransport for ProgAdt {
+    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+        let lock = format!("{PROG_URI}?_action=LOCK&accessMode=MODIFY");
+        let delete = format!("{PROG_URI}?lockHandle={HANDLE}");
+
+        Ok(match (request.method.as_str(), request.uri.as_str()) {
+            ("POST", uri) if uri == lock => Response::text(
+                200,
+                "<asx:abap xmlns:asx=\"http://www.sap.com/abapxml\"><asx:values><DATA>\
+                 <LOCK_HANDLE>a+b</LOCK_HANDLE><CORRNR></CORRNR><CORRUSER></CORRUSER>\
+                 <IS_LOCAL>X</IS_LOCAL></DATA></asx:values></asx:abap>",
+            ),
+            ("DELETE", uri) if uri == delete => Response::empty(200),
+            ("GET", PROG_URI) if self.gone => Response::text(404, "<exc/>"),
+            other => panic!("unscripted {other:?}"),
+        })
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+
+/// A runner side whose first run cannot start, with `error` as the reason.
+fn failed_start(error: TransportError) -> Option<(Failure, String)> {
+    let mut open = move || -> Opened { Err(error.clone()) };
+    let mut ddic = DdicDelete::new(env(Backend::Http), &mut open, CancelFlag::new())
+        .with_nonce(Box::new(|| NONCE.to_owned()));
+    let kind = DeleteKind::Runner(Kind::Dtel);
+
+    ddic.begin(&[(kind, "ZD".to_owned())], None).unwrap();
+
+    assert!(matches!(
+        ddic.plan_row(kind, "ZD", None),
+        RowPlan::Rejected(_)
+    ));
+
+    ddic.unsent_failure()
+}
+
+#[test]
+fn an_authorization_failure_at_the_start_offers_no_fallback() {
+    let unsent = failed_start(TransportError::Authorization("HTTP 401".to_owned()));
+
+    assert_eq!(unsent, None);
+}
+
+#[test]
+fn a_connectivity_failure_at_the_start_keeps_its_class_for_the_fallback() {
+    let (failure, message) = failed_start(TransportError::PreSendConnectivity(
+        "unreachable".to_owned(),
+    ))
+    .expect("nothing was sent");
+
+    assert_eq!(failure, Failure::PreSendConnectivity);
+    assert!(message.contains("unreachable"), "{message}");
+}
+
+#[test]
+fn a_mixed_batch_that_deleted_an_adt_row_does_not_fall_back_when_the_runner_start_fails() {
+    for wrote in [false, true] {
+        let mut main = ProgAdt { gone: false };
+        let mut fresh = || -> Result<Box<dyn SadtTransport>, TransportError> {
+            Ok(Box::new(ProgAdt { gone: true }))
+        };
+        let mut adt = AdtDelete::new(&mut main, "DEVUSER", &mut fresh);
+
+        if wrote {
+            assert_eq!(
+                adt.delete(DeleteKind::Prog, "ZPROG", None),
+                DeleteReply::Deleted
+            );
+        }
+
+        let mut open = || -> Opened {
+            Err(TransportError::PreSendConnectivity(
+                "unreachable".to_owned(),
+            ))
+        };
+        let mut ddic = DdicDelete::new(env(Backend::Http), &mut open, CancelFlag::new())
+            .with_nonce(Box::new(|| NONCE.to_owned()));
+        let kind = DeleteKind::Runner(Kind::Dtel);
+
+        ddic.begin(&[(kind, "ZD".to_owned())], None).unwrap();
+        let _ = ddic.plan_row(kind, "ZD", None);
+
+        assert!(
+            ddic.unsent_failure().is_some(),
+            "the runner alone would fall back"
+        );
+
+        let combined = batch_unsent_failure(&ddic, &adt);
+
+        assert_eq!(combined.is_some(), !wrote, "ADT wrote: {wrote}");
     }
 }

@@ -284,19 +284,25 @@ fn is_runner_name(name: &str) -> bool {
 /// refuses it, and `None` leaves it to the other rules. Everything under classrun is decided
 /// here; the create of the armed runner class must be in `$TMP` without a `corrNr`.
 pub fn runner_verdict(request: &Request) -> Option<bool> {
-    if mentions_classrun(&request.uri) {
+    if reaches_classrun(&request.uri) {
         return Some(admits_classrun_post(request));
     }
 
     (request.method == "POST" && !admits_runner_create(request)).then_some(false)
 }
 
-/// Whether the URI reaches classrun in any spelling: case, percent-encoding, or traversal.
-fn mentions_classrun(uri: &str) -> bool {
+/// Whether the URI reaches the classrun resource, or a path below it, in any spelling: case,
+/// repeated percent-encoding, `.`/`..` segments, doubled slashes, matrix parameters, or a query
+/// that starts early. The decision is on path segments: a class named `ZCL_X_CLASSRUN` is not it.
+fn reaches_classrun(uri: &str) -> bool {
     let mut text = uri.to_owned();
 
     loop {
-        if text.to_ascii_lowercase().contains("classrun") {
+        // The query may start at an encoded `?` or `#`, so the text is judged both with and
+        // without a split at the first one.
+        let path = text.split(['?', '#']).next().unwrap_or_default();
+
+        if is_classrun_path(&text) || is_classrun_path(path) {
             return true;
         }
 
@@ -308,6 +314,33 @@ fn mentions_classrun(uri: &str) -> bool {
 
         text = decoded;
     }
+}
+
+/// Whether the path, as written or with its dot segments resolved, starts at the classrun
+/// resource. A fifth segment that begins with the word counts too (`classrunx`, `classrun.NAME`):
+/// no such resource exists, and refusing it keeps the rule independent of server quirks.
+fn is_classrun_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase().replace('\\', "/");
+    let written: Vec<&str> = lower
+        .split('/')
+        .map(|segment| segment.split(';').next().unwrap_or_default())
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect();
+    let mut resolved: Vec<&str> = Vec::with_capacity(written.len());
+
+    for segment in &written {
+        if *segment == ".." {
+            resolved.pop();
+        } else {
+            resolved.push(segment);
+        }
+    }
+
+    [&written, &resolved].into_iter().any(|segments| {
+        segments.len() > 4
+            && segments[..4] == ["sap", "bc", "adt", "oo"]
+            && segments[4].starts_with("classrun")
+    })
 }
 
 fn percent_decoded(text: &str) -> String {

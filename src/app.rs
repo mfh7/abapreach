@@ -21,7 +21,7 @@ use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::create_ddic::{self, DdicCreate};
 use crate::operation::delete::{self, Context};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
-use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch};
+use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch, batch_unsent_failure};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::deploy_ddic::{self, DdicDeploy};
 use crate::operation::doctor::Doctor;
@@ -1329,7 +1329,7 @@ fn delete_runner_attempt(
 
         (
             outcome,
-            runner.unsent_failure().or_else(|| adt.unsent_failure()),
+            batch_unsent_failure(&runner, &adt),
             adt.close_note(),
         )
     };

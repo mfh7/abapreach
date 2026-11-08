@@ -25,6 +25,8 @@ struct Sessions {
     adt_calls: usize,
     rfc_calls: usize,
     cancel: CancelFlag,
+    /// The failure of an ADT open past `adt_ok`; connectivity when unset.
+    adt_error: Option<TransportError>,
 }
 
 impl Factories for Sessions {
@@ -32,9 +34,10 @@ impl Factories for Sessions {
         self.adt_calls += 1;
 
         if self.adt_calls > self.adt_ok {
-            return Err(TransportError::PreSendConnectivity(
-                "unreachable".to_owned(),
-            ));
+            return Err(self
+                .adt_error
+                .clone()
+                .unwrap_or_else(|| TransportError::PreSendConnectivity("unreachable".to_owned())));
         }
 
         http_session(&self.sap)
@@ -209,6 +212,7 @@ fn a_tran_batch_runs_through_the_router_the_plan_file_and_one_backend() {
             adt_calls: 0,
             rfc_calls: 0,
             cancel: CancelFlag::new(),
+            adt_error: None,
         };
         let args = [
             "--simulate",
@@ -286,6 +290,7 @@ fn a_tran_row_outside_the_customer_scope_stops_before_a_connection() {
         adt_calls: 0,
         rfc_calls: 0,
         cancel: CancelFlag::new(),
+        adt_error: None,
     };
     let plan = directory.path().join("plan.json");
     let exit = run_delete(
@@ -312,6 +317,7 @@ fn a_ddic_row_with_a_name_outside_the_customer_scope_stops_before_a_connection()
         adt_calls: 0,
         rfc_calls: 0,
         cancel: CancelFlag::new(),
+        adt_error: None,
     };
     let plan = directory.path().join("plan.json");
     let exit = run_delete(
@@ -366,6 +372,7 @@ fn a_simulate_then_a_delete_run_through_the_router_and_the_plan_file() {
         adt_calls: 0,
         rfc_calls: 0,
         cancel: CancelFlag::new(),
+        adt_error: None,
     };
     let simulated = run_delete(
         &mut sessions,
@@ -442,6 +449,7 @@ fn a_first_run_that_never_left_the_process_falls_back_to_rfc() {
         adt_calls: 0,
         rfc_calls: 0,
         cancel: CancelFlag::new(),
+        adt_error: None,
     };
     let exit = run_delete(
         &mut sessions,
@@ -466,6 +474,45 @@ fn a_first_run_that_never_left_the_process_falls_back_to_rfc() {
 }
 
 #[test]
+fn an_authorization_failure_at_the_runner_start_does_not_fall_back_to_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let sap = sap_with(true);
+
+    answering_tran(&sap);
+
+    // The router's ADT session opens; the runner cycle's open is refused for authorization.
+    let mut sessions = Sessions {
+        sap: sap.clone(),
+        adt_ok: 1,
+        adt_calls: 0,
+        rfc_calls: 0,
+        cancel: CancelFlag::new(),
+        adt_error: Some(TransportError::Authorization("HTTP 401".to_owned())),
+    };
+    let exit = run_delete(
+        &mut sessions,
+        directory.path(),
+        true,
+        &[
+            "--simulate",
+            "TTYP:ZTT",
+            "--plan",
+            &plan.display().to_string(),
+        ],
+    );
+
+    assert_ne!(exit.code, 0, "{} {}", exit.stdout, exit.stderr);
+    assert!(!exit.stderr.contains("falling back"), "{}", exit.stderr);
+    assert_eq!(
+        sessions.rfc_calls, 0,
+        "no backend switch after authorization"
+    );
+    assert_eq!(sap.borrow().posts, 0);
+    assert!(exit.stdout.contains("authorization"), "{}", exit.stdout);
+}
+
+#[test]
 fn a_stateless_adt_session_runs_the_tran_batch_over_rfc() {
     let directory = tempfile::tempdir().unwrap();
     let plan = directory.path().join("plan.json");
@@ -481,6 +528,7 @@ fn a_stateless_adt_session_runs_the_tran_batch_over_rfc() {
         adt_calls: 0,
         rfc_calls: 0,
         cancel: CancelFlag::new(),
+        adt_error: None,
     };
     let exit = run_delete(
         &mut sessions,
@@ -524,6 +572,7 @@ fn a_stateless_adt_session_without_rfc_keeps_the_stop() {
         adt_calls: 0,
         rfc_calls: 0,
         cancel: CancelFlag::new(),
+        adt_error: None,
     };
     let exit = run_delete(
         &mut sessions,

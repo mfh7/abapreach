@@ -30,7 +30,7 @@ use crate::object::{
 use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::delete::{self, Context, DeleteBackend, DeleteReport, Plan, sha256_hex};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
-use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch};
+use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch, batch_unsent_failure};
 use crate::operation::deploy::{
     CancelFlag, Change, DeployInput, DeployProg, DeployScope, NEW_INCLUDE_WARNING,
     known_lock_handles,
@@ -1447,7 +1447,7 @@ impl DeleteCall<'_> {
 
             (
                 result,
-                runner.unsent_failure().or_else(|| adt.unsent_failure()),
+                batch_unsent_failure(&runner, &adt),
                 adt.close_note(),
             )
         };

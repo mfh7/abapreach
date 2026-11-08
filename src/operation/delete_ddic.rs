@@ -20,7 +20,7 @@ use crate::cli::DeleteKind;
 use crate::config::Connection;
 use crate::domain::{Outcome, Status};
 use crate::operation::delete::{DeleteBackend, DeleteReply, ObjectFacts, Reconcile, RowPlan};
-use crate::operation::delete_adt::Opener;
+use crate::operation::delete_adt::{AdtDelete, Opener};
 use crate::operation::deploy::CancelFlag;
 use crate::operation::payload::{self, Kind, Mode};
 use crate::operation::runner::{CycleInput, PostRoute, RunnerEnd, RunnerRun, STATELESS, run_cycle};
@@ -95,7 +95,8 @@ pub struct DdicDelete<'a> {
     stopped: bool,
     /// Runs that started: a batch that has none can still use another backend.
     started: usize,
-    unsent: Option<String>,
+    /// The failure class and text of a start that never left the process.
+    unsent: Option<(Failure, String)>,
     /// The runner class of the last run, for the reconciliation.
     runner: Option<String>,
 }
@@ -147,9 +148,10 @@ impl<'a> DdicDelete<'a> {
             return Some((Failure::CapabilityUnavailable, STATELESS.to_owned()));
         }
 
+        // Only connectivity may switch backends; an authorization failure stays a failure.
         self.unsent
             .clone()
-            .map(|message| (Failure::PreSendConnectivity, message))
+            .filter(|(failure, _)| *failure == Failure::PreSendConnectivity)
     }
 
     /// Adds the notes, the STOP, and the leftover to the outcome of the batch, and sets the exit
@@ -241,7 +243,8 @@ impl<'a> DdicDelete<'a> {
             RunnerEnd::Interrupted => Ended::Refused("interrupted before the run".to_owned()),
             RunnerEnd::NotStarted(error) => {
                 if self.started == 0 {
-                    self.unsent.get_or_insert_with(|| error.to_string());
+                    self.unsent
+                        .get_or_insert_with(|| (Failure::from(error), error.to_string()));
                 }
 
                 Ended::Refused(format!("runner start failed: {error}"))
@@ -456,6 +459,20 @@ impl DeleteBackend for DdicDelete<'_> {
     fn stops_batch(&self) -> bool {
         self.stopped
     }
+}
+
+/// The failure of a mixed batch that never wrote anything, for the router's fallback. Once an ADT
+/// row has been deleted the batch cannot run again on another backend, whatever the runner side
+/// says.
+pub fn batch_unsent_failure(
+    runner: &DdicDelete<'_>,
+    adt: &AdtDelete<'_>,
+) -> Option<(Failure, String)> {
+    if adt.wrote() {
+        return None;
+    }
+
+    runner.unsent_failure().or_else(|| adt.unsent_failure())
 }
 
 /// The batch of an operation that mixes the M4 kinds with DDIC rows: a DDIC row goes to the

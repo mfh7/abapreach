@@ -549,3 +549,109 @@ fn the_http_gate_leaves_close_and_the_stateful_verdict_to_the_session_it_wraps()
         assert_eq!(spy.closes, 1);
     }
 }
+
+// ---- Task 32A: the word `classrun` inside an object name is not the classrun resource ----------
+
+/// The reads and writes of a class named like `ZCL_MY_CLASSRUN`, as the M1-M5 operations send them.
+fn class_requests(class: &str) -> Vec<Request> {
+    let base = format!("{CLASSES}/{class}");
+    let mut put = Request::put(
+        format!("{base}/source/main?lockHandle=a%2Bb"),
+        b"CLASS x DEFINITION.".to_vec(),
+    );
+
+    put.headers.insert(
+        "Content-Type".to_owned(),
+        "text/plain; charset=utf-8".to_owned(),
+    );
+
+    vec![
+        Request::get(format!("{base}/source/main?version=active")),
+        Request::get(base.clone()),
+        Request::post(format!("{base}?_action=LOCK&accessMode=MODIFY"), Vec::new()),
+        put,
+        Request::delete(format!("{base}?lockHandle=a%2Bb")),
+    ]
+}
+
+#[test]
+fn an_object_whose_name_contains_classrun_is_admitted_on_both_transports() {
+    for class in [
+        "zcl_my_classrun",
+        "ZCL_MY_CLASSRUN",
+        "zclassrun",
+        "zcl_classrun_demo",
+    ] {
+        for request in class_requests(class) {
+            assert_both(None, &request, true);
+            assert_both(Some(RUNNER), &request, true);
+        }
+    }
+
+    // Other object kinds: the word is a name, not the resource.
+    for uri in [
+        "/sap/bc/adt/programs/programs/zclassrun/source/main?version=active",
+        "/sap/bc/adt/oo/interfaces/zif_classrun/source/main?version=active",
+    ] {
+        assert_both(Some(RUNNER), &Request::get(uri), true);
+    }
+}
+
+#[test]
+fn a_runner_cycle_with_classrun_in_its_prefix_works_on_both_transports() {
+    let name = "YCL_CLASSRUN_AB12CD34";
+    let class = name.to_ascii_lowercase();
+    let created = create(CLASSES, class_body(name, "$TMP"));
+
+    assert_both(Some(name), &created, true);
+    assert_both(Some(name), &classrun(name), true);
+
+    for request in class_requests(&class) {
+        assert_both(Some(name), &request, true);
+    }
+
+    // The same name is still only one POST at the real resource.
+    assert_both(Some(name), &classrun(RUNNER), false);
+}
+
+#[test]
+fn every_spelling_that_reaches_the_classrun_resource_stays_refused() {
+    for uri in [
+        CLASSRUN.to_owned(),
+        format!("{CLASSRUN}/{RUNNER}"),
+        format!("{CLASSRUN}?x=1"),
+        format!("{CLASSRUN}%3Fx=1"),
+        format!("/sap/bc/adt/oo/classes/../classrun/{RUNNER}"),
+        format!("/sap/bc/adt/oo/./classrun/{RUNNER}"),
+        format!("/sap/bc/adt/oo//classrun/{RUNNER}"),
+        format!("/sap//bc/adt/oo/classrun/{RUNNER}"),
+        format!("/sap/bc/adt/oo/classes/%2e%2e/classrun/{RUNNER}"),
+        format!("/sap/bc/adt/oo/classes/%252e%252e/classrun/{RUNNER}"),
+        format!("/sap/bc/adt/oo/classes/..%2fclassrun/{RUNNER}"),
+        format!("/sap/bc/adt/oo/classes/..%252fclassrun/{RUNNER}"),
+        format!("/sap/bc/adt/oo/%252563lassrun/{RUNNER}"),
+        format!("/sap/bc/adt/oo/CLASSRUN/{RUNNER}"),
+        format!("/sap/bc/adt/oo/classrun;a=b/{RUNNER}"),
+        format!("/sap/bc/adt/oo/classrun/{RUNNER}#f"),
+        format!("/sap/bc/adt/oo/classrunx/{RUNNER}"),
+        format!("/sap/bc/adt/oo/classes/zcl_x/../../classrun/{RUNNER}"),
+        format!("/sap/bc/adt/oo\\classrun/{RUNNER}"),
+    ] {
+        for request in [
+            Request::get(uri.clone()),
+            Request::delete(uri.clone()),
+            Request::put(uri.clone(), Vec::new()),
+        ] {
+            assert_both(Some(RUNNER), &request, false);
+        }
+
+        let mut post = classrun(RUNNER);
+
+        post.uri = uri.clone();
+
+        // An armed POST is judged on the exact uri; none of these spellings is it.
+        if uri != format!("{CLASSRUN}/{RUNNER}") {
+            assert_both(Some(RUNNER), &post, false);
+        }
+    }
+}
