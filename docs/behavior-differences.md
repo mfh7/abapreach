@@ -217,6 +217,12 @@ references (HTTP 403, `Program <N> is referenced in other programs`).
 carries `corrNr`. A create without `corrNr` makes SAP generate a new request, so a create in a
 non-`$TMP` package without `--tr` is refused before any request (exit 2).
 
+## System change option guard
+
+The system change option guard of the runner class (`TRAN` and DDIC write modes) rejects only
+`EDTFLAG` `N`, the SAP standard rule in `TR_SYS_GET_EU_LOCK_STATUS`. The Python tool rejected any
+non-empty value.
+
 ## Observed parity notes
 
 These results come from a run that deployed the same change with the Python tooling and with

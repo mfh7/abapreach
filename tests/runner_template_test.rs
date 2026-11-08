@@ -18,27 +18,27 @@ const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 const PINNED: [(&str, &str); 6] = [
     (
         "CORE",
-        "a3b4aa58839ce515f890f736fc31a84958649f312b6526b114a1e3dcd8970bcf",
+        "5b184ab33877ae31b034c65c07cf2070abb7b897be82dfa57c0cba258fff2fab",
     ),
     (
         "TRAN",
-        "6055f9fcdf5ef413ae710e37f4705adb2242c7a8c58abaec56de040d67012d96",
+        "8a2cceaac3eee61a8e17011e78d07823cc72ce2516cd0d3d307bf6478e835867",
     ),
     (
         "DTEL",
-        "ea4e4ddcd042004e810de6496d344b4be2ff6170b0821fe521124113ed54efac",
+        "ddc94fbb8147af0f81dea2924afd8b1a9fe2f4d9e84459499f03b65cfde17ce7",
     ),
     (
         "DOMA",
-        "ea4e4ddcd042004e810de6496d344b4be2ff6170b0821fe521124113ed54efac",
+        "ddc94fbb8147af0f81dea2924afd8b1a9fe2f4d9e84459499f03b65cfde17ce7",
     ),
     (
         "TABL",
-        "ea4e4ddcd042004e810de6496d344b4be2ff6170b0821fe521124113ed54efac",
+        "ddc94fbb8147af0f81dea2924afd8b1a9fe2f4d9e84459499f03b65cfde17ce7",
     ),
     (
         "TTYP",
-        "ea4e4ddcd042004e810de6496d344b4be2ff6170b0821fe521124113ed54efac",
+        "ddc94fbb8147af0f81dea2924afd8b1a9fe2f4d9e84459499f03b65cfde17ce7",
     ),
 ];
 
@@ -692,4 +692,23 @@ fn the_pinned_templates_stay_inside_the_allow_list() {
             "{name}"
         );
     }
+}
+
+// SAP's own rule (TR_SYS_GET_EU_LOCK_STATUS): the system is locked only when EDTFLAG is 'N'.
+#[test]
+fn the_system_change_option_guard_rejects_only_n() {
+    let lines = template_lines(&CORE_ONLY);
+    let guard = lines
+        .iter()
+        .position(|l| l.contains("lv_sysedit") && l.trim_start().starts_with("IF "))
+        .expect("the EDTFLAG guard");
+
+    assert_eq!(lines[guard].trim(), "IF lv_sysedit = 'N'.");
+    assert!(lines[guard + 1].contains("The system change option is not modifiable (EDTFLAG="));
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.contains("lv_sysedit IS NOT INITIAL")),
+        "a value other than N must not be rejected"
+    );
 }

@@ -327,8 +327,8 @@
       reject( |TR_SYS_PARAMS failed (rc={ lv_rc }): { sy_text( ) }| ).
       RETURN.
     ENDIF.
-    " EDTFLAG is empty on a system that allows changes; any other value is rejected.
-    IF lv_sysedit IS NOT INITIAL.
+    " Only EDTFLAG N locks the system (SAP rule in TR_SYS_GET_EU_LOCK_STATUS); other values, such as C, allow changes.
+    IF lv_sysedit = 'N'.
       reject( |The system change option is not modifiable (EDTFLAG={ lv_sysedit })| ).
       RETURN.
     ENDIF.
