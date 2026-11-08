@@ -814,6 +814,37 @@ fn a_deploy_stays_on_the_backend_of_its_plan_and_never_falls_back() {
 }
 
 #[test]
+fn a_write_names_the_plan_token_as_the_reason_of_its_backend_never_a_cli_flag() {
+    let mut lab = lab(TOKEN, present());
+    let file = changed();
+    let token = token_of(&lab.plain("abap_simulate", dtel(&file)));
+    let deployed = lab.plain("abap_deploy", with_token(dtel(&file), &token));
+
+    assert_ok(&deployed);
+    assert!(
+        deployed.text.contains("reason: backend of the plan token"),
+        "{}",
+        deployed.text
+    );
+    assert!(!deployed.text.contains("--backend"), "{}", deployed.text);
+
+    let mut lab = self::lab(TOKEN, created_by_the_second_post());
+
+    lab.sessions.package = "ZPKG";
+
+    let token = token_of(&lab.plain("abap_create_simulate", tran_create()));
+    let created = lab.plain("abap_create", with_token(tran_create(), &token));
+
+    assert_ok(&created);
+    assert!(
+        created.text.contains("reason: backend of the plan token"),
+        "{}",
+        created.text
+    );
+    assert!(!created.text.contains("--backend"), "{}", created.text);
+}
+
+#[test]
 fn under_confirm_the_summary_comes_from_run_1_before_run_2_writes() {
     let mut lab = lab(CONFIRM, present());
     let file = changed();

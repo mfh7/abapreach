@@ -24,7 +24,7 @@
 //! token of the M1 deploy (`ACTIVE`), not `DEPLOY: ACTIVE hash <h>`; and the warning that the
 //! active definition differs from the file goes to the stderr.
 
-use crate::app::{Exit, Factories};
+use crate::app::{Exit, Factories, stop};
 use crate::backend::BackendKind;
 use crate::config::Connection;
 use crate::hash::{local_source_lines, normalize, source_hash};
@@ -38,13 +38,12 @@ use crate::operation::runner_reconcile::{
 };
 use crate::operation::runner_route::{random_nonce, route};
 use crate::operation::simulate_ddic::{
-    Attempt, DdicSimulate, Done, Print, Simulation, Stage, Step, Verified, check, first_run,
-    reason, refusal, run_lines, stage, texts, warnings,
+    Attempt, CHECK_NONCE, DdicSimulate, Done, Print, Simulation, Stage, Step, Verified, check,
+    first_run, reason, refusal, run_lines, stage, texts, warnings,
 };
 use crate::runner_protocol::{Level, Nonce, Report, RunMode, RunStatus};
 
-/// A valid nonce and base for the checks that run before any connection.
-const CHECK_NONCE: &str = "00000000000000000000000000000000";
+/// A valid base for the checks that run before any connection.
 const CHECK_BASE: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 /// The text of the class when the live hash moved between the two runs (the template's text).
 const BASE_CHANGED: &str = "Base changed since the diff was shown; run deploy again";
@@ -171,14 +170,6 @@ fn deploy_gated_with(
             attempt_deploy(&attempt, request, (&mut *nonce, &mut *clock), &mut *gate).routed()
         },
     )
-}
-
-fn stop(message: impl std::fmt::Display) -> Exit {
-    Exit {
-        code: 2,
-        stdout: String::new(),
-        stderr: format!("STOP: {message}"),
-    }
 }
 
 /// The payload of run 2: the file, the request, and the base the diff was shown against.

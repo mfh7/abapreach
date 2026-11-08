@@ -11,11 +11,12 @@
 //! payload refuses, and a simulate prints the guards of the create as constant lines because the
 //! `TRAN` template emits none.
 
-use crate::app::{Exit, Factories, Opened};
+use crate::app::{Exit, Factories, Opened, stop};
 use crate::backend::{BackendKind, Failure, Selection};
 use crate::config::Connection;
 use crate::domain::{Outcome, Status};
 use crate::hash::source_hash;
+use crate::object::DEFAULT_PACKAGE;
 use crate::operation::deploy::CancelFlag;
 use crate::operation::payload::{Kind, Mode, Request, encode};
 use crate::operation::read::emit_lines;
@@ -26,12 +27,10 @@ use crate::operation::runner_reconcile::{
 };
 use crate::operation::runner_route::{Routed, random_nonce, route};
 use crate::operation::runner_template::{TRAN_TEMPLATE, generate};
+use crate::operation::simulate_ddic::{CHECK_NONCE, texts};
 use crate::runner_protocol::{Level, Nonce, Parsed, Report, RunMode, RunStatus, parse_post_reply};
 use std::path::Path;
 
-/// A valid nonce for the checks that run before any connection.
-const CHECK_NONCE: &str = "00000000000000000000000000000000";
-const DEFAULT_PACKAGE: &str = "$TMP";
 /// A transaction is six lines: `TRAN`, `program`, `dynpro`, `cinfo`, `text`, `package`.
 const TRAN_LINES: usize = 6;
 /// The guards of a `TRAN` create, in the order the class applies them. The template emits no
@@ -171,14 +170,6 @@ fn create_mode(create: &TranCreate<'_>) -> Mode {
         Mode::CreateSim
     } else {
         Mode::Create
-    }
-}
-
-fn stop(message: impl std::fmt::Display) -> Exit {
-    Exit {
-        code: 2,
-        stdout: String::new(),
-        stderr: format!("STOP: {message}"),
     }
 }
 
@@ -435,15 +426,6 @@ impl Print {
 
 /// The messages of a run: errors are the reason of a verdict, warnings go to the stderr, and
 /// information goes to the stdout.
-fn texts(report: &Report, level: Level) -> Vec<String> {
-    report
-        .messages
-        .iter()
-        .filter(|message| message.level == level)
-        .map(|message| message.text.clone())
-        .collect()
-}
-
 fn side_messages(report: &Report, print: &mut Print) {
     print.stdout.extend(texts(report, Level::Info));
     print.stderr.extend(

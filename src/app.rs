@@ -351,7 +351,7 @@ fn with_warning(mut exit: Exit, warning: Option<&str>) -> Exit {
     exit
 }
 
-fn stop(message: impl std::fmt::Display) -> Exit {
+pub(crate) fn stop(message: impl std::fmt::Display) -> Exit {
     Exit {
         code: 2,
         stdout: String::new(),
@@ -359,13 +359,10 @@ fn stop(message: impl std::fmt::Display) -> Exit {
     }
 }
 
-/// The exit of a DDIC or transaction command: the STOP of a rule it broke, or the note that its
-/// operation does not exist yet.
-fn runner_exit(operation: &str, kind: Kind, checked: Result<(), String>) -> Exit {
-    match checked {
-        Ok(()) => stop(runner_cli::pending(operation, kind)),
-        Err(message) => stop(message),
-    }
+/// The STOP of the rule a DDIC or transaction command broke; a command that passed its rules ran
+/// before this is reached.
+fn runner_exit(checked: Result<(), String>) -> Exit {
+    stop(checked.expect_err("a DDIC or transaction command that passed its rules ran above"))
 }
 
 /// The text of the XML FILE of a DDIC command.
@@ -710,7 +707,7 @@ fn execute(
                         );
                     }
 
-                    return runner_exit("read", kind, checked);
+                    return runner_exit(checked);
                 }
                 TypeArg::Extension(kind) => {
                     let request = ReadRequest {
@@ -892,7 +889,7 @@ fn execute(
                         );
                     }
 
-                    return runner_exit("create", kind, checked);
+                    return runner_exit(checked);
                 }
                 TypeArg::Extension(kind) => {
                     let text = text.unwrap_or_default();
@@ -1059,7 +1056,7 @@ fn execute(
                         );
                     }
 
-                    return runner_exit("deploy", kind, checked);
+                    return runner_exit(checked);
                 }
                 // `deploy` parses an extension type only so that it can say why it stops.
                 TypeArg::Extension(kind) => {

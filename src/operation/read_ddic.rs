@@ -16,7 +16,7 @@
 //! in `$TMP` (Python calls one function module), a status other than `OK` is exit 1 (Python stops
 //! with exit 2), a hash that differs from the runner hash is exit 1, and `--lines` is refused.
 
-use crate::app::{Exit, Factories, Opened};
+use crate::app::{Exit, Factories, Opened, stop};
 use crate::backend::{BackendKind, Failure};
 use crate::config::Connection;
 use crate::hash::{normalize, source_hash};
@@ -26,15 +26,13 @@ use crate::operation::read::emit_lines;
 use crate::operation::runner::{CycleInput, PostRoute, RunnerEnd, RunnerRun, run_cycle};
 use crate::operation::runner_evidence::{Expect, Proof, judge, read_evidence};
 use crate::operation::runner_reconcile::{Cause, uncertainty};
-use crate::operation::runner_route::{Routed, random_nonce, route};
+use crate::operation::runner_route::{random_nonce, route};
 use crate::operation::runner_template::{
     DOMA_TEMPLATE, DTEL_TEMPLATE, TABL_TEMPLATE, TTYP_TEMPLATE, TypeTemplate, generate,
 };
+use crate::operation::simulate_ddic::{CHECK_NONCE, Done, refusal, texts};
 use crate::runner_protocol::{Level, Nonce, Parsed, Report, RunMode, RunStatus, parse_post_reply};
 use std::path::Path;
-
-/// A valid nonce for the checks that run before any connection.
-const CHECK_NONCE: &str = "00000000000000000000000000000000";
 
 /// `read <TYPE> <NAME> <OUT> [--force]` of a DDIC type. The name and the file rules are checked by
 /// `runner_cli::check_read` before this runs.
@@ -98,14 +96,6 @@ fn payload(kind: Kind, name: &str, nonce: &str) -> Result<Vec<String>, String> {
     encode(&Request::new(Mode::Read, kind, name, nonce))
 }
 
-fn stop(message: impl std::fmt::Display) -> Exit {
-    Exit {
-        code: 2,
-        stdout: String::new(),
-        stderr: format!("STOP: {message}"),
-    }
-}
-
 // --- one attempt -------------------------------------------------------------------------------
 
 /// Everything one attempt on one backend needs.
@@ -118,26 +108,6 @@ struct Attempt<'a> {
     /// The object name, upper case.
     name: &'a str,
     template: &'static TypeTemplate,
-}
-
-/// One attempt, and whether the router may try the other backend.
-struct Done {
-    code: i32,
-    stdout: Vec<String>,
-    stderr: Vec<String>,
-    /// Set when nothing was sent and the failure allows the other backend.
-    fallback: Option<(Failure, String)>,
-}
-
-impl Done {
-    fn routed(self) -> Routed {
-        Routed {
-            code: self.code,
-            stdout: self.stdout.join("\n"),
-            stderr: self.stderr,
-            fallback: self.fallback,
-        }
-    }
 }
 
 fn run_attempt(attempt: &Attempt<'_>, nonce: &mut dyn FnMut() -> String) -> Done {
@@ -185,15 +155,6 @@ fn run_attempt(attempt: &Attempt<'_>, nonce: &mut dyn FnMut() -> String) -> Done
             print.finish(&run, 1)
         }
         other => print.ended(&run, other),
-    }
-}
-
-fn refusal(message: &str) -> Done {
-    Done {
-        code: 2,
-        stdout: Vec::new(),
-        stderr: vec![format!("STOP: {message}")],
-        fallback: None,
     }
 }
 
@@ -304,15 +265,6 @@ impl Print {
 }
 
 // --- the report --------------------------------------------------------------------------------
-
-fn texts(report: &Report, level: Level) -> Vec<String> {
-    report
-        .messages
-        .iter()
-        .filter(|message| message.level == level)
-        .map(|message| message.text.clone())
-        .collect()
-}
 
 /// Information goes to the stdout and warnings to the stderr; errors are the reason of a verdict.
 fn side_messages(report: &Report, print: &mut Print) {

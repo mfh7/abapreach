@@ -21,9 +21,10 @@
 //! Differences from the Python tool, on purpose: the create creates and deletes a temporary class
 //! in `$TMP` and prints the `RUNNER:` line, and the XML travels inside the payload of that class.
 
-use crate::app::{Exit, Factories};
+use crate::app::{Exit, Factories, stop};
 use crate::backend::BackendKind;
 use crate::config::Connection;
+use crate::object::DEFAULT_PACKAGE;
 use crate::operation::deploy::CancelFlag;
 use crate::operation::deploy_ddic::{disagreement, fact};
 use crate::operation::payload::{Kind, Mode, Request, encode};
@@ -34,14 +35,10 @@ use crate::operation::runner_reconcile::{
 };
 use crate::operation::runner_route::{random_nonce, route};
 use crate::operation::simulate_ddic::{
-    Attempt, DdicSimulate, Done, Print, Simulation, Stage, reason, refusal, run_lines, stage,
-    texts, warnings,
+    Attempt, CHECK_NONCE, DdicSimulate, Done, Print, Simulation, Stage, reason, refusal, run_lines,
+    stage, texts, warnings,
 };
 use crate::runner_protocol::{Level, Nonce, Report, RunMode, RunStatus};
-
-/// A valid nonce for the checks that run before any connection.
-const CHECK_NONCE: &str = "00000000000000000000000000000000";
-const DEFAULT_PACKAGE: &str = "$TMP";
 
 /// `create <TYPE> <NAME> <FILE>` of a DDIC type. The name and option rules are checked by
 /// `runner_cli` before this runs.
@@ -124,14 +121,6 @@ pub fn create_with(
             attempt_create(&attempt, request, &mut *nonce, &mut *clock).routed()
         },
     )
-}
-
-fn stop(message: impl std::fmt::Display) -> Exit {
-    Exit {
-        code: 2,
-        stdout: String::new(),
-        stderr: format!("STOP: {message}"),
-    }
 }
 
 fn payload(request: &DdicCreate<'_>, name: &str, nonce: &str) -> Result<Vec<String>, String> {

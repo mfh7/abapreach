@@ -21,10 +21,11 @@
 //! deploy, a different `--base` is exit 2, `WHERE-USED` says `(transparent)`, and the guards are
 //! the lines the class reports.
 
-use crate::app::{Exit, Factories, Opened};
+use crate::app::{Exit, Factories, Opened, stop};
 use crate::backend::{BackendKind, Failure, Selection};
 use crate::config::Connection;
 use crate::hash::{local_source_lines, normalize, source_hash};
+use crate::object::DEFAULT_PACKAGE;
 use crate::operation::deploy::CancelFlag;
 use crate::operation::payload::{Kind, Mode, Request, encode};
 use crate::operation::read_ddic::template_of;
@@ -37,8 +38,7 @@ use crate::runner_protocol::{Level, Nonce, Parsed, Report, RunMode, RunStatus, p
 use similar::TextDiff;
 
 /// A valid nonce for the checks that run before any connection.
-const CHECK_NONCE: &str = "00000000000000000000000000000000";
-const DEFAULT_PACKAGE: &str = "$TMP";
+pub(crate) const CHECK_NONCE: &str = "00000000000000000000000000000000";
 /// The row of a transparent table in the XML file; the class decides a verdict for such a table.
 const TRANSPARENT_ROW: &str = "<TABCLASS>TRANSP</TABCLASS>";
 
@@ -157,14 +157,6 @@ fn payload(
     }
 
     encode(&run)
-}
-
-fn stop(message: impl std::fmt::Display) -> Exit {
-    Exit {
-        code: 2,
-        stdout: String::new(),
-        stderr: format!("STOP: {message}"),
-    }
 }
 
 // --- one attempt -------------------------------------------------------------------------------

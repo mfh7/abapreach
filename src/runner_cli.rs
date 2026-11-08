@@ -140,11 +140,6 @@ pub fn first_kind(targets: &[DeleteTarget]) -> Option<Kind> {
     })
 }
 
-/// What a command prints once its grammar passed, until the operation behind it exists.
-pub fn pending(operation: &str, kind: Kind) -> String {
-    format!("{operation} {} is not implemented yet", kind.token())
-}
-
 fn check_source_options(options: &SourceOptions<'_>) -> Result<(), String> {
     if options.include.is_some() {
         return Err("--include is only valid for CLAS".to_owned());

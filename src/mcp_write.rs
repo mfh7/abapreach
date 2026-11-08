@@ -10,7 +10,7 @@ use crate::app::{
     Attempt, Exit, Factories, Opened, RfcLibraryInfo, RfcProbe, end_session, exit_of_outcome,
     option_misuse, pin_of, route,
 };
-use crate::backend::{BackendKind, Failure, OperationKind, Selection};
+use crate::backend::{BackendKind, Failure, OperationKind, Selection, SelectionReason};
 use crate::cli::{CreateKind, DeleteKind, DeleteTarget, IncludeKind, ObjectKind, Subc, TypeArg};
 use crate::config::{Connection, scrub};
 use crate::domain::{Outcome, Status};
@@ -1113,12 +1113,17 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             ),
         );
         let leaked = !diagnostics && holds_secret(connection, &exit.stdout);
+        // The only backend an MCP call pins is the one of its plan_token.
+        let stdout = exit.stdout.replace(
+            &format!("reason: {}", SelectionReason::ExplicitBackend),
+            "reason: backend of the plan token",
+        );
         let output = if leaked {
             SECRET_REJECTED.to_owned()
         } else if diagnostics {
-            diagnostic(connection, exit.stdout.trim_end())
+            diagnostic(connection, stdout.trim_end())
         } else {
-            scrub(exit.stdout.trim_end(), &known_lock_handles())
+            scrub(stdout.trim_end(), &known_lock_handles())
         };
         let mut text = [output.as_str(), notes.as_str()]
             .into_iter()
