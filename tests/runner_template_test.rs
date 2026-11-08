@@ -15,10 +15,16 @@ const NONCE: &str = "0123456789ABCDEF0123456789ABCDEF";
 const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// One pinned hash per shipped template: adding or changing a template line is a deliberate act.
-const PINNED: [(&str, &str); 1] = [(
-    "CORE",
-    "a3b4aa58839ce515f890f736fc31a84958649f312b6526b114a1e3dcd8970bcf",
-)];
+const PINNED: [(&str, &str); 2] = [
+    (
+        "CORE",
+        "a3b4aa58839ce515f890f736fc31a84958649f312b6526b114a1e3dcd8970bcf",
+    ),
+    (
+        "TRAN",
+        "6055f9fcdf5ef413ae710e37f4705adb2242c7a8c58abaec56de040d67012d96",
+    ),
+];
 
 fn payload() -> Vec<String> {
     vec![

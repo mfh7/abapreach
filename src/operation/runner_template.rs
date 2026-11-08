@@ -43,7 +43,14 @@ pub static CORE_ONLY: TypeTemplate = TypeTemplate {
     methods: include_str!("runner_template/core_only.abap"),
 };
 
-pub static TEMPLATES: [&TypeTemplate; 1] = [&CORE_ONLY];
+/// The `TRAN` template: read, create, and delete of a report transaction.
+pub static TRAN_TEMPLATE: TypeTemplate = TypeTemplate {
+    name: "TRAN",
+    declarations: include_str!("runner_template/tran_decl.abap"),
+    methods: include_str!("runner_template/tran_impl.abap"),
+};
+
+pub static TEMPLATES: [&TypeTemplate; 2] = [&CORE_ONLY, &TRAN_TEMPLATE];
 
 /// The constant lines of a template, with the placeholder where the class name goes and without
 /// payload lines.
