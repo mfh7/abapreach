@@ -1175,7 +1175,10 @@ fn reference_of(element: &BytesStart<'_>) -> Option<ObjectRef> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, Part, is_encoded, is_entity, is_name, parse_path};
+    use super::{
+        Kind, Part, is_encoded, is_entity, is_name, parse_path, part_of, percent_decoded,
+        reaches_classrun,
+    };
 
     /// The classrun fault targets exactly the POST of one runner name: a missing name, a nested
     /// path, a query, or a fragment is not the runner's POST.
@@ -1269,6 +1272,36 @@ mod tests {
         assert!(!is_encoded("a%2"));
         assert!(!is_encoded("a%2g"));
         assert!(!is_encoded("a b"));
+    }
+
+    #[test]
+    fn classrun_is_reached_when_only_the_path_before_the_query_resolves_to_it() {
+        // The dot segments after `?` pop the resource off the full text, so only the path
+        // before the query still reaches it.
+        assert!(reaches_classrun("/sap/bc/adt/oo/x/../classrun?/../.."));
+    }
+
+    #[test]
+    fn classrun_is_reached_through_repeated_percent_encoding_only_when_it_is_the_resource() {
+        assert!(reaches_classrun("/sap/bc/adt/oo/%63lassrun/YCL_X"));
+        assert!(reaches_classrun("/sap/bc/adt/oo/%2563lassrun"));
+        assert!(!reaches_classrun("/sap/bc/adt/oo/classes/zcl_a%41"));
+        assert!(!reaches_classrun("/sap/bc/adt/discovery"));
+    }
+
+    #[test]
+    fn percent_decoding_replaces_complete_escapes_and_keeps_the_rest() {
+        assert_eq!(percent_decoded("%41"), "A");
+        assert_eq!(percent_decoded("a%2Fb%41"), "a/bA");
+        assert_eq!(percent_decoded("plain"), "plain");
+        assert_eq!(percent_decoded("100%"), "100%");
+        assert_eq!(percent_decoded("%zz%4"), "%zz%4");
+    }
+
+    #[test]
+    fn a_function_group_has_no_part_below_it() {
+        assert_eq!(part_of(Kind::Group, ""), Some(Part::Object));
+        assert_eq!(part_of(Kind::Group, "/source/main"), None);
     }
 
     #[test]
