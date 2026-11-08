@@ -326,6 +326,12 @@ fn every_valid_form_passes_the_grammar_without_a_connection() {
             continue;
         }
 
+        // `create` of a DDIC type runs since Task 21; its forms are in
+        // tests/runner_ddic_create_test.rs.
+        if operation == "create" && token != "TRAN" {
+            continue;
+        }
+
         let exit = exit_of(&arguments);
 
         assert_eq!(exit.stderr, accepted(operation, token), "{arguments:?}");

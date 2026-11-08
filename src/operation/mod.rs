@@ -1,4 +1,5 @@
 pub mod create;
+pub mod create_ddic;
 pub mod delete;
 pub mod delete_adt;
 pub mod delete_ddic;

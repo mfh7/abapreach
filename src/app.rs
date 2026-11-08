@@ -18,6 +18,7 @@ use crate::object::{
     check_read_extension,
 };
 use crate::operation::create::{CreateInput, CreateProg};
+use crate::operation::create_ddic::{self, DdicCreate};
 use crate::operation::delete::{self, Context};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch};
@@ -848,11 +849,30 @@ fn execute(
                     }
 
                     // `check_create` makes FILE mandatory for a DDIC type.
-                    if let (true, Ok(()), Some(file)) = (simulate, &checked, file.as_deref()) {
+                    if let (Ok(()), Some(file)) = (&checked, file.as_deref()) {
                         let xml = match read_xml(file) {
                             Ok(xml) => xml,
                             Err(exit) => return exit,
                         };
+
+                        if !simulate {
+                            let request = DdicCreate {
+                                kind,
+                                name: &name,
+                                xml: &xml,
+                                package: package.as_deref(),
+                                text: text.as_deref(),
+                                tr: tr.as_deref(),
+                            };
+
+                            return create_ddic::create(
+                                connection,
+                                backend.map(backend_kind),
+                                &request,
+                                factories,
+                            );
+                        }
+
                         let request = DdicSimulate {
                             kind,
                             name: &name,

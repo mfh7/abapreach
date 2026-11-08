@@ -304,7 +304,7 @@ fn written(
     }
 }
 
-fn fact(report: &Report, key: &str) -> Option<String> {
+pub(crate) fn fact(report: &Report, key: &str) -> Option<String> {
     report
         .facts
         .iter()
@@ -351,7 +351,7 @@ fn active(
 
 /// What a new session says against the run: `None` when it agrees. The runner class that stays
 /// (reported on its own) does not count against the definition.
-fn disagreement(
+pub(crate) fn disagreement(
     attempt: &Attempt<'_>,
     run: &RunnerRun,
     package: Option<&str>,

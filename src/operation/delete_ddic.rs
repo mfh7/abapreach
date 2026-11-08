@@ -28,6 +28,7 @@ use crate::operation::runner_evidence::{Expect, Proof, confirm, judge, read_evid
 use crate::operation::runner_reconcile::{
     Clock, Intent, ReadRun, Subject, SystemClock, Verdict, reconcile, settle,
 };
+use crate::operation::runner_route::random_nonce;
 use crate::operation::runner_template::{TEMPLATES, generate};
 use crate::runner_protocol::parse_post_reply;
 use crate::runner_protocol::{Level, Nonce, Parsed, Report, RunMode, RunStatus, Stop};
@@ -746,12 +747,4 @@ pub fn exit_override(interrupted: bool, leftover: bool, stop: bool) -> Option<i3
     } else {
         None
     }
-}
-
-fn random_nonce() -> String {
-    let mut bytes = [0u8; 16];
-
-    getrandom::fill(&mut bytes).expect("the OS random source is available");
-
-    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
 }
