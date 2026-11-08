@@ -571,7 +571,45 @@ fn the_proof_compares_every_part_of_the_definition_like_the_python_subset() {
         assert!(subset.contains(&format!("`{field}`")), "{field}");
     }
 
-    assert!(body(&all, "subset_table").contains("lines( it_file ) <> lines( ct_active )"));
+    assert!(body(&all, "subset_table").contains("lines( it_file ) <> lines( it_active )"));
+}
+
+#[test]
+fn a_master_language_left_empty_in_the_file_is_not_a_difference() {
+    // SAP fills the original language into DD04V-DTELMASTER, DD01V-DOMMASTER, and
+    // DD02V-MASTERLANG; a file written by hand never carries it. A value in the file must match.
+    let subset = body(&text("DTEL"), "subset_struct");
+
+    for field in ["DTELMASTER", "DOMMASTER", "MASTERLANG"] {
+        assert!(subset.contains(&format!("`{field}`")), "{field}");
+    }
+
+    // Equal components pass first; an empty file component passes only when it is on the derived
+    // list; anything else is the first difference.
+    assert_order(
+        &subset,
+        &[
+            "IF <lv_file> = <lv_active>.",
+            "IF <lv_file> IS INITIAL AND line_exists( lt_derived[ table_line = ls_comp-name ] ).",
+            "ev_diff =",
+            "RETURN.",
+        ],
+    );
+}
+
+#[test]
+fn a_failed_proof_names_the_first_differing_component_with_both_values() {
+    let all = text("DTEL");
+    let subset = body(&all, "subset_struct");
+
+    assert!(subset.contains("lo_struct->components"));
+    assert!(subset.contains("|{ ls_comp-name } file='{ <lv_file> }' active='{ <lv_active> }'|"));
+    assert!(body(&all, "subset_table").contains("|row { lv_index }: { lv_diff }|"));
+
+    let verify = body(&all, "verify_definition");
+
+    assert!(verify.contains("ev_diff = lv_diff"));
+    assert!(verify.contains("after activation ({ lt_labels[ lv_index ] }): { lv_diff }|"));
 }
 
 #[test]

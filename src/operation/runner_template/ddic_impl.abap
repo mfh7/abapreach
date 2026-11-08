@@ -1555,6 +1555,7 @@
 
     DATA:
       lv_ok       TYPE abap_bool,
+      lv_diff     TYPE string,
       lv_kind     TYPE c LENGTH 1,
       lv_index    TYPE i,
       lv_pending  TYPE i,
@@ -1581,13 +1582,13 @@
       ASSIGN COMPONENT lv_index OF STRUCTURE ms_live TO <lg_live>.
       DESCRIBE FIELD <lg_file> TYPE lv_kind.
       IF lv_kind = 'h'.
-        subset_table( EXPORTING it_file = <lg_file> IMPORTING ev_ok = lv_ok CHANGING ct_active = <lg_live> ).
+        subset_table( EXPORTING it_file = <lg_file> it_active = <lg_live> IMPORTING ev_ok = lv_ok ev_diff = lv_diff ).
       ELSE.
-        subset_struct( EXPORTING is_file = <lg_file> IMPORTING ev_ok = lv_ok CHANGING cs_active = <lg_live> ).
+        subset_struct( EXPORTING is_file = <lg_file> is_active = <lg_live> IMPORTING ev_ok = lv_ok ev_diff = lv_diff ).
       ENDIF.
       IF lv_ok = abap_false.
         msg( iv_level = `E`
-             iv_text = |{ mv_type } { mv_name } active version does not match the file after activation ({ lt_labels[ lv_index ] })| ).
+             iv_text = |{ mv_type } { mv_name } active version does not match the file after activation ({ lt_labels[ lv_index ] }): { lv_diff }| ).
         RETURN.
       ENDIF.
     ENDDO.
@@ -1623,54 +1624,60 @@
 
   METHOD subset_struct.
     " Each component of the file equals the active one. A component left empty in the file may
-    " be filled by SAP only for the attributes SAP derives or defaults itself.
+    " be filled by SAP only for the attributes SAP derives or defaults itself, and for the
+    " master language, which SAP sets to the original language. The first difference is named.
     DATA:
+      lo_struct TYPE REF TO cl_abap_structdescr,
       lt_derived TYPE string_table.
-
-    DATA:
-      lv_name TYPE string.
 
     FIELD-SYMBOLS:
       <lv_file>   TYPE any,
       <lv_active> TYPE any.
 
     lt_derived = VALUE #( ( `ROWORCOLST` ) ( `INTTYPE` ) ( `INTLEN` ) ( `OUTPUTLEN` ) ( `TYPELEN` )
-                          ( `DOMNAME3L` ) ( `AS4LOCAL` ) ( `AS4VERS` ) ( `DDLANGUAGE` ) ).
-    LOOP AT lt_derived INTO lv_name.
-      ASSIGN COMPONENT lv_name OF STRUCTURE is_file TO <lv_file>.
-      IF sy-subrc <> 0.
+                          ( `DOMNAME3L` ) ( `AS4LOCAL` ) ( `AS4VERS` ) ( `DDLANGUAGE` )
+                          ( `DTELMASTER` ) ( `DOMMASTER` ) ( `MASTERLANG` ) ).
+    lo_struct = CAST cl_abap_structdescr( cl_abap_typedescr=>describe_by_data( is_file ) ).
+    LOOP AT lo_struct->components INTO DATA(ls_comp).
+      ASSIGN COMPONENT ls_comp-name OF STRUCTURE is_file TO <lv_file>.
+      ASSIGN COMPONENT ls_comp-name OF STRUCTURE is_active TO <lv_active>.
+      IF <lv_file> = <lv_active>.
         CONTINUE.
       ENDIF.
-      ASSIGN COMPONENT lv_name OF STRUCTURE cs_active TO <lv_active>.
-      IF sy-subrc = 0 AND <lv_file> IS INITIAL.
-        CLEAR <lv_active>.
+      IF <lv_file> IS INITIAL AND line_exists( lt_derived[ table_line = ls_comp-name ] ).
+        CONTINUE.
       ENDIF.
+      ev_diff = |{ ls_comp-name } file='{ <lv_file> }' active='{ <lv_active> }'|.
+      RETURN.
     ENDLOOP.
-    ev_ok = xsdbool( is_file = cs_active ).
+    ev_ok = abap_true.
   ENDMETHOD.
 
 
   METHOD subset_table.
-    " The same number of rows, compared row by row.
+    " The same number of rows, compared row by row. A difference names its row.
     DATA:
       lv_ok    TYPE abap_bool,
+      lv_diff  TYPE string,
       lv_index TYPE i.
 
     FIELD-SYMBOLS:
       <ls_file>   TYPE any,
       <ls_active> TYPE any.
 
-    IF lines( it_file ) <> lines( ct_active ).
+    IF lines( it_file ) <> lines( it_active ).
+      ev_diff = |{ lines( it_file ) } rows in the file, { lines( it_active ) } rows active|.
       RETURN.
     ENDIF.
     LOOP AT it_file ASSIGNING <ls_file>.
       lv_index = sy-tabix.
-      READ TABLE ct_active INDEX lv_index ASSIGNING <ls_active>.
+      READ TABLE it_active INDEX lv_index ASSIGNING <ls_active>.
       IF sy-subrc <> 0.
         RETURN.
       ENDIF.
-      subset_struct( EXPORTING is_file = <ls_file> IMPORTING ev_ok = lv_ok CHANGING cs_active = <ls_active> ).
+      subset_struct( EXPORTING is_file = <ls_file> is_active = <ls_active> IMPORTING ev_ok = lv_ok ev_diff = lv_diff ).
       IF lv_ok = abap_false.
+        ev_diff = |row { lv_index }: { lv_diff }|.
         RETURN.
       ENDIF.
     ENDLOOP.

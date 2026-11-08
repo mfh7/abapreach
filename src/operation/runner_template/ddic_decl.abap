@@ -246,18 +246,18 @@
     METHODS subset_struct
       IMPORTING
         is_file   TYPE any
+        is_active TYPE any
       EXPORTING
         ev_ok     TYPE abap_bool
-      CHANGING
-        cs_active TYPE any.
+        ev_diff   TYPE string.
 
     METHODS subset_table
       IMPORTING
         it_file   TYPE INDEX TABLE
+        it_active TYPE INDEX TABLE
       EXPORTING
         ev_ok     TYPE abap_bool
-      CHANGING
-        ct_active TYPE INDEX TABLE.
+        ev_diff   TYPE string.
 
     METHODS check_delete
       RETURNING

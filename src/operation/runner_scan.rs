@@ -36,12 +36,15 @@ pub const ALLOWED_FUNCTIONS: &[&str] = &[
 
 /// Classes and interfaces the templates may name. `CL_ABAP_CONV_OUT_CE` encodes SAP text as
 /// UTF-8 for the output protocol, `CL_ABAP_MESSAGE_DIGEST` gives the SHA-256 of a live
-/// definition (the plan hash of `TRAN`), and `CX_ROOT` catches an unexpected exception; all are
-/// proven live in Task 12A.
+/// definition (the plan hash of `TRAN`), `CL_ABAP_TYPEDESCR` and `CL_ABAP_STRUCTDESCR` list the
+/// components of a DDIC structure so that a failed proof names the first difference, and
+/// `CX_ROOT` catches an unexpected exception; all are proven live in Task 12A.
 pub const ALLOWED_CLASSES: &[&str] = &[
     "CL_ABAP_CONV_IN_CE",
     "CL_ABAP_CONV_OUT_CE",
     "CL_ABAP_MESSAGE_DIGEST",
+    "CL_ABAP_STRUCTDESCR",
+    "CL_ABAP_TYPEDESCR",
     "CL_HTTP_UTILITY",
     "CX_ROOT",
     "IF_OO_ADT_CLASSRUN",

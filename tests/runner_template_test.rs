@@ -26,19 +26,19 @@ const PINNED: [(&str, &str); 6] = [
     ),
     (
         "DTEL",
-        "d22cceb4f8e58c94ec8f7e06e593697f4b74df6c0148661136a874817175e36a",
+        "60a90434c26c14489b10f497affa9a86f06d601d00e4482d2d06011a2241c070",
     ),
     (
         "DOMA",
-        "d22cceb4f8e58c94ec8f7e06e593697f4b74df6c0148661136a874817175e36a",
+        "60a90434c26c14489b10f497affa9a86f06d601d00e4482d2d06011a2241c070",
     ),
     (
         "TABL",
-        "d22cceb4f8e58c94ec8f7e06e593697f4b74df6c0148661136a874817175e36a",
+        "60a90434c26c14489b10f497affa9a86f06d601d00e4482d2d06011a2241c070",
     ),
     (
         "TTYP",
-        "d22cceb4f8e58c94ec8f7e06e593697f4b74df6c0148661136a874817175e36a",
+        "60a90434c26c14489b10f497affa9a86f06d601d00e4482d2d06011a2241c070",
     ),
 ];
 
@@ -591,9 +591,9 @@ fn the_scanner_rejects_a_class_that_is_not_allow_listed() {
         "TRY. x = 1. CATCH cx_root cx_sy_zerodivide INTO DATA(lx).",
         "INTERFACES if_serializable_object.",
         "CREATE OBJECT lo_x TYPE cl_gui_alv_grid.",
-        "lo_x = CAST cl_abap_typedescr( lo_y ).",
+        "lo_x = CAST cl_abap_datadescr( lo_y ).",
         "RAISE EXCEPTION TYPE cx_sy_itab_error.",
-        "CLASS lcl_x DEFINITION INHERITING FROM cl_abap_typedescr.",
+        "CLASS lcl_x DEFINITION INHERITING FROM cl_abap_datadescr.",
         "x = cl_abap_char_utilities=>newline&&cl_http_utility=>decode_x_base64( y ).",
     ] {
         let found = rejected(code, None);

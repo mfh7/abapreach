@@ -223,6 +223,13 @@ The system change option guard of the runner class (`TRAN` and DDIC write modes)
 `EDTFLAG` `N`, the SAP standard rule in `TR_SYS_GET_EU_LOCK_STATUS`. The Python tool rejected any
 non-empty value.
 
+## DDIC proof after activation
+
+The in-run comparison of the file with the active definition does not count the master language
+(`DTELMASTER`, `DOMMASTER`, `MASTERLANG`) as a difference when the file leaves it empty: SAP fills
+it with the original language. A value in the file must still match. A failed comparison names the
+first differing component with the file value and the active value.
+
 ## Observed parity notes
 
 These results come from a run that deployed the same change with the Python tooling and with
