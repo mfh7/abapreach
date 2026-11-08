@@ -288,9 +288,52 @@
   ENDMETHOD.
 
 
+  METHOD clear_blank_numc.
+    " A NUMC component that holds only blanks (DDIF_TABL_GET returns one for a foreign-key row)
+    " cannot be written as asXML. It is cleared, so the suppressed initial component is left out.
+    " A NUMC value with a digit is not touched.
+    DATA:
+      lo_type   TYPE REF TO cl_abap_typedescr,
+      lo_struct TYPE REF TO cl_abap_structdescr.
+
+    DATA:
+      lv_text TYPE string.
+
+    FIELD-SYMBOLS:
+      <lg_part> TYPE any,
+      <lg_row>  TYPE any,
+      <lt_rows> TYPE ANY TABLE.
+
+    lo_type = cl_abap_typedescr=>describe_by_data( cg_data ).
+    CASE lo_type->kind.
+      WHEN cl_abap_typedescr=>kind_struct.
+        lo_struct = CAST cl_abap_structdescr( lo_type ).
+        LOOP AT lo_struct->components INTO DATA(ls_comp).
+          ASSIGN COMPONENT ls_comp-name OF STRUCTURE cg_data TO <lg_part>.
+          IF sy-subrc = 0.
+            clear_blank_numc( CHANGING cg_data = <lg_part> ).
+          ENDIF.
+        ENDLOOP.
+      WHEN cl_abap_typedescr=>kind_table.
+        ASSIGN cg_data TO <lt_rows>.
+        LOOP AT <lt_rows> ASSIGNING <lg_row>.
+          clear_blank_numc( CHANGING cg_data = <lg_row> ).
+        ENDLOOP.
+      WHEN cl_abap_typedescr=>kind_elem.
+        IF lo_type->type_kind = cl_abap_typedescr=>typekind_num.
+          lv_text = cg_data.
+          IF lv_text CO ` `.
+            CLEAR cg_data.
+          ENDIF.
+        ENDIF.
+    ENDCASE.
+  ENDMETHOD.
+
+
   METHOD canonicalize.
     " Fields SAP derives or stamps are dropped, so a file read back stays stable and a changed
     " ROLLNAME does not keep the old type.
+    clear_blank_numc( CHANGING cg_data = cs_def ).
     CLEAR: cs_def-dd04v-as4user, cs_def-dd04v-as4date, cs_def-dd04v-as4time,
            cs_def-dd01v-as4user, cs_def-dd01v-as4date, cs_def-dd01v-as4time,
            cs_def-dd02v-as4user, cs_def-dd02v-as4date, cs_def-dd02v-as4time,

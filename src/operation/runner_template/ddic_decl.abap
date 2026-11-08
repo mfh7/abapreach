@@ -65,6 +65,10 @@
       CHANGING
         cs_def TYPE ty_def.
 
+    METHODS clear_blank_numc
+      CHANGING
+        cg_data TYPE any.
+
     METHODS serialize
       IMPORTING
         is_def         TYPE ty_def

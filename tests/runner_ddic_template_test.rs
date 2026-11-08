@@ -885,3 +885,50 @@ fn a_serialization_failure_ends_a_delete_rejected_and_never_plans_from_no_active
         );
     }
 }
+
+#[test]
+fn blank_numc_components_are_cleared_before_any_row_is_serialized_or_compared() {
+    // Live defect (`READ TABL TSTCT`): DDIF_TABL_GET returns a NUMC component of a foreign-key
+    // row as blanks, and the asXML transformation raises "The argument '      ' cannot be
+    // interpreted as a number". Canonicalizing clears a NUMC component that holds only blanks, in
+    // every structure and table row, so that `suppress` omits it like any initial value. The
+    // live definition, the file side of the proof, and the active side of the table check all go
+    // through `canonicalize`, so the hash, the deploy comparison, and the proof see the same
+    // rows. A NUMC value with a digit is never touched. The Python baseline
+    // (`YCL_UTILS_DDIC_DEPLOY.canonicalize`) has no such step.
+    for kind in KINDS {
+        let text = text(kind);
+        let canonicalize = body(&text, "canonicalize");
+        let clear = body(&text, "clear_blank_numc");
+
+        assert_order(
+            &canonicalize,
+            &["clear_blank_numc( CHANGING cg_data = cs_def )", "CLEAR:"],
+        );
+        assert_order(
+            &text,
+            &[
+                "METHODS clear_blank_numc",
+                "cg_data TYPE any",
+                "METHOD clear_blank_numc.",
+            ],
+        );
+        // Structures and tables are walked recursively; only an elementary NUMC is cleared.
+        assert_order(
+            &clear,
+            &[
+                "cl_abap_typedescr=>describe_by_data( cg_data )",
+                "cl_abap_typedescr=>kind_struct",
+                "cl_abap_structdescr",
+                "clear_blank_numc( CHANGING cg_data = <lg_part> )",
+                "cl_abap_typedescr=>kind_table",
+                "clear_blank_numc( CHANGING cg_data = <lg_row> )",
+                "cl_abap_typedescr=>kind_elem",
+                "cl_abap_typedescr=>typekind_num",
+                "CO ` `",
+                "CLEAR cg_data.",
+            ],
+        );
+        assert_eq!(clear.matches("CLEAR ").count(), 1, "{kind}: one CLEAR only");
+    }
+}
