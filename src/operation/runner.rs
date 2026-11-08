@@ -1,4 +1,4 @@
-use crate::transport::TransportError;
+use crate::transport::{Request, Response, SadtTransport, TransportError, runner_verdict};
 
 /// The product default; the live test harness selects its own prefix through `runner_prefix`.
 pub const DEFAULT_RUNNER_PREFIX: &str = "YCL_ABAPREACH_RUN_";
@@ -86,4 +86,38 @@ pub fn create_with_fresh_name(
     }
 
     unreachable!("the second attempt always returns")
+}
+
+/// The ADT HTTP side of the runner boundary. ADT HTTP has no admission layer, so this wraps the
+/// transport and applies the same runner rules as the RFC-SADT admission: the classrun POST, and
+/// the create of the armed runner class. Every other request passes unchanged.
+pub struct RunnerGated<'a> {
+    inner: &'a mut dyn SadtTransport,
+}
+
+impl<'a> RunnerGated<'a> {
+    pub fn new(inner: &'a mut dyn SadtTransport) -> Self {
+        Self { inner }
+    }
+}
+
+impl SadtTransport for RunnerGated<'_> {
+    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+        if runner_verdict(&request) == Some(false) {
+            return Err(TransportError::RequestNotAllowed(format!(
+                "{} {}",
+                request.method, request.uri
+            )));
+        }
+
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        self.inner.stateful_supported()
+    }
 }

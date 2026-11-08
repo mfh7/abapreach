@@ -2,6 +2,8 @@ mod admission;
 pub mod http;
 pub mod rfc;
 
+pub use admission::{RunnerArm, runner_verdict};
+
 use std::collections::BTreeMap;
 use thiserror::Error;
 

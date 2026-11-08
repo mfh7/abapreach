@@ -9,8 +9,10 @@ use crate::adt::{
     ActivationBody, ObjectRef, USAGE_REQUEST_XML, classify_activation, parse_object_refs,
 };
 use crate::operation::read_table::validate_preview_body;
+use crate::operation::runner::validate_runner_prefix;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
+use std::cell::RefCell;
 
 const DISCOVERY: &str = "/sap/bc/adt/discovery";
 const INACTIVE_OBJECTS: &str = "/sap/bc/adt/activation/inactiveobjects";
@@ -36,6 +38,14 @@ const MAX_PREVIEW_ROWS: u32 = 5000;
 const MAX_ENTITY: usize = 30;
 const OBJECT_STRUCTURE: &str = "version=active&withShortDescriptions=true";
 const SEARCH_TAIL: &str = "&maxResults=10&objectType=FUGR%2FFF";
+const CLASS_SEARCH: &str = "operation=quickSearch&query=";
+const CLASS_SEARCH_TAIL: &str = "objectType=CLAS%2FOC";
+/// The `maxResults` of the runner class search: a plain number in this range.
+const CLASS_SEARCH_LIMIT: std::ops::RangeInclusive<u32> = 1..=100;
+/// The classrun endpoint of ADT; only `POST <CLASSRUN>/<armed runner>` is ever admitted.
+const CLASSRUN: &str = "/sap/bc/adt/oo/classrun";
+/// A class name is at most 30 characters.
+const MAX_CLASS_NAME: usize = 30;
 const LOCK: &str = "_action=LOCK&accessMode=MODIFY";
 const UNLOCK: &str = "_action=UNLOCK&lockHandle=";
 /// TRKORR is a CHAR 20 field.
@@ -90,6 +100,10 @@ impl Admission {
 
         if uri.contains('#') {
             return false;
+        }
+
+        if let Some(verdict) = runner_verdict(request) {
+            return verdict;
         }
 
         let (path, query) = split_query(uri);
@@ -202,6 +216,223 @@ pub fn is_delete_request(request: &Request) -> bool {
     let (path, query) = split_query(&request.uri);
 
     request.method == "DELETE" && !request.uri.contains('#') && is_delete(path, query)
+}
+
+// The runner name the running operation armed, and whether its one POST has been spent. Per
+// thread, like the operation that owns it: a request sent from another thread finds nothing
+// armed and is refused.
+thread_local! {
+    static ARMED: RefCell<Option<(String, bool)>> = const { RefCell::new(None) };
+}
+
+/// The armed state of one runner operation. Holding it admits exactly one classrun POST for the
+/// one runner name it was created with, and shapes the create of that class; dropping it ends
+/// both. Create it before the runner class is created, so the create is judged too.
+#[derive(Debug)]
+pub struct RunnerArm(());
+
+impl RunnerArm {
+    /// Arms `name`, a runner class name the operation generated. Only one name can be armed at a
+    /// time.
+    pub fn arm(name: &str) -> Result<Self, String> {
+        if !is_runner_name(name) {
+            return Err("not a runner class name".to_owned());
+        }
+
+        ARMED.with(|armed| {
+            let mut armed = armed.borrow_mut();
+
+            if armed.is_some() {
+                return Err("a runner name is already armed".to_owned());
+            }
+
+            *armed = Some((name.to_owned(), false));
+
+            Ok(Self(()))
+        })
+    }
+}
+
+impl Drop for RunnerArm {
+    fn drop(&mut self) {
+        let _ = ARMED.try_with(|armed| armed.borrow_mut().take());
+    }
+}
+
+/// An upper-case class name of at most 30 characters that starts with `Y` or `Z`.
+fn is_runner_name(name: &str) -> bool {
+    name.starts_with(['Y', 'Z'])
+        && name.len() <= MAX_CLASS_NAME
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// What the runner rules decide for `request`, shared by RFC-SADT admission and the ADT HTTP
+/// gate: `Some(true)` admits it without further checks (the armed classrun POST), `Some(false)`
+/// refuses it, and `None` leaves it to the other rules. Everything under classrun is decided
+/// here; the create of the armed runner class must be in `$TMP` without a `corrNr`.
+pub fn runner_verdict(request: &Request) -> Option<bool> {
+    if mentions_classrun(&request.uri) {
+        return Some(admits_classrun_post(request));
+    }
+
+    (request.method == "POST" && !admits_runner_create(request)).then_some(false)
+}
+
+/// Whether the URI reaches classrun in any spelling: case, percent-encoding, or traversal.
+fn mentions_classrun(uri: &str) -> bool {
+    let mut text = uri.to_owned();
+
+    loop {
+        if text.to_ascii_lowercase().contains("classrun") {
+            return true;
+        }
+
+        let decoded = percent_decoded(&text);
+
+        if decoded == text {
+            return false;
+        }
+
+        text = decoded;
+    }
+}
+
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let escape = bytes
+            .get(index + 1..index + 3)
+            .filter(|_| bytes[index] == b'%')
+            .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+
+        match escape {
+            Some(byte) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            None => {
+                decoded.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// The one POST: the armed name, an empty body, no query, `Accept: text/plain`. Any POST at
+/// classrun spends the arm, admitted or not, so a refused attempt cannot be followed by another.
+fn admits_classrun_post(request: &Request) -> bool {
+    if request.method != "POST" {
+        return false;
+    }
+
+    ARMED.with(|armed| {
+        let mut armed = armed.borrow_mut();
+
+        let Some((name, spent)) = armed.as_mut() else {
+            return false;
+        };
+
+        if std::mem::replace(spent, true) {
+            return false;
+        }
+
+        request
+            .uri
+            .strip_prefix(CLASSRUN)
+            .and_then(|rest| rest.strip_prefix('/'))
+            == Some(name.as_str())
+            && request.body.is_empty()
+            && has_header(request, "Accept", "text/plain")
+    })
+}
+
+/// A create POST whose body mentions the armed runner name must be the runner class create:
+/// `POST /oo/classes` with no query (so no `corrNr`) and a body naming the class in `$TMP`.
+/// Any other create is not judged.
+fn admits_runner_create(request: &Request) -> bool {
+    let (path, query) = split_query(&request.uri);
+
+    if !is_create_path(path) {
+        return true;
+    }
+
+    ARMED.with(|armed| {
+        let armed = armed.borrow();
+        let Some((name, _)) = armed.as_ref() else {
+            return true;
+        };
+        let body = String::from_utf8_lossy(&request.body);
+
+        !body.to_ascii_uppercase().contains(name.as_str())
+            || (path == CLASSES
+                && query.is_none()
+                && !request.uri.contains('#')
+                && is_runner_class_body(&body, name))
+    })
+}
+
+/// The create body of the runner: an `abapClass` of that name and type `CLAS/OC` with exactly one
+/// package reference, `$TMP`.
+fn is_runner_class_body(body: &str, name: &str) -> bool {
+    let mut reader = Reader::from_str(body);
+    let mut root_seen = false;
+    let mut packages = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                let local = element.local_name().into_inner();
+
+                if !root_seen {
+                    root_seen = true;
+
+                    if local != "abapClass"
+                        || attribute_of(&element, "name")
+                            .is_none_or(|value| !value.eq_ignore_ascii_case(name))
+                        || attribute_of(&element, "type").as_deref() != Some("CLAS/OC")
+                    {
+                        return false;
+                    }
+                } else if local == "packageRef" {
+                    packages.push(attribute_of(&element, "name"));
+                }
+            }
+            Ok(Event::Eof) => {
+                return root_seen
+                    && matches!(packages.as_slice(), [Some(package)] if package == "$TMP");
+            }
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+}
+
+/// The value of the attribute with that local name; `None` when it is absent or the element has
+/// a malformed attribute.
+fn attribute_of(element: &BytesStart<'_>, local_name: &str) -> Option<String> {
+    let mut found = None;
+
+    for attribute in element.attributes() {
+        let attribute = attribute.ok()?;
+
+        if attribute.key.local_name().into_inner() == local_name {
+            found = Some(
+                attribute
+                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .ok()?
+                    .into_owned(),
+            );
+        }
+    }
+
+    found
 }
 
 /// The object an activation reference names. An include is only ever activated with its main
@@ -399,7 +630,7 @@ fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
     }
 
     if path == SEARCH {
-        return query.is_some_and(is_group_search);
+        return query.is_some_and(|query| is_group_search(query) || is_class_search(query));
     }
 
     let Some(parsed) = parse_path(path) else {
@@ -424,6 +655,28 @@ fn is_group_search(query: &str) -> bool {
         .strip_prefix("operation=quickSearch&query=")
         .and_then(|rest| rest.strip_suffix(SEARCH_TAIL))
         .is_some_and(|name| is_name(name, false))
+}
+
+/// `search?operation=quickSearch&query=<PREFIX>*&maxResults=<1..=100>&objectType=CLAS%2FOC`, the
+/// leftover search of `doctor`. The prefix follows the `runner_prefix` rule; no other wildcard.
+fn is_class_search(query: &str) -> bool {
+    let Some((prefix, rest)) = query
+        .strip_prefix(CLASS_SEARCH)
+        .and_then(|rest| rest.split_once("*&maxResults="))
+    else {
+        return false;
+    };
+    let Some((limit, object_type)) = rest.split_once('&') else {
+        return false;
+    };
+
+    validate_runner_prefix(prefix).is_ok()
+        && object_type == CLASS_SEARCH_TAIL
+        && !limit.starts_with('0')
+        && limit.bytes().all(|byte| byte.is_ascii_digit())
+        && limit
+            .parse::<u32>()
+            .is_ok_and(|limit| CLASS_SEARCH_LIMIT.contains(&limit))
 }
 
 /// `nodestructure?parent_type=FUGR%2FF&parent_name=<NAME>&withShortDescriptions=false`, the
@@ -573,20 +826,23 @@ fn is_lock_and_request(query: &str) -> bool {
 
 /// The create `POST` collections; a transportable package adds `?corrNr=<request>`.
 fn is_create(path: &str, query: Option<&str>) -> bool {
-    let known = match path {
+    is_create_path(path)
+        && match query {
+            None => true,
+            Some(query) => query.strip_prefix("corrNr=").is_some_and(is_request),
+        }
+}
+
+/// The collections a create `POST` goes to.
+fn is_create_path(path: &str) -> bool {
+    match path {
         GROUPS | CLASSES | INTERFACES | PROGRAMS | PROGRAM_INCLUDES => true,
         _ => path
             .strip_prefix(GROUPS)
             .and_then(|rest| rest.strip_prefix('/'))
             .and_then(|rest| rest.strip_suffix("/fmodules"))
             .is_some_and(|group| is_name(group, false)),
-    };
-
-    known
-        && match query {
-            None => true,
-            Some(query) => query.strip_prefix("corrNr=").is_some_and(is_request),
-        }
+    }
 }
 
 /// The create validation: fixed key order, and the object types each path knows with the key
