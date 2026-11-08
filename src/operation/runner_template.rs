@@ -50,7 +50,29 @@ pub static TRAN_TEMPLATE: TypeTemplate = TypeTemplate {
     methods: include_str!("runner_template/tran_impl.abap"),
 };
 
-pub static TEMPLATES: [&TypeTemplate; 2] = [&CORE_ONLY, &TRAN_TEMPLATE];
+/// The DDIC templates. The four types share one body (the payload names the type), and each has
+/// its own entry so that a run selects its template by type and the pins stay per type.
+pub static DTEL_TEMPLATE: TypeTemplate = ddic_template("DTEL");
+pub static DOMA_TEMPLATE: TypeTemplate = ddic_template("DOMA");
+pub static TABL_TEMPLATE: TypeTemplate = ddic_template("TABL");
+pub static TTYP_TEMPLATE: TypeTemplate = ddic_template("TTYP");
+
+const fn ddic_template(name: &'static str) -> TypeTemplate {
+    TypeTemplate {
+        name,
+        declarations: include_str!("runner_template/ddic_decl.abap"),
+        methods: include_str!("runner_template/ddic_impl.abap"),
+    }
+}
+
+pub static TEMPLATES: [&TypeTemplate; 6] = [
+    &CORE_ONLY,
+    &TRAN_TEMPLATE,
+    &DTEL_TEMPLATE,
+    &DOMA_TEMPLATE,
+    &TABL_TEMPLATE,
+    &TTYP_TEMPLATE,
+];
 
 /// The constant lines of a template, with the placeholder where the class name goes and without
 /// payload lines.
