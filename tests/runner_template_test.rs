@@ -26,19 +26,19 @@ const PINNED: [(&str, &str); 6] = [
     ),
     (
         "DTEL",
-        "60a90434c26c14489b10f497affa9a86f06d601d00e4482d2d06011a2241c070",
+        "de06086154ebf7b50f4d5a536d76d658b426cb9bba450edb126441778d8db088",
     ),
     (
         "DOMA",
-        "60a90434c26c14489b10f497affa9a86f06d601d00e4482d2d06011a2241c070",
+        "de06086154ebf7b50f4d5a536d76d658b426cb9bba450edb126441778d8db088",
     ),
     (
         "TABL",
-        "60a90434c26c14489b10f497affa9a86f06d601d00e4482d2d06011a2241c070",
+        "de06086154ebf7b50f4d5a536d76d658b426cb9bba450edb126441778d8db088",
     ),
     (
         "TTYP",
-        "60a90434c26c14489b10f497affa9a86f06d601d00e4482d2d06011a2241c070",
+        "de06086154ebf7b50f4d5a536d76d658b426cb9bba450edb126441778d8db088",
     ),
 ];
 

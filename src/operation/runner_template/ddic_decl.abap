@@ -151,6 +151,7 @@
       EXPORTING
         ev_action   TYPE tbatg-fct
         ev_modeflag TYPE ddxtt-modeflag
+        ev_daction  TYPE string
         ev_allowed  TYPE abap_bool
         ev_rows     TYPE i
         ev_ok       TYPE abap_bool.
@@ -166,6 +167,7 @@
       EXPORTING
         ev_action    TYPE tbatg-fct
         ev_modeflag  TYPE ddxtt-modeflag
+        ev_daction   TYPE string
         ev_allowed   TYPE abap_bool
       RETURNING
         VALUE(rv_ok) TYPE abap_bool.

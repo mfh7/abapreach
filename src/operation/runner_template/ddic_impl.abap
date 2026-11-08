@@ -761,6 +761,7 @@
     DATA:
       lv_action   TYPE tbatg-fct,
       lv_modeflag TYPE ddxtt-modeflag,
+      lv_daction  TYPE string,
       lv_allowed  TYPE abap_bool,
       lv_decided  TYPE abap_bool,
       lv_rows     TYPE i.
@@ -774,6 +775,7 @@
         decide_table( IMPORTING
                         ev_action   = lv_action
                         ev_modeflag = lv_modeflag
+                        ev_daction  = lv_daction
                         ev_allowed  = lv_allowed
                         ev_rows     = lv_rows
                         ev_ok       = lv_decided ).
@@ -782,7 +784,7 @@
           RETURN.
         ENDIF.
         msg( iv_level = `I`
-             iv_text = |CONVERSION { mv_name }: action={ lv_action } modeflag={ lv_modeflag } allowed={ lv_allowed } rows={ lv_rows }| ).
+             iv_text = |CONVERSION { mv_name }: action={ lv_action } modeflag={ lv_modeflag } daction={ lv_daction } allowed={ lv_allowed } rows={ lv_rows }| ).
         IF lv_allowed = abap_false.
           reject( |Table { mv_name } ({ lv_rows } rows) needs SE14 conversion; change rejected| ).
           RETURN.
@@ -803,7 +805,7 @@
     DATA:
       lt_dd03p TYPE ty_dd03p_tab.
 
-    CLEAR: ev_action, ev_modeflag, ev_allowed, ev_rows, ev_ok.
+    CLEAR: ev_action, ev_modeflag, ev_daction, ev_allowed, ev_rows, ev_ok.
     ev_rows = count_rows( mv_ddname ).
     IF ev_rows < 0.
       msg( iv_level = `E` iv_text = |The row count of { mv_name } is not available| ).
@@ -820,6 +822,7 @@
                          IMPORTING
                            ev_action   = ev_action
                            ev_modeflag = ev_modeflag
+                           ev_daction  = ev_daction
                            ev_allowed  = ev_allowed ).
   ENDMETHOD.
 
@@ -854,7 +857,7 @@
       lv_retyped  TYPE abap_bool,
       lv_ok       TYPE abap_bool.
 
-    CLEAR: ev_action, ev_modeflag, ev_allowed.
+    CLEAR: ev_action, ev_modeflag, ev_daction, ev_allowed.
     lt_fresh_03p = it_dd03p.
     lt_fresh_08v = it_dd08v.
     IF expanded( EXPORTING is_dd02v = is_dd02v
@@ -974,6 +977,7 @@
       msg( iv_level = `E` iv_text = |DD_DECIDE { iv_tabname } error (r_subrc={ lv_subrc })| ).
       RETURN.
     ENDIF.
+    ev_daction = ls_info-daction.
     " The mapping of the activation: a MODIFY of a table without data is an ALTER.
     IF ev_action = 'MDF' AND ls_info-daction = 'ALT'.
       ev_action = 'ALT'.
@@ -1170,6 +1174,7 @@
       lv_ok       TYPE abap_bool,
       lv_action   TYPE tbatg-fct,
       lv_modeflag TYPE ddxtt-modeflag,
+      lv_daction  TYPE string,
       lv_allowed  TYPE abap_bool,
       lv_rows     TYPE i.
 
@@ -1188,6 +1193,7 @@
                          IMPORTING
                            ev_action   = lv_action
                            ev_modeflag = lv_modeflag
+                           ev_daction  = lv_daction
                            ev_allowed  = lv_allowed ).
     IF lv_ok = abap_false.
       RETURN.
@@ -1199,11 +1205,11 @@
     ENDIF.
     IF lv_allowed = abap_false.
       msg( iv_level = `E`
-           iv_text = |Table { iv_tabname } ({ lv_rows } rows) needs SE14 conversion (action={ lv_action } modeflag={ lv_modeflag })| ).
+           iv_text = |Table { iv_tabname } ({ lv_rows } rows) needs SE14 conversion (action={ lv_action } modeflag={ lv_modeflag } daction={ lv_daction })| ).
       RETURN.
     ENDIF.
     msg( iv_level = `I`
-         iv_text = |CONVERSION { iv_tabname }: action={ lv_action } modeflag={ lv_modeflag } allowed={ lv_allowed } rows={ lv_rows }| ).
+         iv_text = |CONVERSION { iv_tabname }: action={ lv_action } modeflag={ lv_modeflag } daction={ lv_daction } allowed={ lv_allowed } rows={ lv_rows }| ).
     rv_ok = abap_true.
   ENDMETHOD.
 
