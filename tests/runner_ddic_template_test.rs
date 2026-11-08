@@ -817,3 +817,71 @@ fn the_pretty_printer_reads_the_next_tag_only_after_it_knows_there_is_one() {
         ],
     );
 }
+
+#[test]
+fn a_serialization_failure_ends_a_read_rejected_and_never_not_found() {
+    // Live defect (HD1, `READ TABL TSTCT`): the XML transformation raised, the error message was
+    // written, and the read then ended `NOT_FOUND` because an empty row list looked like a missing
+    // definition. The failure is recorded where it happens and the read ends `REJECTED` with the
+    // error message; `NOT_FOUND` stays for a definition that has no active version.
+    for kind in KINDS {
+        let text = text(kind);
+        let serialize = body(&text, "serialize");
+        let read = body(&text, "do_read");
+
+        assert_order(
+            &serialize,
+            &[
+                "CATCH cx_root INTO lx_error.",
+                "mv_serial_failed = abap_true.",
+            ],
+        );
+        assert_order(
+            &read,
+            &[
+                "IF read_live( ) = abap_false.",
+                "IF mv_serial_failed = abap_true.",
+                "finish( `REJECTED` )",
+                "ELSE.",
+                "finish( `NOT_FOUND` )",
+            ],
+        );
+        // The previous exception of a failed transformation names the cause; it is part of the
+        // message so that the next live run shows it.
+        assert_order(&serialize, &["lx_error->previous", "get_text( )"]);
+        // The state is declared with the rest of the run state and starts false.
+        assert_order(
+            &text,
+            &[
+                "mv_live_hash TYPE string",
+                "mv_serial_failed TYPE abap_bool",
+            ],
+        );
+    }
+}
+
+#[test]
+fn a_serialization_failure_ends_a_delete_rejected_and_never_plans_from_no_active() {
+    // After a failed transformation `read_live` is false as for a definition without an active
+    // version. The delete must not hash the single row NO_ACTIVE then, or a plan would be made
+    // from a definition that merely cannot be written as XML.
+    for kind in KINDS {
+        let text = text(kind);
+        let delete = body(&text, "do_delete");
+
+        assert_order(
+            &delete,
+            &[
+                "IF read_live( ) = abap_true.",
+                "ELSE.",
+                "IF mv_serial_failed = abap_true.",
+                "finish( `REJECTED` )",
+                "RETURN.",
+                "ENDIF.",
+                "lv_state = `NO_ACTIVE`.",
+                "APPEND `NO_ACTIVE` TO lt_none.",
+                "IF mv_mode = `DELETE_SIM`.",
+            ],
+        );
+    }
+}

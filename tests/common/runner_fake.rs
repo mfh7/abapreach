@@ -77,7 +77,14 @@ pub struct Sap {
     pub inactive_fails: bool,
     /// Runs when a classrun POST arrives, before it executes.
     pub on_post: Option<Box<dyn FnMut()>>,
+    /// The source of the class each classrun POST ran, in order.
+    pub posted: Vec<String>,
+    /// Builds the output of a POST with no scripted reply from the class source it ran.
+    pub reply_with: Option<ReplyWith>,
 }
+
+/// Builds the output of a classrun POST from the class source it ran.
+pub type ReplyWith = Box<dyn Fn(&str) -> String>;
 
 pub type Shared = Rc<RefCell<Sap>>;
 
@@ -96,6 +103,8 @@ pub fn new_sap(stateful: bool, now: &Rc<Cell<Duration>>, evolution: Evolution) -
         previews: 0,
         inactive_fails: false,
         on_post: None,
+        posted: Vec::new(),
+        reply_with: None,
     }))
 }
 
@@ -167,6 +176,8 @@ impl Sap {
             ("POST", "/sap/bc/adt/activation") => self.reply(Response::text(200, MESSAGES_OK)),
             ("POST", path) if path.starts_with("/sap/bc/adt/oo/classrun/") => {
                 self.posts += 1;
+                self.posted
+                    .push(self.classes.get(&name).cloned().unwrap_or_default());
 
                 if let Some(hook) = self.on_post.as_mut() {
                     hook();
@@ -180,7 +191,14 @@ impl Sap {
                     Some(PostReply::Lost) => {
                         return Err(TransportError::PostSendUncertain("reply lost".to_owned()));
                     }
-                    None => self.reply(Response::text(200, "")),
+                    None => {
+                        let text = match (&self.reply_with, self.posted.last()) {
+                            (Some(build), Some(source)) => build(source),
+                            _ => String::new(),
+                        };
+
+                        self.reply(Response::text(200, text))
+                    }
                 }
             }
             ("POST", _) if query.contains("_action=LOCK") => {

@@ -22,8 +22,13 @@
   METHOD do_read.
     " The active definition as the canonical XML rows, any name, any table class.
     IF read_live( ) = abap_false.
-      msg( iv_level = `E` iv_text = |{ mv_type } { mv_name } active version not found| ).
-      finish( `NOT_FOUND` ).
+      IF mv_serial_failed = abap_true.
+        " The error message of the failed transformation is already written.
+        finish( `REJECTED` ).
+      ELSE.
+        msg( iv_level = `E` iv_text = |{ mv_type } { mv_name } active version not found| ).
+        finish( `NOT_FOUND` ).
+      ENDIF.
       RETURN.
     ENDIF.
     IF emit_rows( ) = abap_false.
@@ -176,6 +181,12 @@
       lv_state = `ACTIVE`.
       lv_hash = mv_live_hash.
     ELSE.
+      IF mv_serial_failed = abap_true.
+        " The definition exists but cannot be written as XML: never plan from NO_ACTIVE.
+        " The error message of the failed transformation is already written.
+        finish( `REJECTED` ).
+        RETURN.
+      ENDIF.
       lv_state = `NO_ACTIVE`.
       APPEND `NO_ACTIVE` TO lt_none.
       lv_hash = rows_hash( lt_none ).
@@ -319,7 +330,8 @@
       lx_error TYPE REF TO cx_root.
 
     DATA:
-      lv_xml TYPE string.
+      lv_xml   TYPE string,
+      lv_cause TYPE string.
 
     TRY.
         CASE mv_type.
@@ -343,7 +355,12 @@
               RESULT XML lv_xml.
         ENDCASE.
       CATCH cx_root INTO lx_error.
-        msg( iv_level = `E` iv_text = |XML { mv_type } { mv_name } failed: { lx_error->get_text( ) }| ).
+        mv_serial_failed = abap_true.
+        lv_cause = lx_error->get_text( ).
+        IF lx_error->previous IS BOUND.
+          lv_cause = |{ lv_cause } ({ lx_error->previous->get_text( ) })|.
+        ENDIF.
+        msg( iv_level = `E` iv_text = |XML { mv_type } { mv_name } failed: { lv_cause }| ).
         RETURN.
     ENDTRY.
     APPEND `<?xml version="1.0" encoding="utf-8"?>` TO rt_rows.

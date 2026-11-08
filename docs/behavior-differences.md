@@ -230,6 +230,26 @@ The in-run comparison of the file with the active definition does not count the 
 it with the original language. A value in the file must still match. A failed comparison names the
 first differing component with the file value and the active value.
 
+## DDIC `read`
+
+`read DTEL|DOMA|TABL|TTYP <NAME> <OUT>` runs one temporary class in `$TMP` (the repository
+preflight first, the class removed at the end) and writes the XML of the active definition. The
+Python tool calls one function module and touches no repository object. Further differences:
+
+- **Status exits.** A run that ends `NOT_FOUND` or `REJECTED` is exit 1 and writes no file. Python
+  stops with exit 2. A client hash that differs from the hash the run reported is exit 1 with no
+  file (Python: exit 2).
+- **Confirmation from a new session.** The definition must have a row in the definition table and in
+  `TADIR` when a new session reads them; a definite difference is `PARTIAL` (exit 1, no file). A
+  preview that cannot be read is a `W:` note and does not stop the read.
+- **Uncertain reply.** A lost, cut, or broken reply is exit 1 with no file and no reconciliation
+  (a read changes nothing in SAP); the read is not resent.
+- **`--lines`.** Python has no such option; here it is refused for these types (exit 2).
+- **Control characters.** A row of the XML with a control character other than a tab is refused,
+  because the write side refuses it, so such a file could not be deployed again.
+- **A failed XML transformation** (for example `TABL TSTCT` on one system) is `REJECTED` with the
+  error text. It was reported as `NOT_FOUND` before.
+
 ## Observed parity notes
 
 These results come from a run that deployed the same change with the Python tooling and with

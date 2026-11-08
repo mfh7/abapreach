@@ -20,13 +20,16 @@ use crate::object::{
 use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::delete::{self, Context};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
+use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::doctor::Doctor;
 use crate::operation::payload::Kind;
 use crate::operation::read::{ReadProg, ReadTarget};
+use crate::operation::read_ddic::{self, DdicRead};
 use crate::operation::read_table::{
     CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableError, ReadTableRequest,
 };
+use crate::operation::runner_tran::{self, TranCreate, TranRead};
 use crate::policy::Terminal;
 use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use crate::transport::http::{HttpConfig, HttpTransport};
@@ -34,6 +37,7 @@ use crate::transport::rfc::{
     DynamicRfcApi, Env, FunctionApi, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
 };
 use crate::transport::{SadtTransport, TransportError};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -511,15 +515,19 @@ fn execute(
         };
     }
 
-    // A DDIC or transaction row is checked here and stops: its operation comes with the runner.
+    // A DDIC or transaction row is checked here before any connection. The DDIC rows then run;
+    // a batch with a transaction row stops, because that operation comes with Task 24.
     if let Command::Delete { targets, tr, .. } = &command
         && let Some(kind) = runner_cli::first_kind(targets)
     {
-        return runner_exit(
-            "delete",
-            kind,
-            runner_cli::check_delete(targets, tr.as_deref()),
-        );
+        let checked = runner_cli::check_delete(targets, tr.as_deref());
+        let tran = targets
+            .iter()
+            .any(|target| target.kind == DeleteKind::Runner(Kind::Tran));
+
+        if checked.is_err() || tran {
+            return runner_exit("delete", if tran { Kind::Tran } else { kind }, checked);
+        }
     }
 
     match command {
@@ -617,6 +625,20 @@ fn execute(
             connection,
             factories,
             |transport, selection, cancel, fresh| {
+                if runner_cli::first_kind(&targets).is_some() {
+                    return delete_runner_attempt(
+                        transport,
+                        selection,
+                        cancel,
+                        fresh,
+                        connection,
+                        &targets,
+                        tr.as_deref(),
+                        simulate,
+                        &plan,
+                    );
+                }
+
                 delete_attempt(
                     transport,
                     selection,
@@ -654,11 +676,39 @@ fn execute(
                         create_include: false,
                     };
 
-                    return runner_exit(
-                        "read",
-                        kind,
-                        runner_cli::check_read(kind, &name, &out, force, lines, &options),
-                    );
+                    let checked = runner_cli::check_read(kind, &name, &out, force, lines, &options);
+
+                    if kind == Kind::Tran && checked.is_ok() {
+                        let request = TranRead {
+                            name: &name,
+                            out: &out,
+                        };
+
+                        return runner_tran::read(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    if kind != Kind::Tran && checked.is_ok() {
+                        let request = DdicRead {
+                            kind,
+                            name: &name,
+                            out: &out,
+                            force,
+                        };
+
+                        return read_ddic::read(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    return runner_exit("read", kind, checked);
                 }
                 TypeArg::Extension(kind) => {
                     let request = ReadRequest {
@@ -775,11 +825,28 @@ fn execute(
                         file: file.as_deref(),
                     };
 
-                    return runner_exit(
-                        "create",
-                        kind,
-                        runner_cli::check_create(kind, &name, &options),
-                    );
+                    let checked = runner_cli::check_create(kind, &name, &options);
+
+                    // `check_create` makes `--prog` mandatory for a TRAN.
+                    if let (Kind::Tran, Ok(()), Some(report)) = (kind, &checked, prog.as_deref()) {
+                        let request = TranCreate {
+                            name: &name,
+                            report,
+                            text: text.as_deref(),
+                            package: package.as_deref(),
+                            tr: tr.as_deref(),
+                            simulate,
+                        };
+
+                        return runner_tran::create(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    return runner_exit("create", kind, checked);
                 }
                 TypeArg::Extension(kind) => {
                     let text = text.unwrap_or_default();
@@ -1078,6 +1145,112 @@ fn delete_attempt(
         .is_some_and(|extension| extension.wrote());
 
     if let Some((failure, message)) = unsent.filter(|_| !sent) {
+        if !cancel.is_set() {
+            return Attempt {
+                fallback_allowed: true,
+                ..Attempt::failed(message, failure)
+            }
+            .noted(fresh_note)
+            .noted(note);
+        }
+
+        outcome.exit = 130;
+    }
+
+    Attempt {
+        outcome,
+        failure: None,
+        fallback_allowed: false,
+        detail: None,
+    }
+    .noted(fresh_note)
+    .noted(note)
+}
+
+/// One attempt of a delete batch with DDIC rows: those rows run in their own temporary class, the
+/// other rows over the ADT backend the router picked.
+#[allow(clippy::too_many_arguments)]
+fn delete_runner_attempt(
+    transport: &mut dyn SadtTransport,
+    selection: &Selection,
+    cancel: &CancelFlag,
+    fresh: &mut dyn FnMut() -> Opened,
+    connection: &Connection,
+    targets: &[DeleteTarget],
+    tr: Option<&str>,
+    simulate: bool,
+    plan: &Path,
+) -> Attempt {
+    // The ADT side needs a stateful session for its own rows and the runner cycle needs one on
+    // ADT HTTP; a release without one runs the batch over RFC.
+    if transport.stateful_supported() == Some(false) {
+        let note = end_session(transport);
+
+        return Attempt {
+            fallback_allowed: true,
+            ..Attempt::failed(
+                NO_STATEFUL_SESSION.to_owned(),
+                Failure::CapabilityUnavailable,
+            )
+        }
+        .noted(note);
+    }
+
+    let context = Context {
+        conn: &connection.id,
+        user: &connection.user,
+        policies: &connection.policies,
+        confirmer: &Terminal,
+    };
+    // Both sides open their new sessions from the one router closure.
+    let shared = RefCell::new(fresh);
+    let mut open_adt = || {
+        let mut guard = shared.borrow_mut();
+
+        (**guard)()
+    };
+    let mut open_runner = || {
+        let mut guard = shared.borrow_mut();
+
+        (**guard)()
+    };
+    let (mut outcome, unsent, fresh_note) = {
+        let mut adt = AdtDelete::with_cancel(
+            &mut *transport,
+            &connection.user,
+            &mut open_adt,
+            cancel.clone(),
+        );
+        let mut runner = DdicDelete::new(
+            DdicEnv::of(connection, selection.backend),
+            &mut open_runner,
+            cancel.clone(),
+        );
+        let mut outcome = {
+            let mut mixed = RunnerBatch::new(&mut adt, &mut runner);
+
+            delete::run_until(
+                &mut mixed,
+                &context,
+                targets,
+                tr,
+                simulate,
+                plan,
+                &mut || cancel.is_set(),
+            )
+        };
+
+        runner.finish(&mut outcome);
+
+        (
+            outcome,
+            runner.unsent_failure().or_else(|| adt.unsent_failure()),
+            adt.close_note(),
+        )
+    };
+    let note = end_session(transport);
+
+    if let Some((failure, message)) = unsent {
         if !cancel.is_set() {
             return Attempt {
                 fallback_allowed: true,

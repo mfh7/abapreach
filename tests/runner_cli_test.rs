@@ -293,6 +293,24 @@ fn every_valid_form_passes_the_grammar_without_a_connection() {
     ];
 
     for (arguments, operation, token) in cases {
+        // `read TRAN` and `create TRAN` run since Task 22; their forms are in
+        // tests/runner_tran_ops_test.rs.
+        if token == "TRAN" && matches!(operation, "read" | "create") {
+            continue;
+        }
+
+        // `read` of a DDIC type runs since Task 18; its forms are in
+        // tests/runner_read_ddic_test.rs.
+        if operation == "read" && matches!(token, "DTEL" | "DOMA" | "TABL" | "TTYP") {
+            continue;
+        }
+
+        // `delete` of DDIC rows runs since Task 23; its forms are in tests/delete_ddic_test.rs.
+        // A batch with a TRAN row still stops here until Task 24.
+        if operation == "delete" && token != "TRAN" {
+            continue;
+        }
+
         let exit = exit_of(&arguments);
 
         assert_eq!(exit.stderr, accepted(operation, token), "{arguments:?}");
@@ -359,10 +377,7 @@ fn read_refuses_to_overwrite_a_file_without_force() {
         &["read", "DTEL", "ZD", &out],
         &format!("{out} already exists; use --force to overwrite"),
     );
-    assert_eq!(
-        exit_of(&["read", "DTEL", "ZD", &out, "--force"]).stderr,
-        accepted("read", "DTEL")
-    );
+    // With --force the command goes on to the connection (tests/runner_read_ddic_test.rs).
 }
 
 #[test]

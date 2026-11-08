@@ -178,6 +178,22 @@ pub enum Reconcile {
     Failed(String),
 }
 
+/// What a backend answers for a row that it plans inside a run of its own.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RowPlan {
+    /// The reason, as the run reported it.
+    Rejected(String),
+    NotFound,
+    Ready {
+        /// The hash of the live definition: the plan hash of the row, which the delete sends back.
+        hash: String,
+        /// The request the delete uses; `None` for a local object.
+        tr: Option<String>,
+        /// The plan lines of the row.
+        lines: Vec<String>,
+    },
+}
+
 /// The ADT side of delete. Task 6 provides the real implementation.
 pub trait DeleteBackend {
     /// `Ok(None)` is an object that does not exist.
@@ -219,6 +235,43 @@ pub trait DeleteBackend {
     /// records it in the plan; a backend that does not name itself answers `None`.
     fn backend_label(&self, _kind: DeleteKind) -> Option<String> {
         None
+    }
+
+    /// The backend plans and deletes the kind inside one run per row (a DDIC row): the engine
+    /// does not read the row and does not compare its hash. The plan hash is the one the run
+    /// reports, and the real delete sends it back to the run, which compares it with the live
+    /// definition.
+    fn plans_in_run(&self, _kind: DeleteKind) -> bool {
+        false
+    }
+
+    /// The simulation of a row for which [`Self::plans_in_run`] is true.
+    fn plan_row(&mut self, _kind: DeleteKind, _name: &str, _tr: Option<&str>) -> RowPlan {
+        RowPlan::Rejected("this backend plans no row in a run".to_owned())
+    }
+
+    /// The real delete of a row for which [`Self::plans_in_run`] is true, with the hash the plan
+    /// file holds for it. Never repeated by the caller.
+    fn delete_planned(
+        &mut self,
+        kind: DeleteKind,
+        name: &str,
+        tr: Option<&str>,
+        _plan_hash: &str,
+    ) -> DeleteReply {
+        self.delete(kind, name, tr)
+    }
+
+    /// What the backend printed for the row it handled last (taken once): printed after the row
+    /// header and before the plan lines or the status.
+    fn take_lines(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The batch stops after the row just handled and the rest is `SKIPPED`, for a simulation as
+    /// well as for a delete.
+    fn stops_batch(&self) -> bool {
+        false
     }
 }
 
@@ -547,6 +600,19 @@ fn evaluate(
         return Eval::Rejected(format!("{kind} {name} is outside the Z/Y scope"));
     }
 
+    if backend.plans_in_run(kind) {
+        return match backend.plan_row(kind, name, tr) {
+            RowPlan::Rejected(reason) => Eval::Rejected(reason),
+            RowPlan::NotFound => Eval::NotFound,
+            RowPlan::Ready { hash, tr, lines } => Eval::Ready(Ready {
+                lines,
+                hash,
+                tr,
+                contents: Vec::new(),
+            }),
+        };
+    }
+
     let facts = match backend.inspect(kind, name) {
         Ok(Some(facts)) => facts,
         Ok(None) => return Eval::NotFound,
@@ -794,12 +860,18 @@ pub fn simulate(
     };
     let mixed = has_extension(&rows);
 
-    batch
-        .out
-        .push(GUARDS_ACTIVE.replace("{policy}", context.policies.foreign_inactive.token()));
-    batch.out.push(GUARDS_ABSENT.to_owned());
+    // The guards of a DDIC row run in its own run and are printed with the row.
+    if rows
+        .iter()
+        .any(|(kind, _)| !matches!(kind, DeleteKind::Runner(_)))
+    {
+        batch
+            .out
+            .push(GUARDS_ACTIVE.replace("{policy}", context.policies.foreign_inactive.token()));
+        batch.out.push(GUARDS_ABSENT.to_owned());
+    }
 
-    for row in &rows {
+    for (index, row) in rows.iter().enumerate() {
         batch.start(row);
 
         let label = if mixed {
@@ -812,7 +884,11 @@ pub fn simulate(
             batch.out.push(format!("backend: {label}"));
         }
 
-        match evaluate(backend, context, row, tr.as_deref(), &rows) {
+        let eval = evaluate(backend, context, row, tr.as_deref(), &rows);
+
+        batch.out.extend(backend.take_lines());
+
+        match eval {
             Eval::Rejected(reason) => batch.fail(row, DeleteStatus::Rejected, reason),
             Eval::NotFound => batch.finish(row, DeleteStatus::NotFound, None, None),
             Eval::Ready(ready) => {
@@ -831,6 +907,11 @@ pub fn simulate(
                     result.contents = ready.contents;
                 }
             }
+        }
+
+        if backend.stops_batch() {
+            batch.skip_rest(&rows[index + 1..]);
+            break;
         }
     }
 
@@ -907,6 +988,43 @@ pub fn execute_until(
             batch.out.push(format!("backend: {label}"));
         }
 
+        if backend.plans_in_run(row.0) {
+            if !in_scope(&row.1) {
+                batch.fail(
+                    row,
+                    DeleteStatus::Rejected,
+                    format!("{} {} is outside the Z/Y scope", row.0, row.1),
+                );
+                continue;
+            }
+
+            if stop() {
+                batch.out.push(format!(
+                    "W: stopped before {} {}: the time limit or a cancellation; the rest is SKIPPED",
+                    row.0, row.1
+                ));
+                batch.skip_rest(&rows[index..]);
+                break;
+            }
+
+            // The run compares this hash with the live definition; nothing else reads the row.
+            let hash = plan
+                .objects
+                .iter()
+                .find(|(kind, name, _)| kind == row.0.token() && *name == row.1)
+                .map_or("", |(_, _, hash)| hash.as_str());
+            let reply = backend.delete_planned(row.0, &row.1, tr.as_deref(), hash);
+
+            apply_reply(backend, &mut batch, row, reply);
+
+            if batch.stopped || backend.stops_batch() {
+                batch.skip_rest(&rows[index + 1..]);
+                break;
+            }
+
+            continue;
+        }
+
         let ready = match evaluate(backend, context, row, tr.as_deref(), &rows) {
             Eval::Rejected(reason) => {
                 batch.fail(row, DeleteStatus::Rejected, reason);
@@ -946,26 +1064,11 @@ pub fn execute_until(
             break;
         }
 
-        match backend.delete(row.0, &row.1, ready.tr.as_deref()) {
-            DeleteReply::Deleted => batch.finish(row, DeleteStatus::Deleted, None, None),
-            DeleteReply::NotFound => batch.finish(row, DeleteStatus::NotFound, None, None),
-            DeleteReply::Rejected(reason) => batch.fail(row, DeleteStatus::Rejected, reason),
-            DeleteReply::Partial(reason) => {
-                batch.finish(
-                    row,
-                    DeleteStatus::Partial,
-                    None,
-                    Some(format!("status unknown: {reason}")),
-                );
-                batch.stopped = true;
-            }
-            DeleteReply::Uncertain(reason) => {
-                settle_uncertain(backend, &mut batch, row, &reason);
-                batch.stopped = true;
-            }
-        }
+        let reply = backend.delete(row.0, &row.1, ready.tr.as_deref());
 
-        if batch.stopped {
+        apply_reply(backend, &mut batch, row, reply);
+
+        if batch.stopped || backend.stops_batch() {
             batch.skip_rest(&rows[index + 1..]);
             break;
         }
@@ -974,9 +1077,37 @@ pub fn execute_until(
     Ok(batch.report(None))
 }
 
+/// Records what a delete request answered. `Partial` and `Uncertain` stop the batch.
+fn apply_reply(backend: &mut dyn DeleteBackend, batch: &mut Batch, row: &Row, reply: DeleteReply) {
+    batch.out.extend(backend.take_lines());
+
+    match reply {
+        DeleteReply::Deleted => batch.finish(row, DeleteStatus::Deleted, None, None),
+        DeleteReply::NotFound => batch.finish(row, DeleteStatus::NotFound, None, None),
+        DeleteReply::Rejected(reason) => batch.fail(row, DeleteStatus::Rejected, reason),
+        DeleteReply::Partial(reason) => {
+            batch.finish(
+                row,
+                DeleteStatus::Partial,
+                None,
+                Some(format!("status unknown: {reason}")),
+            );
+            batch.stopped = true;
+        }
+        DeleteReply::Uncertain(reason) => {
+            settle_uncertain(backend, batch, row, &reason);
+            batch.stopped = true;
+        }
+    }
+}
+
 /// One read-only look from a new session; the delete request is never sent again.
 fn settle_uncertain(backend: &mut dyn DeleteBackend, batch: &mut Batch, row: &Row, reason: &str) {
-    let (status, detail) = match backend.reconcile(row.0, &row.1) {
+    let settled = backend.reconcile(row.0, &row.1);
+
+    batch.out.extend(backend.take_lines());
+
+    let (status, detail) = match settled {
         Reconcile::Gone => (
             DeleteStatus::DeletedReconciled,
             format!(

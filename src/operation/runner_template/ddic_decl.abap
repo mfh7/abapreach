@@ -40,6 +40,11 @@
       mv_local     TYPE abap_bool,
       mv_live_hash TYPE string.
 
+    " Set when the XML transformation of the live definition raised: the definition exists, so a
+    " read that cannot produce rows is not a missing object.
+    DATA:
+      mv_serial_failed TYPE abap_bool.
+
     METHODS do_read.
 
     METHODS do_deploy.
