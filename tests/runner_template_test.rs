@@ -26,19 +26,19 @@ const PINNED: [(&str, &str); 6] = [
     ),
     (
         "DTEL",
-        "ddc94fbb8147af0f81dea2924afd8b1a9fe2f4d9e84459499f03b65cfde17ce7",
+        "d22cceb4f8e58c94ec8f7e06e593697f4b74df6c0148661136a874817175e36a",
     ),
     (
         "DOMA",
-        "ddc94fbb8147af0f81dea2924afd8b1a9fe2f4d9e84459499f03b65cfde17ce7",
+        "d22cceb4f8e58c94ec8f7e06e593697f4b74df6c0148661136a874817175e36a",
     ),
     (
         "TABL",
-        "ddc94fbb8147af0f81dea2924afd8b1a9fe2f4d9e84459499f03b65cfde17ce7",
+        "d22cceb4f8e58c94ec8f7e06e593697f4b74df6c0148661136a874817175e36a",
     ),
     (
         "TTYP",
-        "ddc94fbb8147af0f81dea2924afd8b1a9fe2f4d9e84459499f03b65cfde17ce7",
+        "d22cceb4f8e58c94ec8f7e06e593697f4b74df6c0148661136a874817175e36a",
     ),
 ];
 
@@ -664,6 +664,48 @@ fn the_scanner_skips_a_payload_line_and_only_that() {
         "    lv_b64 = lv_b64 && 'ZXN0YWJj'",
     ] {
         assert!(!rejected(code, None).is_empty(), "{code}");
+    }
+}
+
+/// A table expression that fails on a missing row raises inside a condition instead of ending
+/// it: the kernel of release 753 does not short-circuit AND and OR around it (found live in the
+/// DDIC pretty printer). Only line_exists and line_index take such an expression without raising.
+const OLD_PRETTY_CONDITION: &str = "        IF lv_index < lv_count\n           AND substring( val = iv_xml off = lt_tags[ lv_index + 1 ]-offset len = 2 ) = `</`.\n        ENDIF.";
+
+#[test]
+fn the_scanner_rejects_a_table_expression_in_a_condition_with_and_or_or() {
+    for code in [
+        OLD_PRETTY_CONDITION,
+        "IF lv_a = 1 AND lt_x[ 1 ]-f = 2.",
+        "IF lt_x[ lv_i ]-f = 2 OR lv_a = 1.",
+        "IF lv_a = 1 and lt_x[ f = lv_b ]-g IS NOT INITIAL.",
+        "lv_ok = xsdbool( lv_a = 1 OR lt_x[ 1 ] IS INITIAL ).",
+        "IF line_exists( lt_x[ f = lt_y[ 1 ]-g ] ) AND lv_a = 1.",
+        "WHILE lv_i < lv_n AND lt_x[ lv_i ] IS NOT INITIAL.",
+    ] {
+        let found = rejected(code, None);
+
+        assert!(
+            found.iter().any(|f| f.contains("table expression")),
+            "{code}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn the_scanner_accepts_a_table_expression_that_cannot_raise_or_has_no_logic_around_it() {
+    for code in [
+        "IF line_exists( lt_x[ f = 1 ] ) AND lv_a = 1.",
+        "IF NOT line_exists( lt_x[ f = 1 ] ) OR lv_a = 1.",
+        "IF lv_a = line_index( lt_x[ table_line = lv_k ] ) AND lv_b = 2.",
+        "IF lt_x[ 1 ]-f = 2.",
+        "DATA(lv_r) = lt_x[ 1 ]-f.",
+        "lv_a = lt_x[ lv_i ]-f + 1.",
+        "IF lv_i < lv_n.\n  IF lt_x[ lv_i ]-f = 2.\n  ENDIF.\nENDIF.",
+        "IF lv_a = 1 AND lv_b = 2.\n  lv_c = lt_x[ 1 ]-f.\nENDIF.",
+        "lv_x = `a AND b[ 1 ]`.",
+    ] {
+        scan(code, None).unwrap_or_else(|found| panic!("{code}: {found:?}"));
     }
 }
 

@@ -77,7 +77,43 @@ pub fn scan(code: &str, runner: Option<&str>) -> Result<(), Vec<String>> {
         statement_rules(&tokens, index, &mut found);
     }
 
+    logic_rule(&tokens, &mut found);
+
     if found.is_empty() { Ok(()) } else { Err(found) }
+}
+
+/// A table expression `name[ ... ]` raises when the row is missing, and the kernel does not stop
+/// a condition at the first operand that decides it (release 753 ended a method in an internal
+/// error). So no statement that holds AND or OR may hold one, except as the operand of
+/// `line_exists` or `line_index`, which do not raise. Guard it with a nested IF instead.
+fn logic_rule(tokens: &[(Token, usize)], found: &mut Vec<String>) {
+    for statement in tokens.split(|(token, _)| matches!(token, Token::Symbol('.'))) {
+        let logic = statement.iter().any(|(token, _)| {
+            matches!(token, Token::Word(word)
+                if word.eq_ignore_ascii_case("AND") || word.eq_ignore_ascii_case("OR"))
+        });
+
+        if !logic {
+            continue;
+        }
+
+        for (index, (token, line)) in statement.iter().enumerate() {
+            let table_expression = matches!(token, Token::Symbol('['))
+                && index > 0
+                && matches!(statement[index - 1].0, Token::Word(_));
+            let safe = index >= 3
+                && matches!(&statement[index - 3].0, Token::Word(word)
+                    if word.eq_ignore_ascii_case("line_exists")
+                        || word.eq_ignore_ascii_case("line_index"))
+                && matches!(statement[index - 2].0, Token::Symbol('('));
+
+            if table_expression && !safe {
+                found.push(format!(
+                    "line {line}: a table expression in a condition with AND or OR can raise; use a nested IF"
+                ));
+            }
+        }
+    }
 }
 
 fn is_word(c: char) -> bool {

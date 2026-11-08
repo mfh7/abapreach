@@ -366,6 +366,7 @@
       lv_gap   TYPE i,
       lv_tag   TYPE string,
       lv_close TYPE string,
+      lv_next  TYPE string,
       lv_text  TYPE string,
       lv_pad   TYPE string.
 
@@ -383,8 +384,13 @@
         APPEND |{ lv_pad }{ lv_tag }| TO rt_lines.
       ELSE.
         lv_pad = repeat( val = ` ` occ = lv_depth + 1 ).
-        IF lv_index < lv_count
-           AND substring( val = iv_xml off = lt_tags[ lv_index + 1 ]-offset len = 2 ) = `</`.
+        " The next tag is read only after the test that it exists: a table expression behind AND
+        " raises on the last tag instead of ending the condition.
+        CLEAR lv_next.
+        IF lv_index < lv_count.
+          lv_next = substring( val = iv_xml off = lt_tags[ lv_index + 1 ]-offset len = 2 ).
+        ENDIF.
+        IF lv_next = `</`.
           lv_start = lt_tags[ lv_index ]-offset + lt_tags[ lv_index ]-length.
           lv_gap = lt_tags[ lv_index + 1 ]-offset - lv_start.
           lv_text = substring( val = iv_xml off = lv_start len = lv_gap ).

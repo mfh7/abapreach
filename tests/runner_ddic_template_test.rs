@@ -756,3 +756,24 @@ fn a_read_names_no_guard_a_write_would() {
         assert!(!read.contains(guard), "{guard}");
     }
 }
+
+#[test]
+fn the_pretty_printer_reads_the_next_tag_only_after_it_knows_there_is_one() {
+    // Live defect on release 753: a table expression after AND ended the method in an internal
+    // error on the last tag. The next tag is read inside an IF that has already proven it exists.
+    let pretty = body(&text("DTEL"), "pretty");
+
+    assert!(
+        !pretty.contains("AND substring("),
+        "no function call after AND"
+    );
+    assert!(!pretty.contains("lt_tags[ lv_index + 1 ]-offset len = 2 ) = `</`."));
+    assert_order(
+        &pretty,
+        &[
+            "IF lv_index < lv_count.",
+            "lt_tags[ lv_index + 1 ]-offset",
+            "IF lv_next = `</`.",
+        ],
+    );
+}
