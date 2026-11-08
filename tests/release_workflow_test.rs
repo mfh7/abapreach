@@ -394,14 +394,20 @@ fn release_workflow_checks_the_extracted_executable_for_the_custom_function_modu
 
 #[cfg(unix)]
 #[test]
-fn custom_module_check_rejects_a_binary_that_names_the_module_and_accepts_a_clean_one() {
+fn custom_module_check_rejects_a_binary_that_names_a_private_name_and_accepts_a_clean_one() {
     let directory = tempfile::tempdir().unwrap();
     let clean = directory.path().join("clean");
-    let tainted = directory.path().join("tainted");
-    let needle = concat!("YFM_UTILS_", "SOURCE_DEPLOY");
+    let needles = [
+        concat!("YFM_UTILS_", "SOURCE_DEPLOY"),
+        concat!("experimental", "-ext"),
+        concat!("abapreach", "-ext"),
+    ];
 
-    std::fs::write(&clean, b"\x7fELF\0YFM_UTILS_OTHER\0SOURCE_DEPLOY\0").unwrap();
-    std::fs::write(&tainted, format!("\x7fELF\0\0{needle}\0\0").as_bytes()).unwrap();
+    std::fs::write(
+        &clean,
+        b"\x7fELF\0YFM_UTILS_OTHER\0SOURCE_DEPLOY\0experimental\0ext\0abapreach\0",
+    )
+    .unwrap();
 
     let outcome = scripts::run(
         "check-no-custom-module.sh",
@@ -411,14 +417,20 @@ fn custom_module_check_rejects_a_binary_that_names_the_module_and_accepts_a_clea
     );
     assert!(outcome.success, "{}", outcome.text);
 
-    let outcome = scripts::run(
-        "check-no-custom-module.sh",
-        &[tainted.to_str().unwrap()],
-        "",
-        None,
-    );
-    assert!(!outcome.success, "{}", outcome.text);
-    assert!(outcome.text.contains("::error::"), "{}", outcome.text);
+    for needle in needles {
+        let tainted = directory.path().join("tainted");
+
+        std::fs::write(&tainted, format!("\x7fELF\0\0{needle}\0\0").as_bytes()).unwrap();
+
+        let outcome = scripts::run(
+            "check-no-custom-module.sh",
+            &[tainted.to_str().unwrap()],
+            "",
+            None,
+        );
+        assert!(!outcome.success, "{needle}: {}", outcome.text);
+        assert!(outcome.text.contains("::error::"), "{}", outcome.text);
+    }
 
     let missing = directory.path().join("missing");
     let outcome = scripts::run(
