@@ -260,7 +260,7 @@ impl<'a> AdtDelete<'a> {
             DeleteKind::Clas => ObjectKind::Clas,
             DeleteKind::Intf => ObjectKind::Intf,
             DeleteKind::Fugr => return Ok(Some((group_uri(name), None))),
-            DeleteKind::Extension(kind) => {
+            DeleteKind::Extension(_) | DeleteKind::Runner(_) => {
                 return Err(format!("{} is not an ADT object", kind.token()));
             }
             DeleteKind::Func => {
@@ -585,7 +585,7 @@ impl DeleteBackend for AdtDelete<'_> {
         let mut where_used = Vec::new();
 
         match kind {
-            DeleteKind::Extension(kind) => {
+            DeleteKind::Extension(_) | DeleteKind::Runner(_) => {
                 return Err(format!("{} is not an ADT object", kind.token()));
             }
             DeleteKind::Fugr => {

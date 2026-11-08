@@ -627,7 +627,7 @@ fn cli_parses_the_m3_commands() {
         } => {
             assert_eq!(kind, CreateKind::Func);
             assert_eq!(name, "ZFM");
-            assert_eq!(text, "A text");
+            assert_eq!(text.as_deref(), Some("A text"));
             assert_eq!(package, None);
             assert_eq!(fugr.as_deref(), Some("ZFG"));
             assert_eq!(tr.as_deref(), Some("DEVK000001"));
@@ -1014,30 +1014,6 @@ fn create_prog_and_trans_parse_the_m5_grammar() {
             "t",
             "--main",
             "ZM",
-            "--conn",
-            "c",
-        ],
-        // `--prog` belongs to no standard kind.
-        &[
-            "abapreach",
-            "create",
-            "PROG",
-            "ZX",
-            "--text",
-            "t",
-            "--prog",
-            "ZR",
-            "--conn",
-            "c",
-        ],
-        // The DDIC kinds are out of scope for 0.15.0.
-        &[
-            "abapreach",
-            "create",
-            "DTEL",
-            "YX",
-            "--text",
-            "t",
             "--conn",
             "c",
         ],

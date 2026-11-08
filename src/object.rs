@@ -682,6 +682,12 @@ fn create_rules(
         };
     }
 
+    check_package_scope(package, tr)
+}
+
+/// `--package` (default `$TMP`) and `--tr` of a create: the package grammar and the rule that a
+/// transportable package needs a request and a local one takes none.
+pub(crate) fn check_package_scope(package: Option<&str>, tr: Option<&str>) -> Result<(), String> {
     let package = package.unwrap_or(DEFAULT_PACKAGE);
     let valid = !package.is_empty()
         && package.chars().count() <= MAX_PACKAGE

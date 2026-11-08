@@ -2022,7 +2022,7 @@ fn delete_accepts_type_name_targets_and_rejects_bad_ones_locally() {
         &["--plan", "p", "--conn", "dev_100"][..],
         &["PROG:ZX", "--conn", "dev_100"],
         &["PROG:ZX", "--plan", "p"],
-        &["TABL:ZX", "--plan", "p", "--conn", "dev_100"],
+        &["VIEW:ZX", "--plan", "p", "--conn", "dev_100"],
         &["PROG:", "--plan", "p", "--conn", "dev_100"],
         &["ZX", "--plan", "p", "--conn", "dev_100"],
     ] {

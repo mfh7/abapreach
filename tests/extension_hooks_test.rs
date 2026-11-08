@@ -627,15 +627,19 @@ fn the_unknown_type_texts_list_the_extension_type() {
     let (delete, _) = stops(&["delete", "BOGUS:ZX", "--plan", "p"], "dev_100", &registry);
 
     assert!(
-        read.contains("[possible values: PROG, FUNC, CLAS, INTF, XTEST]"),
+        read.contains(
+            "[possible values: PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN, XTEST]"
+        ),
         "{read}"
     );
     assert!(
-        create.contains("[possible values: PROG, FUGR, FUNC, CLAS, INTF, XTEST]"),
+        create.contains(
+            "[possible values: PROG, FUGR, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN, XTEST]"
+        ),
         "{create}"
     );
     assert!(
-        delete.contains("delete target must be TYPE:NAME (PROG|FUGR|FUNC|CLAS|INTF|XTEST)"),
+        delete.contains("delete target must be TYPE:NAME (PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN|XTEST)"),
         "{delete}"
     );
 }
@@ -653,10 +657,13 @@ fn without_an_extension_the_type_is_an_unknown_type() {
 
     assert!(read.contains("invalid value 'XTEST'"), "{read}");
     assert!(
-        read.contains("[possible values: PROG, FUNC, CLAS, INTF]"),
+        read.contains("[possible values: PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN]"),
         "{read}"
     );
-    assert!(delete.contains("(PROG|FUGR|FUNC|CLAS|INTF)"), "{delete}");
+    assert!(
+        delete.contains("(PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN)"),
+        "{delete}"
+    );
     assert!(option.contains("unexpected argument '--note'"), "{option}");
 }
 

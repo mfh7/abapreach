@@ -6,7 +6,7 @@ Arguments:
   <TYPE:NAME>...  
 
 Options:
-      --simulate     
+      --simulate     For DTEL, DOMA, TABL, TTYP and TRAN a simulate still creates and deletes a temporary class in $TMP
       --tr <TR>      
       --plan <PLAN>  
       --conn <CONN>  

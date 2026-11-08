@@ -1,5 +1,6 @@
 use crate::extension::{ExtensionKind, ExtensionOptions, Registry, Verbs};
-use clap::builder::{EnumValueParser, PossibleValue, PossibleValuesParser, TypedValueParser};
+use crate::operation::payload::Kind;
+use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -13,6 +14,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(
+        after_help = "DTEL, DOMA, TABL, TTYP and TRAN are read through a temporary class that the \
+                      command creates in $TMP and deletes again."
+    )]
     Read {
         #[arg(value_parser = standard_type::<ObjectKind>())]
         kind: TypeArg<ObjectKind>,
@@ -47,6 +52,8 @@ pub enum Command {
         name: String,
         file: PathBuf,
 
+        /// For DTEL, DOMA, TABL, TTYP and TRAN a simulate still creates and deletes a temporary
+        /// class in $TMP.
         #[arg(long)]
         simulate: bool,
 
@@ -83,14 +90,19 @@ pub enum Command {
         /// A `PROG` create only: the source a simulate deploy checks after `CREATE: ACTIVE`.
         file: Option<PathBuf>,
 
-        #[arg(long)]
-        text: String,
+        /// Required except for DTEL, DOMA, TABL and TTYP, whose description is in the XML file.
+        #[arg(long, required_if_eq_any = TEXT_REQUIRED)]
+        text: Option<String>,
 
         #[arg(long)]
         package: Option<String>,
 
         #[arg(long)]
         fugr: Option<String>,
+
+        /// A `TRAN` create only: the report the transaction starts.
+        #[arg(long)]
+        prog: Option<String>,
 
         /// A `PROG` create only: `1` for a program (the default) or `I` for an include.
         #[arg(long)]
@@ -99,6 +111,8 @@ pub enum Command {
         #[arg(long)]
         tr: Option<String>,
 
+        /// For DTEL, DOMA, TABL, TTYP and TRAN a simulate still creates and deletes a temporary
+        /// class in $TMP.
         #[arg(long)]
         simulate: bool,
 
@@ -130,6 +144,8 @@ pub enum Command {
         #[arg(required = true, value_name = "TYPE:NAME")]
         targets: Vec<DeleteTarget>,
 
+        /// For DTEL, DOMA, TABL, TTYP and TRAN a simulate still creates and deletes a temporary
+        /// class in $TMP.
         #[arg(long)]
         simulate: bool,
 
@@ -150,7 +166,23 @@ pub enum Command {
     },
 }
 
-/// The object kinds `delete` accepts: the standard ones and the types of the registered extension.
+/// The DDIC and transaction types that run through the temporary class, in the order the help
+/// lists them.
+pub const RUNNER_KINDS: [Kind; 5] = [Kind::Dtel, Kind::Doma, Kind::Tabl, Kind::Ttyp, Kind::Tran];
+
+/// The `kind` values of `create` that need `--text`: a DDIC object takes its description from the
+/// XML file, every other type has none.
+const TEXT_REQUIRED: [(&str, &str); 6] = [
+    ("kind", "PROG"),
+    ("kind", "FUGR"),
+    ("kind", "FUNC"),
+    ("kind", "CLAS"),
+    ("kind", "INTF"),
+    ("kind", "TRAN"),
+];
+
+/// The object kinds `delete` accepts: the standard ones, the DDIC and transaction types, and the
+/// types of the registered extension.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeleteKind {
     Prog,
@@ -158,6 +190,7 @@ pub enum DeleteKind {
     Func,
     Clas,
     Intf,
+    Runner(Kind),
     Extension(ExtensionKind),
 }
 
@@ -183,6 +216,18 @@ impl DeleteKind {
                     .map(|kind| Self::Extension(*kind))
             })
     }
+
+    /// [`DeleteKind::parse`] for the command line, which also knows the DDIC and transaction types.
+    pub fn parse_cli(token: &str, extensions: &[ExtensionKind]) -> Option<Self> {
+        Self::parse(token, &[])
+            .or_else(|| {
+                RUNNER_KINDS
+                    .iter()
+                    .find(|kind| kind.token() == token)
+                    .map(|kind| Self::Runner(*kind))
+            })
+            .or_else(|| Self::parse(token, extensions))
+    }
 }
 
 /// One `TYPE:NAME` argument of `delete`.
@@ -195,10 +240,22 @@ pub struct DeleteTarget {
 impl DeleteTarget {
     /// `TYPE:NAME` for a standard type or one of `extensions`.
     pub fn parse(text: &str, extensions: &[ExtensionKind]) -> Result<Self, String> {
+        Self::parse_with(text, extensions, false)
+    }
+
+    /// [`DeleteTarget::parse`] for the command line, which also knows the DDIC and transaction
+    /// types.
+    pub fn parse_cli(text: &str, extensions: &[ExtensionKind]) -> Result<Self, String> {
+        Self::parse_with(text, extensions, true)
+    }
+
+    fn parse_with(text: &str, extensions: &[ExtensionKind], runners: bool) -> Result<Self, String> {
         let invalid = || {
+            let runner_tokens = RUNNER_KINDS.iter().map(|kind| kind.token());
             let types = DeleteKind::STANDARD
                 .iter()
                 .map(|(token, _)| *token)
+                .chain(runner_tokens.filter(|_| runners))
                 .chain(extensions.iter().map(|kind| kind.token()))
                 .collect::<Vec<_>>()
                 .join("|");
@@ -206,7 +263,12 @@ impl DeleteTarget {
             format!("delete target must be TYPE:NAME ({types}): {text:?}")
         };
         let (kind, name) = text.split_once(':').ok_or_else(invalid)?;
-        let kind = DeleteKind::parse(kind, extensions).ok_or_else(invalid)?;
+        let kind = if runners {
+            DeleteKind::parse_cli(kind, extensions)
+        } else {
+            DeleteKind::parse(kind, extensions)
+        }
+        .ok_or_else(invalid)?;
 
         if name.is_empty() {
             return Err(invalid());
@@ -223,15 +285,16 @@ impl FromStr for DeleteTarget {
     type Err = String;
 
     fn from_str(text: &str) -> Result<Self, String> {
-        Self::parse(text, &[])
+        Self::parse_cli(text, &[])
     }
 }
 
-/// The type argument of `read`, `deploy` and `create`: a standard type, or one of the registered
-/// extension.
+/// The type argument of `read`, `deploy` and `create`: a standard type, a DDIC or transaction
+/// type, or one of the registered extension.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TypeArg<K> {
     Standard(K),
+    Runner(Kind),
     Extension(ExtensionKind),
 }
 
@@ -241,19 +304,25 @@ impl<K: PartialEq> PartialEq<K> for TypeArg<K> {
     }
 }
 
+/// The standard types plus the DDIC and transaction types.
 fn standard_type<K: ValueEnum + Clone + Send + Sync + 'static>()
 -> impl TypedValueParser<Value = TypeArg<K>> {
-    EnumValueParser::<K>::new().map(TypeArg::Standard)
+    extended_type::<K>(Vec::new())
 }
 
-/// The standard types plus `extensions`, for a registered extension. The help of a type shows in
-/// the long `--help`.
+/// The standard types, the DDIC and transaction types, and `extensions`, for a registered
+/// extension. The help of a type shows in the long `--help`.
 fn extended_type<K: ValueEnum + Clone + Send + Sync + 'static>(
     extensions: Vec<ExtensionKind>,
 ) -> impl TypedValueParser<Value = TypeArg<K>> {
     let values = K::value_variants()
         .iter()
         .filter_map(ValueEnum::to_possible_value)
+        .chain(
+            RUNNER_KINDS
+                .iter()
+                .map(|kind| PossibleValue::new(kind.token())),
+        )
         .chain(extensions.iter().map(|kind| {
             let value = PossibleValue::new(kind.token());
 
@@ -267,12 +336,20 @@ fn extended_type<K: ValueEnum + Clone + Send + Sync + 'static>(
     PossibleValuesParser::new(values).map(move |token| {
         K::from_str(&token, false).map_or_else(
             |_| {
-                TypeArg::Extension(
-                    *extensions
-                        .iter()
-                        .find(|kind| kind.token() == token)
-                        .expect("the parser admits only the listed tokens"),
-                )
+                RUNNER_KINDS
+                    .iter()
+                    .find(|kind| kind.token() == token)
+                    .map_or_else(
+                        || {
+                            TypeArg::Extension(
+                                *extensions
+                                    .iter()
+                                    .find(|kind| kind.token() == token)
+                                    .expect("the parser admits only the listed tokens"),
+                            )
+                        },
+                        |kind| TypeArg::Runner(*kind),
+                    )
             },
             TypeArg::Standard,
         )
@@ -323,12 +400,18 @@ pub fn command(registry: &Registry) -> clap::Command {
         .mut_subcommand("create", positional(["kind", "name", "file"]))
         .mut_subcommand("create", |sub| {
             sub.mut_arg("kind", |arg| {
-                arg.value_parser(extended_type::<CreateKind>(creates))
+                arg.value_parser(extended_type::<CreateKind>(creates.clone()))
+            })
+        })
+        // An extension type has no XML description either: its create needs `--text`.
+        .mut_subcommand("create", |sub| {
+            sub.mut_arg("text", |arg| {
+                arg.required_if_eq_any(creates.iter().map(|kind| ("kind", kind.token())))
             })
         })
         .mut_subcommand("delete", |sub| {
             sub.mut_arg("targets", |arg| {
-                arg.value_parser(move |text: &str| DeleteTarget::parse(text, &deletes))
+                arg.value_parser(move |text: &str| DeleteTarget::parse_cli(text, &deletes))
             })
         });
 

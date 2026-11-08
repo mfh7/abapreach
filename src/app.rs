@@ -22,11 +22,13 @@ use crate::operation::delete::{self, Context};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::doctor::Doctor;
+use crate::operation::payload::Kind;
 use crate::operation::read::{ReadProg, ReadTarget};
 use crate::operation::read_table::{
     CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableError, ReadTableRequest,
 };
 use crate::policy::Terminal;
+use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
     DynamicRfcApi, Env, FunctionApi, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
@@ -350,6 +352,15 @@ fn stop(message: impl std::fmt::Display) -> Exit {
     }
 }
 
+/// The exit of a DDIC or transaction command: the STOP of a rule it broke, or the note that its
+/// operation does not exist yet.
+fn runner_exit(operation: &str, kind: Kind, checked: Result<(), String>) -> Exit {
+    match checked {
+        Ok(()) => stop(runner_cli::pending(operation, kind)),
+        Err(message) => stop(message),
+    }
+}
+
 fn connection_id(command: &Command) -> Option<&str> {
     match command {
         Command::Read { conn, .. }
@@ -500,6 +511,17 @@ fn execute(
         };
     }
 
+    // A DDIC or transaction row is checked here and stops: its operation comes with the runner.
+    if let Command::Delete { targets, tr, .. } = &command
+        && let Some(kind) = runner_cli::first_kind(targets)
+    {
+        return runner_exit(
+            "delete",
+            kind,
+            runner_cli::check_delete(targets, tr.as_deref()),
+        );
+    }
+
     match command {
         Command::Doctor { .. } => {
             let report = Doctor::probe_with(connection, local_credentials, factories, registry);
@@ -624,6 +646,20 @@ fn execute(
         } => {
             let kind = match kind {
                 TypeArg::Standard(kind) => kind,
+                TypeArg::Runner(kind) => {
+                    let options = SourceOptions {
+                        include,
+                        fugr: fugr.as_deref(),
+                        main: main.as_deref(),
+                        create_include: false,
+                    };
+
+                    return runner_exit(
+                        "read",
+                        kind,
+                        runner_cli::check_read(kind, &name, &out, force, lines, &options),
+                    );
+                }
                 TypeArg::Extension(kind) => {
                     let request = ReadRequest {
                         name: &name,
@@ -715,15 +751,38 @@ fn execute(
             text,
             package,
             fugr,
+            prog,
             subc,
             tr,
             simulate,
             backend,
             ..
         } => {
+            if prog.is_some() && !matches!(kind, TypeArg::Runner(Kind::Tran)) {
+                return stop(runner_cli::PROG_RULE);
+            }
+
             let kind = match kind {
                 TypeArg::Standard(kind) => kind,
+                TypeArg::Runner(kind) => {
+                    let options = CreateOptions {
+                        text: text.as_deref(),
+                        package: package.as_deref(),
+                        tr: tr.as_deref(),
+                        fugr: fugr.as_deref(),
+                        subc,
+                        prog: prog.as_deref(),
+                        file: file.as_deref(),
+                    };
+
+                    return runner_exit(
+                        "create",
+                        kind,
+                        runner_cli::check_create(kind, &name, &options),
+                    );
+                }
                 TypeArg::Extension(kind) => {
+                    let text = text.unwrap_or_default();
                     let request = CreateRequest {
                         name: &name,
                         text: &text,
@@ -744,6 +803,8 @@ fn execute(
                     );
                 }
             };
+
+            let text = text.unwrap_or_default();
 
             if let Err(message) = check_create(
                 kind,
@@ -831,6 +892,20 @@ fn execute(
         } => {
             let kind = match kind {
                 TypeArg::Standard(kind) => kind,
+                TypeArg::Runner(kind) => {
+                    let options = SourceOptions {
+                        include,
+                        fugr: fugr.as_deref(),
+                        main: main.as_deref(),
+                        create_include,
+                    };
+
+                    return runner_exit(
+                        "deploy",
+                        kind,
+                        runner_cli::check_deploy(kind, &name, tr.as_deref(), &options),
+                    );
+                }
                 // `deploy` parses an extension type only so that it can say why it stops.
                 TypeArg::Extension(kind) => {
                     return stop(

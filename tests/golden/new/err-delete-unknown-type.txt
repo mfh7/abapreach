@@ -1,3 +1,3 @@
-STOP: error: invalid value 'BOGUS:X' for '<TYPE:NAME>...': delete target must be TYPE:NAME (PROG|FUGR|FUNC|CLAS|INTF): "BOGUS:X"
+STOP: error: invalid value 'BOGUS:X' for '<TYPE:NAME>...': delete target must be TYPE:NAME (PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN): "BOGUS:X"
 
 For more information, try '--help'.

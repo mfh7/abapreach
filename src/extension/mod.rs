@@ -49,13 +49,16 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-/// The object types the standard grammar owns; an extension may not reuse one.
-const STANDARD_TOKENS: [&str; 5] = ["PROG", "FUGR", "FUNC", "CLAS", "INTF"];
+/// The object types the standard grammar owns, among them the DDIC and transaction types built in
+/// since 0.16.0; an extension may not reuse one.
+const STANDARD_TOKENS: [&str; 10] = [
+    "PROG", "FUGR", "FUNC", "CLAS", "INTF", "DTEL", "DOMA", "TABL", "TTYP", "TRAN",
+];
 /// The write targets of the standard fault grammar; an extension may not reuse one.
 const STANDARD_FAULT_TARGETS: [&str; 4] = ["PUT", "ACTIVATE", "CREATE", "DELETE"];
 /// The ids and long flags of the standard create arguments and MCP properties; an extension
 /// option may not reuse one.
-const STANDARD_OPTION_NAMES: [&str; 14] = [
+const STANDARD_OPTION_NAMES: [&str; 15] = [
     "kind",
     "type",
     "name",
@@ -63,6 +66,7 @@ const STANDARD_OPTION_NAMES: [&str; 14] = [
     "text",
     "package",
     "fugr",
+    "prog",
     "subc",
     "tr",
     "simulate",

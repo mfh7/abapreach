@@ -688,6 +688,10 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                 option_misuse(None, &options, registry),
                 None,
             )?,
+            // The MCP tools list the standard and the extension types only until Task 26.
+            TypeArg::Runner(kind) => {
+                return Err(format!("{} is not available over MCP yet", kind.token()));
+            }
             TypeArg::Extension(kind) => {
                 let extension = registry.extension().ok_or("no extension is registered")?;
 
@@ -714,6 +718,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                 "type",
                 Some(match kind {
                     TypeArg::Standard(kind) => kind.token().to_owned(),
+                    TypeArg::Runner(kind) => kind.token().to_owned(),
                     TypeArg::Extension(kind) => kind.token().to_owned(),
                 }),
             ),
@@ -763,6 +768,9 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             cancel: cancel.clone(),
         };
         let exit = match kind {
+            TypeArg::Runner(kind) => {
+                return Err(format!("{} is not available over MCP yet", kind.token()));
+            }
             TypeArg::Extension(kind) => {
                 // Over the extension only, never routed; the token's backend is its pin.
                 let extension = registry.extension().ok_or("no extension is registered")?;

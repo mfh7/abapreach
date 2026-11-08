@@ -77,7 +77,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn token(self) -> &'static str {
+    pub fn token(self) -> &'static str {
         match self {
             Self::Dtel => "DTEL",
             Self::Doma => "DOMA",
@@ -87,7 +87,7 @@ impl Kind {
         }
     }
 
-    fn max_name(self) -> usize {
+    pub fn max_name(self) -> usize {
         if self == Self::Tran { 20 } else { 30 }
     }
 

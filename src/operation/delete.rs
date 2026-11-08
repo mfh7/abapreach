@@ -9,6 +9,7 @@ use crate::cli::{DeleteKind, DeleteTarget};
 use crate::domain::Outcome;
 use crate::hash::{source_hash, validate_name_within};
 use crate::object::check_request;
+use crate::operation::payload::Kind;
 use crate::policy::{Confirmer, Decision, ForeignInactive, InactiveVersion, Policies};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,6 +38,7 @@ impl DeleteKind {
             Self::Func => "FUNC",
             Self::Clas => "CLAS",
             Self::Intf => "INTF",
+            Self::Runner(kind) => kind.token(),
             Self::Extension(kind) => kind.token(),
         }
     }
@@ -47,19 +49,27 @@ impl DeleteKind {
             Self::Prog => 40,
             Self::Fugr => 26,
             Self::Func | Self::Clas | Self::Intf => 30,
+            Self::Runner(kind) => kind.max_name(),
             Self::Extension(kind) => kind.spec().max_name,
         }
     }
 
     /// Execution order: a function module before its group, a class before the program it
-    /// includes. An extension type brings its own rank on the same scale.
-    fn rank(self) -> u8 {
+    /// includes. An extension type brings its own rank on the same scale; the transaction ranks
+    /// before all of them and the DDIC types after them (the order of the Python tool), so the
+    /// ranks 1 to 5 an extension may use stay as they were.
+    pub fn rank(self) -> u8 {
         match self {
             Self::Func => 1,
             Self::Clas => 2,
             Self::Intf => 3,
             Self::Prog => 4,
             Self::Fugr => 5,
+            Self::Runner(Kind::Tran) => 0,
+            Self::Runner(Kind::Ttyp) => 6,
+            Self::Runner(Kind::Tabl) => 7,
+            Self::Runner(Kind::Dtel) => 8,
+            Self::Runner(Kind::Doma) => 9,
             Self::Extension(kind) => kind.spec().delete_rank,
         }
     }
@@ -362,7 +372,7 @@ fn is_self(kind: DeleteKind, name: &str, group: Option<&str>) -> bool {
         }
         DeleteKind::Clas => class(),
         DeleteKind::Prog => name == "SAPLYFG_UTILS" || name.starts_with("LYFG_UTILS") || class(),
-        DeleteKind::Intf => false,
+        DeleteKind::Intf | DeleteKind::Runner(_) => false,
         DeleteKind::Extension(kind) => kind.spec().is_self.is_some_and(|is_self| is_self(name)),
     }
 }
