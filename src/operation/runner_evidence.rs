@@ -213,6 +213,32 @@ pub fn read_evidence(open: &mut Opener<'_>, kind: Kind, name: &str, runner: &str
     }
 }
 
+/// Whether an inactive version of `name` exists (`AS4LOCAL = 'N'`), read from a new session that
+/// is closed again. `TRAN` has no inactive version. One preview.
+pub fn read_inactive(open: &mut Opener<'_>, kind: Kind, name: &str) -> Probe {
+    let name = literal(name)?;
+
+    if kind == Kind::Tran {
+        return Ok(None);
+    }
+
+    let mut session = open().map_err(|error| format!("cannot open a new session: {error}"))?;
+    let (table, key, _) = definition_of(kind);
+    let found = probe(
+        &mut *session,
+        table,
+        key,
+        &format!("{key} = '{name}' AND AS4LOCAL = 'N'"),
+        key,
+        name,
+    );
+
+    // A failed close cannot change what the preview saw.
+    let _ = session.close();
+
+    found
+}
+
 /// What a finished run should have left behind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Expect<'a> {
@@ -317,6 +343,24 @@ pub fn confirm(run_reported_ok: bool, proof: &Proof) -> Status {
     } else {
         Status::Partial
     }
+}
+
+/// The ABAP interface a classrun handler implements; `doctor` reads it from the repository table
+/// because the 7.40 discovery document is empty.
+const CLASSRUN_INTERFACE: &str = "IF_OO_ADT_CLASSRUN";
+
+/// Whether the classrun interface exists, from one preview of `SEOCLASS`. `Err` is the reason it
+/// could not be read.
+pub fn classrun_interface(transport: &mut dyn SadtTransport) -> Result<bool, String> {
+    probe(
+        transport,
+        Table::Seoclass,
+        "CLSNAME",
+        &format!("CLSNAME = '{CLASSRUN_INTERFACE}'"),
+        "CLSNAME",
+        CLASSRUN_INTERFACE,
+    )
+    .map(|row| row.is_some())
 }
 
 /// What the repository preflight found.

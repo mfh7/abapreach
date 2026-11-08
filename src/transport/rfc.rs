@@ -1,6 +1,6 @@
 use super::admission::Admission;
 #[cfg(feature = "fault-injection")]
-use super::admission::{is_create_post, is_delete_request, is_put_request};
+use super::admission::{is_classrun_post, is_create_post, is_delete_request, is_put_request};
 use super::{Request, Response, SadtTransport, TransportError};
 use crate::config::Connection;
 use libloading::{Library, Symbol};
@@ -2293,14 +2293,15 @@ impl Drop for DynamicRfcApi {
 }
 
 /// Whether the request is the write a fault targets: the source `PUT`, the activation, the
-/// create `POST` or the `DELETE`.
+/// create `POST`, the `DELETE`, or the classrun `POST`.
 #[cfg(feature = "fault-injection")]
-fn is_fault_target(target: crate::fault::Target, request: &Request) -> bool {
+pub(crate) fn is_fault_target(target: crate::fault::Target, request: &Request) -> bool {
     match target {
         crate::fault::Target::Put => is_put_request(request),
         crate::fault::Target::Activate => request.method == "POST" && request.uri == ACTIVATION_URI,
         crate::fault::Target::Create => is_create_post(request),
         crate::fault::Target::Delete => is_delete_request(request),
+        crate::fault::Target::Classrun => is_classrun_post(request),
         // A function call of an extension is not an ADT request.
         crate::fault::Target::Named(_) => false,
     }

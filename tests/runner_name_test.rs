@@ -93,9 +93,11 @@ struct AdtOnly;
 
 impl Factories for AdtOnly {
     fn adt(&mut self, _: &Connection) -> Opened {
-        Ok(Box::new(ScriptedTransport::replies(vec![Ok(
-            Response::text(200, "<app:service/>"),
-        )])))
+        let mut replies = vec![Ok(Response::text(200, "<app:service/>"))];
+
+        replies.extend(common::doctor_runner_replies());
+
+        Ok(Box::new(ScriptedTransport::replies(replies)))
     }
 
     fn rfc(&mut self, _: &Connection) -> Opened {

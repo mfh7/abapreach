@@ -108,11 +108,19 @@ pub fn create_with_fresh_name(
 /// the create of the armed runner class. Every other request passes unchanged.
 pub struct RunnerGated<'a> {
     inner: &'a mut dyn SadtTransport,
+    /// Test-only: the writes whose reply is dropped after SAP executed them (ADT HTTP has no
+    /// proxy-free way to lose a reply; the RFC transport carries its own).
+    #[cfg(feature = "fault-injection")]
+    faults: Vec<crate::fault::Fault>,
 }
 
 impl<'a> RunnerGated<'a> {
     pub fn new(inner: &'a mut dyn SadtTransport) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            #[cfg(feature = "fault-injection")]
+            faults: crate::fault::Fault::from_env(),
+        }
     }
 }
 
@@ -125,7 +133,21 @@ impl SadtTransport for RunnerGated<'_> {
             )));
         }
 
-        self.inner.request(request)
+        #[cfg(feature = "fault-injection")]
+        let dropped = self.faults.iter().find_map(|fault| {
+            fault.target().and_then(|target| {
+                fault.drop_reply(crate::transport::rfc::is_fault_target(target, &request))
+            })
+        });
+        let response = self.inner.request(request)?;
+
+        // The request has run and SAP executed it; only the reply is discarded.
+        #[cfg(feature = "fault-injection")]
+        if let Some(error) = dropped {
+            return Err(error);
+        }
+
+        Ok(response)
     }
 
     fn close(&mut self) -> Result<(), TransportError> {
@@ -236,6 +258,8 @@ pub struct RunnerRun {
     pub preflight: Option<String>,
     /// A signal or a closed input arrived during the row.
     pub interrupted: bool,
+    /// The status of the POST is unknown and is reconciled, never resent (the batch stops).
+    pub uncertain: bool,
     conn: String,
 }
 
@@ -264,7 +288,10 @@ impl RunnerRun {
 
     /// Whether the later rows of a batch are skipped: a class that stays, a signal, or a stop.
     pub fn halts_batch(&self) -> bool {
-        self.leftover.is_some() || self.interrupted || matches!(self.end, RunnerEnd::Stop(_))
+        self.leftover.is_some()
+            || self.interrupted
+            || self.uncertain
+            || matches!(self.end, RunnerEnd::Stop(_))
     }
 
     /// The exit code of the row. `posted_exit` is the code the operation derived from a POST
@@ -346,6 +373,7 @@ pub fn run_cycle(
         notes: Vec::new(),
         preflight: None,
         interrupted: false,
+        uncertain: false,
         conn: input.conn.to_owned(),
     };
 
@@ -409,6 +437,7 @@ pub fn run_cycle(
     run.notes = std::mem::take(&mut cycle.notes);
     run.preflight = cycle.preflight.take();
     run.interrupted = cancel.is_set();
+    run.uncertain = matches!(run.end, RunnerEnd::PostUncertain(_));
 
     run
 }

@@ -1324,8 +1324,10 @@ fn doctor_probes_both_backends_and_warns_once() {
     let directory = tempfile::tempdir().unwrap();
     let mut fake = Fake::default();
 
-    fake.adt
-        .push_back(scripted(vec![Ok(Response::text(200, "<app:service/>"))]));
+    let mut replies = vec![Ok(Response::text(200, "<app:service/>"))];
+
+    replies.extend(common::doctor_runner_replies());
+    fake.adt.push_back(scripted(replies));
     fake.library.push_back(Ok(RfcLibraryInfo {
         identity: RfcLibraryIdentity {
             path: "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so".to_owned(),

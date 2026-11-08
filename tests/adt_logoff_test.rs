@@ -636,10 +636,12 @@ fn doctor(directory: &Path, fake: &mut Fake) -> Exit {
 #[test]
 fn doctor_ends_its_probe_session_with_one_logoff() {
     let directory = tempfile::tempdir().unwrap();
-    let (log, opened) = http(vec![
-        ctx(Response::text(200, "<app:service/>")),
-        plain(200, ""),
-    ]);
+    let mut replies = vec![ctx(Response::text(200, "<app:service/>"))];
+
+    replies.extend(common::doctor_runner_replies());
+    replies.push(plain(200, ""));
+
+    let (log, opened) = http(replies);
     let mut fake = Fake::default();
 
     fake.adt.push_back(opened);
@@ -659,7 +661,12 @@ fn doctor_ends_its_probe_session_with_one_logoff() {
 #[test]
 fn doctor_reports_a_failed_logoff_as_a_w_line_and_keeps_the_probe_result() {
     let directory = tempfile::tempdir().unwrap();
-    let (log, opened) = http(vec![ctx(Response::text(200, "<app:service/>")), gone()]);
+    let mut replies = vec![ctx(Response::text(200, "<app:service/>"))];
+
+    replies.extend(common::doctor_runner_replies());
+    replies.push(gone());
+
+    let (log, opened) = http(replies);
     let mut fake = Fake::default();
 
     fake.adt.push_back(opened);

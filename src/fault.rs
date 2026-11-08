@@ -20,6 +20,24 @@ const UNKNOWN: &str = "unknown ABAPREACH_FAULT value";
 
 thread_local! {
     static DELETE_REPLY_DROPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SCOPED: std::cell::RefCell<Option<Vec<Fault>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Ends the effect of [`scoped`] when dropped.
+pub struct Scope(());
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        SCOPED.with(|scoped| scoped.borrow_mut().take());
+    }
+}
+
+/// Test-only: the faults [`Fault::from_env`] returns on this thread until the guard is dropped,
+/// in place of the environment. Setting the process environment from a test is not sound.
+pub fn scoped(faults: Vec<Fault>) -> Scope {
+    SCOPED.with(|scoped| *scoped.borrow_mut() = Some(faults));
+
+    Scope(())
 }
 
 /// Remembers that the reply of a delete was dropped. A delete reconciles from a new session, whose
@@ -45,6 +63,8 @@ pub enum Target {
     Create,
     /// The `DELETE` of an object under its lock.
     Delete,
+    /// The classrun `POST` of the temporary runner class.
+    Classrun,
     /// A write of a registered extension. No transport of this crate matches it.
     Named(&'static str),
 }
@@ -57,6 +77,7 @@ impl Target {
             "ACTIVATE" => Some(Self::Activate),
             "CREATE" => Some(Self::Create),
             "DELETE" => Some(Self::Delete),
+            "CLASSRUN" => Some(Self::Classrun),
             _ => extra
                 .iter()
                 .find(|name| **name == value)
@@ -83,6 +104,7 @@ impl Target {
             Self::Activate => "ACTIVATE",
             Self::Create => "CREATE",
             Self::Delete => "DELETE",
+            Self::Classrun => "CLASSRUN",
             Self::Named(name) => name,
         }
     }
@@ -169,6 +191,10 @@ impl Fault {
     /// `drop-reply:<NAME>` of an extension is kept as a named target that no transport of this
     /// crate matches, so it never disturbs the other faults of the list.
     pub fn from_env() -> Vec<Self> {
+        if let Some(faults) = SCOPED.with(|scoped| scoped.borrow().clone()) {
+            return faults;
+        }
+
         Self::from_lookup_lenient(std::env::var(ENV).ok().as_deref())
     }
 

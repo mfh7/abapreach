@@ -218,6 +218,17 @@ pub fn is_delete_request(request: &Request) -> bool {
     request.method == "DELETE" && !request.uri.contains('#') && is_delete(path, query)
 }
 
+/// Whether `request` is the classrun `POST` of a runner class.
+#[cfg(feature = "fault-injection")]
+pub fn is_classrun_post(request: &Request) -> bool {
+    request.method == "POST"
+        && request
+            .uri
+            .strip_prefix(CLASSRUN)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .is_some_and(|name| !name.is_empty() && !name.contains(['/', '?', '#']))
+}
+
 // The runner name the running operation armed, and whether its one POST has been spent. Per
 // thread, like the operation that owns it: a request sent from another thread finds nothing
 // armed and is refused.
