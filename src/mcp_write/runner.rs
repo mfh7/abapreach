@@ -147,6 +147,8 @@ struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Result<Self, String> {
         let path = std::env::temp_dir().join(format!("abapreach-read-{}", random_nonce()));
+        // Only the unix mode below needs `mut`.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = fs::DirBuilder::new();
 
         #[cfg(unix)]
