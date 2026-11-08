@@ -14,6 +14,20 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
+Version metadata is `0.16.0`. This entry is finalized before the last release candidate.
+
+### Added
+- DDIC types `DTEL`, `DOMA`, `TABL` and `TTYP`, and transaction codes `TRAN`, for `read`, `deploy`,
+  `deploy --simulate`, `create`, `create --simulate` and `delete`. They run through a temporary
+  runner class in `$TMP`, created and removed in each cycle, over ADT classrun or RFC SADT.
+- `doctor` prints `RUNNER` lines: the classrun availability, the runner prefix and the leftovers of
+  the runner class.
+- MCP: `abap_read_source` and the write tools accept the types `DTEL`, `DOMA`, `TABL`, `TTYP` and `TRAN`.
+
+### Changed
+- An unpinned command on a stateless ADT session uses the RFC path. The CLI prints
+  `NOTE: ADT HTTP is stateless on this release; the RFC path is used`.
+
 ### Fixed
 - RFC backend: the connection now opens with `NO_BASXML=1` (classic RFC serialization). Before,
   `deploy` and `deploy --simulate` of a source of about 59 KB or more over RFC failed with
