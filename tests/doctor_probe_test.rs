@@ -664,6 +664,37 @@ fn doctor_reports_the_stateful_session_and_leaves_the_deploy_capability_with_rfc
     }
 }
 
+/// A stateless ADT session with an RFC route runs the runner commands over RFC, so the POST
+/// travels over SADT; with a stateful session it travels over HTTP.
+#[test]
+fn doctor_reports_the_transport_a_runner_would_really_use() {
+    let mut kept = Response::text(200, "<app:service/>");
+    kept.headers
+        .insert("Set-Cookie".to_owned(), "sap-contextid=ctx".to_owned());
+
+    for (discovery, expected) in [
+        (kept, "RUNNER post transport: http"),
+        (
+            Response::text(200, "<app:service/>"),
+            "RUNNER post transport: sadt",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(Ok(Box::new(HttpTransport::for_test(vec![
+            Ok(discovery),
+            Ok(Response::empty(200)),
+        ]))));
+        fake.library.push_back(library());
+        fake.ping.push_back(Ok(()));
+
+        let exit = doctor(directory.path(), &mut fake);
+
+        assert_eq!(runner_line(&exit, "RUNNER post transport"), expected);
+    }
+}
+
 #[test]
 fn a_missing_rfc_library_skips_the_ping_and_fails_the_doctor() {
     let directory = tempfile::tempdir().unwrap();

@@ -100,7 +100,7 @@ pub fn simulate(
     };
 
     // The payload refuses a value, and a base that is no hash, before any connection is opened.
-    if let Err(message) = payload(request, &name, CHECK_NONCE, true) {
+    if let Err(message) = check(request, &name) {
         return stop(message);
     }
 
@@ -128,6 +128,11 @@ pub fn simulate(
             .routed()
         },
     )
+}
+
+/// Whether the payload of the first run is accepted: the values are checked before any connection.
+pub(crate) fn check(request: &DdicSimulate<'_>, name: &str) -> Result<(), String> {
+    payload(request, name, CHECK_NONCE, true).map(drop)
 }
 
 /// The payload of one run. The base is validated by the check but never sent: the live hash comes
@@ -165,30 +170,30 @@ fn stop(message: impl std::fmt::Display) -> Exit {
 // --- one attempt -------------------------------------------------------------------------------
 
 /// Everything one attempt on one backend needs.
-struct Attempt<'a> {
-    connection: &'a Connection,
-    selection: &'a Selection,
-    open: &'a dyn Fn() -> Opened,
-    cancel: &'a CancelFlag,
-    request: &'a DdicSimulate<'a>,
+pub(crate) struct Attempt<'a> {
+    pub(crate) connection: &'a Connection,
+    pub(crate) selection: &'a Selection,
+    pub(crate) open: &'a dyn Fn() -> Opened,
+    pub(crate) cancel: &'a CancelFlag,
+    pub(crate) request: &'a DdicSimulate<'a>,
     /// The object name, upper case.
-    name: &'a str,
+    pub(crate) name: &'a str,
     /// `<verb> <TYPE>`, for the STOP texts.
-    operation: &'a str,
-    template: &'static TypeTemplate,
+    pub(crate) operation: &'a str,
+    pub(crate) template: &'static TypeTemplate,
 }
 
 /// One attempt, and whether the router may try the other backend.
-struct Done {
-    code: i32,
-    stdout: Vec<String>,
-    stderr: Vec<String>,
+pub(crate) struct Done {
+    pub(crate) code: i32,
+    pub(crate) stdout: Vec<String>,
+    pub(crate) stderr: Vec<String>,
     /// Set when nothing was sent and the failure allows the other backend.
-    fallback: Option<(Failure, String)>,
+    pub(crate) fallback: Option<(Failure, String)>,
 }
 
 impl Done {
-    fn routed(self) -> Routed {
+    pub(crate) fn routed(self) -> Routed {
         Routed {
             code: self.code,
             stdout: self.stdout.join("\n"),
@@ -199,19 +204,24 @@ impl Done {
 }
 
 fn run_attempt(attempt: &Attempt<'_>, nonce: &mut dyn FnMut() -> String) -> Done {
-    let text = nonce();
-    let nonce = match Nonce::parse(&text) {
-        Ok(nonce) => nonce,
-        Err(message) => return refusal(&message),
-    };
-    let lines = match payload(attempt.request, attempt.name, &text, false) {
-        Ok(lines) => lines,
-        Err(message) => return refusal(&message),
-    };
-    let build = |runner: &str| generate(attempt.template, runner, &lines);
+    match first_run(attempt, nonce) {
+        Step::Done(done) => done,
+        Step::Verified(verified) => simulated(attempt, verified),
+    }
+}
+
+/// One run of the class cycle with the payload `lines`: a new class, the POST, the cleanup. The
+/// two runs of a deploy and the read run of a reconciliation share it.
+pub(crate) fn run_lines(
+    attempt: &Attempt<'_>,
+    operation: &str,
+    lines: &[String],
+    cancel: &CancelFlag,
+) -> RunnerRun {
+    let build = |runner: &str| generate(attempt.template, runner, lines);
     let connection = attempt.connection;
     let input = CycleInput {
-        operation: attempt.operation,
+        operation,
         sid: &connection.system_id,
         client: &connection.client,
         conn: &connection.id,
@@ -224,26 +234,82 @@ fn run_attempt(attempt: &Attempt<'_>, nonce: &mut dyn FnMut() -> String) -> Done
     };
     let open = attempt.open;
     let mut opener = || open();
-    let run = run_cycle(&input, &mut opener, PostRoute::Cycle, attempt.cancel);
+
+    run_cycle(&input, &mut opener, PostRoute::Cycle, cancel)
+}
+
+/// How the first run ended for a caller that goes on with a write.
+pub(crate) enum Step {
+    /// The command is over: a rejection, a stop, a status, or a failure.
+    Done(Done),
+    /// A deploy run that passed every check; a simulate ends here with `SIMULATED_OK`, a deploy
+    /// goes on with a second run.
+    Verified(Verified),
+}
+
+/// A deploy run that passed the checks, with everything the caller needs to go on.
+pub(crate) struct Verified {
+    pub(crate) run: RunnerRun,
+    /// The lines printed so far: the diff, the live hash, the verdict, and the guards.
+    pub(crate) print: Print,
+    /// The live hash, which becomes the base of the write.
+    pub(crate) base: Option<String>,
+}
+
+/// The first run of a simulate or a deploy: the class cycle in mode `SIMULATE` or `CREATE_SIM`,
+/// then the report, the `--base` comparison, and the diff. A deploy that returns `Verified` has
+/// shown the diff and the live hash and has written nothing.
+pub(crate) fn first_run(attempt: &Attempt<'_>, nonce: &mut dyn FnMut() -> String) -> Step {
+    let text = nonce();
+    let nonce = match Nonce::parse(&text) {
+        Ok(nonce) => nonce,
+        Err(message) => return Step::Done(refusal(&message)),
+    };
+    let lines = match payload(attempt.request, attempt.name, &text, false) {
+        Ok(lines) => lines,
+        Err(message) => return Step::Done(refusal(&message)),
+    };
+    let run = run_lines(attempt, attempt.operation, &lines, attempt.cancel);
     let mut print = Print::start(attempt.selection, &run);
 
     match stage(&run, &nonce, attempt.request.simulation.run_mode()) {
-        Stage::Report(report) => report_done(attempt, &run, &report, print),
+        Stage::Report(report) => match report_done(attempt, &run, &report, print) {
+            Flow::Done(done) => Step::Done(done),
+            Flow::Verified { print, base } => Step::Verified(Verified { run, print, base }),
+        },
         Stage::Uncertain(cause) => {
-            // A simulate writes nothing in SAP, so there is nothing to settle.
+            // A first run writes nothing in SAP, so there is nothing to settle.
             print.stderr.push(format!(
                 "ERROR: {} {}: the simulate status is uncertain ({cause}); nothing was written; \
-                 run the simulate again",
+                 run the command again",
                 attempt.operation, attempt.name
             ));
 
-            print.finish(&run, 1)
+            Step::Done(print.finish(&run, 1))
         }
-        other => print.ended(&run, other, attempt.request.simulation),
+        other => Step::Done(print.ended(&run, other, attempt.request.simulation)),
     }
 }
 
-fn refusal(message: &str) -> Done {
+/// The end of a simulate: the new session must find the object as before, then `SIMULATED_OK`.
+fn simulated(attempt: &Attempt<'_>, verified: Verified) -> Done {
+    let Verified { run, mut print, .. } = verified;
+    let expect = Expect::Present {
+        package: None,
+        report: None,
+    };
+
+    match confirm(attempt, &run, &expect, &mut print) {
+        Some(why) => partial_deploy(&run, "SIMULATED_OK", &why, print),
+        None => {
+            print.stdout.push("SIMULATED_OK".to_owned());
+
+            print.finish(&run, 0)
+        }
+    }
+}
+
+pub(crate) fn refusal(message: &str) -> Done {
     Done {
         code: 2,
         stdout: Vec::new(),
@@ -253,7 +319,7 @@ fn refusal(message: &str) -> Done {
 }
 
 /// How the cycle of the run ended, seen from the simulate.
-enum Stage {
+pub(crate) enum Stage {
     /// A whole, well formed run.
     Report(Box<Report>),
     /// The reply is lost, cut, or broken; the text says why.
@@ -266,7 +332,7 @@ enum Stage {
     Interrupted,
 }
 
-fn stage(run: &RunnerRun, nonce: &Nonce, mode: RunMode) -> Stage {
+pub(crate) fn stage(run: &RunnerRun, nonce: &Nonce, mode: RunMode) -> Stage {
     if let Some(cause) = uncertainty(&run.end, nonce, mode) {
         let (Cause::LostReply(text) | Cause::Broken(text)) = cause;
 
@@ -294,14 +360,14 @@ fn stage(run: &RunnerRun, nonce: &Nonce, mode: RunMode) -> Stage {
 }
 
 /// The lines of an attempt while it is built.
-struct Print {
-    stdout: Vec<String>,
-    stderr: Vec<String>,
+pub(crate) struct Print {
+    pub(crate) stdout: Vec<String>,
+    pub(crate) stderr: Vec<String>,
 }
 
 impl Print {
     /// The backend and why it was chosen, then the runner line and the repository preflight.
-    fn start(selection: &Selection, run: &RunnerRun) -> Self {
+    pub(crate) fn start(selection: &Selection, run: &RunnerRun) -> Self {
         let mut stdout = vec![
             format!("backend: {}", selection.backend.token()),
             format!("reason: {}", selection.reason),
@@ -318,7 +384,7 @@ impl Print {
 
     /// The exit follows the run: a signal wins, then a class that stays, then `posted_exit`. The
     /// notes of the run come first on the stderr and the cleanup commands last.
-    fn finish(self, run: &RunnerRun, posted_exit: i32) -> Done {
+    pub(crate) fn finish(self, run: &RunnerRun, posted_exit: i32) -> Done {
         let mut stderr = run.notes.clone();
 
         stderr.extend(self.stderr);
@@ -333,7 +399,12 @@ impl Print {
     }
 
     /// An end that is no report: the stage of the cycle that stopped the simulate.
-    fn ended(mut self, run: &RunnerRun, stage: Stage, simulation: Simulation<'_>) -> Done {
+    pub(crate) fn ended(
+        mut self,
+        run: &RunnerRun,
+        stage: Stage,
+        simulation: Simulation<'_>,
+    ) -> Done {
         match stage {
             Stage::Stop(text) => self.stderr.push(format!("STOP: {text}")),
             Stage::Interrupted => self
@@ -379,7 +450,7 @@ impl Print {
 
 // --- the report --------------------------------------------------------------------------------
 
-fn texts(report: &Report, level: Level) -> Vec<String> {
+pub(crate) fn texts(report: &Report, level: Level) -> Vec<String> {
     report
         .messages
         .iter()
@@ -389,7 +460,7 @@ fn texts(report: &Report, level: Level) -> Vec<String> {
 }
 
 /// Warnings go to the stderr; information is printed in place by the status that owns it.
-fn warnings(report: &Report, print: &mut Print) {
+pub(crate) fn warnings(report: &Report, print: &mut Print) {
     print.stderr.extend(
         texts(report, Level::Warning)
             .into_iter()
@@ -399,7 +470,7 @@ fn warnings(report: &Report, print: &mut Print) {
 }
 
 /// The reason of a rejection: the errors of the run, or `fallback` when it gave none.
-fn reason(report: &Report, fallback: &str) -> String {
+pub(crate) fn reason(report: &Report, fallback: &str) -> String {
     let errors = texts(report, Level::Error);
 
     if errors.is_empty() {
@@ -418,12 +489,24 @@ fn guard_lines(report: &Report) -> impl Iterator<Item = String> + '_ {
         .map(|fact| format!("GUARD {}", fact.value))
 }
 
-fn report_done(attempt: &Attempt<'_>, run: &RunnerRun, report: &Report, mut print: Print) -> Done {
+/// What the report of the first run leads to.
+enum Flow {
+    Done(Done),
+    /// A deploy that passed: the lines so far and the live hash.
+    Verified {
+        print: Print,
+        base: Option<String>,
+    },
+}
+
+fn report_done(attempt: &Attempt<'_>, run: &RunnerRun, report: &Report, mut print: Print) -> Flow {
     warnings(report, &mut print);
 
     match attempt.request.simulation {
         Simulation::Deploy { base } => deploy_report(attempt, run, report, base, print),
-        Simulation::Create { package, .. } => create_report(attempt, run, report, package, print),
+        Simulation::Create { package, .. } => {
+            Flow::Done(create_report(attempt, run, report, package, print))
+        }
     }
 }
 
@@ -527,7 +610,7 @@ fn deploy_report(
     report: &Report,
     base: Option<&str>,
     mut print: Print,
-) -> Done {
+) -> Flow {
     let live = match live_of(report) {
         Ok(live) => live,
         Err(message) => {
@@ -536,7 +619,7 @@ fn deploy_report(
                 attempt.operation, attempt.name
             ));
 
-            return print.finish(run, 1);
+            return Flow::Done(print.finish(run, 1));
         }
     };
 
@@ -549,7 +632,7 @@ fn deploy_report(
             live.hash
         ));
 
-        return print.finish(run, 2);
+        return Flow::Done(print.finish(run, 2));
     }
 
     let expect = Expect::Present {
@@ -558,14 +641,14 @@ fn deploy_report(
     };
 
     if report.status == RunStatus::NoChanges {
-        return match confirm(attempt, run, &expect, &mut print) {
-            Some(why) => partial_deploy(run, report, &why, print),
+        return Flow::Done(match confirm(attempt, run, &expect, &mut print) {
+            Some(why) => partial_deploy(run, report.status.token(), &why, print),
             None => {
                 print.stdout.push("no changes".to_owned());
 
                 print.finish(run, 0)
             }
-        };
+        });
     }
 
     let file = normalize(local_source_lines(attempt.request.xml));
@@ -594,26 +677,21 @@ fn deploy_report(
     if let Some(reason) = rejection {
         print.stdout.push(format!("REJECTED: {reason}"));
 
-        return print.finish(run, 1);
+        return Flow::Done(print.finish(run, 1));
     }
 
     print.stdout.extend(guard_lines(report));
 
-    match confirm(attempt, run, &expect, &mut print) {
-        Some(why) => partial_deploy(run, report, &why, print),
-        None => {
-            print.stdout.push("SIMULATED_OK".to_owned());
-
-            print.finish(run, 0)
-        }
+    Flow::Verified {
+        print,
+        base: live.map(|live| live.hash),
     }
 }
 
-fn partial_deploy(run: &RunnerRun, report: &Report, why: &str, mut print: Print) -> Done {
+fn partial_deploy(run: &RunnerRun, reported: &str, why: &str, mut print: Print) -> Done {
     print.stdout.push(format!(
-        "PARTIAL: the run reported {} but a new session disagrees ({why}); check with read \
-         before retrying",
-        report.status.token()
+        "PARTIAL: the run reported {reported} but a new session disagrees ({why}); check with \
+         read before retrying"
     ));
 
     print.finish(run, 1)

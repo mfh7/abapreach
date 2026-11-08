@@ -3,6 +3,7 @@ pub mod delete;
 pub mod delete_adt;
 pub mod delete_ddic;
 pub mod deploy;
+pub mod deploy_ddic;
 pub mod doctor;
 pub mod doctor_runner;
 pub mod include;

@@ -8,6 +8,7 @@ use crate::app::{Exit, Factories, Opened};
 use crate::backend::{BackendKind, Failure, Selection, SelectionReason};
 use crate::config::Connection;
 use crate::operation::deploy::CancelFlag;
+use crate::operation::runner::STATELESS;
 use std::cell::RefCell;
 
 /// What one attempt on one backend produced.
@@ -72,6 +73,32 @@ pub fn route(
             BackendKind::RfcSadt => shared.borrow_mut().rfc(connection),
         };
         let done = attempt(&selection, &open, &cancel);
+
+        // The probe of the cycle found a stateless ADT session before anything was written. Unless
+        // `--backend` pins ADT, the RFC path takes the command; the STOP stays when RFC is missing.
+        if explicit.is_none()
+            && backend == BackendKind::AdtHttp
+            && connection.rfc.is_some()
+            && done.code == 2
+            && done.stderr.iter().any(|block| has_stateless_stop(block))
+        {
+            earlier.extend(
+                done.stderr
+                    .iter()
+                    .filter_map(|block| without_stateless_stop(block)),
+            );
+            earlier.push(
+                "NOTE: ADT HTTP is stateless on this release; the RFC path is used".to_owned(),
+            );
+            reason = SelectionReason::Fallback(format!(
+                "{}: ADT HTTP session is stateless on this release",
+                Failure::CapabilityUnavailable
+            ));
+            backend = BackendKind::RfcSadt;
+
+            continue;
+        }
+
         let retry = done.fallback.as_ref().filter(|_| {
             explicit.is_none() && backend == BackendKind::AdtHttp && connection.rfc.is_some()
         });
@@ -109,4 +136,22 @@ fn exit_of(mut stderr: Vec<String>, done: Routed) -> Exit {
         stdout: done.stdout,
         stderr: stderr.join("\n"),
     }
+}
+
+fn is_stateless_stop(line: &str) -> bool {
+    line.strip_prefix("STOP: ") == Some(STATELESS)
+}
+
+fn has_stateless_stop(block: &str) -> bool {
+    block.lines().any(is_stateless_stop)
+}
+
+/// The block without the stateless STOP line; `None` when nothing else is left.
+fn without_stateless_stop(block: &str) -> Option<String> {
+    let kept: Vec<&str> = block
+        .lines()
+        .filter(|line| !is_stateless_stop(line))
+        .collect();
+
+    (!kept.is_empty()).then(|| kept.join("\n"))
 }

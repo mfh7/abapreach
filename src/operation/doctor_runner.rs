@@ -38,6 +38,9 @@ pub struct RunnerFacts {
     /// The listed classes and the number of classes the search returned.
     leftovers: Result<(Vec<Leftover>, usize), String>,
     preflight: Result<Preflight, String>,
+    /// The session these facts were read on keeps no ADT state, so an unpinned runner command
+    /// takes the RFC path when the connection has one.
+    adt_stateless: bool,
 }
 
 impl RunnerFacts {
@@ -47,6 +50,7 @@ impl RunnerFacts {
             classrun: Err(reason.to_owned()),
             leftovers: Err(reason.to_owned()),
             preflight: Err(reason.to_owned()),
+            adt_stateless: false,
         }
     }
 
@@ -62,6 +66,7 @@ impl RunnerFacts {
             leftovers: read_leftovers(transport, &connection.runner_prefix, now),
             preflight: preflight(transport, &connection.client)
                 .map_err(|error| scrub_text(&error.to_string())),
+            adt_stateless: transport.stateful_supported() == Some(false),
         }
     }
 
@@ -77,8 +82,10 @@ impl RunnerFacts {
                 Err(reason) => format!("RUNNER classrun: unknown ({reason})"),
             },
             format!("RUNNER prefix: {}", connection.runner_prefix),
+            // A stateless ADT session with an RFC route runs the commands over RFC, so the POST
+            // travels over SADT.
             post_transport_line(
-                connection.adt.is_some(),
+                connection.adt.is_some() && !(self.adt_stateless && connection.rfc.is_some()),
                 connection.rfc.is_some(),
                 SADT_POST_WORKS,
             ),

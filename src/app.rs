@@ -22,6 +22,7 @@ use crate::operation::delete::{self, Context};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
+use crate::operation::deploy_ddic::{self, DdicDeploy};
 use crate::operation::doctor::Doctor;
 use crate::operation::payload::Kind;
 use crate::operation::read::{ReadProg, ReadTarget};
@@ -1010,6 +1011,27 @@ fn execute(
                         };
 
                         return simulate_ddic::simulate(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    if checked.is_ok() {
+                        let xml = match read_xml(&file) {
+                            Ok(xml) => xml,
+                            Err(exit) => return exit,
+                        };
+                        let request = DdicDeploy {
+                            kind,
+                            name: &name,
+                            xml: &xml,
+                            tr: tr.as_deref(),
+                            base: base.as_deref(),
+                        };
+
+                        return deploy_ddic::deploy(
                             connection,
                             backend.map(backend_kind),
                             &request,

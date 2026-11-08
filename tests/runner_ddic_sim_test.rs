@@ -371,7 +371,8 @@ fn env_in(directory: &Path) -> BTreeMap<String, String> {
         r#"{"servers":[{"systemId":"DEV","host":"example.com","port":443,"clients":["100"],"#,
         r#""rfc":{"ashost":"example.com","sysnr":"00"}},"#,
         r#"{"systemId":"QAS","clients":["100"],"#,
-        r#""rfc":{"ashost":"example.com","sysnr":"02"}}]}"#,
+        r#""rfc":{"ashost":"example.com","sysnr":"02"}},"#,
+        r#"{"systemId":"ADO","host":"example.com","port":443,"clients":["100"]}]}"#,
     );
 
     fs::write(directory.join("connections.json"), config).unwrap();
@@ -383,6 +384,8 @@ fn env_in(directory: &Path) -> BTreeMap<String, String> {
         ),
         ("DEV_100_USER".to_owned(), "user".to_owned()),
         ("DEV_100_PASS".to_owned(), "secret-pw".to_owned()),
+        ("ADO_100_USER".to_owned(), "user".to_owned()),
+        ("ADO_100_PASS".to_owned(), "secret-pw".to_owned()),
         ("QAS_100_USER".to_owned(), "user".to_owned()),
         ("QAS_100_PASS".to_owned(), "secret-pw".to_owned()),
     ])
@@ -1592,4 +1595,75 @@ fn a_dropped_classrun_reply_is_uncertain_and_the_simulate_is_not_resent() {
     assert!(!done.exit.stdout.lines().any(|line| line == "SIMULATED_OK"));
     assert_eq!(done.sap.borrow().posts, 1);
     assert_clean(&done);
+}
+
+// ---- a release whose ADT session keeps no state -------------------------------------------------------
+
+const STATELESS_STOP: &str = "STOP: ADT HTTP session is stateless on this release; the temporary \
+                              runner class needs a stateful session (use the RFC path)";
+
+fn stateless(index: usize) -> Case {
+    let (_, xml, name, ..) = FIXTURES[index];
+    let mut case = Case::deploy(index, deploy_reply(xml, passing(name), "SIMULATED_OK"));
+
+    case.sap = sap(false, PRESENT);
+
+    case
+}
+
+#[test]
+fn an_unpinned_stateless_adt_session_takes_the_rfc_path_with_one_note() {
+    let done = stateless(0).go();
+
+    assert_eq!(done.exit.code, 0, "{}", done.exit.stderr);
+    assert_eq!(
+        done.exit.stderr,
+        "NOTE: ADT HTTP is stateless on this release; the RFC path is used"
+    );
+    assert!(
+        done.exit.stdout.contains(
+            "reason: fallback to RFC: capability unavailable: ADT HTTP session is stateless on \
+             this release"
+        ),
+        "{}",
+        done.exit.stdout
+    );
+    runner_line(&done.exit.stdout, "sadt");
+    assert!(done.exit.stdout.ends_with("\nSIMULATED_OK"));
+    // The probe ran on ADT; the one class and the one POST ran on RFC.
+    assert!(done.adt_opens > 0 && done.rfc_opens > 0);
+    assert_eq!(done.creates(), 1);
+    assert_eq!(done.sap.borrow().posts, 1);
+    assert_clean(&done);
+}
+
+#[test]
+fn a_pinned_adt_backend_keeps_the_stateless_stop() {
+    let mut case = stateless(0);
+
+    case.extra = vec!["--backend", "adt"];
+
+    let done = case.go();
+
+    assert_eq!(done.exit.code, 2);
+    assert_eq!(done.exit.stderr, STATELESS_STOP);
+    assert_eq!(done.rfc_opens, 0);
+    assert_eq!(done.creates(), 0);
+}
+
+#[test]
+fn a_connection_without_rfc_keeps_a_stop_when_the_adt_session_is_stateless() {
+    let mut case = stateless(0);
+
+    case.conn = "ADO_100";
+
+    let done = case.go();
+
+    assert_eq!(done.exit.code, 2);
+    assert_eq!(
+        done.exit.stderr,
+        "STOP: deploy DTEL needs a stateful ADT session or the RFC path"
+    );
+    assert_eq!(done.rfc_opens, 0);
+    assert_eq!(done.creates(), 0);
 }

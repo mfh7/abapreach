@@ -1030,11 +1030,12 @@ fn a_repository_that_forbids_a_class_stops_before_any_class_exists() {
 }
 
 #[test]
-fn an_adt_session_without_state_stops_with_the_one_text() {
+fn an_adt_session_without_state_stops_with_the_one_text_when_adt_is_pinned() {
     let (kind, xml, name, hash) = FIXTURES[0];
     let mut case = Case::new(kind, name, fixture_reply(xml, hash));
 
     case.sap = sap(false, PRESENT);
+    case.extra = vec!["--backend", "adt"];
 
     let done = case.go();
 
@@ -1045,6 +1046,25 @@ fn an_adt_session_without_state_stops_with_the_one_text() {
          a stateful session (use the RFC path)"
     );
     assert_eq!(done.creates(), 0);
+}
+
+#[test]
+fn an_adt_session_without_state_reads_over_rfc_when_nothing_is_pinned() {
+    let (kind, xml, name, hash) = FIXTURES[0];
+    let mut case = Case::new(kind, name, fixture_reply(xml, hash));
+
+    case.sap = sap(false, PRESENT);
+
+    let done = case.go();
+
+    assert_eq!(done.exit.code, 0, "{}", done.exit.stderr);
+    assert_eq!(done.file().as_deref(), Some(xml));
+    runner_line(&done.exit.stdout, "sadt");
+    assert_eq!(
+        done.exit.stderr,
+        "NOTE: ADT HTTP is stateless on this release; the RFC path is used"
+    );
+    assert_clean(&done);
 }
 
 // ---- cleanup and signals ----------------------------------------------------------------------------

@@ -164,7 +164,9 @@ const CLASSRUN: &str = "/sap/bc/adt/oo/classrun";
 const DISCOVERY: &str = "/sap/bc/adt/discovery";
 const AUTHORIZATION_HINT: &str =
     "the temporary runner class needs CLAS create/activate in $TMP and ADT classrun access";
-const STATELESS: &str = "ADT HTTP session is stateless on this release; the temporary runner class \
+/// The STOP text of an ADT HTTP session that keeps no state; `runner_route` turns it into the
+/// RFC path when `--backend` does not pin ADT.
+pub const STATELESS: &str = "ADT HTTP session is stateless on this release; the temporary runner class \
                          needs a stateful session (use the RFC path)";
 const TEMPLATE_BUG: &str =
     "W: the generated runner class did not activate; please report this as a bug";
