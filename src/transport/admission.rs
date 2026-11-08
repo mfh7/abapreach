@@ -316,9 +316,9 @@ fn reaches_classrun(uri: &str) -> bool {
     }
 }
 
-/// Whether the path, as written or with its dot segments resolved, starts at the classrun
-/// resource. A fifth segment that begins with the word counts too (`classrunx`, `classrun.NAME`):
-/// no such resource exists, and refusing it keeps the rule independent of server quirks.
+/// Whether the path, as written or with its dot segments resolved, holds the classrun resource.
+/// A fifth segment that begins with the word counts too (`classrunx`, `classrun.NAME`): no such
+/// resource exists, and refusing it keeps the rule independent of server quirks.
 fn is_classrun_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase().replace('\\', "/");
     let written: Vec<&str> = lower
@@ -336,10 +336,12 @@ fn is_classrun_path(path: &str) -> bool {
         }
     }
 
+    // The window may sit at any position, so a scheme, an authority, or a leading segment of an
+    // absolute-form URI cannot hide it.
     [&written, &resolved].into_iter().any(|segments| {
-        segments.len() > 4
-            && segments[..4] == ["sap", "bc", "adt", "oo"]
-            && segments[4].starts_with("classrun")
+        segments.windows(5).any(|window| {
+            window[..4] == ["sap", "bc", "adt", "oo"] && window[4].starts_with("classrun")
+        })
     })
 }
 

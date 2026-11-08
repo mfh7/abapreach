@@ -636,6 +636,14 @@ fn every_spelling_that_reaches_the_classrun_resource_stays_refused() {
         format!("/sap/bc/adt/oo/classrunx/{RUNNER}"),
         format!("/sap/bc/adt/oo/classes/zcl_x/../../classrun/{RUNNER}"),
         format!("/sap/bc/adt/oo\\classrun/{RUNNER}"),
+        format!("https://host.example.com/sap/bc/adt/oo/classrun/{RUNNER}"),
+        format!("http://host.example.com:8000/sap/bc/adt/oo/classrun/{RUNNER}"),
+        format!("HTTPS://HOST.EXAMPLE.COM/SAP/BC/ADT/OO/CLASSRUN/{RUNNER}"),
+        format!("//host.example.com/sap/bc/adt/oo/classrun/{RUNNER}"),
+        format!("https://host.example.com/sap/bc/adt/oo/classes/../classrun/{RUNNER}"),
+        format!("https://host.example.com/sap/bc/adt/oo/%63lassrun/{RUNNER}"),
+        format!("/prefix/sap/bc/adt/oo/classrun/{RUNNER}"),
+        "https://host.example.com/sap/bc/adt/oo/classrun".to_owned(),
     ] {
         for request in [
             Request::get(uri.clone()),
