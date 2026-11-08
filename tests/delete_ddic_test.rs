@@ -9,11 +9,15 @@ use abapreach::backend::BackendKind;
 use abapreach::cli::{DeleteKind, DeleteTarget};
 use abapreach::domain::Outcome;
 use abapreach::operation::delete::{
-    self, Context, DeleteBackend, DeleteReply, ObjectFacts, Plan, Reconcile,
+    self, Context, DeleteBackend, DeleteReply, ObjectFacts, Plan, Reconcile, RowPlan,
 };
 use abapreach::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch};
 use abapreach::operation::deploy::CancelFlag;
+use abapreach::operation::payload::Kind;
 use abapreach::operation::runner_reconcile::Clock;
+use abapreach::operation::runner_template::{
+    DTEL_TEMPLATE, TRAN_TEMPLATE, TypeTemplate, template_lines,
+};
 use abapreach::policy::{Confirmer, Policies};
 use abapreach::transport::TransportError;
 use common::runner_fake::{
@@ -1697,4 +1701,270 @@ fn the_tran_delete_order_stays_before_every_other_kind() {
     let tran = "TRAN:ZT".parse::<DeleteTarget>().unwrap().kind;
 
     assert!(kinds.iter().all(|kind| tran.rank() < kind.rank()));
+}
+
+// --- cargo-mutants triage (M6 Task 33): rules that no test pinned ----------------------------
+
+#[test]
+fn a_cancelled_batch_exits_130_even_when_no_run_saw_the_signal() {
+    let cancel = CancelFlag::new();
+
+    cancel.set();
+
+    let mut open = || -> Opened { Err(TransportError::PreSendConnectivity("unused".to_owned())) };
+    let mut ddic = DdicDelete::new(env(Backend::Http), &mut open, cancel);
+    let mut outcome = Outcome {
+        status: None,
+        exit: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+    };
+
+    ddic.finish(&mut outcome);
+
+    assert_eq!(outcome.exit, 130);
+}
+
+#[test]
+fn a_batch_that_ran_a_row_never_offers_the_other_backend_for_a_later_stop() {
+    let rig = rig(constant(present()), vec![PostReply::Output(sim_ok(HASH_A))]);
+    let policies = Policies::default();
+    let context = Context {
+        conn: "dev",
+        user: "DEVUSER",
+        policies: &policies,
+        confirmer: &No,
+    };
+    let sap = rig.sap.clone();
+    // The session of the second row keeps no state: it is the probe of that row that stops.
+    let mut open = move || {
+        if sap.borrow().posts > 0 {
+            sap.borrow_mut().stateful = false;
+        }
+
+        opened(Backend::Http, &sap)
+    };
+    let mut ddic = DdicDelete::new(env(Backend::Http), &mut open, CancelFlag::new())
+        .with_nonce(Box::new(|| NONCE.to_owned()))
+        .with_clock(Box::new(FakeClock {
+            now: rig.now.clone(),
+        }));
+    let directory = tempfile::tempdir().unwrap();
+    let mut outcome = delete::run(
+        &mut ddic,
+        &context,
+        &targets(&["DTEL:ZD1", "DTEL:ZD2"]),
+        None,
+        true,
+        &directory.path().join("plan.json"),
+    );
+
+    ddic.finish(&mut outcome);
+
+    assert_eq!(rig.sap.borrow().posts, 1, "the first row ran");
+    assert!(
+        outcome
+            .stderr
+            .starts_with("STOP: ADT HTTP session is stateless"),
+        "{}",
+        outcome.stderr
+    );
+    // Rerunning the whole batch on RFC would run the first row twice.
+    assert_eq!(ddic.unsent_failure(), None);
+}
+
+/// The class source without its payload lines, the class name replaced by the template's
+/// placeholder.
+fn constant_lines(source: &str) -> Vec<String> {
+    let name = source
+        .lines()
+        .find_map(|line| line.strip_prefix("CLASS ")?.strip_suffix(" DEFINITION"))
+        .expect("the class definition line");
+
+    source
+        .lines()
+        .filter(|line| !line.starts_with("    lv_b64 = lv_b64 && '"))
+        .map(|line| line.replace(name, "<NAME>"))
+        .collect()
+}
+
+#[test]
+fn each_row_runs_the_template_of_its_own_type() {
+    let cases: [(&str, &TypeTemplate); 2] =
+        [("DTEL:ZD", &DTEL_TEMPLATE), ("TRAN:ZT", &TRAN_TEMPLATE)];
+
+    for (text, template) in cases {
+        let rig = rig(constant(present()), vec![PostReply::Output(sim_ok(HASH_A))]);
+
+        simulate_batch(&rig, Backend::Rfc, &[text], None);
+
+        let source = rig.sap.borrow().posted[0].clone();
+
+        assert_eq!(constant_lines(&source), template_lines(template), "{text}");
+    }
+}
+
+#[test]
+fn a_planned_row_carries_the_request_the_run_reports() {
+    for (request, expected) in [("DEVK900005", Some("DEVK900005")), ("-", None)] {
+        let mut body = sim_body(HASH_A);
+
+        body[2] = fact("REQUEST", request);
+
+        let rig = rig(
+            constant(present()),
+            vec![PostReply::Output(output(
+                "DELETE_SIM",
+                &body,
+                "SIMULATED_OK",
+            ))],
+        );
+        let sap = rig.sap.clone();
+        let mut open = move || opened(Backend::Rfc, &sap);
+        let mut ddic = DdicDelete::new(env(Backend::Rfc), &mut open, CancelFlag::new())
+            .with_nonce(Box::new(|| NONCE.to_owned()))
+            .with_clock(Box::new(FakeClock {
+                now: rig.now.clone(),
+            }));
+        let kind = DeleteKind::Runner(Kind::Dtel);
+
+        ddic.begin(&[(kind, "ZD".to_owned())], None).unwrap();
+
+        match ddic.plan_row(kind, "ZD", None) {
+            RowPlan::Ready { tr, .. } => assert_eq!(tr.as_deref(), expected, "{request}"),
+            other => panic!("{request}: {other:?}"),
+        }
+    }
+}
+
+// --- the mixed batch hands each call to the side that owns it --------------------------------
+
+/// A backend with scripted answers, tagged so that a test can tell which side answered.
+#[derive(Default)]
+struct Side {
+    tag: &'static str,
+    code: i32,
+    include: bool,
+    halted: bool,
+    plans: bool,
+    stops: bool,
+}
+
+impl DeleteBackend for Side {
+    fn inspect(&mut self, _kind: DeleteKind, _name: &str) -> Result<Option<ObjectFacts>, String> {
+        Ok(None)
+    }
+
+    fn delete(&mut self, _kind: DeleteKind, _name: &str, _tr: Option<&str>) -> DeleteReply {
+        DeleteReply::Deleted
+    }
+
+    fn reconcile(&mut self, _kind: DeleteKind, _name: &str) -> Reconcile {
+        Reconcile::Gone
+    }
+
+    fn is_include(&mut self, _kind: DeleteKind, name: &str) -> bool {
+        self.include && name == "ZINCL"
+    }
+
+    fn begin_failure(&self, message: &str) -> (i32, String) {
+        (self.code, format!("{}: {message}", self.tag))
+    }
+
+    fn halted(&self) -> bool {
+        self.halted
+    }
+
+    fn plans_in_run(&self, _kind: DeleteKind) -> bool {
+        self.plans
+    }
+
+    fn stops_batch(&self) -> bool {
+        self.stops
+    }
+}
+
+#[test]
+fn a_mixed_batch_asks_the_adt_side_whether_a_program_is_an_include() {
+    let mut adt = Side {
+        include: true,
+        ..Side::default()
+    };
+    let mut runner = Side::default();
+    let mut mixed = RunnerBatch::new(&mut adt, &mut runner);
+
+    assert!(mixed.is_include(DeleteKind::Prog, "ZINCL"));
+    assert!(!mixed.is_include(DeleteKind::Prog, "ZMAIN"));
+}
+
+#[test]
+fn a_mixed_batch_reports_a_failed_begin_the_way_the_runner_side_does() {
+    let mut adt = Side {
+        tag: "adt",
+        code: 8,
+        ..Side::default()
+    };
+    let mut runner = Side {
+        tag: "runner",
+        code: 7,
+        ..Side::default()
+    };
+    let mixed = RunnerBatch::new(&mut adt, &mut runner);
+
+    assert_eq!(mixed.begin_failure("boom"), (7, "runner: boom".to_owned()));
+}
+
+#[test]
+fn a_mixed_batch_is_halted_when_either_side_is() {
+    for (adt_halted, runner_halted) in [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let mut adt = Side {
+            halted: adt_halted,
+            ..Side::default()
+        };
+        let mut runner = Side {
+            halted: runner_halted,
+            ..Side::default()
+        };
+        let mixed = RunnerBatch::new(&mut adt, &mut runner);
+
+        assert_eq!(mixed.halted(), adt_halted || runner_halted);
+    }
+}
+
+#[test]
+fn a_mixed_batch_plans_in_a_run_only_a_runner_kind_the_runner_side_accepts() {
+    let dtel = DeleteKind::Runner(Kind::Dtel);
+
+    for runner_plans in [false, true] {
+        let mut adt = Side {
+            plans: true,
+            ..Side::default()
+        };
+        let mut runner = Side {
+            plans: runner_plans,
+            ..Side::default()
+        };
+        let mixed = RunnerBatch::new(&mut adt, &mut runner);
+
+        assert_eq!(mixed.plans_in_run(dtel), runner_plans);
+        assert!(!mixed.plans_in_run(DeleteKind::Prog));
+    }
+}
+
+#[test]
+fn a_mixed_batch_stops_when_the_runner_side_says_so() {
+    for (adt_stops, runner_stops) in [(false, false), (false, true), (true, false)] {
+        let mut adt = Side {
+            stops: adt_stops,
+            ..Side::default()
+        };
+        let mut runner = Side {
+            stops: runner_stops,
+            ..Side::default()
+        };
+        let mixed = RunnerBatch::new(&mut adt, &mut runner);
+
+        assert_eq!(mixed.stops_batch(), runner_stops);
+    }
 }

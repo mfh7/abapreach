@@ -171,6 +171,11 @@ fn the_suffix_comes_from_the_byte_source_without_modulo_bias() {
     let mut calls = 0;
     let name = runner_name_with("YA_", &mut |buffer: &mut [u8]| {
         calls += 1;
+        // A generator that does not stop after the redraw fails here instead of looping.
+        assert!(
+            calls <= 3,
+            "the generator asked for more bytes than it needs"
+        );
         for slot in buffer.iter_mut() {
             *slot = bytes.next().unwrap_or(2);
         }

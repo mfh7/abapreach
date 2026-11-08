@@ -754,3 +754,57 @@ fn the_system_change_option_guard_rejects_only_n() {
         "a value other than N must not be rejected"
     );
 }
+
+// ---- cargo-mutants triage (M6 Task 33): scanner behaviour that no test pinned -------------------
+
+#[test]
+fn a_call_off_the_allow_list_names_the_function_and_a_computed_call_says_why() {
+    assert_eq!(
+        rejected("CALL FUNCTION 'RFC_ABAP_INSTALL_AND_RUN'", None),
+        ["line 1: CALL FUNCTION 'RFC_ABAP_INSTALL_AND_RUN' is not on the allow-list"]
+    );
+    assert_eq!(
+        rejected("CALL FUNCTION lv_name", None),
+        ["line 1: CALL FUNCTION needs a literal function name"]
+    );
+}
+
+#[test]
+fn a_keyword_pattern_names_a_class_only_with_its_second_keyword() {
+    for code in [
+        // REF, INHERITING, and CREATE name a class only after TO, FROM, and OBJECT.
+        "lr = REF lt_x lt_y.",
+        "x = INHERITING foo bar.",
+        "CREATE DATA lr TYPE string.",
+        // A TYPE after the end of the statement belongs to another statement.
+        "CREATE OBJECT lo_x.\nDATA lv_x TYPE string.",
+        // BEFORE UNWIND are keywords of CATCH, not classes.
+        "TRY. x = 1. CATCH BEFORE UNWIND cx_root INTO DATA(lx). ENDTRY.",
+        // The class is the word after TYPE, and an allow-listed one passes.
+        "CREATE OBJECT lo_x TYPE cx_root.",
+    ] {
+        scan(code, None).unwrap_or_else(|found| panic!("{code}: {found:?}"));
+    }
+}
+
+#[test]
+fn a_class_after_type_is_found_wherever_the_statement_stands() {
+    let found = rejected("lv_a = 1. CREATE OBJECT lo_x TYPE cl_gui_alv_grid.", None);
+
+    assert_eq!(
+        found,
+        ["line 1: class cl_gui_alv_grid is not on the allow-list"]
+    );
+}
+
+#[test]
+fn a_name_right_after_an_arrow_is_scanned() {
+    let found = rejected("CL_HTTP_UTILITY=>zfoo( ).", None);
+
+    assert_eq!(found, ["line 1: Y/Z name zfoo is not allowed"]);
+}
+
+#[test]
+fn a_statement_may_start_with_a_bracket_inside_logic() {
+    scan("[ lv_a AND lv_b ].", None).unwrap();
+}

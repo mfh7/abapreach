@@ -468,3 +468,84 @@ fn the_other_writes_of_the_runner_class_are_unchanged_by_the_arm() {
         assert!(http_admits(request), "{request:?}");
     }
 }
+
+// ---- cargo-mutants triage (M6 Task 33): create-body rules that no test pinned -------------------
+
+/// A runner create body in which each rule of the admission can be broken alone: the root element,
+/// the `adtcore:name`, and the `adtcore:type`. The description always names the armed runner, so
+/// the body is judged as a runner create whatever else it says.
+fn class_body_of(root: &str, name: &str, kind: &str) -> Vec<u8> {
+    format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><class:{root} "#,
+            r#"xmlns:class="http://www.sap.com/adt/oo/classes" "#,
+            r#"xmlns:adtcore="http://www.sap.com/adt/core" adtcore:description="{runner}" "#,
+            r#"adtcore:name="{name}" adtcore:type="{kind}" adtcore:language="EN" "#,
+            r#"adtcore:masterLanguage="EN"><adtcore:packageRef adtcore:name="$TMP"/>"#,
+            r#"</class:{root}>"#,
+        ),
+        root = root,
+        runner = RUNNER,
+        name = name,
+        kind = kind,
+    )
+    .into_bytes()
+}
+
+#[test]
+fn a_create_that_names_the_runner_is_admitted_only_when_root_name_and_type_all_match() {
+    assert_both(
+        Some(RUNNER),
+        &create(CLASSES, class_body_of("abapClass", RUNNER, "CLAS/OC")),
+        true,
+    );
+
+    // Each rule broken alone.
+    for body in [
+        class_body_of("abapInterface", RUNNER, "CLAS/OC"),
+        class_body_of("abapClass", OTHER, "CLAS/OC"),
+        class_body_of("abapClass", RUNNER, "PROG/P"),
+    ] {
+        assert_both(Some(RUNNER), &create(CLASSES, body), false);
+    }
+}
+
+/// A session that counts its closes and answers a scripted stateful verdict.
+struct Spy {
+    closes: usize,
+    stateful: Option<bool>,
+}
+
+impl SadtTransport for Spy {
+    fn request(&mut self, _request: Request) -> Result<Response, TransportError> {
+        Ok(Response::empty(200))
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.closes += 1;
+
+        Err(TransportError::Protocol("close refused".to_owned()))
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        self.stateful
+    }
+}
+
+#[test]
+fn the_http_gate_leaves_close_and_the_stateful_verdict_to_the_session_it_wraps() {
+    for stateful in [None, Some(true), Some(false)] {
+        let mut spy = Spy {
+            closes: 0,
+            stateful,
+        };
+        let mut gated = RunnerGated::new(&mut spy);
+
+        assert_eq!(gated.stateful_supported(), stateful);
+        assert_eq!(
+            gated.close(),
+            Err(TransportError::Protocol("close refused".to_owned()))
+        );
+        assert_eq!(spy.closes, 1);
+    }
+}

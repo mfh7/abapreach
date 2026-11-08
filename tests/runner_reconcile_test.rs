@@ -17,7 +17,7 @@ use abapreach::operation::runner_reconcile::{
     classify_deploy, read_facts, reconcile, settle, stable_state, uncertainty,
 };
 use abapreach::runner_protocol::{Nonce, RunMode};
-use abapreach::transport::{Response, TransportError};
+use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use common::runner_fake::{
     Evolution, OBJECT, Opened, PostReply, Shared, Tick, World, http_session, new_sap, rfc_session,
 };
@@ -1396,4 +1396,51 @@ fn the_system_clock_waits_for_real_and_stops_early_on_abort() {
 
     assert!(!clock.wait(Duration::from_secs(30), &|| true));
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+// --- cargo-mutants triage (M6 Task 33): a note that no test pinned ---------------------------
+
+/// A session whose close fails after it was used.
+struct BadClose(Box<dyn SadtTransport>);
+
+impl SadtTransport for BadClose {
+    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+        self.0.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        let _ = self.0.close();
+
+        Err(TransportError::Protocol("close refused".to_owned()))
+    }
+}
+
+#[test]
+fn a_session_close_failure_is_noted_once_however_many_reads_see_it() {
+    let (sap, now) = setup(constant(World::default()));
+    let mut clock = FakeClock::new(&now);
+    let mut open = || -> Opened {
+        let session = rfc_session(&sap)?;
+
+        Ok(Box::new(BadClose(session)))
+    };
+    let mut read_run = |_: &CancelFlag| -> ReadRun { panic!("a delete needs no READ run") };
+    let result = reconcile(
+        &Intent::Delete,
+        &subject(),
+        &mut open,
+        &mut read_run,
+        &mut clock,
+        &CancelFlag::new(),
+    );
+
+    assert_eq!(result.verdict, Verdict::DeletedReconciled);
+    // The evidence was read at least twice to settle, and every read closed a failing session.
+    assert!(clock.waits.len() >= 2, "{:?}", clock.waits);
+    assert_eq!(result.notes.len(), 1, "{:?}", result.notes);
+    assert!(
+        result.notes[0].starts_with("W: session close failed:"),
+        "{:?}",
+        result.notes
+    );
 }

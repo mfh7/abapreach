@@ -60,6 +60,8 @@ enum Fault {
     LostBefore,
     /// The request never leaves the process.
     NotSent,
+    /// The transport refuses the logon and answers with an error instead of a reply.
+    Unauthorized,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -193,6 +195,9 @@ impl Sap {
                 return Err(TransportError::PreSendConnectivity(
                     "unreachable".to_owned(),
                 ));
+            }
+            Some(Fault::Unauthorized) => {
+                return Err(TransportError::Authorization("HTTP 401".to_owned()));
             }
             _ => {}
         }
@@ -1628,4 +1633,87 @@ fn a_failed_stage_carries_its_stage_and_sap_text_in_the_notes() {
         run.notes
     );
     assert_clean(&sap, &run);
+}
+
+// ---- cargo-mutants triage (M6 Task 33): cycle rules that no test pinned ---------------------------
+
+#[test]
+fn a_forbidden_discovery_probe_is_rejected_with_the_hint() {
+    let sap = new_sap(true);
+
+    fault(&sap, Step::Preflight, 1, Fault::Status(403, "forbidden"));
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(
+        rejected(&run).starts_with("runner preflight failed: HTTP 403"),
+        "{:?}",
+        run.end
+    );
+    assert!(rejected(&run).contains(HINT), "{:?}", run.end);
+    assert_eq!(sap.borrow().count(Step::Create), 0);
+}
+
+#[test]
+fn a_create_below_500_leaves_nothing_to_check_and_a_5xx_is_checked_from_a_new_session() {
+    // 409 is the taken-name path and 403 the authorization path; both have their own tests.
+    for (status, checked) in [
+        (400, false),
+        (404, false),
+        (499, false),
+        (500, true),
+        (503, true),
+        (599, true),
+    ] {
+        let sap = new_sap(true);
+
+        fault(&sap, Step::Create, 1, Fault::Status(status, "x"));
+
+        let run = http_row(&sap, &CancelFlag::new());
+
+        assert!(
+            rejected(&run).starts_with(&format!("runner create failed: HTTP {status}")),
+            "{status}: {:?}",
+            run.end
+        );
+        assert_eq!(
+            sap.borrow().count(Step::Proof),
+            usize::from(checked),
+            "{status}"
+        );
+        assert_eq!(sap.borrow().count(Step::Delete), 0, "{status}");
+        assert_clean(&sap, &run);
+    }
+}
+
+#[test]
+fn a_refused_logon_at_any_stage_carries_the_hint_and_a_lost_reply_does_not() {
+    for step in [
+        Step::Create,
+        Step::Lock,
+        Step::Put,
+        Step::Unlock,
+        Step::Activate,
+        Step::GetSource,
+        Step::Post,
+    ] {
+        let sap = new_sap(true);
+
+        fault(&sap, step, 1, Fault::Unauthorized);
+
+        let run = http_row(&sap, &CancelFlag::new());
+
+        assert!(rejected(&run).contains(HINT), "{step:?}: {:?}", run.end);
+        assert_clean(&sap, &run);
+    }
+
+    for step in [Step::Lock, Step::Put, Step::Unlock, Step::Activate] {
+        let sap = new_sap(true);
+
+        fault(&sap, step, 1, Fault::Lost);
+
+        let run = http_row(&sap, &CancelFlag::new());
+
+        assert!(!rejected(&run).contains(HINT), "{step:?}: {:?}", run.end);
+    }
 }

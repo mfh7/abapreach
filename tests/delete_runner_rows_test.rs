@@ -534,3 +534,68 @@ fn a_row_outside_the_customer_scope_is_refused_before_a_run() {
     assert_eq!(status_of(&report, "SFLIGHT"), DeleteStatus::Rejected);
     assert!(own.deleted_in_run.is_empty());
 }
+
+// ---- cargo-mutants triage (M6 Task 33): engine rules that no test pinned ------------------------
+
+#[test]
+fn rows_of_one_type_each_send_their_own_plan_hash() {
+    let mut own = Own::default();
+    let plan = sim(&mut own, &["TABL:ZT1", "TABL:ZT2"], None)
+        .plan
+        .expect("plan");
+    let mut own = Own::default();
+
+    exec(&mut own, &["TABL:ZT1", "TABL:ZT2"], None, &plan);
+
+    assert_eq!(
+        own.deleted_in_run,
+        [
+            ("ZT1".to_owned(), None, "HASH_ZT1".to_owned()),
+            ("ZT2".to_owned(), None, "HASH_ZT2".to_owned()),
+        ]
+    );
+}
+
+/// A backend that leaves `take_lines` at its default: it prints nothing of its own for a row.
+struct Silent;
+
+impl DeleteBackend for Silent {
+    fn inspect(&mut self, _kind: DeleteKind, _name: &str) -> Result<Option<ObjectFacts>, String> {
+        Ok(Some(ObjectFacts {
+            package: "$TMP".to_owned(),
+            author: "DEVUSER".to_owned(),
+            group: None,
+            sources: vec![SourceFact::active("MAIN", &["REPORT."])],
+            contents: Vec::new(),
+            where_used: Vec::new(),
+            inactive: InactiveFact::Absent,
+            tr: TrLock::Local,
+        }))
+    }
+
+    fn delete(&mut self, _kind: DeleteKind, _name: &str, _tr: Option<&str>) -> DeleteReply {
+        DeleteReply::Deleted
+    }
+
+    fn reconcile(&mut self, _kind: DeleteKind, _name: &str) -> Reconcile {
+        Reconcile::Gone
+    }
+}
+
+#[test]
+fn a_backend_that_prints_nothing_adds_no_line_to_a_row() {
+    let policies = Policies::default();
+    let targets = targets(&["PROG:ZP"]);
+    let simulated = simulate(&mut Silent, &context(&policies), &targets, None).expect("simulate");
+    let plan = simulated.plan.clone().expect("plan");
+    let deleted =
+        execute(&mut Silent, &context(&policies), &targets, None, &plan).expect("execute");
+
+    for out in [simulated.outcome.stdout, deleted.outcome.stdout] {
+        let after_header = out.split("== PROG ZP ==\n").nth(1).expect("the row header");
+        let first = after_header.lines().next().unwrap_or_default();
+
+        assert!(!first.is_empty(), "no blank line after the header: {out}");
+        assert!(!out.contains("xyzzy"), "{out}");
+    }
+}

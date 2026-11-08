@@ -829,3 +829,67 @@ fn scrubbed_hostile_text_has_no_control_or_bidi_characters() {
         );
     }
 }
+
+// ---- cargo-mutants triage (M6 Task 33): behaviour that no test pinned ---------------------------
+
+#[test]
+fn output_of_exactly_the_cap_is_still_parsed() {
+    let valid = framed(&run("READ", &[], "OK"));
+    let padded = format!("{valid}{}", "y".repeat(MAX_OUTPUT_BYTES - valid.len()));
+
+    assert_eq!(padded.len(), MAX_OUTPUT_BYTES);
+    assert!(matches!(
+        parse_output(&nonce(), RunMode::Read, &padded),
+        Parsed::Complete(_)
+    ));
+}
+
+#[test]
+fn an_ignored_line_is_listed_by_its_one_based_line_number() {
+    let text = format!("noise one\nnoise two\n{}", framed(&run("READ", &[], "OK")));
+    let report = complete(parse_output(&nonce(), RunMode::Read, &text));
+
+    assert_eq!(
+        report.warnings,
+        [
+            "W: ignored output line 1 (not bound to this run)",
+            "W: ignored output line 2 (not bound to this run)",
+        ]
+    );
+}
+
+#[test]
+fn the_scrub_counts_the_separating_spaces_toward_the_limit() {
+    let spaced = "a ".repeat(TEXT_LIMIT);
+    let cut = scrub_text(&spaced);
+
+    assert_eq!(cut.chars().count(), TEXT_LIMIT);
+    assert!(cut.ends_with("..."));
+}
+
+#[test]
+fn a_closing_count_that_is_not_plain_decimal_digits_is_malformed() {
+    // The run holds BEGIN and STATUS, so the closing line is the third one.
+    for count in [
+        "+2",
+        "02",
+        "0002",
+        "0000000002",
+        "1234567890",
+        "",
+        "2 ",
+        " 2",
+    ] {
+        let lines = vec![
+            line("BEGIN:DEPLOY"),
+            line("STATUS:ACTIVE"),
+            line(&format!("END:{count}")),
+        ];
+
+        assert_eq!(
+            reason(parse(RunMode::Deploy, &lines)),
+            Reason::Malformed(3),
+            "{count:?}",
+        );
+    }
+}

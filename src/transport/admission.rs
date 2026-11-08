@@ -1142,6 +1142,37 @@ fn reference_of(element: &BytesStart<'_>) -> Option<ObjectRef> {
 mod tests {
     use super::{Kind, Part, is_encoded, is_entity, is_name, parse_path};
 
+    /// The classrun fault targets exactly the POST of one runner name: a missing name, a nested
+    /// path, a query, or a fragment is not the runner's POST.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn only_a_post_to_one_runner_name_is_the_classrun_fault_target() {
+        use super::{CLASSRUN, is_classrun_post};
+        use crate::transport::Request;
+
+        assert!(is_classrun_post(&Request::post(
+            format!("{CLASSRUN}/YCL_ABAPREACH_RUN_AB12CD34"),
+            Vec::new()
+        )));
+
+        for uri in [
+            CLASSRUN.to_owned(),
+            format!("{CLASSRUN}/"),
+            format!("{CLASSRUN}/YCL_X/y"),
+            format!("{CLASSRUN}/YCL_X?a=1"),
+            format!("{CLASSRUN}/YCL_X#f"),
+        ] {
+            assert!(
+                !is_classrun_post(&Request::post(uri.clone(), Vec::new())),
+                "{uri}"
+            );
+        }
+
+        assert!(!is_classrun_post(&Request::get(format!(
+            "{CLASSRUN}/YCL_X"
+        ))));
+    }
+
     #[test]
     fn names_are_sap_characters_and_only_a_program_takes_a_namespace_escape() {
         assert!(is_name("zcl_a1", false));
