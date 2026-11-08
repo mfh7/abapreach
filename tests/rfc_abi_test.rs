@@ -138,10 +138,21 @@ fn connection_parameters_use_sdk_names_and_optional_saprouter() {
 
     assert_eq!(
         names(&parameters),
-        vec!["ASHOST", "SYSNR", "CLIENT", "USER", "PASSWD", "LANG"]
+        vec![
+            "ASHOST",
+            "SYSNR",
+            "CLIENT",
+            "USER",
+            "PASSWD",
+            "LANG",
+            "NO_BASXML"
+        ]
     );
     assert_eq!(parameters[0].1, "example.com");
     assert_eq!(parameters[2].1, "100");
+    // Classic serialization: the server fails to read a basXML stream of high-entropy data from
+    // about 64 KB on, which a source file in `MESSAGE_BODY` is.
+    assert_eq!(parameters[6].1, "1");
 
     connection.rfc.as_mut().unwrap().saprouter = Some("/H/router.example.com/S/3299/H/".to_owned());
     let parameters = connection_parameters(&connection).unwrap();

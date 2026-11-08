@@ -843,6 +843,9 @@ pub fn connection_parameters(connection: &Connection) -> Result<Vec<(String, Str
         ("USER".to_owned(), connection.user.clone()),
         ("PASSWD".to_owned(), connection.password.clone()),
         ("LANG".to_owned(), connection.lang.clone()),
+        // Classic serialization: the server fails to read a basXML stream of high-entropy data
+        // (a source in `MESSAGE_BODY`) from about 64 KB on.
+        ("NO_BASXML".to_owned(), "1".to_owned()),
     ];
 
     if let Some(router) = &rfc.saprouter {

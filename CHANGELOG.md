@@ -14,6 +14,13 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
+### Fixed
+- RFC backend: the connection now opens with `NO_BASXML=1` (classic RFC serialization). Before,
+  `deploy` and `deploy --simulate` of a source of about 59 KB or more over RFC failed with
+  `RfcInvoke: The read XML document had an invalid format` (an `XML_FORMAT_ERROR` dump in
+  `SAPLSADT_REST`): the server could not read the basXML stream of a high-entropy `MESSAGE_BODY`
+  from about 64 KB on.
+
 ## [0.15.0] - 2026-11-07
 
 ### Added
