@@ -21,7 +21,8 @@ use crate::extension::{
 use crate::hash::local_source_lines;
 use crate::mcp::{Answer, Form, NoSession, Session, ToolHandler, ToolResult};
 use crate::mcp_read::{
-    ReadTools, SECRET_REJECTED, diagnostic, holds_secret, optional, required, status_token,
+    READ_TYPES, ReadTools, SECRET_REJECTED, diagnostic, holds_secret, optional, required,
+    status_token,
 };
 use crate::object::{
     check_create, check_create_extension, check_deploy_options, check_deploy_source,
@@ -29,6 +30,7 @@ use crate::object::{
 use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::delete::{self, Context, DeleteBackend, DeleteReport, Plan, sha256_hex};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
+use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch};
 use crate::operation::deploy::{
     CancelFlag, Change, DeployInput, DeployProg, DeployScope, NEW_INCLUDE_WARNING,
     known_lock_handles,
@@ -43,6 +45,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasher, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+mod runner;
 
 /// How long a plan token stays valid.
 pub const TOKEN_LIFETIME: Duration = Duration::from_secs(15 * 60);
@@ -104,6 +108,58 @@ pub struct Ticket {
     pub change: Option<Change>,
     /// A delete's objects, with the contents of a group, one line each.
     pub listing: Vec<String>,
+    /// What run 1 of a DDIC deploy found; set at execution, never stored by a simulation.
+    pub ddic: Option<DdicPreview>,
+}
+
+/// What run 1 of a DDIC deploy found, for the confirmation shown before run 2 writes: the
+/// temporary class, the size and an excerpt of the diff, and the conversion verdicts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DdicPreview {
+    pub runner: Option<String>,
+    pub added: usize,
+    pub removed: usize,
+    /// The unified diff lines, header and context included.
+    pub excerpt: Vec<String>,
+    /// The `CONVERSION` lines of the verdict.
+    pub conversion: Vec<String>,
+}
+
+impl DdicPreview {
+    /// Reads the printed blocks of run 1: the diff block starts with its `--- live` header.
+    pub fn of(runner: Option<&str>, printed: &[String]) -> Self {
+        let mut preview = Self {
+            runner: runner.map(str::to_owned),
+            added: 0,
+            removed: 0,
+            excerpt: Vec::new(),
+            conversion: Vec::new(),
+        };
+
+        for block in printed {
+            if block.starts_with("--- live") {
+                // The first two lines are the header, the rest are rows.
+                for (index, line) in block.lines().enumerate() {
+                    match line.chars().next() {
+                        Some('+') if index > 1 => preview.added += 1,
+                        Some('-') if index > 1 => preview.removed += 1,
+                        _ => {}
+                    }
+
+                    preview.excerpt.push(line.to_owned());
+                }
+            } else {
+                preview.conversion.extend(
+                    block
+                        .lines()
+                        .filter(|line| line.starts_with("CONVERSION "))
+                        .map(str::to_owned),
+                );
+            }
+        }
+
+        preview
+    }
 }
 
 impl Ticket {
@@ -125,6 +181,7 @@ impl Ticket {
             warning: None,
             change: None,
             listing: Vec::new(),
+            ddic: None,
         }
     }
 }
@@ -261,14 +318,18 @@ impl Confirmer for NoTerminal {
 struct WithCancel<'a> {
     inner: &'a mut dyn Factories,
     cancel: CancelFlag,
+    /// The backend of the last connection the operation asked for: the one it ended on.
+    opened: Option<BackendKind>,
 }
 
 impl Factories for WithCancel<'_> {
     fn adt(&mut self, connection: &Connection) -> Opened {
+        self.opened = Some(BackendKind::AdtHttp);
         self.inner.adt(connection)
     }
 
     fn rfc(&mut self, connection: &Connection) -> Opened {
+        self.opened = Some(BackendKind::RfcSadt);
         self.inner.rfc(connection)
     }
 
@@ -389,17 +450,15 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         Ok(connection)
     }
 
-    /// Everything an executing call needs before SAP is touched: the capability to ask, the
-    /// token, and where the policy or the tool demands it the human's typed answer. The form is
-    /// shown before the lock, so the base check under the lock catches a stale confirmation.
-    fn authorize(
+    /// The token and the client capability an executing call needs: the presented token is spent
+    /// here, and whether the human must still be asked is returned with the stored ticket.
+    fn admit(
         &mut self,
         connection: &Connection,
         arguments: &Map<String, Value>,
         presented: &Ticket,
-        session: &mut dyn Session,
-        deadline: &mut Deadline,
-    ) -> Result<Ticket, String> {
+        session: &dyn Session,
+    ) -> Result<(Ticket, bool), String> {
         let delete = presented.operation == Operation::Delete;
         let confirm = delete || connection.policies.mcp_write == McpWrite::Confirm;
         let token = required(arguments, "plan_token")?;
@@ -418,41 +477,40 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             });
         }
 
+        Ok((stored, confirm))
+    }
+
+    /// Everything an executing call needs before SAP is touched: the capability to ask, the
+    /// token, and where the policy or the tool demands it the human's typed answer. The form is
+    /// shown before the lock, so the base check under the lock catches a stale confirmation.
+    fn authorize(
+        &mut self,
+        connection: &Connection,
+        arguments: &Map<String, Value>,
+        presented: &Ticket,
+        session: &mut dyn Session,
+        deadline: &mut Deadline,
+    ) -> Result<Ticket, String> {
+        let (stored, confirm) = self.admit(connection, arguments, presented, session)?;
+
         if !confirm {
             return Ok(stored);
         }
 
-        let summary = confirmation_summary_with(connection, &stored, self.registry);
-
-        if holds_secret(connection, &summary) {
-            return Err(SECRET_REJECTED.to_owned());
-        }
-
-        let expected = typed_text(&stored);
-        let form = Form {
-            message: format!("{summary}\nType {expected} to confirm."),
-            label: format!("Type {expected} to confirm"),
-        };
         let read = &mut self.read;
-        let answer = session.elicit(&form, self.limits.elicit, &mut |name, args| {
-            read.call(name, args)
-        });
+        let answer = ask(
+            connection,
+            &stored,
+            self.registry,
+            self.limits.elicit,
+            session,
+            &mut |name, args| read.call(name, args),
+        );
 
         // The answer is in; what follows is work, and the deadline counts only work.
         deadline.restart();
 
-        match answer {
-            Answer::Accepted(typed) if typed.trim() == expected => Ok(stored),
-            Answer::Accepted(_) => {
-                Err("write not confirmed: the typed text did not match".to_owned())
-            }
-            Answer::Declined => Err("write not confirmed: declined".to_owned()),
-            Answer::Cancelled => Err("write not confirmed: cancelled".to_owned()),
-            Answer::TimedOut => Err(format!(
-                "write not confirmed: timed out after {} s",
-                self.limits.elicit.as_secs()
-            )),
-        }
+        answer.map(|()| stored)
     }
 
     /// The last look before anything is sent: a passed deadline or a cancellation ends the call.
@@ -479,10 +537,12 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
     ) -> Result<ToolResult, String> {
         let mut deadline = Deadline::start(self.limits.call);
         let connection = self.writer(arguments)?;
-        let kind = parse::<ObjectKind>(
-            required(arguments, "type")?,
-            "type must be one of PROG, FUNC, CLAS, INTF",
-        )?;
+
+        if let Some(kind) = runner::runner_type_of(arguments) {
+            return self.runner_deploy(connection, kind, arguments, execute, session, deadline);
+        }
+
+        let kind = parse::<ObjectKind>(required(arguments, "type")?, READ_TYPES)?;
         let name = required(arguments, "name")?;
         let source = required(arguments, "source")?;
         let tr = optional(arguments, "tr")?;
@@ -553,6 +613,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         let mut factories = WithCancel {
             inner: self.read.factories(),
             cancel: cancel.clone(),
+            opened: None,
         };
         let exit = route(
             OperationKind::Deploy(kind),
@@ -624,6 +685,11 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
     ) -> Result<ToolResult, String> {
         let mut deadline = Deadline::start(self.limits.call);
         let connection = self.writer(arguments)?;
+
+        if let Some(kind) = runner::runner_type_of(arguments) {
+            return self.runner_create(connection, kind, arguments, execute, session, deadline);
+        }
+
         let registry = self.registry;
         let empty = Registry::new();
         let registry = registry.unwrap_or(&empty);
@@ -637,7 +703,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             None => TypeArg::Standard(parse::<CreateKind>(
                 type_text,
                 &format!(
-                    "type must be one of PROG, FUGR, FUNC, CLAS, INTF{}",
+                    "type must be one of PROG, FUGR, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN{}",
                     extension_kinds
                         .iter()
                         .map(|kind| format!(", {}", kind.token()))
@@ -688,10 +754,8 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                 option_misuse(None, &options, registry),
                 None,
             )?,
-            // The MCP tools list the standard and the extension types only until Task 26.
-            TypeArg::Runner(kind) => {
-                return Err(format!("{} is not available over MCP yet", kind.token()));
-            }
+            // A DDIC or transaction type took the runner branch above.
+            TypeArg::Runner(kind) => unreachable!("{} is handled by the runner", kind.token()),
             TypeArg::Extension(kind) => {
                 let extension = registry.extension().ok_or("no extension is registered")?;
 
@@ -766,11 +830,10 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         let mut factories = WithCancel {
             inner: self.read.factories(),
             cancel: cancel.clone(),
+            opened: None,
         };
         let exit = match kind {
-            TypeArg::Runner(kind) => {
-                return Err(format!("{} is not available over MCP yet", kind.token()));
-            }
+            TypeArg::Runner(kind) => unreachable!("{} is handled by the runner", kind.token()),
             TypeArg::Extension(kind) => {
                 // Over the extension only, never routed; the token's backend is its pin.
                 let extension = registry.extension().ok_or("no extension is registered")?;
@@ -863,6 +926,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         let empty = Registry::new();
         let registry = registry.unwrap_or(&empty);
         let mut batch_kinds: Vec<ExtensionKind> = Vec::new();
+        let runner_rows = runner::check_delete_rows(&targets, tr)?;
 
         for target in &targets {
             if let DeleteKind::Extension(kind) = target.kind
@@ -917,6 +981,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         let mut factories = WithCancel {
             inner: self.read.factories(),
             cancel: cancel.clone(),
+            opened: None,
         };
         let mut call = DeleteCall {
             connection: &connection,
@@ -924,6 +989,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             tr,
             plan: plan.as_ref(),
             deadline: &deadline,
+            runner: runner_rows > 0,
             selected: None,
             report: None,
         };
@@ -1061,6 +1127,15 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             .join("\n");
         let failed = exit.code != 0 || leaked;
 
+        // A temporary class that stays is named in the data of the call that left it.
+        if let Some(leftover) = exit
+            .stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("RUNNER_LEFTOVER: "))
+        {
+            structured["runner_leftover"] = json!(diagnostic(connection, leftover.trim()));
+        }
+
         structured["status"] = json!(status.map(status_token));
         structured["exit"] = json!(exit.code);
         structured["output"] = json!(output);
@@ -1116,6 +1191,40 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
     }
 }
 
+/// Shows the human the summary of `ticket` and takes the typed name of the object: `Ok` only when
+/// it matches. A summary that holds a configured secret is refused without asking.
+fn ask(
+    connection: &Connection,
+    ticket: &Ticket,
+    registry: Option<&Registry>,
+    timeout: Duration,
+    session: &mut dyn Session,
+    read: &mut dyn FnMut(&str, &Map<String, Value>) -> ToolResult,
+) -> Result<(), String> {
+    let summary = confirmation_summary_with(connection, ticket, registry);
+
+    if holds_secret(connection, &summary) {
+        return Err(SECRET_REJECTED.to_owned());
+    }
+
+    let expected = typed_text(ticket);
+    let form = Form {
+        message: format!("{summary}\nType {expected} to confirm."),
+        label: format!("Type {expected} to confirm"),
+    };
+
+    match session.elicit(&form, timeout, read) {
+        Answer::Accepted(typed) if typed.trim() == expected => Ok(()),
+        Answer::Accepted(_) => Err("write not confirmed: the typed text did not match".to_owned()),
+        Answer::Declined => Err("write not confirmed: declined".to_owned()),
+        Answer::Cancelled => Err("write not confirmed: cancelled".to_owned()),
+        Answer::TimedOut => Err(format!(
+            "write not confirmed: timed out after {} s",
+            timeout.as_secs()
+        )),
+    }
+}
+
 /// What a finished write needs to report itself.
 struct Settled<'a> {
     tool: &'static str,
@@ -1160,6 +1269,8 @@ struct DeleteCall<'a> {
     tr: Option<&'a str>,
     plan: Option<&'a Plan>,
     deadline: &'a Deadline,
+    /// The batch has a DDIC or transaction row: those rows run in their own temporary class.
+    runner: bool,
     selected: Option<BackendKind>,
     report: Option<DeleteReport>,
 }
@@ -1240,6 +1351,10 @@ impl DeleteCall<'_> {
             .noted(note);
         }
 
+        if self.runner {
+            return self.attempt_runner(transport, selection, cancel, fresh);
+        }
+
         let (result, unsent, fresh_note) = {
             let mut backend = AdtDelete::with_cancel(
                 &mut *transport,
@@ -1276,6 +1391,76 @@ impl DeleteCall<'_> {
             .is_some_and(|extension| extension.wrote());
         let fallback = unsent.filter(|_| !sent && !cancel.is_set() && !self.deadline.passed());
 
+        self.conclude(result, fallback, fresh_note, note)
+    }
+
+    /// A batch with a DDIC or transaction row: those rows run in their own temporary class and the
+    /// others over the ADT backend the router picked, as the command line runs them.
+    fn attempt_runner(
+        &mut self,
+        transport: &mut dyn SadtTransport,
+        selection: &Selection,
+        cancel: &CancelFlag,
+        fresh: &mut dyn FnMut() -> Opened,
+    ) -> Attempt {
+        // Both sides open their new sessions from the one router closure.
+        let shared = RefCell::new(fresh);
+        let mut open_adt = || {
+            let mut guard = shared.borrow_mut();
+
+            (**guard)()
+        };
+        let mut open_runner = || {
+            let mut guard = shared.borrow_mut();
+
+            (**guard)()
+        };
+        let (result, unsent, fresh_note) = {
+            let mut adt = AdtDelete::with_cancel(
+                &mut *transport,
+                &self.connection.user,
+                &mut open_adt,
+                cancel.clone(),
+            );
+            let mut runner = DdicDelete::new(
+                DdicEnv::of(self.connection, selection.backend),
+                &mut open_runner,
+                cancel.clone(),
+            );
+            let result = {
+                let mut mixed = RunnerBatch::new(&mut adt, &mut runner);
+
+                self.run(&mut mixed, cancel)
+                    .map_err(|message| mixed.begin_failure(&message))
+            };
+            // The notes, the STOP, and the leftover class belong to the outcome of the batch.
+            let result = result.map(|mut done| {
+                runner.finish(&mut done.outcome);
+
+                done
+            });
+
+            (
+                result,
+                runner.unsent_failure().or_else(|| adt.unsent_failure()),
+                adt.close_note(),
+            )
+        };
+        let note = end_session(transport);
+        let fallback = unsent.filter(|_| !cancel.is_set() && !self.deadline.passed());
+
+        self.conclude(result, fallback, fresh_note, note)
+    }
+
+    /// The attempt that a finished batch makes: its report and outcome, or the fallback to the
+    /// other backend when nothing was sent.
+    fn conclude(
+        &mut self,
+        result: Result<DeleteReport, (i32, String)>,
+        fallback: Option<(Failure, String)>,
+        fresh_note: Option<String>,
+        note: Option<String>,
+    ) -> Attempt {
         match result {
             Ok(done) => {
                 let outcome = done.outcome.clone();
@@ -1350,6 +1535,60 @@ fn listing_of(report: &delete::DeleteReport) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Whether the operation of a ticket runs a temporary class: its type, or a row of its batch, is
+/// a DDIC or transaction type.
+fn uses_runner(ticket: &Ticket) -> bool {
+    let rows = ticket.fields.get("objects").map_or("", String::as_str);
+
+    ticket
+        .fields
+        .get("type")
+        .map(String::as_str)
+        .into_iter()
+        .chain(rows.lines().filter_map(|row| row.split(':').next()))
+        .any(crate::mcp::is_runner_type)
+}
+
+/// The lines of the run-1 preview of a DDIC deploy: the class, the size of the change, a bounded
+/// diff excerpt, and the conversion verdicts.
+fn ddic_lines(preview: &DdicPreview) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if let Some(runner) = &preview.runner {
+        lines.push(format!("runner class: {}", sanitize(runner, SUMMARY_LINE)));
+    }
+
+    lines.push(format!(
+        "changed XML rows: +{} -{}",
+        preview.added, preview.removed
+    ));
+    lines.push("diff excerpt:".to_owned());
+    lines.extend(
+        preview
+            .excerpt
+            .iter()
+            .take(SUMMARY_EXCERPT_LINES)
+            .map(|line| sanitize(line, SUMMARY_LINE)),
+    );
+
+    if preview.excerpt.len() > SUMMARY_EXCERPT_LINES {
+        lines.push(format!(
+            "... {} more diff lines omitted (excerpt truncated)",
+            preview.excerpt.len() - SUMMARY_EXCERPT_LINES
+        ));
+    }
+
+    lines.extend(
+        preview
+            .conversion
+            .iter()
+            .take(SUMMARY_OBJECT_LINES)
+            .map(|line| sanitize(line, SUMMARY_LINE)),
+    );
+
+    lines
 }
 
 /// What the human types: the name of the object, or `DELETE <n>` for a batch of `n`.
@@ -1520,7 +1759,7 @@ pub fn confirmation_summary_with(
             .flat_map(Registry::kinds)
             .flat_map(|kind| kind.spec().create_options)
             .map(|option| option.id);
-        let keys = ["type", "name", "subc"]
+        let keys = ["type", "name", "prog", "subc"]
             .into_iter()
             .chain(options)
             .chain(["include", "fugr", "package", "tr", "text"]);
@@ -1534,6 +1773,16 @@ pub fn confirmation_summary_with(
         if let Some(main) = ticket.fields.get("main").or(ticket.main.as_ref()) {
             lines.push(format!("main: {}", sanitize(main, SUMMARY_LINE)));
         }
+    }
+
+    if uses_runner(ticket) {
+        lines.push(
+            "footprint: a temporary class is created in $TMP and removed after the run".to_owned(),
+        );
+    }
+
+    if let Some(preview) = &ticket.ddic {
+        lines.extend(ddic_lines(preview));
     }
 
     if let Some(warning) = &ticket.warning {
@@ -1599,6 +1848,9 @@ impl<G: WriteGate> ToolHandler for McpTools<'_, G> {
             "abap_create" => self.create(arguments, true, session),
             "abap_delete_simulate" => self.delete(arguments, false, session),
             "abap_delete" => self.delete(arguments, true, session),
+            "abap_read_source" if runner::runner_type_of(arguments).is_some() => {
+                self.runner_read(arguments, session)
+            }
             _ => {
                 let result = self.read.call(name, arguments);
 
@@ -1652,7 +1904,7 @@ fn targets(
             object
                 .as_str()
                 .ok_or_else(|| "objects must be strings of the form TYPE:NAME".to_owned())
-                .and_then(|text| DeleteTarget::parse(text, extensions))
+                .and_then(|text| DeleteTarget::parse_cli(text, extensions))
         })
         .collect()
 }
@@ -1701,6 +1953,7 @@ mod tests {
         let mut factories = WithCancel {
             inner: &mut inner,
             cancel: CancelFlag::new(),
+            opened: None,
         };
 
         assert_eq!(

@@ -155,30 +155,6 @@ fn minus_tran(old: &str) -> String {
     text
 }
 
-fn remove_tran(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            map.remove("prog");
-
-            for (key, child) in map.iter_mut() {
-                if key == "enum" {
-                    if let Value::Array(items) = child {
-                        items.retain(|item| item != "TRAN");
-                    }
-                } else if key == "description"
-                    && let Value::String(description) = child
-                {
-                    *description = description.replace("|TRAN", "");
-                } else {
-                    remove_tran(child);
-                }
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(remove_tran),
-        _ => {}
-    }
-}
-
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
 
@@ -215,20 +191,15 @@ fn tools_list(write_offered: bool) -> Value {
 }
 
 #[test]
-fn the_mcp_tool_list_is_the_golden_schema_and_the_old_schema_minus_tran_and_prog() {
+fn the_mcp_tool_list_is_the_golden_schema_of_the_m6_contract() {
     for (file, write_offered) in [
         ("mcp-tools-write.json", true),
         ("mcp-tools-read.json", false),
     ] {
         let tools = tools_list(write_offered);
         let expected: Value = serde_json::from_str(&golden("new", file)).unwrap();
-        let mut old: Value = serde_json::from_str(&golden("old", file)).unwrap();
 
         assert_eq!(tools, expected, "{file}");
-
-        remove_tran(&mut old);
-
-        assert_eq!(old, expected, "{file}");
         assert_eq!(
             format!("{}\n", serde_json::to_string_pretty(&tools).unwrap()),
             golden("new", file),
@@ -236,13 +207,48 @@ fn the_mcp_tool_list_is_the_golden_schema_and_the_old_schema_minus_tran_and_prog
         );
     }
 
-    let write = golden("old", "mcp-tools-write.json");
+    // Since M6 Task 26 the schema no longer relates to the old branch by a deletion: it carries
+    // the DDIC and transaction types, `prog`, the XML `source` of a create, and the footprint.
+    let write = golden("new", "mcp-tools-write.json");
 
-    assert!(
-        write.contains("\"prog\"") && write.contains("\"TRAN\""),
-        "the old schema had them"
-    );
-    assert!(!golden("new", "mcp-tools-write.json").contains("TRAN"));
+    for needle in [
+        "\"TRAN\"",
+        "\"DTEL\"",
+        "\"prog\"",
+        "temporary class in $TMP",
+    ] {
+        assert!(write.contains(needle), "{needle}");
+    }
+
+    let tools = tools_list(true);
+    let tools = tools.as_array().unwrap();
+    let find = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+
+    // The one hint that changed is the read-only hint of `abap_read_source`.
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            name == "abap_read_table",
+            "{name}"
+        );
+    }
+
+    for name in [
+        "abap_read_source",
+        "abap_simulate",
+        "abap_create_simulate",
+        "abap_delete_simulate",
+    ] {
+        assert!(
+            find(name)["description"]
+                .as_str()
+                .unwrap()
+                .contains("temporary class in $TMP"),
+            "{name}"
+        );
+    }
 }
 
 // ---- the MCP type errors ------------------------------------------------------------------------
@@ -300,51 +306,49 @@ fn mcp_text(tool: &str, arguments: Value) -> (bool, String) {
 }
 
 #[test]
-fn tran_as_an_mcp_type_is_the_unknown_type_message_of_the_tool_without_tran() {
-    let create = json!({"conn": "DEV_100", "type": "TRAN", "name": "ZT", "text": "t"});
-    let read = json!({"conn": "DEV_100", "type": "TRAN", "name": "ZT"});
-    let deploy = json!({"conn": "DEV_100", "type": "TRAN", "name": "ZT", "source": "x"});
-    let delete = json!({"conn": "DEV_100", "objects": ["TRAN:ZT"]});
+fn an_unknown_mcp_type_is_refused_with_the_list_that_names_the_ddic_and_transaction_types() {
+    let source = "STOP: type must be one of PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN";
+    let create =
+        "STOP: type must be one of PROG, FUGR, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN";
 
     for (tool, arguments, expected) in [
         (
             "abap_create_simulate",
-            create.clone(),
-            "STOP: type must be one of PROG, FUGR, FUNC, CLAS, INTF",
+            json!({"conn": "DEV_100", "type": "BOGUS", "name": "ZT", "text": "t"}),
+            create,
         ),
         (
             "abap_create",
-            json!({"conn": "DEV_100", "type": "TRAN", "name": "ZT", "text": "t", "plan_token": "x"}),
-            "STOP: type must be one of PROG, FUGR, FUNC, CLAS, INTF",
+            json!({"conn": "DEV_100", "type": "BOGUS", "name": "ZT", "text": "t", "plan_token": "x"}),
+            create,
         ),
         (
             "abap_read_source",
-            read,
-            "STOP: type must be one of PROG, FUNC, CLAS, INTF",
+            json!({"conn": "DEV_100", "type": "BOGUS", "name": "ZT"}),
+            source,
         ),
         (
             "abap_simulate",
-            deploy,
-            "STOP: type must be one of PROG, FUNC, CLAS, INTF",
-        ),
-        (
-            "abap_delete_simulate",
-            delete,
-            "STOP: error: invalid value 'TRAN:ZT'",
+            json!({"conn": "DEV_100", "type": "BOGUS", "name": "ZT", "source": "x"}),
+            source,
         ),
     ] {
         let (is_error, message) = mcp_text(tool, arguments);
 
         assert!(is_error, "{tool}");
-
-        if tool == "abap_delete_simulate" {
-            assert!(
-                message.contains("delete target must be TYPE:NAME (PROG|FUGR|FUNC|CLAS|INTF)")
-                    && !message.contains("|TRAN"),
-                "{message}"
-            );
-        } else {
-            assert_eq!(message, expected, "{tool}");
-        }
+        assert_eq!(message, expected, "{tool}");
     }
+
+    let (is_error, message) = mcp_text(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["BOGUS:ZT"]}),
+    );
+
+    assert!(is_error);
+    assert!(
+        message.contains(
+            "delete target must be TYPE:NAME (PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN)"
+        ),
+        "{message}"
+    );
 }

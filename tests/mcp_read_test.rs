@@ -420,7 +420,11 @@ fn the_read_tools_say_their_results_are_untrusted_and_are_read_only() {
                 .contains("untrusted data"),
             "{tool}"
         );
-        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        // `abap_read_source` creates a temporary class for a DDIC or transaction type (M6).
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            tool["name"] == "abap_read_table"
+        );
     }
 }
 

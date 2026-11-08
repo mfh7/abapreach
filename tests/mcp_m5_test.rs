@@ -303,11 +303,18 @@ fn the_tool_schemas_carry_the_m5_arguments() {
             .map(|kind| kind.as_str().unwrap())
             .collect();
 
-        assert_eq!(kinds, ["PROG", "FUGR", "FUNC", "CLAS", "INTF"], "{name}");
+        assert_eq!(
+            kinds,
+            [
+                "PROG", "FUGR", "FUNC", "CLAS", "INTF", "DTEL", "DOMA", "TABL", "TTYP", "TRAN"
+            ],
+            "{name}"
+        );
         assert_eq!(properties["subc"]["enum"], json!(["1", "I"]), "{name}");
-        assert!(properties.get("prog").is_none(), "{name}");
-        // The create tools stay without source and without a file.
-        assert!(properties.get("source").is_none(), "{name}");
+        // The XML of a DDIC create and the report of a transaction are arguments since M6; there
+        // is still no file.
+        assert_eq!(properties["prog"]["type"], "string", "{name}");
+        assert_eq!(properties["source"]["type"], "string", "{name}");
         assert!(properties.get("file").is_none(), "{name}");
     }
 
@@ -319,11 +326,13 @@ fn the_tool_schemas_carry_the_m5_arguments() {
         );
     }
 
-    // A read or deploy still offers the M4 object types only.
+    // A read or deploy offers the source types and the DDIC and transaction types.
     for name in ["abap_read_source", "abap_simulate", "abap_deploy"] {
         assert_eq!(
             find(name)["inputSchema"]["properties"]["type"]["enum"],
-            json!(["PROG", "FUNC", "CLAS", "INTF"]),
+            json!([
+                "PROG", "FUNC", "CLAS", "INTF", "DTEL", "DOMA", "TABL", "TTYP", "TRAN"
+            ]),
             "{name}"
         );
     }
@@ -334,7 +343,7 @@ fn the_tool_schemas_carry_the_m5_arguments() {
             .unwrap();
 
         assert!(
-            description.ends_with("PROG|FUGR|FUNC|CLAS|INTF"),
+            description.ends_with("PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN"),
             "{name}: {description}"
         );
     }
@@ -344,7 +353,13 @@ fn the_tool_schemas_carry_the_m5_arguments() {
         let name = tool["name"].as_str().unwrap();
         let read = name == "abap_read_source" || name == "abap_read_table";
 
-        assert_eq!(tool["annotations"]["readOnlyHint"], read, "{name}");
+        // Only `abap_read_source` is not read-only: a DDIC or transaction read creates and
+        // deletes a temporary class. Its destructive hint stays false.
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            name == "abap_read_table",
+            "{name}"
+        );
         assert_eq!(tool["annotations"]["destructiveHint"], !read, "{name}");
     }
 }

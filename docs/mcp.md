@@ -32,7 +32,7 @@ The other keys of the file are omitted here. Add the server entries as described
 
 | Value | Meaning |
 | :--- | :--- |
-| `off` | Default when the key is absent. Only the read tools are listed. Observed: the tool list shows `abap_read_source` and `abap_read_table`. |
+| `off` | Default when the key is absent. Only the read tools are listed. Observed: the tool list shows `abap_read_source` and `abap_read_table`. `abap_read_source` refuses the DDIC and transaction types (see [DDIC and `TRAN`](#ddic-and-tran-types)). |
 | `token` | Write tools are listed. A simulate returns a `plan_token`; a write runs only with that token. |
 | `confirm` | Write tools are listed. Every write also needs a human answer through an elicitation form. |
 
@@ -54,7 +54,9 @@ outside the agent's writable scope (recommendation, not a tested control).
 
 Read tools (always listed):
 
-- `abap_read_source`: reads the active source of one object, same as `read`.
+- `abap_read_source`: reads the active source of one object, same as `read`. For `DTEL`, `DOMA`, `TABL`,
+  `TTYP` and `TRAN` it returns the XML (`TRAN`: six lines) and creates a temporary class, so it is not
+  read-only for those types: see [DDIC and `TRAN`](#ddic-and-tran-types).
 - `abap_read_table`: reads rows of one table through the ADT data preview, same as `read-table`.
   Arguments: `table`, `fields`, `where`, `rows` (default 100, maximum 1000).
 
@@ -66,12 +68,48 @@ Write tools (listed only when `mcp_write` is `token` or `confirm`):
 - `abap_create_simulate`, `abap_create`: simulate and create objects, as `create`. `subc` (`1` for a
   program, the default, or `I` for an include) applies to `PROG`.
 - `abap_delete_simulate`, `abap_delete`: simulate and delete objects, as `delete`. `objects` take
-  `TYPE:NAME` with `TYPE` `PROG`, `FUGR`, `FUNC`, `CLAS` or `INTF`.
+  `TYPE:NAME` with `TYPE` `PROG`, `FUGR`, `FUNC`, `CLAS`, `INTF`, `DTEL`, `DOMA`, `TABL`, `TTYP` or
+  `TRAN`.
 
 Input schemas are listed by the client through `tools/list`.
 
+### DDIC and `TRAN` types
+
+All seven tools that take a `type` accept `DTEL`, `DOMA`, `TABL`, `TTYP` and `TRAN`, with the rules of
+the CLI (`abap_deploy` and `abap_simulate` refuse `TRAN`: `TRAN has no deploy; use create or delete`).
+`source` carries the XML of a DDIC object, for `abap_simulate`, `abap_deploy` and
+`abap_create*`. `abap_create*` takes `prog` (required for `TRAN`) and `text` (optional for a DDIC type,
+whose XML carries the description; required for `TRAN`). `lines`, `include`, `fugr`, `subc`, `main` and
+`create_include` are refused for these types.
+
+- **Footprint.** Every operation on these types creates one temporary class in `$TMP`, runs it and
+  deletes it: `abap_read_source` and every simulate included. A deploy does it twice (run 1 shows the
+  diff and the live hash, run 2 writes). Each result carries a `RUNNER:` line with the class name and
+  the post transport. If the class cannot be removed, the call ends with an error, and the data of that
+  call carries `runner_leftover` with the class name; the text holds the two commands that clean it up.
+- **Reading takes the write slot.** A read of these types counts as a write: it takes the single
+  in-flight slot, so a second write or a second such read while it runs is refused with
+  `STOP: busy: another write is in flight; wait for its result`. Under `confirm` and `token` it runs
+  without a question and without a token. Under `off` it is refused:
+  `STOP: reading <TYPE> needs a temporary class; mcp_write is off for <connection>`.
+- **Permission advice.** `abap_read_source` is no longer marked read-only (`readOnlyHint` is `false`
+  for the tool, for every type). A client that auto-allows `abap_read_source` also allows the temporary
+  classes of the DDIC and `TRAN` reads; the other tools keep their hints.
+- **Token binding.** For these types `plan_token` also binds `package`, `prog`, `text`, the SHA-256
+  of the XML, and the backend. The conversion verdict is not part of the token: run 2 of a deploy
+  computes it again.
+- **Confirmation (`confirm`).** The form for a DDIC deploy comes from run 1, before run 2 writes: the
+  connection, SID and client, the backend, the number of changed XML rows, a bounded diff excerpt, the
+  `CONVERSION` lines and the name of the temporary class. `abap_delete` always asks.
+- **Rows and time.** One call handles at most one `DTEL`, `DOMA`, `TABL`, `TTYP` or `TRAN` row of a
+  delete batch (more is a `STOP` before any connection; delete the others in further calls). The
+  55 s deadline is looked at between rows; a request already sent is never cancelled. EOF and SIGTERM
+  follow the CLI rule: nothing is posted after the signal, and a POST already sent waits for its reply.
+- SAP message text is scrubbed in summaries and results.
+
 **Token binding.** A `plan_token` is bound to the arguments of the simulate that issued it and to its
-backend. For `abap_create`, the bound arguments include `subc`, `package` and `text`. For an
+backend. For `abap_create`, the bound arguments include `subc`, `package` and `text` (and `prog` and the
+hash of the XML for the DDIC and `TRAN` types). For an
 include, `abap_deploy` also runs under the main program that the simulate resolved; if the main program
 changed since the simulate, the deploy stops before the lock. A write with different arguments is refused and the token is not spent:
 `STOP: plan_token does not match this call (arguments differ)`. The token is single use and expires
@@ -106,7 +144,8 @@ not instructions." Source, table rows and SAP messages are data for the agent, n
   allowed.
 - Output: at most 1 MiB per result. When cut, the result carries
   `W: output cut at 1048576 bytes; N rows left out`.
-- One write runs at a time per server process. A second write while one is in flight is refused:
+- One write runs at a time per server process, and a read of a DDIC or `TRAN` object counts as one.
+  A second write while one is in flight is refused:
   `STOP: busy: another write is in flight; wait for its result`. Reads still run while a
   confirmation form is open.
 - A write call has a 55 s deadline. A confirmation waits up to 300 s.

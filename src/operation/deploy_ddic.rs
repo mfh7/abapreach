@@ -68,13 +68,36 @@ pub fn deploy(
     request: &DdicDeploy<'_>,
     factories: &mut dyn Factories,
 ) -> Exit {
-    deploy_with(
+    deploy_gated(connection, explicit, request, factories, &mut |_| Ok(()))
+}
+
+/// What run 1 of a deploy found, handed to the gate before run 2 starts.
+pub struct Preview<'a> {
+    /// The runner class of run 1.
+    pub runner: Option<&'a str>,
+    /// The lines printed so far, one entry per printed block (a diff is one entry).
+    pub printed: &'a [String],
+}
+
+/// Asked once run 1 has shown the diff and the live hash and before run 2 writes anything. An
+/// `Err` ends the command with exit 1 and that text; run 2 never starts.
+pub type Gate<'a> = &'a mut dyn FnMut(&Preview<'_>) -> Result<(), String>;
+
+/// [`deploy`] with a gate between the two runs: the MCP deploy asks its human there.
+pub fn deploy_gated(
+    connection: &Connection,
+    explicit: Option<BackendKind>,
+    request: &DdicDeploy<'_>,
+    factories: &mut dyn Factories,
+    gate: Gate<'_>,
+) -> Exit {
+    deploy_gated_with(
         connection,
         explicit,
         request,
         factories,
-        &mut random_nonce,
-        &mut SystemClock::new(),
+        (&mut random_nonce, &mut SystemClock::new()),
+        gate,
     )
 }
 
@@ -86,6 +109,24 @@ pub fn deploy_with(
     factories: &mut dyn Factories,
     nonce: &mut dyn FnMut() -> String,
     clock: &mut dyn Clock,
+) -> Exit {
+    deploy_gated_with(
+        connection,
+        explicit,
+        request,
+        factories,
+        (nonce, clock),
+        &mut |_| Ok(()),
+    )
+}
+
+fn deploy_gated_with(
+    connection: &Connection,
+    explicit: Option<BackendKind>,
+    request: &DdicDeploy<'_>,
+    factories: &mut dyn Factories,
+    (nonce, clock): (&mut dyn FnMut() -> String, &mut dyn Clock),
+    gate: Gate<'_>,
 ) -> Exit {
     let name = request.name.to_ascii_uppercase();
     let Some(template) = template_of(request.kind) else {
@@ -127,7 +168,7 @@ pub fn deploy_with(
                 template,
             };
 
-            attempt_deploy(&attempt, request, &mut *nonce, &mut *clock).routed()
+            attempt_deploy(&attempt, request, (&mut *nonce, &mut *clock), &mut *gate).routed()
         },
     )
 }
@@ -166,12 +207,12 @@ fn read_payload(request: &DdicDeploy<'_>, name: &str, nonce: &str) -> Result<Vec
 fn attempt_deploy(
     attempt: &Attempt<'_>,
     deploy: &DdicDeploy<'_>,
-    nonce: &mut dyn FnMut() -> String,
-    clock: &mut dyn Clock,
+    (nonce, clock): (&mut dyn FnMut() -> String, &mut dyn Clock),
+    gate: Gate<'_>,
 ) -> Done {
     match first_run(attempt, &mut *nonce) {
         Step::Done(done) => done,
-        Step::Verified(verified) => write(attempt, deploy, verified, nonce, clock),
+        Step::Verified(verified) => write(attempt, deploy, verified, (nonce, clock), gate),
     }
 }
 
@@ -180,8 +221,8 @@ fn write(
     attempt: &Attempt<'_>,
     deploy: &DdicDeploy<'_>,
     verified: Verified,
-    nonce: &mut dyn FnMut() -> String,
-    clock: &mut dyn Clock,
+    (nonce, clock): (&mut dyn FnMut() -> String, &mut dyn Clock),
+    gate: Gate<'_>,
 ) -> Done {
     let Verified {
         run: first,
@@ -210,6 +251,17 @@ fn write(
         print
             .stderr
             .push("CANCELED: interrupted before the write; nothing was written".to_owned());
+
+        return print.finish(&first, 1);
+    }
+
+    let preview = Preview {
+        runner: first.name.as_deref(),
+        printed: &print.stdout,
+    };
+
+    if let Err(message) = gate(&preview) {
+        print.stderr.push(message);
 
         return print.finish(&first, 1);
     }

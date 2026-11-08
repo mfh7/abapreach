@@ -36,5 +36,12 @@ The DDIC types (`DTEL`, `DOMA`, `TABL`, `TTYP`) and `TRAN` are types of the publ
 again, and `--prog` is an option of `create`. The text files of `new/` that mention the types
 (`help-read`, `help-deploy`, `help-create`, `help-delete` and the four `err-*` files) therefore
 follow the M6 contract and no longer relate to `old/` by the rule above; only `help-top.txt` and
-the MCP schemas do, until Task 26 moves the MCP schemas as well. `tests/golden_test.rs` checks the
-M6 texts directly.
+the MCP schemas did, until Task 26.
+
+## Since M6 Task 26
+
+The MCP schemas (`new/mcp-tools-*.json`) carry the DDIC and transaction types, `prog`, the XML
+`source` of a create, and the footprint sentences, so they no longer relate to `old/` by the rule
+above either; `old/` stays as the record of the old branch. `abap_read_source` has
+`readOnlyHint: false`, the one hint that changed. `tests/golden_test.rs` checks the M6 texts
+directly.

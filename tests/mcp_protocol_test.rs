@@ -391,11 +391,17 @@ fn every_tool_has_a_short_name_a_complete_schema_and_advisory_annotations() {
             "{name}"
         );
 
-        let read_only = name == "abap_read_source" || name == "abap_read_table";
+        let read = name == "abap_read_source" || name == "abap_read_table";
         let annotations = &tool["annotations"];
 
-        assert_eq!(annotations["readOnlyHint"], read_only, "{name}");
-        assert_eq!(annotations["destructiveHint"], !read_only, "{name}");
+        // Reading a DDIC or transaction type creates a temporary class (M6): only the table read
+        // is read-only, and no read tool is destructive.
+        assert_eq!(
+            annotations["readOnlyHint"],
+            name == "abap_read_table",
+            "{name}"
+        );
+        assert_eq!(annotations["destructiveHint"], !read, "{name}");
         assert_eq!(annotations["openWorldHint"], false, "{name}");
         // A write tool takes its plan token only where the contract says so.
         assert_eq!(
@@ -452,7 +458,7 @@ fn tool_arguments_follow_the_contract() {
     assert_eq!(
         properties("abap_create_simulate"),
         set(&[
-            "conn", "type", "name", "text", "package", "tr", "fugr", "subc"
+            "conn", "type", "name", "text", "source", "prog", "package", "tr", "fugr", "subc"
         ])
     );
     assert_eq!(

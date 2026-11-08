@@ -1782,7 +1782,10 @@ fn the_tool_list_offers_the_type_and_the_option_where_the_hook_says() {
 
         assert_eq!(
             properties["type"]["enum"],
-            json!(["PROG", "FUGR", "FUNC", "CLAS", "INTF", "XTEST"]),
+            json!([
+                "PROG", "FUGR", "FUNC", "CLAS", "INTF", "DTEL", "DOMA", "TABL", "TTYP", "TRAN",
+                "XTEST"
+            ]),
             "{name}"
         );
         assert_eq!(properties["note"]["type"], "string", "{name}");
@@ -1798,7 +1801,7 @@ fn the_tool_list_offers_the_type_and_the_option_where_the_hook_says() {
             .unwrap();
 
         assert!(
-            description.ends_with("PROG|FUGR|FUNC|CLAS|INTF|XTEST"),
+            description.ends_with("PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN|XTEST"),
             "{description}"
         );
     }
@@ -1807,7 +1810,9 @@ fn the_tool_list_offers_the_type_and_the_option_where_the_hook_says() {
     for name in ["abap_read_source", "abap_simulate", "abap_deploy"] {
         assert_eq!(
             find(name)["inputSchema"]["properties"]["type"]["enum"],
-            json!(["PROG", "FUNC", "CLAS", "INTF"]),
+            json!([
+                "PROG", "FUNC", "CLAS", "INTF", "DTEL", "DOMA", "TABL", "TTYP", "TRAN"
+            ]),
             "{name}"
         );
     }
@@ -1841,10 +1846,12 @@ fn the_unknown_type_texts_of_the_tools_list_the_extension_type() {
 
     assert_eq!(
         created.text,
-        "STOP: type must be one of PROG, FUGR, FUNC, CLAS, INTF, XTEST"
+        "STOP: type must be one of PROG, FUGR, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN, XTEST"
     );
     assert!(
-        deleted.text.contains("(PROG|FUGR|FUNC|CLAS|INTF|XTEST)"),
+        deleted
+            .text
+            .contains("(PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN|XTEST)"),
         "{}",
         deleted.text
     );
@@ -1854,7 +1861,7 @@ fn the_unknown_type_texts_of_the_tools_list_the_extension_type() {
     );
     assert_eq!(
         unknown.text,
-        "STOP: type must be one of PROG, FUNC, CLAS, INTF"
+        "STOP: type must be one of PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN"
     );
     assert_eq!(rig.fake.opens(), (0, 0, 0, 0));
 }
