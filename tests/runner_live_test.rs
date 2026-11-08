@@ -103,6 +103,7 @@ fn one_template_mode_through_the_real_runner_cycle() {
     let input = CycleInput {
         operation: &operation,
         sid: &connection.system_id,
+        client: &connection.client,
         conn: &connection.id,
         prefix: &connection.runner_prefix,
         user: &connection.user,

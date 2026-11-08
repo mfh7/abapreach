@@ -839,7 +839,7 @@ fn lookup(
     }
 }
 
-fn fetch(
+pub(crate) fn fetch(
     transport: &mut dyn SadtTransport,
     entity: &str,
     body: &str,

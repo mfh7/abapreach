@@ -9,6 +9,7 @@ use crate::operation::deploy::{
     CancelFlag, INTERRUPT_EXIT_CODE, LOCK_ACCEPT, LockInfo, activation_request_xml,
     encode_lock_handle, known_lock_handles, leaf_texts, parse_lock,
 };
+use crate::operation::runner_evidence::preflight;
 use crate::transport::{
     Request, Response, RunnerArm, SadtTransport, TransportError, runner_verdict,
 };
@@ -187,6 +188,8 @@ pub struct CycleInput<'a> {
     /// `<op> <TYPE>`, such as `deploy DTEL`, for the STOP texts.
     pub operation: &'a str,
     pub sid: &'a str,
+    /// The client, for the repository preflight.
+    pub client: &'a str,
     /// The connection id of the cleanup commands.
     pub conn: &'a str,
     pub prefix: &'a str,
@@ -229,6 +232,8 @@ pub struct RunnerRun {
     pub leftover: Option<String>,
     /// `W:` lines for the stderr, before the verdict.
     pub notes: Vec<String>,
+    /// The `RUNNER: preflight` line, when the repository preflight ran.
+    pub preflight: Option<String>,
     /// A signal or a closed input arrived during the row.
     pub interrupted: bool,
     conn: String,
@@ -339,6 +344,7 @@ pub fn run_cycle(
         end: RunnerEnd::Interrupted,
         leftover: None,
         notes: Vec::new(),
+        preflight: None,
         interrupted: false,
         conn: input.conn.to_owned(),
     };
@@ -368,6 +374,7 @@ pub fn run_cycle(
         held: None,
         arm: None,
         notes: Vec::new(),
+        preflight: None,
         fatal: None,
         source: None,
         expected: None,
@@ -375,6 +382,19 @@ pub fn run_cycle(
     let end = match cycle.steps(post) {
         Ok(end) | Err(end) => end,
     };
+
+    // A failed stage is never silent: its stage and SAP text also go to the notes.
+    match &end {
+        RunnerEnd::Rejected(text) => cycle.notes.push(format!("W: {text}")),
+        RunnerEnd::PostUncertain(error) => cycle
+            .notes
+            .push(format!("W: {}", cycle.stage_text("POST", error))),
+        RunnerEnd::NotStarted(error) => cycle
+            .notes
+            .push(format!("W: runner start failed: {}", cycle.detail(error))),
+        RunnerEnd::Posted(_) | RunnerEnd::Stop(_) | RunnerEnd::Interrupted => {}
+    }
+
     let leftover = cycle.cleanup(open);
 
     if let Err(error) = cycle.session.close() {
@@ -387,6 +407,7 @@ pub fn run_cycle(
     run.end = end;
     run.leftover = leftover.then(|| run.name.clone()).flatten();
     run.notes = std::mem::take(&mut cycle.notes);
+    run.preflight = cycle.preflight.take();
     run.interrupted = cancel.is_set();
 
     run
@@ -402,6 +423,7 @@ struct Cycle<'a> {
     held: Option<LockInfo>,
     arm: Option<RunnerArm>,
     notes: Vec<String>,
+    preflight: Option<String>,
     /// An end decided while the name loop ran.
     fatal: Option<RunnerEnd>,
     /// The class source for the current name, and the hash the active source must have.
@@ -459,10 +481,39 @@ impl Cycle<'_> {
         )
     }
 
+    /// Everything checked before the class exists: the session, then the repository.
+    fn preflight(&mut self) -> Result<(), RunnerEnd> {
+        self.session_probe()?;
+        self.repository_check()
+    }
+
+    /// Two data previews on the cycle session. A system that forbids repository changes stops
+    /// here, before any write; the text differs from the authorization hint.
+    fn repository_check(&mut self) -> Result<(), RunnerEnd> {
+        let client = self.input.client;
+        let found = if self.input.backend == BackendKind::AdtHttp {
+            preflight(&mut RunnerGated::new(&mut *self.session), client)
+        } else {
+            preflight(&mut *self.session, client)
+        }
+        .map_err(RunnerEnd::NotStarted)?;
+
+        self.notes.extend(found.notes);
+        self.preflight = Some(found.line);
+
+        match found.refusal {
+            Some(reason) => Err(RunnerEnd::Stop(format!(
+                "{} needs a temporary class; repository changes are not allowed on {}/{client} ({reason})",
+                self.input.operation, self.input.sid
+            ))),
+            None => Ok(()),
+        }
+    }
+
     /// An ADT HTTP session must be stateful, and the first stateful reply shows whether it is:
     /// a read of the discovery document, before anything is written. RFC-SADT keeps its state
     /// in the connection and needs no probe.
-    fn preflight(&mut self) -> Result<(), RunnerEnd> {
+    fn session_probe(&mut self) -> Result<(), RunnerEnd> {
         if self.input.backend != BackendKind::AdtHttp {
             return Ok(());
         }
@@ -826,6 +877,8 @@ impl Cycle<'_> {
     }
 
     /// Removes the class and proves from a new session that it is gone; `true` when it stays.
+    /// A delete that fails on the cycle session is tried once more on a new session, because the
+    /// classrun run can leave the cycle session unusable.
     fn cleanup(&mut self, open: &mut Opener<'_>) -> bool {
         if self.class == Class::Maybe {
             match self.exists(open) {
@@ -839,21 +892,71 @@ impl Cycle<'_> {
             return false;
         }
 
-        if !self.delete_class() {
-            return true;
+        if self.delete_and_prove(open) {
+            return false;
         }
 
-        !matches!(self.exists(open), Ok(false))
+        let fresh = match open() {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                self.notes.push(format!(
+                    "W: runner cleanup retry failed: cannot open a new session: {error}"
+                ));
+
+                return true;
+            }
+        };
+
+        // The old session is abandoned: closing it releases whatever it still holds.
+        let mut old = std::mem::replace(&mut self.session, fresh);
+
+        if let Err(error) = old.close() {
+            self.notes.push(format!("W: session close failed: {error}"));
+        }
+
+        self.held = None;
+
+        !self.delete_and_prove(open)
     }
 
-    /// Sends the DELETE; `false` when it could not be sent at all (no lock). A sent DELETE is
-    /// judged by the proof, whatever it answered.
-    fn delete_class(&mut self) -> bool {
+    /// One delete attempt on the current session and the proof from a new one; `true` when the
+    /// proof finds the class gone. Every failure leaves its reason in the notes.
+    fn delete_and_prove(&mut self, open: &mut Opener<'_>) -> bool {
+        self.delete_class();
+
+        match self.exists(open) {
+            Ok(false) => true,
+            Ok(true) => {
+                self.notes.push(
+                    "W: runner cleanup proof: the class still exists in a new session".to_owned(),
+                );
+
+                false
+            }
+            Err(reason) => {
+                self.notes
+                    .push(format!("W: runner cleanup proof failed: {reason}"));
+
+                false
+            }
+        }
+    }
+
+    /// Sends the DELETE under a lock. A failure only goes to the notes: the proof judges.
+    fn delete_class(&mut self) {
         let lock = match self.held.take() {
             Some(lock) => lock,
             None => match self.lock_class() {
                 Ok(lock) => lock,
-                Err(_) => return false,
+                Err(RunnerEnd::Rejected(text)) => {
+                    self.notes.push(format!(
+                        "W: runner cleanup {}",
+                        text.trim_start_matches("runner ")
+                    ));
+
+                    return;
+                }
+                Err(_) => return,
             },
         };
         let request = Request::delete(format!(
@@ -862,11 +965,25 @@ impl Cycle<'_> {
             encode_lock_handle(&lock.handle)
         ));
 
-        if matches!(self.send(request), Ok(response) if ok(&response)) {
-            self.end_stateful_session();
-        }
+        match self.send(request) {
+            Ok(response) if ok(&response) => self.end_stateful_session(),
+            Ok(response) => {
+                let text = self.failed("DELETE", &response);
 
-        true
+                self.notes.push(format!(
+                    "W: runner cleanup {}",
+                    text.trim_start_matches("runner ")
+                ));
+            }
+            Err(error) => {
+                let text = self.stage_text("DELETE", &error);
+
+                self.notes.push(format!(
+                    "W: runner cleanup {}",
+                    text.trim_start_matches("runner ")
+                ));
+            }
+        }
     }
 
     /// A DELETE answered 2xx ends the stateful session with its logoff.
@@ -938,6 +1055,11 @@ impl Cycle<'_> {
     }
 
     fn stage_text(&self, stage: &str, error: &TransportError) -> String {
+        format!("runner {stage} failed: {}", self.detail(error))
+    }
+
+    /// The error as text, without a lock handle.
+    fn detail(&self, error: &TransportError) -> String {
         let text = match error {
             TransportError::Http { status, message } if message.is_empty() => {
                 format!("HTTP {status}")
@@ -945,7 +1067,7 @@ impl Cycle<'_> {
             other => other.to_string(),
         };
 
-        format!("runner {stage} failed: {}", self.mask(&text))
+        self.mask(&text)
     }
 
     /// The SAP message of an error body, on one line and cut.

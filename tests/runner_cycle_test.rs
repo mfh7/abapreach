@@ -16,6 +16,10 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+mod common;
+
+use common::preview;
+
 const PREFIX: &str = "YTEST_ABAPREACH_RUN_";
 const SOURCE: &str = "CLASS <N> DEFINITION.\nENDCLASS.\n";
 const LOGOFF: &str = "/sap/public/bc/icf/logoff";
@@ -33,6 +37,7 @@ const MESSAGES_OK: &str = r#"<chkl:messages xmlns:chkl="x"></chkl:messages>"#;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Step {
     Preflight,
+    Preview,
     Create,
     Lock,
     Put,
@@ -87,6 +92,11 @@ struct Sap {
     activation: Option<&'static str>,
     /// The class survives a DELETE that answered 2xx.
     delete_is_ignored: bool,
+    /// A session that ran the POST is dead afterwards: every later request on it fails.
+    dies_after_post: bool,
+    dead: Vec<usize>,
+    /// `EDITFLAG` of the customer namespace; `None` answers no row.
+    namespace_flag: Option<&'static str>,
 }
 
 type Shared = Rc<RefCell<Sap>>;
@@ -100,6 +110,7 @@ fn step_of(request: &Request) -> Option<Step> {
     Some(match (request.method.as_str(), path) {
         ("GET", LOGOFF) => Step::Logoff,
         ("GET", "/sap/bc/adt/discovery") => Step::Preflight,
+        ("POST", "/sap/bc/adt/datapreview/ddic") => Step::Preview,
         ("POST", "/sap/bc/adt/oo/classes") => Step::Create,
         ("POST", "/sap/bc/adt/activation") => Step::Activate,
         ("POST", path) if path.starts_with("/sap/bc/adt/oo/classrun/") => Step::Post,
@@ -161,6 +172,10 @@ impl Sap {
             }
         }
 
+        if self.dead.contains(&session) && step != Step::Logoff {
+            return Ok(Response::text(500, "session expired"));
+        }
+
         let fault = self
             .faults
             .iter()
@@ -184,6 +199,10 @@ impl Sap {
 
         let response = self.execute(step, &request);
 
+        if step == Step::Post && self.dies_after_post {
+            self.dead.push(session);
+        }
+
         if matches!(fault, Some(Fault::Lost)) {
             return Err(TransportError::PostSendUncertain("reply lost".to_owned()));
         }
@@ -196,6 +215,26 @@ impl Sap {
 
         match step {
             Step::Preflight => self.reply(Response::text(200, "<intf/>")),
+            Step::Preview => {
+                let body = String::from_utf8_lossy(&request.body).into_owned();
+                let none: &[Option<&str>] = &[];
+                let xml = if body.contains(" FROM T000 ") {
+                    preview(&[
+                        ("CCCATEGORY", &[Some("C")]),
+                        ("CCCORACTIV", &[Some("1")]),
+                        ("CCNOCLIIND", &[None]),
+                    ])
+                } else if body.contains(" FROM TRNSPACE ") {
+                    match self.namespace_flag {
+                        Some(flag) => preview(&[("EDITFLAG", &[Some(flag)])]),
+                        None => preview(&[("EDITFLAG", none)]),
+                    }
+                } else {
+                    panic!("unexpected preview {body}");
+                };
+
+                self.reply(Response::text(200, xml))
+            }
             Step::Create => {
                 let body = String::from_utf8_lossy(&request.body).into_owned();
                 let name = body
@@ -340,6 +379,7 @@ fn rfc_session(sap: &Shared) -> Opened {
 fn new_sap(stateful: bool) -> Shared {
     Rc::new(RefCell::new(Sap {
         stateful,
+        namespace_flag: Some("X"),
         ..Sap::default()
     }))
 }
@@ -352,6 +392,7 @@ fn input(backend: BackendKind, rfc_available: bool) -> CycleInput<'static> {
     CycleInput {
         operation: "read DTEL",
         sid: "DEV",
+        client: "100",
         conn: "dev",
         prefix: PREFIX,
         user: "DEVUSER",
@@ -428,6 +469,8 @@ fn the_http_cycle_runs_every_step_in_order_and_removes_the_class() {
     let object = format!("/sap/bc/adt/oo/classes/{}", name.to_ascii_lowercase());
     let expected = [
         "GET /sap/bc/adt/discovery".to_owned(),
+        "POST /sap/bc/adt/datapreview/ddic?rowNumber=1&ddicEntityName=T000".to_owned(),
+        "POST /sap/bc/adt/datapreview/ddic?rowNumber=1&ddicEntityName=TRNSPACE".to_owned(),
         "POST /sap/bc/adt/oo/classes".to_owned(),
         format!("POST {object}?_action=LOCK&accessMode=MODIFY"),
         format!("PUT {object}/source/main?lockHandle=h%2B1%2F%3D"),
@@ -505,6 +548,130 @@ fn every_row_opens_a_fresh_session_and_the_batch_logs_off_per_class() {
     assert!(rows.iter().all(|row| matches!(row, Row::Ran(_))));
     assert_eq!(sap.borrow().sessions, 6);
     assert_eq!(sap.borrow().count(Step::Logoff), 6);
+}
+
+// --- the repository preflight ----------------------------------------------------------------
+
+const PREFLIGHT_LINE: &str =
+    "RUNNER: preflight T000 CCCATEGORY=C CCCORACTIV=1 CCNOCLIIND=- TRNSPACE /0CUST/ EDITFLAG=X";
+
+#[test]
+fn the_preflight_runs_before_the_class_on_the_cycle_session_and_prints_its_facts() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(backend == BackendKind::AdtHttp);
+        let cancel = CancelFlag::new();
+        let run = match backend {
+            BackendKind::AdtHttp => http_row(&sap, &cancel),
+            BackendKind::RfcSadt => rfc_row(&sap, &cancel),
+        };
+        let sap = sap.borrow();
+        let lines = sap.lines();
+        let first_create = lines
+            .iter()
+            .position(|line| line == "POST /sap/bc/adt/oo/classes")
+            .expect("a create");
+
+        assert_eq!(
+            run.preflight.as_deref(),
+            Some(PREFLIGHT_LINE),
+            "{backend:?}"
+        );
+        assert_eq!(sap.count(Step::Preview), 2, "{backend:?}: two previews");
+        assert_eq!(
+            lines[..first_create]
+                .iter()
+                .filter(|line| line.contains("datapreview"))
+                .count(),
+            2,
+            "{backend:?}: both before the create"
+        );
+        // Same session as the cycle: no extra session for the preflight.
+        assert_eq!(sap.on_session(1, Step::Preview), 2, "{backend:?}");
+        assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+    }
+}
+
+#[test]
+fn a_namespace_that_is_not_modifiable_stops_before_any_write_and_differs_from_the_hint() {
+    for flag in [Some("N"), Some(""), None] {
+        for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+            let sap = new_sap(backend == BackendKind::AdtHttp);
+            let cancel = CancelFlag::new();
+
+            sap.borrow_mut().namespace_flag = flag;
+
+            let run = match backend {
+                BackendKind::AdtHttp => http_row(&sap, &cancel),
+                BackendKind::RfcSadt => rfc_row(&sap, &cancel),
+            };
+            let RunnerEnd::Stop(text) = &run.end else {
+                if flag.is_none() {
+                    // No row at all is not an unambiguous refusal.
+                    assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+
+                    continue;
+                }
+
+                panic!("expected STOP, got {:?}", run.end);
+            };
+
+            assert!(
+                text.starts_with(
+                    "read DTEL needs a temporary class; repository changes are not allowed on DEV/100 ("
+                ) && text.contains("EDITFLAG"),
+                "{text}"
+            );
+            assert!(!text.contains(HINT), "{text}");
+            assert_eq!(run.exit_code(0), 2);
+            assert!(run.name.is_none() && run.runner_line().is_none());
+            assert_eq!(sap.borrow().count(Step::Create), 0);
+            assert_eq!(sap.borrow().count(Step::Delete), 0);
+            assert!(run.leftover.is_none());
+            assert!(run.halts_batch());
+        }
+    }
+}
+
+#[test]
+fn an_unreadable_preview_does_not_block_and_leaves_a_warning() {
+    let sap = new_sap(true);
+
+    fault(&sap, Step::Preview, 2, Fault::Status(403, "forbidden"));
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+    assert!(
+        run.notes
+            .iter()
+            .any(|note| note.starts_with("W: ") && note.contains("TRNSPACE")),
+        "{:?}",
+        run.notes
+    );
+    assert!(run.preflight.as_deref().unwrap().contains("EDITFLAG=?"));
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn a_preview_that_is_never_sent_does_not_start_the_cycle() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(backend == BackendKind::AdtHttp);
+
+        fault(&sap, Step::Preview, 1, Fault::NotSent);
+
+        let run = match backend {
+            BackendKind::AdtHttp => http_row(&sap, &CancelFlag::new()),
+            BackendKind::RfcSadt => rfc_row(&sap, &CancelFlag::new()),
+        };
+
+        assert!(
+            matches!(&run.end, RunnerEnd::NotStarted(_)),
+            "{:?}",
+            run.end
+        );
+        assert_eq!(sap.borrow().count(Step::Create), 0);
+        assert_clean(&sap, &run);
+    }
 }
 
 // --- failures before the POST ----------------------------------------------------------------
@@ -1106,7 +1273,9 @@ fn a_failed_delete_is_a_leftover_with_both_cleanup_commands() {
         // The write lock is the first LOCK, the cleanup lock the second.
         let nth = if step == Step::Lock { 2 } else { 1 };
 
-        fault(&sap, step, nth, injected);
+        // Both attempts fail: the one on the cycle session and the retry on a fresh session.
+        fault(&sap, step, nth, injected.clone());
+        fault(&sap, step, nth + 1, injected);
 
         let run = http_row(&sap, &CancelFlag::new());
         let name = run.name.clone().unwrap();
@@ -1158,11 +1327,19 @@ fn a_proof_that_cannot_be_read_is_a_leftover_never_a_success() {
     let sap = new_sap(true);
 
     fault(&sap, Step::Proof, 1, Fault::LostBefore);
+    fault(&sap, Step::Proof, 2, Fault::LostBefore);
 
     let run = http_row(&sap, &CancelFlag::new());
 
     assert!(run.leftover.is_some());
     assert_eq!(run.exit_code(0), 1);
+    assert!(
+        run.notes
+            .iter()
+            .any(|note| note.contains("runner cleanup proof failed")),
+        "{:?}",
+        run.notes
+    );
 }
 
 #[test]
@@ -1172,6 +1349,7 @@ fn a_leftover_stops_the_batch_and_the_later_rows_are_skipped() {
 
     // The delete of the second row fails.
     fault(&sap, Step::Delete, 2, Fault::Status(500, "x"));
+    fault(&sap, Step::Delete, 3, Fault::Status(500, "x"));
 
     let rows = run_rows(&[1, 2, 3, 4], |_| http_row(&sap, &cancel));
 
@@ -1267,6 +1445,7 @@ fn a_leftover_after_a_signal_still_exits_130() {
 
     signal(&sap, Step::Put, Signal::Handler, &cancel);
     fault(&sap, Step::Delete, 1, Fault::Status(500, "x"));
+    fault(&sap, Step::Delete, 2, Fault::Status(500, "x"));
 
     let run = http_row(&sap, &cancel);
 
@@ -1299,4 +1478,154 @@ fn the_exit_code_follows_the_end_and_a_leftover() {
 
     assert_eq!(run.exit_code(0), 0);
     assert_eq!(run.exit_code(1), 1);
+}
+
+// --- live defect of the 12A gate: warnings, a large class, a dead session, silent leftovers ----
+
+const MESSAGES_W: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="W" line="1378"><shortText><txt>The exception CX_ABAP_MESSAGE_DIGEST is not caught or declared in the RAISING clause of "ROWS_HASH"</txt></shortText></msg><msg type="W" line="400"><shortText><txt>Redundant conversion for type DDOBJNAME</txt></shortText></msg></chkl:messages>"#;
+
+#[test]
+fn an_activation_with_warnings_only_proceeds_to_the_post() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(true);
+
+        sap.borrow_mut().activation = Some(MESSAGES_W);
+
+        let cancel = CancelFlag::new();
+        let run = match backend {
+            BackendKind::AdtHttp => http_row(&sap, &cancel),
+            BackendKind::RfcSadt => rfc_row(&sap, &cancel),
+        };
+
+        assert!(
+            matches!(&run.end, RunnerEnd::Posted(_)),
+            "{backend:?}: {:?}",
+            run.end
+        );
+        assert_eq!(sap.borrow().count(Step::Post), 1);
+        assert_clean(&sap, &run);
+        assert_eq!(run.exit_code(0), 0);
+    }
+}
+
+#[test]
+fn a_class_of_about_ninety_kilobytes_runs_the_whole_cycle() {
+    let big = |name: &str| -> Result<String, String> {
+        let mut source = format!("CLASS {name} DEFINITION.\nENDCLASS.\n");
+
+        for row in 0..2300 {
+            source.push_str(&format!("  \" row {row:05} {}\n", "x".repeat(30)));
+        }
+
+        Ok(source)
+    };
+
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(true);
+        let mut input = input(backend, true);
+
+        input.build = &big;
+        sap.borrow_mut().activation = Some(MESSAGES_W);
+
+        let cancel = CancelFlag::new();
+        let run = match backend {
+            BackendKind::AdtHttp => {
+                let mut open = || http_session(&sap);
+
+                run_cycle(&input, &mut open, PostRoute::Cycle, &cancel)
+            }
+            BackendKind::RfcSadt => {
+                let mut open = || rfc_session(&sap);
+
+                run_cycle(&input, &mut open, PostRoute::Cycle, &cancel)
+            }
+        };
+
+        assert!(
+            matches!(&run.end, RunnerEnd::Posted(_)),
+            "{backend:?}: {:?}",
+            run.end
+        );
+        assert_clean(&sap, &run);
+    }
+}
+
+#[test]
+fn a_session_that_died_in_the_post_is_replaced_for_the_cleanup() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(true);
+
+        sap.borrow_mut().dies_after_post = true;
+
+        let cancel = CancelFlag::new();
+        let run = match backend {
+            BackendKind::AdtHttp => http_row(&sap, &cancel),
+            BackendKind::RfcSadt => rfc_row(&sap, &cancel),
+        };
+
+        assert!(
+            matches!(&run.end, RunnerEnd::Posted(_)),
+            "{backend:?}: {:?}",
+            run.end
+        );
+        assert_clean(&sap, &run);
+        assert_eq!(run.exit_code(0), 0);
+        // The first attempt is not silent even though the retry removed the class.
+        assert!(
+            run.notes
+                .iter()
+                .any(|note| note.starts_with("W: runner cleanup lock failed: HTTP 500")),
+            "{:?}",
+            run.notes
+        );
+    }
+}
+
+#[test]
+fn a_leftover_always_carries_its_reason_in_the_notes() {
+    let sap = new_sap(true);
+
+    for nth in [1, 2] {
+        fault(&sap, Step::Delete, nth, Fault::Status(500, "boom"));
+    }
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(run.leftover.is_some());
+    assert!(
+        run.notes
+            .iter()
+            .any(|note| note.starts_with("W: runner cleanup DELETE failed: HTTP 500")),
+        "{:?}",
+        run.notes
+    );
+    assert!(
+        run.notes
+            .iter()
+            .any(|note| note.contains("runner cleanup proof") && note.contains("still exists")),
+        "{:?}",
+        run.notes
+    );
+}
+
+#[test]
+fn a_failed_stage_carries_its_stage_and_sap_text_in_the_notes() {
+    let sap = new_sap(true);
+
+    fault(
+        &sap,
+        Step::Put,
+        1,
+        Fault::Status(500, "<m><localizedMessage>no space</localizedMessage></m>"),
+    );
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(
+        run.notes
+            .contains(&"W: runner PUT failed: HTTP 500: no space".to_owned()),
+        "{:?}",
+        run.notes
+    );
+    assert_clean(&sap, &run);
 }
