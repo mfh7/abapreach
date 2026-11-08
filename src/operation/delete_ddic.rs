@@ -23,7 +23,7 @@ use crate::operation::delete::{DeleteBackend, DeleteReply, ObjectFacts, Reconcil
 use crate::operation::delete_adt::Opener;
 use crate::operation::deploy::CancelFlag;
 use crate::operation::payload::{self, Kind, Mode};
-use crate::operation::runner::{CycleInput, PostRoute, RunnerEnd, RunnerRun, run_cycle};
+use crate::operation::runner::{CycleInput, PostRoute, RunnerEnd, RunnerRun, STATELESS, run_cycle};
 use crate::operation::runner_evidence::{Expect, Proof, confirm, judge, read_evidence};
 use crate::operation::runner_reconcile::{
     Clock, Intent, ReadRun, Subject, SystemClock, Verdict, reconcile, settle,
@@ -141,6 +141,11 @@ impl<'a> DdicDelete<'a> {
             return None;
         }
 
+        // The probe found a stateless ADT session before any class existed: RFC can run it.
+        if self.stop.as_deref() == Some(STATELESS) {
+            return Some((Failure::CapabilityUnavailable, STATELESS.to_owned()));
+        }
+
         self.unsent
             .clone()
             .map(|message| (Failure::PreSendConnectivity, message))
@@ -252,7 +257,10 @@ impl<'a> DdicDelete<'a> {
         self.notes.extend(run.notes.iter().cloned());
         self.runner = run.name.clone();
 
-        if !matches!(run.end, RunnerEnd::NotStarted(_)) {
+        // The stateless STOP comes from the probe, before any class exists.
+        let probe_stop = matches!(&run.end, RunnerEnd::Stop(text) if text == STATELESS);
+
+        if !matches!(run.end, RunnerEnd::NotStarted(_)) && !probe_stop {
             self.started += 1;
         }
 

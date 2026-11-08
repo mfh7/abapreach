@@ -464,3 +464,80 @@ fn a_first_run_that_never_left_the_process_falls_back_to_rfc() {
     assert!(sessions.rfc_calls >= 2);
     assert_eq!(sap.borrow().posts, 1);
 }
+
+#[test]
+fn a_stateless_adt_session_runs_the_tran_batch_over_rfc() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let sap = sap_with(false);
+
+    answering_tran(&sap);
+    // No context cookie: the ADT session of this release keeps no state.
+    sap.borrow_mut().stateful = false;
+
+    let mut sessions = Sessions {
+        sap: sap.clone(),
+        adt_ok: usize::MAX,
+        adt_calls: 0,
+        rfc_calls: 0,
+        cancel: CancelFlag::new(),
+    };
+    let exit = run_delete(
+        &mut sessions,
+        directory.path(),
+        true,
+        &[
+            "--simulate",
+            "TRAN:ZTRAN",
+            "--plan",
+            &plan.display().to_string(),
+        ],
+    );
+
+    assert_eq!(exit.code, 0, "{} {}", exit.stdout, exit.stderr);
+    assert!(
+        exit.stdout.contains("DELETE_SIM: SIMULATED_OK"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT") && !exit.stderr.contains("STOP:"),
+        "{}",
+        exit.stderr
+    );
+    assert!(sessions.rfc_calls >= 1);
+    assert_eq!(sap.borrow().posts, 1);
+}
+
+#[test]
+fn a_stateless_adt_session_without_rfc_keeps_the_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory.path().join("plan.json");
+    let sap = sap_with(false);
+
+    answering_tran(&sap);
+    sap.borrow_mut().stateful = false;
+
+    let mut sessions = Sessions {
+        sap: sap.clone(),
+        adt_ok: usize::MAX,
+        adt_calls: 0,
+        rfc_calls: 0,
+        cancel: CancelFlag::new(),
+    };
+    let exit = run_delete(
+        &mut sessions,
+        directory.path(),
+        false,
+        &[
+            "--simulate",
+            "TRAN:ZTRAN",
+            "--plan",
+            &plan.display().to_string(),
+        ],
+    );
+
+    assert_eq!(exit.code, 2, "{} {}", exit.stdout, exit.stderr);
+    assert_eq!(sessions.rfc_calls, 0);
+    assert_eq!(sap.borrow().posts, 0);
+}
