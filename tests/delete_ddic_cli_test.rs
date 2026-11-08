@@ -165,12 +165,123 @@ fn run_delete(sessions: &mut Sessions, directory: &Path, rfc: bool, args: &[&str
     run(full, env(directory, rfc), sessions)
 }
 
+/// A fake SAP that answers a transaction or DDIC `DELETE_SIM` and `DELETE` like the class would.
+fn answering_tran(sap: &Shared) {
+    sap.borrow_mut().reply_with = Some(Box::new(|source: &str| {
+        let nonce = nonce_of(source);
+
+        if payload_mode(source) == "DELETE_SIM" {
+            let mut body = vec![
+                format!("FACT:PACKAGE:{}", hex("$TMP")),
+                format!("FACT:AUTHOR:{}", hex("DEVUSER")),
+            ];
+
+            if payload_type(source) == "TRAN" {
+                body.push(format!("FACT:PROGRAM:{}", hex("ZREPORT")));
+                body.push(format!("FACT:CINFO:{}", hex("80")));
+            }
+
+            body.push(format!("FACT:REQUEST:{}", hex("-")));
+            body.push(format!("FACT:HASH:{}", hex(HASH)));
+
+            output(&nonce, "DELETE_SIM", &body, "SIMULATED_OK")
+        } else {
+            output(&nonce, "DELETE", &[], "DELETED")
+        }
+    }));
+}
+
 #[test]
-fn a_tran_row_still_stops_before_a_connection() {
+fn a_tran_batch_runs_through_the_router_the_plan_file_and_one_backend() {
+    // An ADT route that opens, and one that cannot be reached before anything is sent (RFC then
+    // runs the whole operation).
+    for (adt_ok, rfc) in [(usize::MAX, false), (0, true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let plan = directory.path().join("plan.json");
+        let plan_arg = plan.display().to_string();
+        let sap = sap_with(true);
+
+        answering_tran(&sap);
+
+        let mut sessions = Sessions {
+            sap: sap.clone(),
+            adt_ok,
+            adt_calls: 0,
+            rfc_calls: 0,
+            cancel: CancelFlag::new(),
+        };
+        let args = [
+            "--simulate",
+            "DTEL:zdtel",
+            "TRAN:ztran",
+            "--plan",
+            &plan_arg,
+        ];
+        let simulated = run_delete(&mut sessions, directory.path(), rfc, &args);
+
+        assert_eq!(
+            simulated.code, 0,
+            "{rfc} {} {}",
+            simulated.stdout, simulated.stderr
+        );
+
+        for expected in [
+            "== TRAN ZTRAN ==",
+            "DELETE TRAN ZTRAN package $TMP author DEVUSER TR -",
+            "PROGRAM ZREPORT",
+            "CINFO 80",
+            &format!("SOURCE LINES {HASH}"),
+        ] {
+            assert!(
+                simulated.stdout.contains(expected),
+                "{expected} in {}",
+                simulated.stdout
+            );
+        }
+
+        // TRAN runs before DTEL.
+        let first = simulated.stdout.find("== TRAN ZTRAN ==").unwrap();
+        let second = simulated.stdout.find("== DTEL ZDTEL ==").unwrap();
+
+        assert!(first < second, "{}", simulated.stdout);
+
+        // The plan file keeps its format: connection, request, and rows; no backend list.
+        let text = fs::read_to_string(&plan).unwrap();
+
+        assert!(
+            text.contains("ZTRAN") && !text.contains("backends"),
+            "{text}"
+        );
+
+        let real = run_delete(
+            &mut sessions,
+            directory.path(),
+            rfc,
+            &["TRAN:ztran", "DTEL:zdtel", "--plan", &plan_arg],
+        );
+
+        assert_eq!(real.code, 0, "{rfc} {} {}", real.stdout, real.stderr);
+        assert!(real.stdout.contains("SUMMARY: 2 OK, 0 FAILED, 0 SKIPPED"));
+        assert_eq!(sap.borrow().posts, 4);
+        assert!(sap.borrow().classes.is_empty());
+
+        // The operation stays on the backend it began with: simulate and delete, the TRAN row and
+        // the DDIC row. The ADT route that cannot open is tried once per command and never again.
+        if rfc {
+            assert_eq!(sessions.adt_calls, 2, "one failed open per command");
+            assert!(sessions.rfc_calls >= 4, "{}", sessions.rfc_calls);
+        } else {
+            assert!(sessions.adt_calls >= 4, "{}", sessions.adt_calls);
+            assert_eq!(sessions.rfc_calls, 0);
+        }
+    }
+}
+
+#[test]
+fn a_tran_row_outside_the_customer_scope_stops_before_a_connection() {
     let directory = tempfile::tempdir().unwrap();
-    let sap = sap_with(false);
     let mut sessions = Sessions {
-        sap,
+        sap: sap_with(false),
         adt_ok: 0,
         adt_calls: 0,
         rfc_calls: 0,
@@ -181,11 +292,14 @@ fn a_tran_row_still_stops_before_a_connection() {
         &mut sessions,
         directory.path(),
         false,
-        &["DTEL:ZD", "TRAN:ZT", "--plan", &plan.display().to_string()],
+        &["TRAN:SE38", "--plan", &plan.display().to_string()],
     );
 
     assert_eq!(exit.code, 2);
-    assert_eq!(exit.stderr, "STOP: delete TRAN is not implemented yet");
+    assert_eq!(
+        exit.stderr,
+        "STOP: write and delete accept only Z and Y names: SE38"
+    );
     assert_eq!(sessions.adt_calls + sessions.rfc_calls, 0);
 }
 
@@ -282,7 +396,15 @@ fn a_simulate_then_a_delete_run_through_the_router_and_the_plan_file() {
     assert!(sap.borrow().classes.is_empty());
 }
 
+fn payload_type(source: &str) -> String {
+    payload_value(source, "TYPE=")
+}
+
 fn payload_mode(source: &str) -> String {
+    payload_value(source, "MODE=")
+}
+
+fn payload_value(source: &str, key: &str) -> String {
     let encoded: String = source
         .lines()
         .filter_map(|line| {
@@ -293,8 +415,8 @@ fn payload_mode(source: &str) -> String {
 
     base64_decode(&encoded)
         .lines()
-        .find_map(|line| line.strip_prefix("MODE=").map(str::to_owned))
-        .expect("a mode in the payload")
+        .find_map(|line| line.strip_prefix(key).map(str::to_owned))
+        .expect("a key in the payload")
 }
 
 #[test]

@@ -1198,3 +1198,503 @@ fn a_ddic_row_is_never_read_or_deleted_without_its_plan_hash() {
     ));
     assert_eq!(rig.sap.borrow().sessions, 0);
 }
+
+// --- TRAN rows (M6 Task 24) ------------------------------------------------------------------
+
+/// The body of a successful `DELETE_SIM` of a transaction: package, author, program, cinfo,
+/// request, and the hash of the six live lines. A transaction has no `STATE` fact.
+fn tran_sim_body(hash: &str) -> Vec<String> {
+    vec![
+        fact("PACKAGE", "$TMP"),
+        fact("AUTHOR", "DEVUSER"),
+        fact("PROGRAM", "ZREPORT"),
+        fact("CINFO", "80"),
+        fact("REQUEST", "-"),
+        fact("HASH", hash),
+    ]
+}
+
+fn tran_sim_ok(hash: &str) -> String {
+    output("DELETE_SIM", &tran_sim_body(hash), "SIMULATED_OK")
+}
+
+fn plan_of_rows(tr: Option<&str>, rows: &[(&str, &str, &str)]) -> Plan {
+    Plan {
+        conn: "dev".to_owned(),
+        tr: tr.map(str::to_owned),
+        objects: rows
+            .iter()
+            .map(|(kind, name, hash)| ((*kind).to_owned(), (*name).to_owned(), (*hash).to_owned()))
+            .collect(),
+        backends: Vec::new(),
+    }
+}
+
+#[test]
+fn a_tran_simulate_prints_package_author_tr_program_and_cinfo() {
+    for backend in BACKENDS {
+        let rig = rig(
+            constant(present()),
+            vec![PostReply::Output(tran_sim_ok(HASH_A))],
+        );
+        let done = simulate_batch(&rig, backend, &["TRAN:ztran"], None);
+        let out = &done.outcome.stdout;
+
+        assert_eq!(done.outcome.exit, 0, "{backend:?} {out}");
+
+        for expected in [
+            "== TRAN ZTRAN ==",
+            "DELETE TRAN ZTRAN package $TMP author DEVUSER TR -",
+            "PROGRAM ZREPORT",
+            "CINFO 80",
+            &format!("SOURCE LINES {HASH_A}"),
+            &format!("plan hash {HASH_A}"),
+            "DELETE_SIM: SIMULATED_OK",
+            "SUMMARY: 1 OK, 0 FAILED, 0 SKIPPED",
+        ] {
+            assert!(out.contains(expected), "{backend:?} {expected} in {out}");
+        }
+
+        // A transaction is not a DDIC XML: no XML marker, no row count.
+        assert!(!out.contains("SOURCE XML"), "{out}");
+        assert!(!out.contains("ROWS"), "{out}");
+
+        let payloads = posted(&rig);
+
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(value(&payloads[0], "MODE"), Some("DELETE_SIM"));
+        assert_eq!(value(&payloads[0], "TYPE"), Some("TRAN"));
+        assert_eq!(value(&payloads[0], "NAME"), Some("ZTRAN"));
+        assert_eq!(batch_of(&payloads[0]), ["TRAN:ZTRAN"]);
+        clean(&rig);
+    }
+}
+
+#[test]
+fn the_tran_plan_hash_is_the_hash_the_run_gave_for_the_live_definition() {
+    let first = rig(
+        constant(present()),
+        vec![PostReply::Output(tran_sim_ok(HASH_A))],
+    );
+    let second = rig(
+        constant(present()),
+        vec![PostReply::Output(tran_sim_ok(&HASH_B.to_ascii_uppercase()))],
+    );
+    let one = simulate_batch(&first, Backend::Rfc, &["TRAN:ZT"], None);
+    let two = simulate_batch(&second, Backend::Rfc, &["TRAN:ZT"], None);
+
+    assert_eq!(plan_of(&one).objects[0].2, HASH_A);
+    // An upper-case hash is stored in lower case, like every other plan hash.
+    assert_eq!(plan_of(&two).objects[0].2, HASH_B);
+
+    for bad in ["", "abc", &"g".repeat(64)] {
+        let mut body = tran_sim_body(HASH_A);
+
+        body[5] = fact("HASH", bad);
+
+        let rig = rig(
+            constant(present()),
+            vec![PostReply::Output(output(
+                "DELETE_SIM",
+                &body,
+                "SIMULATED_OK",
+            ))],
+        );
+        let done = simulate_batch(&rig, Backend::Rfc, &["TRAN:ZT"], None);
+
+        assert_eq!(done.outcome.exit, 1, "{bad:?}");
+        assert!(
+            done.outcome.stdout.contains("ERROR: the runner reported"),
+            "{}",
+            done.outcome.stdout
+        );
+        assert!(!done.plan_path.exists() || plan_of(&done).objects.is_empty());
+    }
+
+    let mut body = tran_sim_body(HASH_A);
+
+    body.remove(5);
+
+    let rig = rig(
+        constant(present()),
+        vec![PostReply::Output(output(
+            "DELETE_SIM",
+            &body,
+            "SIMULATED_OK",
+        ))],
+    );
+    let done = simulate_batch(&rig, Backend::Rfc, &["TRAN:ZT"], None);
+
+    assert!(
+        done.outcome
+            .stdout
+            .contains("ERROR: the runner reported no plan hash")
+    );
+}
+
+#[test]
+fn a_tran_row_runs_first_in_a_mixed_batch_on_the_one_backend_of_the_operation() {
+    for backend in BACKENDS {
+        let rig = rig(
+            gone_after_post(),
+            vec![
+                PostReply::Output(tran_sim_ok(HASH_A)),
+                PostReply::Output(sim_ok(HASH_B)),
+                PostReply::Output(deleted()),
+                PostReply::Output(deleted()),
+            ],
+        );
+        let policies = Policies::default();
+        let context = Context {
+            conn: "dev",
+            user: "DEVUSER",
+            policies: &policies,
+            confirmer: &No,
+        };
+        let texts = ["DTEL:ZDTEL", "PROG:ZPROG", "CLAS:ZCL_X", "TRAN:ZTRAN"];
+        let directory = tempfile::tempdir().unwrap();
+        let plan_path = directory.path().join("plan.json");
+        let cancel = CancelFlag::new();
+        let mut adt = Adt::default();
+        let sap = rig.sap.clone();
+        let mut open = move || opened(backend, &sap);
+        let mut ddic = DdicDelete::new(env(backend), &mut open, cancel.clone())
+            .with_nonce(Box::new(|| NONCE.to_owned()))
+            .with_clock(Box::new(FakeClock {
+                now: rig.now.clone(),
+            }));
+        let mut mixed = RunnerBatch::new(&mut adt, &mut ddic);
+        let simulated = delete::run(
+            &mut mixed,
+            &context,
+            &targets(&texts),
+            None,
+            true,
+            &plan_path,
+        );
+
+        assert_eq!(simulated.exit, 0, "{backend:?} {}", simulated.stdout);
+
+        let plan = delete::load_plan(&plan_path).unwrap();
+        let order: Vec<&str> = plan.objects.iter().map(|o| o.1.as_str()).collect();
+
+        // The Python order: TRAN, then CLAS, PROG, and the DDIC rows last.
+        assert_eq!(order, ["ZTRAN", "ZCL_X", "ZPROG", "ZDTEL"], "{backend:?}");
+        // The plan file keeps its format: no per-object backend list.
+        assert!(plan.backends.is_empty());
+        assert!(
+            !std::fs::read_to_string(&plan_path)
+                .unwrap()
+                .contains("backends")
+        );
+
+        let real = delete::run(
+            &mut mixed,
+            &context,
+            &targets(&texts),
+            None,
+            false,
+            &plan_path,
+        );
+
+        assert_eq!(real.exit, 0, "{backend:?} {}", real.stdout);
+        assert!(real.stdout.contains("SUMMARY: 4 OK, 0 FAILED, 0 SKIPPED"));
+        assert_eq!(adt.deleted, ["ZCL_X", "ZPROG"]);
+
+        // Every run of the operation, simulate and delete, posted on the one transport.
+        let other = match backend {
+            Backend::Http => "sadt",
+            Backend::Rfc => "http",
+        };
+
+        for out in [&simulated.stdout, &real.stdout] {
+            assert!(out.contains(&format!("post via {},", backend.post())));
+            assert!(!out.contains(&format!("post via {other},")), "{out}");
+        }
+
+        let payloads = posted(&rig);
+        // The batch list is the whole batch, ADT rows included, in run order.
+        let tokens = ["TRAN:ZTRAN", "CLAS:ZCL_X", "PROG:ZPROG", "DTEL:ZDTEL"];
+
+        assert_eq!(payloads.len(), 4);
+
+        for payload in &payloads {
+            assert_eq!(batch_of(payload), tokens, "the batch list is in run order");
+        }
+
+        assert_eq!(value(&payloads[0], "NAME"), Some("ZTRAN"));
+        assert_eq!(value(&payloads[2], "MODE"), Some("DELETE"));
+        assert_eq!(value(&payloads[2], "NAME"), Some("ZTRAN"));
+        assert_eq!(value(&payloads[2], "PLAN"), Some(HASH_A));
+        clean(&rig);
+    }
+}
+
+#[test]
+fn a_tran_plan_that_changed_since_the_simulate_is_rejected_and_the_batch_goes_on() {
+    let rig = rig(
+        gone_after_post(),
+        vec![
+            PostReply::Output(delete_rejected(
+                "Plan changed since simulate; simulate again",
+            )),
+            PostReply::Output(deleted()),
+        ],
+    );
+    let plan = plan_of_rows(
+        None,
+        &[("TRAN", "ZTRAN", HASH_A), ("DTEL", "ZDTEL", HASH_B)],
+    );
+    let done = delete_batch(
+        &rig,
+        Backend::Rfc,
+        &["TRAN:ZTRAN", "DTEL:ZDTEL"],
+        None,
+        &plan,
+    );
+    let out = &done.outcome.stdout;
+
+    assert_eq!(done.outcome.exit, 1, "{out}");
+    assert!(
+        out.contains("ERROR: Plan changed since simulate; simulate again"),
+        "{out}"
+    );
+    assert!(out.contains("SUMMARY: 1 OK, 1 FAILED, 0 SKIPPED"), "{out}");
+    assert_eq!(rig.sap.borrow().posts, 2);
+}
+
+#[test]
+fn a_tran_plan_that_does_not_match_the_arguments_stops_before_any_connection() {
+    let rig = rig(constant(present()), Vec::new());
+    let plan = plan_of_rows(None, &[("TRAN", "ZTRAN", HASH_A)]);
+
+    for (texts, tr) in [
+        (vec!["TRAN:ZTRAN", "DTEL:ZDTEL"], None),
+        (vec!["TRAN:ZOTHER"], None),
+        (vec!["DTEL:ZTRAN"], None),
+        (vec!["TRAN:ZTRAN"], Some("DEVK900001")),
+    ] {
+        let done = delete_batch(&rig, Backend::Http, &texts, tr, &plan);
+
+        assert_eq!(done.outcome.exit, 2, "{texts:?}");
+        assert_eq!(
+            done.outcome.stderr,
+            "STOP: plan does not match the arguments (conn/objects/--tr); simulate again"
+        );
+    }
+
+    assert_eq!(rig.sap.borrow().sessions, 0, "nothing was opened");
+}
+
+#[test]
+fn a_missing_transaction_is_not_found_in_both_modes_and_the_next_row_runs() {
+    let missing = |mode: &str| {
+        PostReply::Output(output(
+            mode,
+            &[msg(
+                "E",
+                "Object TRAN ZTRAN does not exist (TADIR R3TR TRAN)",
+            )],
+            "NOT_FOUND",
+        ))
+    };
+    let rig = rig(
+        constant(present()),
+        vec![missing("DELETE_SIM"), PostReply::Output(sim_ok(HASH_B))],
+    );
+    let simulated = simulate_batch(&rig, Backend::Rfc, &["TRAN:ZTRAN", "DTEL:ZDTEL"], None);
+    let out = &simulated.outcome.stdout;
+
+    assert_eq!(simulated.outcome.exit, 1, "{out}");
+    assert!(out.contains("DELETE_SIM: NOT_FOUND"), "{out}");
+    assert!(out.contains("DELETE_SIM: SIMULATED_OK"), "{out}");
+    assert!(out.contains("SUMMARY: 1 OK, 1 FAILED, 0 SKIPPED"), "{out}");
+    // Only the existing row is in the plan.
+    assert_eq!(plan_of(&simulated).objects.len(), 1);
+
+    let rig = rig_after_not_found(missing("DELETE"));
+    let plan = plan_of_rows(
+        None,
+        &[("TRAN", "ZTRAN", HASH_A), ("DTEL", "ZDTEL", HASH_B)],
+    );
+    let done = delete_batch(
+        &rig,
+        Backend::Http,
+        &["TRAN:ZTRAN", "DTEL:ZDTEL"],
+        None,
+        &plan,
+    );
+
+    assert!(
+        done.outcome.stdout.contains("DELETE: NOT_FOUND"),
+        "{}",
+        done.outcome.stdout
+    );
+    assert!(
+        done.outcome.stdout.contains("DELETE: DELETED"),
+        "{}",
+        done.outcome.stdout
+    );
+    assert_eq!(rig.sap.borrow().posts, 2);
+}
+
+fn rig_after_not_found(first: PostReply) -> Rig {
+    rig(gone_after_post(), vec![first, PostReply::Output(deleted())])
+}
+
+#[test]
+fn the_markers_of_a_partial_tran_delete_stop_the_batch() {
+    for marker in ["PARTIAL_DELETE:{}", "OBJECT_STILL_EXISTS:{}"] {
+        let line = marker.replace(
+            "{}",
+            &hex("Object TRAN ZTRAN still exists after the delete"),
+        );
+        let rig = rig(
+            constant(present()),
+            vec![PostReply::Output(output("DELETE", &[line], "PARTIAL"))],
+        );
+        let plan = plan_of_rows(
+            None,
+            &[("TRAN", "ZTRAN", HASH_A), ("DTEL", "ZDTEL", HASH_B)],
+        );
+        let done = delete_batch(
+            &rig,
+            Backend::Http,
+            &["TRAN:ZTRAN", "DTEL:ZDTEL"],
+            None,
+            &plan,
+        );
+        let out = &done.outcome.stdout;
+
+        assert_eq!(done.outcome.exit, 1, "{marker}");
+        assert!(out.contains("DELETE: PARTIAL"), "{marker} {out}");
+        assert!(
+            out.contains("Object TRAN ZTRAN still exists after the delete"),
+            "{out}"
+        );
+        assert!(out.contains("SKIPPED DTEL ZDTEL"), "{out}");
+        assert_eq!(rig.sap.borrow().posts, 1);
+    }
+}
+
+#[test]
+fn a_tran_delete_is_proven_by_a_new_session_and_a_lost_reply_is_settled_once() {
+    // The run says DELETED and the TSTC row is still there: PARTIAL, and the batch stops.
+    let first = rig(constant(present()), vec![PostReply::Output(deleted())]);
+    let plan = plan_of_rows(
+        None,
+        &[("TRAN", "ZTRAN", HASH_A), ("DTEL", "ZDTEL", HASH_B)],
+    );
+    let done = delete_batch(
+        &first,
+        Backend::Rfc,
+        &["TRAN:ZTRAN", "DTEL:ZDTEL"],
+        None,
+        &plan,
+    );
+
+    assert_eq!(done.outcome.exit, 1);
+    assert!(done.outcome.stdout.contains("DELETE: PARTIAL"));
+    assert!(done.outcome.stdout.contains("SKIPPED DTEL ZDTEL"));
+
+    for backend in BACKENDS {
+        for gone in [true, false] {
+            let (world, expected) = if gone {
+                (gone_after_post(), "DELETED (reconciled)")
+            } else {
+                (constant(present()), "DELETE: PARTIAL")
+            };
+            let rig = rig(world, vec![PostReply::Lost]);
+            let done = delete_batch(&rig, backend, &["TRAN:ZTRAN", "DTEL:ZDTEL"], None, &plan);
+            let out = &done.outcome.stdout;
+
+            assert_eq!(done.outcome.exit, 1, "{backend:?} {out}");
+            assert!(out.contains(expected), "{expected} in {out}");
+            assert!(out.contains("SKIPPED DTEL ZDTEL"), "{out}");
+            assert_eq!(rig.sap.borrow().posts, 1, "the POST is never resent");
+            clean(&rig);
+        }
+    }
+}
+
+#[test]
+fn the_request_of_a_tran_delete_is_settled_by_the_run_and_shown_in_the_plan() {
+    // A transaction locked in the user's own request: the run reports it in the plan line.
+    let mut body = tran_sim_body(HASH_A);
+
+    body[4] = fact("REQUEST", "DEVK900005");
+    body.push(msg(
+        "W",
+        "Request DEVK900001 is ignored: the object is locked in DEVK900005",
+    ));
+
+    let own = rig(
+        gone_after_post(),
+        vec![
+            PostReply::Output(output("DELETE_SIM", &body, "SIMULATED_OK")),
+            PostReply::Output(deleted()),
+        ],
+    );
+    let simulated = simulate_batch(&own, Backend::Rfc, &["TRAN:ZTRAN"], Some("DEVK900001"));
+    let out = &simulated.outcome.stdout;
+
+    assert!(
+        out.contains("DELETE TRAN ZTRAN package $TMP author DEVUSER TR DEVK900005"),
+        "{out}"
+    );
+    assert!(
+        out.contains("W: Request DEVK900001 is ignored: the object is locked in DEVK900005"),
+        "{out}"
+    );
+
+    let plan = plan_of(&simulated);
+    let real = delete_batch(
+        &own,
+        Backend::Rfc,
+        &["TRAN:ZTRAN"],
+        Some("DEVK900001"),
+        &plan,
+    );
+    let payloads = posted(&own);
+
+    assert_eq!(real.outcome.exit, 0, "{}", real.outcome.stdout);
+    // Both runs get the request of the command; the run settles the lock itself.
+    assert_eq!(value(&payloads[0], "TR"), Some("DEVK900001"));
+    assert_eq!(value(&payloads[1], "TR"), Some("DEVK900001"));
+    assert_eq!(value(&payloads[1], "PLAN"), Some(HASH_A));
+
+    // Another user's request, or an unlocked transportable object without a request, is the
+    // run's REJECTED and the text is shown as the run gave it.
+    for text in [
+        "Object TRAN ZTRAN is locked in request DEVK900009 of OTHERUSER",
+        "Transportable package ZPKG needs --tr",
+    ] {
+        let refused = rig(
+            constant(present()),
+            vec![PostReply::Output(sim_rejected(text))],
+        );
+        let done = simulate_batch(&refused, Backend::Http, &["TRAN:ZTRAN"], None);
+
+        assert_eq!(done.outcome.exit, 1);
+        assert!(
+            done.outcome.stdout.contains(&format!("ERROR: {text}")),
+            "{}",
+            done.outcome.stdout
+        );
+    }
+}
+
+#[test]
+fn the_tran_delete_order_stays_before_every_other_kind() {
+    // Port of the Python order case: a transaction goes before its program.
+    let kinds: Vec<DeleteKind> = [
+        "PROG:ZP", "FUGR:ZF", "FUNC:ZF1", "CLAS:ZC", "INTF:ZI", "TTYP:ZT", "TABL:ZB", "DTEL:ZD",
+        "DOMA:ZM",
+    ]
+    .iter()
+    .map(|text| text.parse::<DeleteTarget>().unwrap().kind)
+    .collect();
+    let tran = "TRAN:ZT".parse::<DeleteTarget>().unwrap().kind;
+
+    assert!(kinds.iter().all(|kind| tran.rank() < kind.rank()));
+}

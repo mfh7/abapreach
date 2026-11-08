@@ -1,12 +1,14 @@
-//! `delete` of the DDIC types (`DTEL`, `DOMA`, `TABL`, `TTYP`) through the temporary runner class.
+//! `delete` of the DDIC types (`DTEL`, `DOMA`, `TABL`, `TTYP`) and of `TRAN` through the temporary
+//! runner class.
 //!
 //! The generic delete engine ([`crate::operation::delete`]) owns the batch: order, plan file,
 //! statuses, summary and stop rules. This backend answers for the DDIC rows with ONE run per row:
 //! `DELETE_SIM` for the plan (the hash of the live definition is the plan hash) and `DELETE` for
-//! the real delete, which sends the plan hash back to the run. The class re-reads the live
-//! definition and rejects with `Plan changed since simulate; simulate again`. The run also owns
-//! the rules of the Python tool: rows of a transparent table, an object still in use outside the
-//! batch, and the batch order; Rust passes the whole batch in the payload and maps the answer.
+//! the real delete, which sends the plan hash back to the run (for `TRAN` the hash of the six live
+//! lines). The class re-reads the live definition and rejects with
+//! `Plan changed since simulate; simulate again`. The run also owns the rules of the Python tool:
+//! rows of a transparent table, an object still in use outside the batch, and the batch order;
+//! Rust passes the whole batch in the payload and maps the answer.
 //!
 //! A delete counts as done only when the run said `DELETED` AND a new session finds the
 //! definition and the TADIR row gone. A lost reply is settled once, read-only, and never resent.
@@ -620,20 +622,28 @@ fn ready(kind: Kind, name: &str, report: &Report) -> RowPlan {
 
     let value = |key: &str| fact(report, key).unwrap_or("-");
     let request = value("REQUEST");
-    let marker = if value("STATE") == "NO_ACTIVE" {
-        "NO_ACTIVE"
+    let mut lines = vec![format!(
+        "DELETE {} {name} package {} author {} TR {request}",
+        kind.token(),
+        value("PACKAGE"),
+        value("AUTHOR")
+    )];
+
+    if kind == Kind::Tran {
+        // The hashed definition is the six live lines; a missing transaction is NOT_FOUND, so
+        // there is no `NO_ACTIVE` marker. The program and cinfo are shown with the plan.
+        lines.push(format!("PROGRAM {}", value("PROGRAM")));
+        lines.push(format!("CINFO {}", value("CINFO")));
+        lines.push(format!("SOURCE LINES {hash}"));
     } else {
-        hash
-    };
-    let mut lines = vec![
-        format!(
-            "DELETE {} {name} package {} author {} TR {request}",
-            kind.token(),
-            value("PACKAGE"),
-            value("AUTHOR")
-        ),
-        format!("SOURCE XML {marker}"),
-    ];
+        let marker = if value("STATE") == "NO_ACTIVE" {
+            "NO_ACTIVE"
+        } else {
+            hash
+        };
+
+        lines.push(format!("SOURCE XML {marker}"));
+    }
 
     if let Some(rows) = fact(report, "ROWS") {
         lines.push(format!("ROWS {rows}"));

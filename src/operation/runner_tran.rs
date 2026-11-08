@@ -12,7 +12,7 @@
 //! `TRAN` template emits none.
 
 use crate::app::{Exit, Factories, Opened};
-use crate::backend::{BackendKind, Failure, Selection, SelectionReason};
+use crate::backend::{BackendKind, Failure, Selection};
 use crate::config::Connection;
 use crate::domain::{Outcome, Status};
 use crate::hash::source_hash;
@@ -24,6 +24,7 @@ use crate::operation::runner_evidence::{Expect, Proof, confirm, judge, read_evid
 use crate::operation::runner_reconcile::{
     Clock, Intent, ReadFacts, ReadRun, Subject, SystemClock, read_facts, reconcile, settle,
 };
+use crate::operation::runner_route::{Routed, random_nonce, route};
 use crate::operation::runner_template::{TRAN_TEMPLATE, generate};
 use crate::runner_protocol::{Level, Nonce, Parsed, Report, RunMode, RunStatus, parse_post_reply};
 use std::path::Path;
@@ -123,7 +124,7 @@ pub fn read_with(
                 cancel,
             };
 
-            attempt_read(&mut runtime, read, &spec)
+            attempt_read(&mut runtime, read, &spec).routed()
         },
     )
 }
@@ -160,17 +161,9 @@ pub fn create_with(
                 cancel,
             };
 
-            attempt_create(&mut runtime, selection, create, &spec)
+            attempt_create(&mut runtime, selection, create, &spec).routed()
         },
     )
-}
-
-fn random_nonce() -> String {
-    let mut bytes = [0u8; 16];
-
-    getrandom::fill(&mut bytes).expect("the OS random source is available");
-
-    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
 }
 
 fn create_mode(create: &TranCreate<'_>) -> Mode {
@@ -349,6 +342,17 @@ struct Done {
     outcome: Outcome,
     /// The failure and its text, when nothing was sent and the other backend may still run.
     fallback: Option<(Failure, String)>,
+}
+
+impl Done {
+    fn routed(self) -> Routed {
+        Routed {
+            code: self.outcome.exit,
+            stdout: self.outcome.stdout,
+            stderr: vec![self.outcome.stderr],
+            fallback: self.fallback,
+        }
+    }
 }
 
 /// The lines of an attempt while it is built.
@@ -798,84 +802,4 @@ fn tran_read_facts(end: &RunnerEnd, nonce: &Nonce) -> Result<ReadFacts, String> 
     }
 
     read_facts(end, nonce)
-}
-
-// --- routing -----------------------------------------------------------------------------------
-
-/// Runs the attempt on the backend the connection allows. A second backend is tried only when the
-/// first one failed before anything was sent and `--backend` does not pin it.
-fn route(
-    label: &str,
-    connection: &Connection,
-    explicit: Option<BackendKind>,
-    factories: &mut dyn Factories,
-    mut attempt: impl FnMut(&Selection, &dyn Fn() -> Opened, &CancelFlag) -> Done,
-) -> Exit {
-    let cancel = factories.cancel();
-    let mut backend = match explicit {
-        Some(backend) => backend,
-        None if connection.adt.is_some() => BackendKind::AdtHttp,
-        None => BackendKind::RfcSadt,
-    };
-    let mut reason = match explicit {
-        Some(_) => SelectionReason::ExplicitBackend,
-        None if connection.adt.is_some() => SelectionReason::DefaultAdt,
-        None => SelectionReason::RfcOnly,
-    };
-    let mut earlier: Vec<String> = Vec::new();
-
-    loop {
-        let available = match backend {
-            BackendKind::AdtHttp => connection.adt.is_some(),
-            BackendKind::RfcSadt => connection.rfc.is_some(),
-        };
-
-        if !available {
-            return stop(format!("{backend} is not available for {label}"));
-        }
-
-        let selection = Selection::new(backend, reason.clone());
-        let shared = std::cell::RefCell::new(&mut *factories);
-        let open = || match backend {
-            BackendKind::AdtHttp => shared.borrow_mut().adt(connection),
-            BackendKind::RfcSadt => shared.borrow_mut().rfc(connection),
-        };
-        let done = attempt(&selection, &open, &cancel);
-        let retry = done.fallback.filter(|_| {
-            explicit.is_none() && backend == BackendKind::AdtHttp && connection.rfc.is_some()
-        });
-
-        let Some((failure, text)) = retry else {
-            return exit_of(earlier, done.outcome);
-        };
-
-        earlier.push(done.outcome.stderr);
-        earlier.push(format!(
-            "NOTE: {backend} failed before anything was written; falling back to RFC SADT"
-        ));
-        reason = SelectionReason::Fallback(format!("{failure}: {text}"));
-        backend = BackendKind::RfcSadt;
-    }
-}
-
-fn exit_of(mut stderr: Vec<String>, outcome: Outcome) -> Exit {
-    stderr.push(outcome.stderr);
-    stderr.retain(|line| !line.is_empty());
-
-    // An abandoned backend breaks the run only when the one that replaced it failed too.
-    if outcome.exit == 0 {
-        stderr = stderr
-            .into_iter()
-            .map(|block| match block.strip_prefix("ERROR: ") {
-                Some(rest) => format!("NOTE: {rest}"),
-                None => block,
-            })
-            .collect();
-    }
-
-    Exit {
-        code: outcome.exit,
-        stdout: outcome.stdout,
-        stderr: stderr.join("\n"),
-    }
 }

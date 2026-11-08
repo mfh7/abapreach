@@ -30,6 +30,7 @@ use crate::operation::read_table::{
     CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableError, ReadTableRequest,
 };
 use crate::operation::runner_tran::{self, TranCreate, TranRead};
+use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
 use crate::policy::Terminal;
 use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use crate::transport::http::{HttpConfig, HttpTransport};
@@ -365,6 +366,12 @@ fn runner_exit(operation: &str, kind: Kind, checked: Result<(), String>) -> Exit
     }
 }
 
+/// The text of the XML FILE of a DDIC command.
+fn read_xml(file: &Path) -> Result<String, Exit> {
+    fs::read_to_string(file)
+        .map_err(|error| stop(format!("cannot read {}: {error}", file.display())))
+}
+
 fn connection_id(command: &Command) -> Option<&str> {
     match command {
         Command::Read { conn, .. }
@@ -515,19 +522,12 @@ fn execute(
         };
     }
 
-    // A DDIC or transaction row is checked here before any connection. The DDIC rows then run;
-    // a batch with a transaction row stops, because that operation comes with Task 24.
+    // A DDIC or transaction row is checked here before any connection.
     if let Command::Delete { targets, tr, .. } = &command
-        && let Some(kind) = runner_cli::first_kind(targets)
+        && runner_cli::first_kind(targets).is_some()
+        && let Err(message) = runner_cli::check_delete(targets, tr.as_deref())
     {
-        let checked = runner_cli::check_delete(targets, tr.as_deref());
-        let tran = targets
-            .iter()
-            .any(|target| target.kind == DeleteKind::Runner(Kind::Tran));
-
-        if checked.is_err() || tran {
-            return runner_exit("delete", if tran { Kind::Tran } else { kind }, checked);
-        }
+        return stop(message);
     }
 
     match command {
@@ -846,6 +846,31 @@ fn execute(
                         );
                     }
 
+                    // `check_create` makes FILE mandatory for a DDIC type.
+                    if let (true, Ok(()), Some(file)) = (simulate, &checked, file.as_deref()) {
+                        let xml = match read_xml(file) {
+                            Ok(xml) => xml,
+                            Err(exit) => return exit,
+                        };
+                        let request = DdicSimulate {
+                            kind,
+                            name: &name,
+                            xml: &xml,
+                            tr: tr.as_deref(),
+                            simulation: Simulation::Create {
+                                package: package.as_deref(),
+                                text: text.as_deref(),
+                            },
+                        };
+
+                        return simulate_ddic::simulate(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
                     return runner_exit("create", kind, checked);
                 }
                 TypeArg::Extension(kind) => {
@@ -967,11 +992,32 @@ fn execute(
                         create_include,
                     };
 
-                    return runner_exit(
-                        "deploy",
-                        kind,
-                        runner_cli::check_deploy(kind, &name, tr.as_deref(), &options),
-                    );
+                    let checked = runner_cli::check_deploy(kind, &name, tr.as_deref(), &options);
+
+                    if simulate && checked.is_ok() {
+                        let xml = match read_xml(&file) {
+                            Ok(xml) => xml,
+                            Err(exit) => return exit,
+                        };
+                        let request = DdicSimulate {
+                            kind,
+                            name: &name,
+                            xml: &xml,
+                            tr: tr.as_deref(),
+                            simulation: Simulation::Deploy {
+                                base: base.as_deref(),
+                            },
+                        };
+
+                        return simulate_ddic::simulate(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    return runner_exit("deploy", kind, checked);
                 }
                 // `deploy` parses an extension type only so that it can say why it stops.
                 TypeArg::Extension(kind) => {

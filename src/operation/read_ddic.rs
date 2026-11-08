@@ -26,11 +26,11 @@ use crate::operation::read::emit_lines;
 use crate::operation::runner::{CycleInput, PostRoute, RunnerEnd, RunnerRun, run_cycle};
 use crate::operation::runner_evidence::{Expect, Proof, judge, read_evidence};
 use crate::operation::runner_reconcile::{Cause, uncertainty};
+use crate::operation::runner_route::{Routed, random_nonce, route};
 use crate::operation::runner_template::{
     DOMA_TEMPLATE, DTEL_TEMPLATE, TABL_TEMPLATE, TTYP_TEMPLATE, TypeTemplate, generate,
 };
 use crate::runner_protocol::{Level, Nonce, Parsed, Report, RunMode, RunStatus, parse_post_reply};
-use std::cell::RefCell;
 use std::path::Path;
 
 /// A valid nonce for the checks that run before any connection.
@@ -62,15 +62,15 @@ pub fn read(
     }
 
     route(
-        request.kind,
+        &format!("read {}", request.kind.token()),
         connection,
         explicit,
         factories,
-        |backend, open, cancel| {
+        |selection, open, cancel| {
             run_attempt(
                 &Attempt {
                     connection,
-                    backend,
+                    backend: selection.backend,
                     open,
                     cancel,
                     request,
@@ -79,11 +79,12 @@ pub fn read(
                 },
                 &mut random_nonce,
             )
+            .routed()
         },
     )
 }
 
-fn template_of(kind: Kind) -> Option<&'static TypeTemplate> {
+pub(crate) fn template_of(kind: Kind) -> Option<&'static TypeTemplate> {
     match kind {
         Kind::Dtel => Some(&DTEL_TEMPLATE),
         Kind::Doma => Some(&DOMA_TEMPLATE),
@@ -91,14 +92,6 @@ fn template_of(kind: Kind) -> Option<&'static TypeTemplate> {
         Kind::Ttyp => Some(&TTYP_TEMPLATE),
         Kind::Tran => None,
     }
-}
-
-fn random_nonce() -> String {
-    let mut bytes = [0u8; 16];
-
-    getrandom::fill(&mut bytes).expect("the OS random source is available");
-
-    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
 }
 
 fn payload(kind: Kind, name: &str, nonce: &str) -> Result<Vec<String>, String> {
@@ -134,6 +127,17 @@ struct Done {
     stderr: Vec<String>,
     /// Set when nothing was sent and the failure allows the other backend.
     fallback: Option<(Failure, String)>,
+}
+
+impl Done {
+    fn routed(self) -> Routed {
+        Routed {
+            code: self.code,
+            stdout: self.stdout.join("\n"),
+            stderr: self.stderr,
+            fallback: self.fallback,
+        }
+    }
 }
 
 fn run_attempt(attempt: &Attempt<'_>, nonce: &mut dyn FnMut() -> String) -> Done {
@@ -468,81 +472,5 @@ fn ok_done(attempt: &Attempt<'_>, run: &RunnerRun, report: &Report, mut print: P
             print.finish(run, 0)
         }
         Err(error) => fail(print, format!("ERROR: {}", error.message)),
-    }
-}
-
-// --- the backends ------------------------------------------------------------------------------
-
-/// Runs `attempt` on the first backend and, when nothing was sent and the failure allows it, on
-/// RFC. `--backend` pins the backend.
-fn route(
-    kind: Kind,
-    connection: &Connection,
-    explicit: Option<BackendKind>,
-    factories: &mut dyn Factories,
-    mut attempt: impl FnMut(BackendKind, &dyn Fn() -> Opened, &CancelFlag) -> Done,
-) -> Exit {
-    let cancel = factories.cancel();
-    let mut backend = match explicit {
-        Some(backend) => backend,
-        None if connection.adt.is_some() => BackendKind::AdtHttp,
-        None => BackendKind::RfcSadt,
-    };
-    let mut earlier: Vec<String> = Vec::new();
-
-    loop {
-        let available = match backend {
-            BackendKind::AdtHttp => connection.adt.is_some(),
-            BackendKind::RfcSadt => connection.rfc.is_some(),
-        };
-
-        if !available {
-            return stop(format!(
-                "{backend} is not available for read {}",
-                kind.token()
-            ));
-        }
-
-        let shared = RefCell::new(&mut *factories);
-        let open = || match backend {
-            BackendKind::AdtHttp => shared.borrow_mut().adt(connection),
-            BackendKind::RfcSadt => shared.borrow_mut().rfc(connection),
-        };
-        let done = attempt(backend, &open, &cancel);
-        let retry = done.fallback.as_ref().filter(|_| {
-            explicit.is_none() && backend == BackendKind::AdtHttp && connection.rfc.is_some()
-        });
-
-        if retry.is_none() {
-            return exit_of(earlier, done);
-        }
-
-        earlier.extend(done.stderr);
-        earlier.push(format!(
-            "NOTE: {backend} failed before anything was written; falling back to RFC SADT"
-        ));
-        backend = BackendKind::RfcSadt;
-    }
-}
-
-fn exit_of(mut stderr: Vec<String>, done: Done) -> Exit {
-    stderr.extend(done.stderr);
-    stderr.retain(|line| !line.is_empty());
-
-    // An abandoned backend breaks the read only when the one that replaced it failed too.
-    if done.code == 0 {
-        stderr = stderr
-            .into_iter()
-            .map(|block| match block.strip_prefix("ERROR: ") {
-                Some(rest) => format!("NOTE: {rest}"),
-                None => block,
-            })
-            .collect();
-    }
-
-    Exit {
-        code: done.code,
-        stdout: done.stdout.join("\n"),
-        stderr: stderr.join("\n"),
     }
 }

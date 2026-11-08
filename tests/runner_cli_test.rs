@@ -305,9 +305,18 @@ fn every_valid_form_passes_the_grammar_without_a_connection() {
             continue;
         }
 
-        // `delete` of DDIC rows runs since Task 23; its forms are in tests/delete_ddic_test.rs.
-        // A batch with a TRAN row still stops here until Task 24.
-        if operation == "delete" && token != "TRAN" {
+        // `delete` of DDIC rows runs since Task 23 and of TRAN rows since Task 24; their forms
+        // are in tests/delete_ddic_test.rs and tests/delete_ddic_cli_test.rs.
+        if operation == "delete" {
+            continue;
+        }
+
+        // `deploy --simulate` and `create --simulate` of a DDIC type run since Task 19; their
+        // forms are in tests/runner_ddic_sim_test.rs.
+        if matches!(operation, "deploy" | "create")
+            && token != "TRAN"
+            && arguments.contains(&"--simulate")
+        {
             continue;
         }
 
