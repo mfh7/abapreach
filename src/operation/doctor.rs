@@ -78,6 +78,7 @@ impl Doctor {
                 denied_label(&connection.policies.read_table_denied)
             ),
             format!("policy mcp_write: {}", connection.policies.mcp_write),
+            format!("RUNNER prefix: {}", connection.runner_prefix),
         ];
         let missing = connection.policies.missing_default_denied();
 

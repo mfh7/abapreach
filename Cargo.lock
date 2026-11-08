@@ -10,6 +10,7 @@ dependencies = [
  "aws-lc-rs",
  "clap",
  "ctrlc",
+ "getrandom 0.4.3",
  "httpmock",
  "libloading",
  "quick-xml",

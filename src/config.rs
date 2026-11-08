@@ -1,3 +1,4 @@
+use crate::operation::runner::{DEFAULT_RUNNER_PREFIX, validate_runner_prefix};
 use crate::policy::{McpWrite, Policies, PolicyDocument};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -121,6 +122,8 @@ pub struct Connection {
     pub saprouter_source: Option<SaprouterSource>,
     /// The effective write-guard policies of this connection.
     pub policies: Policies,
+    /// The effective prefix of the temporary runner class: `runner_prefix` or the default.
+    pub runner_prefix: String,
 }
 
 impl Connection {
@@ -180,6 +183,7 @@ impl Connection {
             }),
             saprouter_source: None,
             policies: Policies::default(),
+            runner_prefix: DEFAULT_RUNNER_PREFIX.to_owned(),
         }
     }
 }
@@ -260,6 +264,14 @@ impl Config {
                     "{}: servers[{index}].systemId",
                     paths.connections.display()
                 ));
+            }
+            if let Some(prefix) = &server.runner_prefix {
+                validate_runner_prefix(prefix).map_err(|reason| {
+                    format!(
+                        "{}: servers[{index}].runner_prefix: {reason}",
+                        paths.connections.display()
+                    )
+                })?;
             }
         }
         let local = match fs::read_to_string(&paths.local) {
@@ -364,6 +376,10 @@ impl Config {
             rfc,
             saprouter_source,
             policies,
+            runner_prefix: server
+                .runner_prefix
+                .clone()
+                .unwrap_or_else(|| DEFAULT_RUNNER_PREFIX.to_owned()),
         })
     }
 
@@ -500,6 +516,9 @@ struct Server {
     lang: Option<String>,
     #[serde(default)]
     policies: Option<PolicyDocument>,
+    /// The key is snake case on purpose, like the policy keys; `None` selects the default prefix.
+    #[serde(default, rename = "runner_prefix")]
+    runner_prefix: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
