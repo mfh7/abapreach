@@ -360,9 +360,15 @@ pub(crate) fn stop(message: impl std::fmt::Display) -> Exit {
 }
 
 /// The STOP of the rule a DDIC or transaction command broke; a command that passed its rules ran
-/// before this is reached.
+/// before this is reached, so a passed check here is a bug that stops instead of panicking.
 fn runner_exit(checked: Result<(), String>) -> Exit {
-    stop(checked.expect_err("a DDIC or transaction command that passed its rules ran above"))
+    let Err(message) = checked else {
+        return stop(
+            "internal error: a DDIC or transaction command passed its rules but did not run",
+        );
+    };
+
+    stop(message)
 }
 
 /// The text of the XML FILE of a DDIC command.
@@ -1713,5 +1719,30 @@ fn as_note(block: String) -> String {
     match block.strip_prefix("ERROR: ") {
         Some(rest) => format!("NOTE: {rest}"),
         None => block,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runner_exit;
+
+    #[test]
+    fn a_broken_rule_is_the_stop_of_its_message() {
+        let exit = runner_exit(Err("FILE is required".to_owned()));
+
+        assert_eq!(exit.code, 2);
+        assert_eq!(exit.stderr, "STOP: FILE is required");
+    }
+
+    #[test]
+    fn a_passed_check_is_a_stop_and_never_a_panic() {
+        let exit = runner_exit(Ok(()));
+
+        assert_eq!(exit.code, 2);
+        assert!(
+            exit.stderr.starts_with("STOP: internal error"),
+            "{}",
+            exit.stderr
+        );
     }
 }

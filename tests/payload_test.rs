@@ -844,6 +844,60 @@ fn table_field_rows_must_all_carry_the_requested_tabname() {
 }
 
 #[test]
+fn sub_table_rows_must_all_name_the_requested_object() {
+    // (kind, row element, name tag): every name-keyed sub-table the payload accepts.
+    let rows = [
+        (Kind::Doma, "DD07V_TAB", "DD07V", "DOMNAME"),
+        (Kind::Tabl, "", "DD09L", "TABNAME"),
+        (Kind::Tabl, "DD05M_TABLE", "DD05M", "TABNAME"),
+        (Kind::Tabl, "DD08V_TABLE", "DD08V", "TABNAME"),
+        (Kind::Tabl, "DD35V_TABLE", "DD35V", "TABNAME"),
+        (Kind::Tabl, "DD36M_TABLE", "DD36M", "TABNAME"),
+        (Kind::Ttyp, "DD42V_TABLE", "DD42V", "TYPENAME"),
+        (Kind::Ttyp, "DD43V_TABLE", "DD43V", "TYPENAME"),
+    ];
+
+    for (kind, table, row, tag) in rows {
+        let with = |object: &str| {
+            let element = format!("<{row}><{tag}>{object}</{tag}></{row}>");
+            let wrapped = if table.is_empty() {
+                element
+            } else {
+                format!("<{table}>{element}</{table}>")
+            };
+
+            ddic_xml(kind, "ZOBJ", "t").replace("</asx:values>", &format!("{wrapped}</asx:values>"))
+        };
+        let kind_token = format!("{kind:?}").to_ascii_uppercase();
+        let mut r = Request::new(Mode::Simulate, kind, "ZOBJ", NONCE);
+
+        let good = with("ZOBJ");
+        r.xml = Some(&good);
+        encoded(&r);
+
+        let foreign = with("MATNR");
+        r.xml = Some(&foreign);
+        assert_eq!(
+            err(&r),
+            format!("XML file is for MATNR, not {kind_token} ZOBJ"),
+            "{row}"
+        );
+    }
+}
+
+#[test]
+fn sub_table_rows_without_a_name_are_not_judged() {
+    // Empty tables and rows that carry no name field stay accepted (only a foreign name is refused).
+    let xml = ddic_xml(Kind::Ttyp, "ZOBJ", "t").replace(
+        "</asx:values>",
+        "<DD42V/><DD43V/><DD07V_TAB><DD07V><VALPOS>0001</VALPOS></DD07V></DD07V_TAB></asx:values>",
+    );
+    let mut r = Request::new(Mode::Simulate, Kind::Ttyp, "ZOBJ", NONCE);
+    r.xml = Some(&xml);
+    encoded(&r);
+}
+
+#[test]
 fn only_the_record_element_names_the_object() {
     // A matching name in the wrong place does not satisfy the check.
     let xml = "<abapGit><DD04V><DDTEXT>ZOBJ</DDTEXT></DD04V><OTHER><ROLLNAME>ZOBJ</ROLLNAME></OTHER></abapGit>";

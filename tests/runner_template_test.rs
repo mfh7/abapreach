@@ -710,6 +710,69 @@ fn the_scanner_accepts_a_table_expression_that_cannot_raise_or_has_no_logic_arou
 }
 
 #[test]
+fn the_scanner_rejects_statements_that_run_other_code_or_change_the_database() {
+    for code in [
+        "SUBMIT lv_rep AND RETURN.",
+        "submit (lv_name).",
+        "EXEC SQL.\n  DELETE FROM t000\nENDEXEC.",
+        "CALL 'C_SAPGPARAM' ID 'NAME' FIELD lv_n.",
+        "GENERATE SUBROUTINE POOL lt_src NAME lv_pool.",
+        "INSERT REPORT lv_name FROM lt_src.",
+        "CALL TRANSACTION 'SE38'.",
+        "CALL METHOD (lv_class)=>(lv_method).",
+        "CALL METHOD (lv_method).",
+        "lo_x->(lv_method)( ).",
+        "lo_x->(lv_method).",
+        "cl_abap_typedescr=>(lv_method)( ).",
+        "INSERT t000 FROM ls_row.",
+        "INSERT t000 FROM TABLE lt_rows.",
+        "INSERT INTO t000 VALUES ls_row.",
+        "INSERT (lv_table) FROM ls_row.",
+        "UPDATE t000 SET cccategory = 'C'.",
+        "x = 1.\nUPDATE t000 FROM ls_row.",
+        "MODIFY t000 FROM ls_row.",
+        "MODIFY t000 FROM TABLE lt_rows.",
+        "DELETE FROM t000 WHERE mandt = '001'.",
+        "DELETE t000 FROM ls_row.",
+        "DELETE t000 FROM TABLE lt_rows.",
+        "DELETE (lv_table) FROM ls_row.",
+        "\" a comment\nUPDATE t000 SET x = 1.",
+    ] {
+        let found = rejected(code, None);
+
+        assert!(
+            found
+                .iter()
+                .all(|f| f.contains("is not allowed") && !f.contains("Y/Z")),
+            "{code}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn the_scanner_accepts_internal_table_statements_and_words_in_comments_and_literals() {
+    for code in [
+        "INSERT ls_row INTO TABLE lt_rows.",
+        "INSERT VALUE #( a = 1 ) INTO TABLE lt_rows.",
+        "INSERT ls_row INTO lt_rows INDEX 1.",
+        "INSERT LINES OF lt_a FROM 2 TO 3 INTO TABLE lt_b.",
+        "DELETE lt_rows INDEX lv_i.",
+        "DELETE lt_rows WHERE a = 1.",
+        "DELETE cs_def-dd03p WHERE adminfield <> '0'.",
+        "DELETE TABLE lt_rows FROM ls_row.",
+        "DELETE ADJACENT DUPLICATES FROM lt_rows.",
+        "x = lt_rows[ 1 ].\n\" Update the row, then modify it and submit.",
+        "* Delete from the database is never done here.",
+        "lv_mode = 'MODIFY'. lv_text = `UPDATE t000 SET x = 1`.",
+        "lo_x->method( ).",
+        "CALL FUNCTION 'DD_DECIDE'.",
+        "mv_transaction = 'SE11'. lv_report = 1.",
+    ] {
+        scan(code, None).unwrap_or_else(|found| panic!("{code}: {found:?}"));
+    }
+}
+
+#[test]
 fn the_scanner_reports_every_finding_with_its_line() {
     let found = rejected(
         "x = 1.\nCALL FUNCTION 'BAD_ONE'\nx = cl_bad=>y.\nzfoo = 2.",

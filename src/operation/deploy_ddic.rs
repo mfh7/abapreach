@@ -293,7 +293,14 @@ fn write(
             (nonce, clock),
             print,
         ),
-        other => print.ended(&second, other, Simulation::Deploy { base: None }),
+        other => {
+            let mut done = print.ended(&second, other, Simulation::Deploy { base: None });
+
+            // Run 1 has been sent: a router fallback would repeat it on RFC.
+            done.fallback = None;
+
+            done
+        }
     }
 }
 

@@ -368,7 +368,8 @@ struct Fake {
     script: Script,
     cancel: CancelFlag,
     seen: Seen,
-    adt_down: bool,
+    /// From this ADT open on (1-based), every open fails with a connectivity error.
+    adt_down_from: Option<usize>,
     adt_opens: usize,
     rfc_opens: usize,
     package: &'static str,
@@ -392,7 +393,10 @@ impl Factories for Fake {
     fn adt(&mut self, _: &Connection) -> Opened {
         self.adt_opens += 1;
 
-        if self.adt_down {
+        if self
+            .adt_down_from
+            .is_some_and(|from| self.adt_opens >= from)
+        {
             return Err(TransportError::PreSendConnectivity("no route".to_owned()));
         }
 
@@ -503,7 +507,7 @@ struct Case {
     extra: Vec<&'static str>,
     sap: Shared,
     script: Script,
-    adt_down: bool,
+    adt_down_from: Option<usize>,
     cancel: CancelFlag,
     package: &'static str,
     fail_deletes_at_post: Option<usize>,
@@ -555,7 +559,7 @@ impl Case {
             extra: Vec::new(),
             sap: sap(PRESENT),
             script: replies.script(),
-            adt_down: false,
+            adt_down_from: None,
             cancel: CancelFlag::new(),
             package: "$TMP",
             fail_deletes_at_post: None,
@@ -582,7 +586,7 @@ impl Case {
             script: self.script.clone(),
             cancel: self.cancel.clone(),
             seen: seen.clone(),
-            adt_down: self.adt_down,
+            adt_down_from: self.adt_down_from,
             adt_opens: 0,
             rfc_opens: 0,
             package: self.package,
@@ -1516,7 +1520,7 @@ fn ctrl_c_during_run_1_exits_130_and_starts_no_write() {
 fn a_connection_that_cannot_be_opened_falls_back_to_rfc_before_anything_is_written() {
     let mut case = passing_case(0);
 
-    case.adt_down = true;
+    case.adt_down_from = Some(1);
 
     let done = case.go();
 
@@ -1533,6 +1537,28 @@ fn a_connection_that_cannot_be_opened_falls_back_to_rfc_before_anything_is_writt
         )
     );
     assert!(done.exit.stdout.ends_with("\nACTIVE"));
+}
+
+#[test]
+fn a_run_2_that_cannot_be_opened_reports_the_failure_and_never_reruns_run_1_on_rfc() {
+    let mut case = passing_case(0);
+
+    // Open 1 is run 1, open 2 its cleanup proof, open 3 run 2.
+    case.adt_down_from = Some(3);
+
+    let done = case.go();
+
+    assert_eq!(done.exit.code, 1, "{}", done.exit.stderr);
+    assert_eq!(done.modes(), ["SIMULATE"]);
+    assert_eq!(done.rfc_opens, 0);
+    assert_eq!(done.exit.stdout.matches("backend:").count(), 1);
+    assert!(
+        !done.exit.stderr.contains("falling back"),
+        "{}",
+        done.exit.stderr
+    );
+    assert!(done.exit.stderr.contains("ERROR:"), "{}", done.exit.stderr);
+    assert_clean(&done);
 }
 
 // ---- an uncertain status after run 2 (Task 16) ----------------------------------------------------------

@@ -2474,6 +2474,7 @@ static PACKAGE_LONG: [OptionSpec; 1] = [option("ypackage", "package")];
 static SHARED_ID: [OptionSpec; 1] = [option("yopt", "other")];
 static SHARED_LONG: [OptionSpec; 1] = [option("yother", "yopt")];
 static YOPT: [OptionSpec; 1] = [option("yopt", "yopt")];
+static SOURCE_ID: [OptionSpec; 1] = [option("source", "ysource")];
 
 const fn spec_with(options: &'static [OptionSpec], token: &'static str) -> KindSpec {
     let mut kind = spec(token, "y (YKIND)");
@@ -2483,11 +2484,13 @@ const fn spec_with(options: &'static [OptionSpec], token: &'static str) -> KindS
 }
 
 static TEXT_ID_KIND: KindSpec = spec_with(&TEXT_ID, "YKIND");
+static SOURCE_ID_KIND: KindSpec = spec_with(&SOURCE_ID, "YKIND");
 static PACKAGE_LONG_KIND: KindSpec = spec_with(&PACKAGE_LONG, "YKIND");
 static YOPT_KIND: KindSpec = spec_with(&YOPT, "YKIND");
 static SHARED_ID_KIND: KindSpec = spec_with(&SHARED_ID, "YOTHER");
 static SHARED_LONG_KIND: KindSpec = spec_with(&SHARED_LONG, "YOTHER");
 static TEXT_ID_KINDS: [ExtensionKind; 1] = [ExtensionKind::new(&TEXT_ID_KIND)];
+static SOURCE_ID_KINDS: [ExtensionKind; 1] = [ExtensionKind::new(&SOURCE_ID_KIND)];
 static PACKAGE_LONG_KINDS: [ExtensionKind; 1] = [ExtensionKind::new(&PACKAGE_LONG_KIND)];
 static SHARED_ID_KINDS: [ExtensionKind; 2] = [
     ExtensionKind::new(&YOPT_KIND),
@@ -2508,6 +2511,15 @@ static YOPT_KIND_B: KindSpec = spec_with(&YOPT, "YOTHER");
 fn an_option_id_that_is_a_standard_argument_is_refused() {
     let _ = Registry::new().with(Colliding {
         kinds: &TEXT_ID_KINDS,
+        faults: &[],
+    });
+}
+
+#[test]
+#[should_panic(expected = "extension option source is a standard create argument")]
+fn the_ddic_source_option_is_reserved_against_an_extension() {
+    let _ = Registry::new().with(Colliding {
+        kinds: &SOURCE_ID_KINDS,
         faults: &[],
     });
 }
@@ -2553,5 +2565,14 @@ fn a_standard_fault_target_is_refused() {
     let _ = Registry::new().with(Colliding {
         kinds: &FINE_KINDS,
         faults: &["PUT"],
+    });
+}
+
+#[test]
+#[should_panic(expected = "fault target CLASSRUN is a standard target")]
+fn the_classrun_fault_target_is_reserved_against_an_extension() {
+    let _ = Registry::new().with(Colliding {
+        kinds: &FINE_KINDS,
+        faults: &["CLASSRUN"],
     });
 }

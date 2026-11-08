@@ -386,6 +386,10 @@ fn xml_rows(xml: &str, kind: Kind, name: &str, text: Option<&str>) -> Result<Vec
         return Err(wrong_object(row, kind, name));
     }
 
+    if let Some(other) = found.sub_names.iter().find(|row| *row != name) {
+        return Err(wrong_object(other, kind, name));
+    }
+
     if let Some(text) = text
         && found.description.as_deref() != Some(text)
     {
@@ -410,7 +414,21 @@ struct Found {
     description: Option<String>,
     /// The `TABNAME` of every `DD03P` row; `None` when the row has none.
     rows: Vec<Option<String>>,
+    /// The non-empty object name of every row of the other name-keyed sub-tables (`SUB_TABLE_NAMES`).
+    sub_names: Vec<String>,
 }
+
+/// The rows the DDIC `*_PUT` functions take besides `DD03P`, with the element that names the object.
+const SUB_TABLE_NAMES: [(&str, &str); 8] = [
+    ("DD07V", "DOMNAME"),
+    ("DD09L", "TABNAME"),
+    ("DD05M", "TABNAME"),
+    ("DD08V", "TABNAME"),
+    ("DD35V", "TABNAME"),
+    ("DD36M", "TABNAME"),
+    ("DD42V", "TYPENAME"),
+    ("DD43V", "TYPENAME"),
+];
 
 fn scan(xml: &str, kind: Kind) -> Result<Found, String> {
     let (record, name_tag) = kind.xml_names();
@@ -466,6 +484,12 @@ impl Found {
             self.name.get_or_insert_with(|| text.trim().to_owned());
         } else if parent == record && last == "DDTEXT" {
             self.description.get_or_insert_with(|| text.to_owned());
+        } else if SUB_TABLE_NAMES.contains(&(parent.as_str(), last.as_str())) {
+            let name = text.trim();
+
+            if !name.is_empty() {
+                self.sub_names.push(name.to_owned());
+            }
         } else if parent == "DD03P"
             && last == "TABNAME"
             && let Some(row) = self.rows.last_mut()

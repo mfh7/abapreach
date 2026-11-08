@@ -55,10 +55,10 @@ const STANDARD_TOKENS: [&str; 10] = [
     "PROG", "FUGR", "FUNC", "CLAS", "INTF", "DTEL", "DOMA", "TABL", "TTYP", "TRAN",
 ];
 /// The write targets of the standard fault grammar; an extension may not reuse one.
-const STANDARD_FAULT_TARGETS: [&str; 4] = ["PUT", "ACTIVATE", "CREATE", "DELETE"];
+const STANDARD_FAULT_TARGETS: [&str; 5] = ["PUT", "ACTIVATE", "CREATE", "DELETE", "CLASSRUN"];
 /// The ids and long flags of the standard create arguments and MCP properties; an extension
 /// option may not reuse one.
-const STANDARD_OPTION_NAMES: [&str; 15] = [
+const STANDARD_OPTION_NAMES: [&str; 16] = [
     "kind",
     "type",
     "name",
@@ -67,6 +67,7 @@ const STANDARD_OPTION_NAMES: [&str; 15] = [
     "package",
     "fugr",
     "prog",
+    "source",
     "subc",
     "tr",
     "simulate",
