@@ -755,7 +755,8 @@ fn reconcile_create(
 
     print.stderr.extend(settled.notes.clone());
 
-    let exit = settled.exit_code(run.interrupted);
+    // A Ctrl-C during the reconciliation sets the flag after `run.interrupted` was taken.
+    let exit = settled.exit_code(run.interrupted || runtime.cancel.is_set());
 
     print.finish(run, Some(settled.verdict.status()), exit)
 }

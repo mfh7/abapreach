@@ -23,7 +23,7 @@ mod common;
 use abapreach::backend::BackendKind;
 use abapreach::config::Connection;
 use abapreach::hash::{normalize, source_hash};
-use abapreach::operation::deploy::CancelFlag;
+use abapreach::operation::deploy::{CancelFlag, InterruptAction};
 use abapreach::operation::deploy_ddic::{DdicDeploy, deploy_with};
 use abapreach::operation::payload::Kind;
 use abapreach::operation::runner_reconcile::Clock;
@@ -1629,6 +1629,35 @@ fn a_lost_reply_of_run_2_is_reconciled_from_a_new_session_and_never_resent() {
         assert_eq!(done.modes(), ["SIMULATE", "DEPLOY", "READ"], "{token}");
         assert_clean(&done);
     }
+}
+
+/// The first Ctrl-C that arrives in the extra `READ` run of the reconciliation is deferred, so the
+/// verdict is still printed, and it ends the command with 130 (the run itself ended without it).
+#[test]
+fn a_ctrl_c_during_the_reconciliation_exits_130_and_still_prints_the_verdict() {
+    let (_, xml, ..) = FIXTURES[0];
+    let case = uncertain(PRESENT, Some(live_hash(xml)), lost());
+    let signal = case.cancel.clone();
+    let mut posts = 0;
+
+    case.sap.borrow_mut().on_post = Some(Box::new(move || {
+        posts += 1;
+
+        // The third classrun POST is the extra READ run (run 1, run 2, READ).
+        if posts == 3 {
+            assert_eq!(signal.on_interrupt(), InterruptAction::Deferred);
+        }
+    }));
+
+    let done = case.go_virtual(None, None);
+
+    assert_eq!(done.exit.code, 130, "{}", done.exit.stderr);
+    assert!(
+        done.exit.stdout.contains("\nPARTIAL: outcome unknown"),
+        "{}",
+        done.exit.stdout
+    );
+    assert_eq!(done.modes(), ["SIMULATE", "DEPLOY", "READ"]);
 }
 
 #[test]

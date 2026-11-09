@@ -23,7 +23,7 @@ use abapreach::backend::BackendKind;
 use abapreach::config::Connection;
 use abapreach::hash::{normalize, source_hash};
 use abapreach::operation::create_ddic::{DdicCreate, create_with};
-use abapreach::operation::deploy::CancelFlag;
+use abapreach::operation::deploy::{CancelFlag, InterruptAction};
 use abapreach::operation::payload::Kind;
 use abapreach::operation::runner_reconcile::Clock;
 use abapreach::operation::runner_route::random_nonce;
@@ -1240,6 +1240,38 @@ fn previews_that_cannot_be_read_are_settled_by_one_extra_read_run() {
         assert_eq!(done.modes(), ["CREATE", "READ"], "{token}");
         assert_clean(&done);
     }
+}
+
+/// The first Ctrl-C that arrives in the extra `READ` run of the reconciliation is deferred, so the
+/// verdict is still printed, and it ends the command with 130 (the run itself ended without it).
+#[test]
+fn a_ctrl_c_during_the_reconciliation_exits_130_and_still_prints_the_verdict() {
+    let broken = World {
+        broken: true,
+        ..PRESENT
+    };
+    let case = uncertain(broken, true, lost());
+    let signal = case.cancel.clone();
+    let mut posts = 0;
+
+    case.sap.borrow_mut().on_post = Some(Box::new(move || {
+        posts += 1;
+
+        // The second classrun POST is the extra READ run of the reconciliation.
+        if posts == 2 {
+            assert_eq!(signal.on_interrupt(), InterruptAction::Deferred);
+        }
+    }));
+
+    let done = case.go_virtual();
+
+    assert_eq!(done.exit.code, 130, "{}", done.exit.stderr);
+    assert!(
+        done.exit.stdout.contains("\nCREATE: PARTIAL; "),
+        "{}",
+        done.exit.stdout
+    );
+    assert_eq!(done.modes(), ["CREATE", "READ"]);
 }
 
 #[test]

@@ -8,7 +8,7 @@ mod common;
 use abapreach::backend::BackendKind;
 use abapreach::config::Connection;
 use abapreach::hash::source_hash;
-use abapreach::operation::deploy::CancelFlag;
+use abapreach::operation::deploy::{CancelFlag, InterruptAction};
 use abapreach::operation::payload::{Kind, Mode, Request as PayloadRequest, encode};
 use abapreach::operation::runner_reconcile::Clock;
 use abapreach::operation::runner_tran::{TranCreate, TranRead, create_with, read_with};
@@ -1113,6 +1113,41 @@ fn unreadable_previews_make_one_extra_read_run_that_decides() {
         );
         assert_eq!(rig.classes(), 0);
     }
+}
+
+/// The first Ctrl-C that arrives in the extra `READ` run of the reconciliation is deferred, so the
+/// verdict is still printed, and it ends the command with 130 (the run itself ended without it).
+#[test]
+fn a_ctrl_c_during_the_reconciliation_exits_130_and_still_prints_the_verdict() {
+    let rig = rig(World {
+        broken: true,
+        ..World::default()
+    });
+    let mut factory = Factory::new(&rig);
+    let signal = factory.cancel.clone();
+    let mut posts = 0;
+
+    rig.reply(vec![PostReply::Lost, PostReply::Output(read_ok())]);
+    rig.sap.borrow_mut().on_post = Some(Box::new(move || {
+        posts += 1;
+
+        // The second classrun POST is the extra READ run of the reconciliation.
+        if posts == 2 {
+            assert_eq!(signal.on_interrupt(), InterruptAction::Deferred);
+        }
+    }));
+
+    let exit = run_create_with(&rig, HTTP, &spec(false), &mut factory);
+    let lines = shown(&exit.stdout);
+
+    assert_eq!(exit.code, 130, "{}", exit.stderr);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("CREATE: PARTIAL; ")),
+        "{lines:?}"
+    );
+    assert_eq!(rig.posts(), 2);
 }
 
 #[test]
