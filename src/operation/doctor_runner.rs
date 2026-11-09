@@ -27,7 +27,8 @@ const NO_ADT_ROUTE: &str = "RUNNER post transport: unavailable (no ADT HTTP rout
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Leftover {
     pub name: String,
-    /// Seconds since the class was created; `None` when its metadata gave no readable time.
+    /// Seconds since the class was last created or changed; `None` when its metadata gave no
+    /// readable time.
     pub age_seconds: Option<u64>,
 }
 
@@ -168,9 +169,8 @@ fn read_leftovers(
     let found = names
         .into_iter()
         .map(|name| {
-            let age_seconds = created_at(transport, &name)
-                .and_then(|stamp| epoch_seconds(&stamp))
-                .map(|created| now.saturating_sub(created));
+            let age_seconds =
+                last_touched(transport, &name).map(|touched| now.saturating_sub(touched));
 
             Leftover { name, age_seconds }
         })
@@ -179,9 +179,11 @@ fn read_leftovers(
     Ok((found, returned))
 }
 
-/// The creation time of a runner class from its metadata, or its change time when the system
-/// reports no creation time.
-fn created_at(transport: &mut dyn SadtTransport, name: &str) -> Option<String> {
+/// The later of the creation and change time of a runner class, in epoch seconds, from its
+/// metadata. `createdAt` carries the date only (midnight), `changedAt` the real time, so the
+/// later one is the best sign of when a running operation last touched the class. A time that does
+/// not parse is left out.
+fn last_touched(transport: &mut dyn SadtTransport, name: &str) -> Option<u64> {
     let uri = format!("/sap/bc/adt/oo/classes/{}", name.to_ascii_lowercase());
     let response = transport.request(Request::get(uri)).ok()?;
 
@@ -217,7 +219,11 @@ fn created_at(transport: &mut dyn SadtTransport, name: &str) -> Option<String> {
         }
     }
 
-    created.or(changed)
+    [created, changed]
+        .into_iter()
+        .flatten()
+        .filter_map(|stamp| epoch_seconds(&stamp))
+        .max()
 }
 
 /// The class references of a search reply: how many classes it returned and which of them are

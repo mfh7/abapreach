@@ -119,14 +119,29 @@ fn search_reply(names: &[&str]) -> Result<Response, TransportError> {
 
 /// The metadata of a runner class; `None` leaves out the time stamps.
 fn class_meta(created_at: Option<&str>) -> Result<Response, TransportError> {
-    let stamp = created_at
-        .map(|value| format!(r#" adtcore:createdAt="{value}""#))
-        .unwrap_or_default();
+    class_times(created_at, None)
+}
+
+/// The metadata of a runner class with the creation and change time stamps; `None` leaves one out.
+fn class_times(
+    created_at: Option<&str>,
+    changed_at: Option<&str>,
+) -> Result<Response, TransportError> {
+    let stamp = |name: &str, value: Option<&str>| {
+        value
+            .map(|value| format!(r#" adtcore:{name}="{value}""#))
+            .unwrap_or_default()
+    };
+    let stamps = format!(
+        "{}{}",
+        stamp("createdAt", created_at),
+        stamp("changedAt", changed_at)
+    );
 
     Ok(Response::text(
         200,
         format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?><class:abapClass xmlns:class="http://www.sap.com/adt/oo/classes" xmlns:adtcore="http://www.sap.com/adt/core" adtcore:name="X"{stamp}/>"#
+            r#"<?xml version="1.0" encoding="UTF-8"?><class:abapClass xmlns:class="http://www.sap.com/adt/oo/classes" xmlns:adtcore="http://www.sap.com/adt/core" adtcore:name="X"{stamps}/>"#
         ),
     ))
 }
@@ -1321,6 +1336,77 @@ fn a_class_without_a_time_stamp_has_an_unknown_age_and_no_stale_mark() {
         "{line}"
     );
     assert!(!line.contains("stale"), "{line}");
+}
+
+/// The leftovers line of one runner class whose metadata carries the given time stamps.
+fn age_line(created_at: Option<&str>, changed_at: Option<&str>) -> String {
+    let (exit, _) = adt_doctor(runner_replies(
+        classrun_found(),
+        search_reply(&[RUN_A]),
+        vec![class_times(created_at, changed_at)],
+    ));
+
+    runner_line(&exit, "RUNNER leftovers").to_owned()
+}
+
+/// A creation stamp as the system writes it: the date only, at midnight.
+fn midnight_of(stamp: &str) -> String {
+    format!("{}T00:00:00Z", &stamp[..10])
+}
+
+#[test]
+fn the_age_counts_from_the_change_time_when_the_creation_time_is_a_bare_date() {
+    // A date two days back keeps the case independent of the time of day of the run.
+    let line = age_line(
+        Some(&midnight_of(&seconds_ago(2 * 86_400))),
+        Some(&seconds_ago(300)),
+    );
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} 5m;")),
+        "{line}"
+    );
+    assert!(!line.contains("stale"), "{line}");
+}
+
+#[test]
+fn the_age_counts_from_the_creation_time_when_there_is_no_change_time() {
+    let line = age_line(Some(&seconds_ago(300)), None);
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} 5m;")),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_age_counts_from_the_change_time_when_there_is_no_creation_time() {
+    let line = age_line(None, Some(&seconds_ago(300)));
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} 5m;")),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_age_counts_from_the_later_time_when_the_change_time_is_older() {
+    let line = age_line(Some(&seconds_ago(300)), Some(&seconds_ago(3 * 3_600)));
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} 5m;")),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_age_uses_the_time_stamp_that_parses_when_the_other_does_not() {
+    let line = age_line(Some("not a time"), Some(&seconds_ago(300)));
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} 5m;")),
+        "{line}"
+    );
 }
 
 #[test]
