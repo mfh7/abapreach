@@ -37,6 +37,10 @@ const TARGETS: [(&str, &str, &str, &str); 4] = [
     ),
 ];
 
+/// Every archive holds the executable, LICENSE and THIRD-PARTY-NOTICES at its root.
+const UNIX_PACKAGE: &str = "tar -czf \"dist/$ARCHIVE_FILE\" -C \"target/$TARGET/release\" \"$EXE\" -C \"$PWD\" LICENSE THIRD-PARTY-NOTICES";
+const WINDOWS_PACKAGE: &str = "Compress-Archive -LiteralPath \"target\\\\$env:TARGET\\\\release\\\\$env:EXE\", \"LICENSE\", \"THIRD-PARTY-NOTICES\" -DestinationPath \"dist\\\\$env:ARCHIVE_FILE\"";
+
 /// Nothing here may reach a system: no repository secret, and no connection source.
 const FORBIDDEN: [&str; 5] = [
     "secrets.",
@@ -491,13 +495,46 @@ fn release_workflow_promotion_requires_a_successful_release_run_of_the_rc_tag() 
 #[test]
 fn release_workflow_packages_and_hashes_every_archive() {
     let text = workflow_text();
-    assert!(
-        text.contains("tar -C \"target/$TARGET/release\" -czf \"dist/$ARCHIVE_FILE\" \"$EXE\"")
-    );
+    assert!(text.contains(UNIX_PACKAGE));
     assert!(text.contains("Compress-Archive"));
     assert!(text.contains("Expand-Archive"));
     assert!(text.contains("> \"dist/$ARCHIVE_FILE.sha256\""));
     assert!(text.contains("persist-credentials: false"));
+}
+
+#[test]
+fn release_workflow_packages_the_license_files_beside_the_executable_in_every_archive() {
+    let document = document();
+    for build in [BARE_BUILD_JOB, LINUX_BUILD_JOB] {
+        let packaging = steps(&document, build)
+            .iter()
+            .filter(|step| find(step, "name").is_some_and(|name| scalar(name).contains("Package")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            packaging.len(),
+            if build == LINUX_BUILD_JOB { 1 } else { 2 },
+            "{build}"
+        );
+        for step in packaging {
+            let script = scalar(get(step, "run"));
+            let command = if find(step, "shell").is_some() {
+                WINDOWS_PACKAGE
+            } else {
+                UNIX_PACKAGE
+            };
+            assert!(script.contains(command), "{build}: {script}");
+        }
+    }
+
+    // The set check compares the two text files with the tag commit's, so each job that runs it
+    // starts from a checkout of that commit.
+    for name in ["publish-rc", "promote-verify", "publish-final"] {
+        let first = &steps(&document, name)[0];
+        assert!(
+            scalar(get(first, "uses")).starts_with("actions/checkout@"),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -947,7 +984,7 @@ fn doc_only_check_fails_on_an_unknown_commit() {
 
 #[cfg(unix)]
 mod dist {
-    use super::scripts;
+    use super::{root, scripts};
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -965,7 +1002,9 @@ mod dist {
             .to_owned()
     }
 
-    fn executable(extension: &str) -> &'static str {
+    pub const LICENSE_FILES: [&str; 2] = ["LICENSE", "THIRD-PARTY-NOTICES"];
+
+    pub fn executable(extension: &str) -> &'static str {
         if extension == "zip" {
             "abapreach.exe"
         } else {
@@ -973,37 +1012,61 @@ mod dist {
         }
     }
 
-    /// A release set for `version`: four archives that each hold one fake executable, plus their
-    /// SHA256 files. The executable bytes differ per target so a swapped archive is detectable.
-    pub fn release_set(dir: &Path, version: &str) {
+    /// The three entries a release archive for `target` holds: the executable with target-specific
+    /// bytes (so a swapped archive is detectable), and the two text files as the repository has them.
+    pub fn release_entries(target: usize) -> Vec<(String, Vec<u8>)> {
+        let (name, extension) = TARGETS[target];
+        let mut entries = vec![(
+            executable(extension).to_owned(),
+            format!("binary for {name}\n").into_bytes(),
+        )];
+        for file in LICENSE_FILES {
+            entries.push((file.to_owned(), std::fs::read(root().join(file)).unwrap()));
+        }
+        entries
+    }
+
+    /// Writes (or replaces) the archive of `target` for `version` holding exactly `entries`, and
+    /// its SHA256 file.
+    pub fn write_archive(dir: &Path, version: &str, target: usize, entries: &[(String, Vec<u8>)]) {
         std::fs::create_dir_all(dir).unwrap();
-        for (target, extension) in TARGETS {
-            let work = tempfile::tempdir().unwrap();
-            let exe = executable(extension);
-            std::fs::write(work.path().join(exe), format!("binary for {target}\n")).unwrap();
-            let archive = dir.join(format!("abapreach-{version}-{target}.{extension}"));
-            let status = if extension == "zip" {
-                Command::new("zip")
-                    .args(["-q", "-j"])
-                    .arg(&archive)
-                    .arg(work.path().join(exe))
-                    .status()
-            } else {
-                Command::new("tar")
-                    .arg("-C")
-                    .arg(work.path())
-                    .arg("-czf")
-                    .arg(&archive)
-                    .arg(exe)
-                    .status()
-            };
-            assert!(status.expect("archiver runs").success());
-            let name = archive.file_name().unwrap().to_str().unwrap().to_owned();
-            std::fs::write(
-                dir.join(format!("{name}.sha256")),
-                format!("{}  {name}\n", sha256(&archive)),
-            )
-            .unwrap();
+        let work = tempfile::tempdir().unwrap();
+        for (name, bytes) in entries {
+            std::fs::write(work.path().join(name), bytes).unwrap();
+        }
+        let names = entries.iter().map(|(name, _)| name.as_str());
+        let archive = path(dir, version, target);
+        let _ = std::fs::remove_file(&archive);
+        let status = if TARGETS[target].1 == "zip" {
+            Command::new("zip")
+                .current_dir(work.path())
+                .args(["-q", "-X"])
+                .arg(&archive)
+                .args(names)
+                .status()
+        } else {
+            Command::new("tar")
+                .arg("-C")
+                .arg(work.path())
+                .arg("-czf")
+                .arg(&archive)
+                .args(names)
+                .status()
+        };
+        assert!(status.expect("archiver runs").success());
+        let name = archive.file_name().unwrap().to_str().unwrap().to_owned();
+        std::fs::write(
+            dir.join(format!("{name}.sha256")),
+            format!("{}  {name}\n", sha256(&archive)),
+        )
+        .unwrap();
+    }
+
+    /// A release set for `version`: four archives that each hold the executable, LICENSE and
+    /// THIRD-PARTY-NOTICES, plus their SHA256 files.
+    pub fn release_set(dir: &Path, version: &str) {
+        for target in 0..TARGETS.len() {
+            write_archive(dir, version, target, &release_entries(target));
         }
     }
 
@@ -1098,6 +1161,153 @@ fn verify_dist_rejects_a_tampered_archive() {
     );
     assert!(!outcome.success, "{}", outcome.text);
     assert!(outcome.text.contains("SHA256 mismatch"), "{}", outcome.text);
+}
+
+#[cfg(unix)]
+fn verify(dir: &std::path::Path, version: &str) -> scripts::Outcome {
+    scripts::run(
+        "verify-dist.sh",
+        &[dir.to_str().unwrap(), version],
+        "",
+        None,
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_dist_rejects_an_archive_that_does_not_hold_exactly_the_three_entries() {
+    // (case, entries kept by name, extra entry)
+    let cases: [(&str, &[&str], Option<&str>); 5] = [
+        ("only the executable", &["EXE"], None),
+        ("no LICENSE", &["EXE", "THIRD-PARTY-NOTICES"], None),
+        ("no THIRD-PARTY-NOTICES", &["EXE", "LICENSE"], None),
+        (
+            "an extra file",
+            &["EXE", "LICENSE", "THIRD-PARTY-NOTICES"],
+            Some("README.md"),
+        ),
+        (
+            "no executable",
+            &["LICENSE", "THIRD-PARTY-NOTICES"],
+            Some("other"),
+        ),
+    ];
+    for target in 0..dist::TARGETS.len() {
+        for (case, kept, extra) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            dist::release_set(dir.path(), "0.12.0-rc.1");
+            let exe = dist::executable(dist::TARGETS[target].1);
+            let mut entries = dist::release_entries(target)
+                .into_iter()
+                .filter(|(name, _)| {
+                    kept.contains(&name.as_str()) || (name.as_str() == exe && kept.contains(&"EXE"))
+                })
+                .collect::<Vec<_>>();
+            if let Some(extra) = extra {
+                entries.push((extra.to_owned(), b"extra\n".to_vec()));
+            }
+            dist::write_archive(dir.path(), "0.12.0-rc.1", target, &entries);
+
+            let outcome = verify(dir.path(), "0.12.0-rc.1");
+            let archive = dist::TARGETS[target].0;
+            assert!(!outcome.success, "{archive}, {case}: {}", outcome.text);
+            assert!(outcome.text.contains("::error::"), "{}", outcome.text);
+            assert!(
+                outcome.text.contains(archive),
+                "{archive}, {case}: {}",
+                outcome.text
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_dist_rejects_an_executable_named_for_another_target() {
+    // The Windows archive must hold abapreach.exe, the others abapreach.
+    let dir = tempfile::tempdir().unwrap();
+    dist::release_set(dir.path(), "0.12.0-rc.1");
+    let entries = dist::release_entries(1)
+        .into_iter()
+        .map(|(name, bytes)| (name.replace("abapreach.exe", "abapreach"), bytes))
+        .collect::<Vec<_>>();
+    dist::write_archive(dir.path(), "0.12.0-rc.1", 1, &entries);
+
+    let outcome = verify(dir.path(), "0.12.0-rc.1");
+    assert!(!outcome.success, "{}", outcome.text);
+    assert!(outcome.text.contains("abapreach.exe"), "{}", outcome.text);
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_dist_rejects_license_files_that_differ_from_the_checked_out_commit() {
+    for file in dist::LICENSE_FILES {
+        for target in [0, 1] {
+            let dir = tempfile::tempdir().unwrap();
+            dist::release_set(dir.path(), "0.12.0-rc.1");
+            let entries = dist::release_entries(target)
+                .into_iter()
+                .map(|(name, mut bytes)| {
+                    if name == file {
+                        bytes.extend_from_slice(b"changed\n");
+                    }
+                    (name, bytes)
+                })
+                .collect::<Vec<_>>();
+            dist::write_archive(dir.path(), "0.12.0-rc.1", target, &entries);
+
+            let outcome = verify(dir.path(), "0.12.0-rc.1");
+            assert!(!outcome.success, "{file}, {target}: {}", outcome.text);
+            assert!(outcome.text.contains("::error::"), "{}", outcome.text);
+            assert!(outcome.text.contains(file), "{file}: {}", outcome.text);
+            assert!(
+                outcome.text.contains(dist::TARGETS[target].0),
+                "{}",
+                outcome.text
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn promotion_refuses_an_rc_archive_with_the_wrong_entries_or_license_files() {
+    // An old-layout archive (executable only) and an archive whose LICENSE differs from the tag
+    // commit's both carry a valid checksum, so only the content checks can stop them.
+    for case in ["executable only", "changed LICENSE"] {
+        let work = tempfile::tempdir().unwrap();
+        let rc = work.path().join("rc");
+        let out = work.path().join("promoted");
+        dist::release_set(&rc, "0.12.0-rc.2");
+        let entries = dist::release_entries(2)
+            .into_iter()
+            .filter(|(name, _)| case != "executable only" || name == "abapreach")
+            .map(|(name, mut bytes)| {
+                if name == "LICENSE" {
+                    bytes.extend_from_slice(b"changed\n");
+                }
+                (name, bytes)
+            })
+            .collect::<Vec<_>>();
+        dist::write_archive(&rc, "0.12.0-rc.2", 2, &entries);
+
+        let outcome = scripts::run(
+            "promote-archives.sh",
+            &[
+                rc.to_str().unwrap(),
+                "0.12.0-rc.2",
+                out.to_str().unwrap(),
+                "0.12.0",
+            ],
+            "",
+            None,
+        );
+        assert!(!outcome.success, "{case}: {}", outcome.text);
+        assert!(
+            !out.exists() || std::fs::read_dir(&out).unwrap().next().is_none(),
+            "{case}: nothing is promoted"
+        );
+    }
 }
 
 #[cfg(unix)]

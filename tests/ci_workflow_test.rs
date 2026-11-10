@@ -236,3 +236,34 @@ fn ci_workflow_confirms_the_fault_injection_suite_is_not_empty() {
     assert!(script.contains("-lt 1"), "{script}");
     assert!(script.contains("exit 1"), "{script}");
 }
+
+#[test]
+fn ci_workflow_checks_the_third_party_notices_are_current_on_the_ubuntu_x64_runner_only() {
+    let document = document();
+    let check = step_of(&document, "cargo install cargo-about");
+    let step = &steps(&document)[check];
+
+    // One runner is enough to prove the committed file, and its output must not depend on the OS.
+    assert_eq!(
+        scalar(get(step, "if")),
+        "matrix.runner.label == 'ubuntu-24.04'"
+    );
+    assert!(
+        check > step_of(&document, "rustup toolchain install"),
+        "cargo must be installed before it builds cargo-about"
+    );
+
+    let script = scalar(get(step, "run"));
+    for needle in [
+        "cargo install cargo-about --locked --version 0.9.3 --features cli",
+        "cargo about generate about-text.hbs",
+        "diff -u THIRD-PARTY-NOTICES",
+        "::error::",
+        "exit 1",
+    ] {
+        assert!(script.contains(needle), "missing `{needle}`: {script}");
+    }
+    for forbidden in ["|| true", "|| exit 0"] {
+        assert!(!script.contains(forbidden), "{script}");
+    }
+}

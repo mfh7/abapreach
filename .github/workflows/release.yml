@@ -15,7 +15,9 @@
 # manual dispatch        Runs the same promotion checks against `rc_tag` and the dispatched commit
 #                        as a dry run. It creates no tag and no Release.
 #
-# Release archives hold the single executable at the archive root, so promotion is a rename.
+# Release archives hold exactly three entries at the archive root: the executable, LICENSE and
+# THIRD-PARTY-NOTICES. Promotion is still a rename; verify-dist.sh checks the three entries and
+# that the two text files equal the ones in the checked-out commit.
 # This workflow never reaches a system. It reads no connection file, RFC library or secret
 # beyond the default workflow token.
 name: release
@@ -177,7 +179,7 @@ jobs:
       - name: Package the archive
         run: |
           mkdir dist
-          tar -C "target/$TARGET/release" -czf "dist/$ARCHIVE_FILE" "$EXE"
+          tar -czf "dist/$ARCHIVE_FILE" -C "target/$TARGET/release" "$EXE" -C "$PWD" LICENSE THIRD-PARTY-NOTICES
 
       - name: Record the archive SHA256
         run: |
@@ -281,14 +283,14 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir dist
-          tar -C "target/$TARGET/release" -czf "dist/$ARCHIVE_FILE" "$EXE"
+          tar -czf "dist/$ARCHIVE_FILE" -C "target/$TARGET/release" "$EXE" -C "$PWD" LICENSE THIRD-PARTY-NOTICES
 
       - name: Package the archive (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -LiteralPath "target\\$env:TARGET\\release\\$env:EXE" -DestinationPath "dist\\$env:ARCHIVE_FILE"
+          Compress-Archive -LiteralPath "target\\$env:TARGET\\release\\$env:EXE", "LICENSE", "THIRD-PARTY-NOTICES" -DestinationPath "dist\\$env:ARCHIVE_FILE"
 
       - name: Record the archive SHA256
         run: |

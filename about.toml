@@ -15,3 +15,7 @@ accepted = [
 ]
 ignore-dev-dependencies = true
 ignore-build-dependencies = true
+
+# The project itself is not a third-party component.
+[private]
+ignore = true
