@@ -35,6 +35,8 @@ Version metadata is `0.16.0`. This entry is finalized before the last release ca
   [DDIC and `TRAN` types](docs/mcp.md#ddic-and-tran-types).
 
 ### Changed
+- MCP: `abap_create` and `abap_create_simulate` refuse `prog` for every type except `TRAN`
+  (`prog only applies to TRAN`), as the CLI does. 0.15.0 ignored it.
 - An unpinned command on a stateless ADT session uses the RFC path. The CLI prints
   `NOTE: ADT HTTP is stateless on this release; the RFC path is used`.
 - MCP: `abap_read_source` is no longer read-only (`readOnlyHint` is `false` for every type). A read
