@@ -78,7 +78,7 @@ Input schemas are listed by the client through `tools/list`.
 All seven tools that take a `type` accept `DTEL`, `DOMA`, `TABL`, `TTYP` and `TRAN`, with the rules of
 the CLI (`abap_deploy` and `abap_simulate` refuse `TRAN`: `TRAN has no deploy; use create or delete`).
 `source` carries the XML of a DDIC object, for `abap_simulate`, `abap_deploy` and
-`abap_create*`. `abap_create*` takes `prog` (required for `TRAN`) and `text` (optional for a DDIC type,
+`abap_create*`. `abap_create*` takes `prog` (required for `TRAN`, refused for every other type: `prog only applies to TRAN`) and `text` (optional for a DDIC type,
 whose XML carries the description; required for `TRAN`). `lines`, `include`, `fugr`, `subc`, `main` and
 `create_include` are refused for these types.
 

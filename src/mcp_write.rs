@@ -720,6 +720,12 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             Some(subc) => Some(parse::<Subc>(subc, "subc must be one of 1, I")?),
             None => None,
         };
+
+        // The runner branch above took TRAN, the only type that takes `prog`.
+        if optional(arguments, "prog")?.is_some() {
+            return Err("prog only applies to TRAN".to_owned());
+        }
+
         let mut options = ExtensionOptions::new();
 
         for option in extension_kinds

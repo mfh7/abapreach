@@ -586,6 +586,35 @@ fn invalid_combinations_fail_with_the_cli_text_and_without_any_activity() {
     assert_eq!(rig.opened(), (0, 0));
 }
 
+#[test]
+fn a_prog_argument_on_a_non_tran_create_is_refused_before_any_connection() {
+    let cases = [
+        json!({"type": "PROG", "name": NEW_PROG, "text": TEXT, "package": "$TMP"}),
+        json!({"type": "FUNC", "name": "ZFM_A", "text": TEXT, "package": "$TMP", "fugr": "ZFG"}),
+        json!({"type": "CLAS", "name": "ZCL_A", "text": TEXT, "package": "$TMP"}),
+    ];
+
+    for mut arguments in cases {
+        arguments["conn"] = json!("DEV_100");
+        arguments["prog"] = json!("ZREPORT");
+
+        for tool in ["abap_create_simulate", "abap_create"] {
+            let mut rig = rig();
+            let mut arguments = arguments.clone();
+
+            if tool == "abap_create" {
+                arguments["plan_token"] = json!("tok");
+            }
+
+            let result = rig.call(tool, arguments.clone());
+
+            assert!(result.is_error, "{tool} {arguments}");
+            assert_eq!(result.text, "STOP: prog only applies to TRAN", "{tool}");
+            assert_eq!(rig.opened(), (0, 0), "{tool}");
+        }
+    }
+}
+
 // ---- the main program of an include ------------------------------------------------------------
 
 const PROG_A: &str = "/sap/bc/adt/programs/programs/zprog_a";
