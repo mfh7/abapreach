@@ -376,3 +376,15 @@ cargo test
 
 The `test-support` feature is turned on for tests by the dev-dependency, so no flag is needed.
 Mutation testing of the pure logic modules uses `cargo mutants`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The release binaries include third-party open source
+components; their licenses are in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES).
+
+ABAPReach reads and changes objects in SAP systems. You are responsible for the
+authorization to do so, for your change and transport procedures, and for
+backups; try it on a non-production system first.
+
+SAP and ABAP are trademarks or registered trademarks of SAP SE. ABAPReach is not
+affiliated with, endorsed by or sponsored by SAP SE.

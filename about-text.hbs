@@ -1,0 +1,17 @@
+Third-party notices for ABAPReach
+
+The ABAPReach release binaries include the following open source components.
+Each component is listed with the license it is used under, followed by the
+full license texts.
+
+{{#each licenses}}
+================================================================================
+{{name}} ({{id}})
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+--------------------------------------------------------------------------------
+{{{text}}}
+
+{{/each}}
