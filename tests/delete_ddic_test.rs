@@ -594,6 +594,81 @@ fn a_real_delete_sends_the_plan_hash_and_the_request_and_proves_it_from_a_new_se
     }
 }
 
+/// A transportable object: after the delete the definition is gone and TADIR keeps its row.
+fn row_kept_after_post() -> Evolution {
+    Box::new(|tick: &Tick| {
+        if tick.posts == 0 {
+            present()
+        } else {
+            World {
+                directory: true,
+                ..World::default()
+            }
+        }
+    })
+}
+
+fn transportable_plan() -> Plan {
+    Plan {
+        conn: "dev".to_owned(),
+        tr: Some("DEVK900001".to_owned()),
+        objects: ["TTYP:ZTT", "TABL:ZTABL", "DTEL:ZDTEL", "DOMA:ZDOMA"]
+            .iter()
+            .map(|text| {
+                let (kind, name) = text.split_once(':').unwrap();
+
+                (kind.to_owned(), name.to_owned(), HASH_A.to_owned())
+            })
+            .collect(),
+        backends: Vec::new(),
+    }
+}
+
+#[test]
+fn a_transportable_delete_whose_tadir_row_is_flagged_deleted_is_deleted_and_the_batch_goes_on() {
+    for backend in BACKENDS {
+        let rig = rig(row_kept_after_post(), vec![PostReply::Output(deleted()); 4]);
+
+        rig.sap.borrow_mut().directory_flagged = true;
+
+        let done = delete_batch(
+            &rig,
+            backend,
+            &["TTYP:ZTT", "TABL:ZTABL", "DTEL:ZDTEL", "DOMA:ZDOMA"],
+            Some("DEVK900001"),
+            &transportable_plan(),
+        );
+        let out = &done.outcome.stdout;
+
+        assert_eq!(done.outcome.exit, 0, "{backend:?} {out}");
+        assert!(out.contains("SUMMARY: 4 OK, 0 FAILED, 0 SKIPPED"), "{out}");
+        assert!(!out.contains("status unknown"), "{out}");
+        assert_eq!(rig.sap.borrow().posts, 4);
+        clean(&rig);
+    }
+}
+
+#[test]
+fn a_tadir_row_without_the_delete_flag_after_the_delete_is_still_status_unknown() {
+    let rig = rig(row_kept_after_post(), vec![PostReply::Output(deleted()); 4]);
+    let done = delete_batch(
+        &rig,
+        Backend::Rfc,
+        &["TTYP:ZTT", "TABL:ZTABL", "DTEL:ZDTEL", "DOMA:ZDOMA"],
+        Some("DEVK900001"),
+        &transportable_plan(),
+    );
+    let out = &done.outcome.stdout;
+
+    assert_eq!(done.outcome.exit, 1, "{out}");
+    assert!(
+        out.contains("status unknown: the run reported DELETED but the new session disagrees: TADIR still has a row"),
+        "{out}"
+    );
+    assert!(out.contains("SKIPPED TABL ZTABL"), "{out}");
+    assert_eq!(rig.sap.borrow().posts, 1);
+}
+
 #[test]
 fn a_plan_that_changed_since_the_simulate_is_rejected_by_the_run_and_the_batch_goes_on() {
     let rig = rig(

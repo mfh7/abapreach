@@ -81,6 +81,9 @@ pub struct Sap {
     pub posted: Vec<String>,
     /// Builds the output of a POST with no scripted reply from the class source it ran.
     pub reply_with: Option<ReplyWith>,
+    /// A TADIR row carries `DELFLAG = X` (a deletion recorded in a transport request); when
+    /// unset the flag is blank.
+    pub directory_flagged: bool,
 }
 
 /// Builds the output of a classrun POST from the class source it ran.
@@ -105,6 +108,7 @@ pub fn new_sap(stateful: bool, now: &Rc<Cell<Duration>>, evolution: Evolution) -
         on_post: None,
         posted: Vec::new(),
         reply_with: None,
+        directory_flagged: false,
     }))
 }
 
@@ -315,6 +319,8 @@ impl Sap {
             .map(|field| {
                 let value = match *field {
                     "DEVCLASS" => "$TMP",
+                    "DELFLAG" if self.directory_flagged => "X",
+                    "DELFLAG" => "",
                     "PGMNA" => "ZREPORT",
                     _ => key,
                 };

@@ -585,6 +585,35 @@ fn a_delete_is_settled_from_the_evidence_alone() {
 }
 
 #[test]
+fn a_tadir_row_flagged_deleted_settles_a_delete_and_a_blank_flag_does_not() {
+    let directory_only = World {
+        directory: true,
+        ..World::default()
+    };
+
+    for (flagged, verdict) in [
+        (true, Verdict::DeletedReconciled),
+        (false, Verdict::DeletePartial),
+    ] {
+        let (sap, now) = setup(constant(directory_only));
+
+        sap.borrow_mut().directory_flagged = flagged;
+
+        let mut clock = FakeClock::new(&now);
+        let (result, reads) = run_reconcile(
+            &Intent::Delete,
+            &sap,
+            &mut clock,
+            &CancelFlag::new(),
+            Err("x".into()),
+        );
+
+        assert_eq!(result.verdict, verdict, "flagged {flagged}");
+        assert_eq!(reads, 0);
+    }
+}
+
+#[test]
 fn a_delete_whose_state_moves_waits_until_two_reads_agree() {
     // Present until 25 s, gone afterwards: the reads at 20 s and 30 s differ; 30 s and 40 s agree.
     let (sap, now) = setup(Box::new(|tick: &Tick| {

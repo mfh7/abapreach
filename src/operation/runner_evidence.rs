@@ -183,7 +183,7 @@ pub fn read_evidence(open: &mut Opener<'_>, kind: Kind, name: &str, runner: &str
     let directory = probe(
         &mut *session,
         Table::Tadir,
-        "OBJ_NAME, DEVCLASS",
+        "OBJ_NAME, DEVCLASS, DELFLAG",
         &format!(
             "PGMID = 'R3TR' AND OBJECT = '{}' AND OBJ_NAME = '{name}'",
             kind.token()
@@ -239,6 +239,16 @@ pub fn read_inactive(open: &mut Opener<'_>, kind: Kind, name: &str) -> Probe {
     found
 }
 
+/// The TADIR probe without a row that only records a deletion: a transportable object that was
+/// deleted keeps its TADIR row with `DELFLAG = X` until the request is imported, and that object
+/// is gone. A blank flag, or a row without the column, is a live entry.
+pub fn without_deleted(directory: &Probe) -> Probe {
+    match directory {
+        Ok(Some(row)) if row.get("DELFLAG").is_some_and(|flag| flag == "X") => Ok(None),
+        other => other.clone(),
+    }
+}
+
 /// What a finished run should have left behind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Expect<'a> {
@@ -247,7 +257,8 @@ pub enum Expect<'a> {
         package: Option<&'a str>,
         report: Option<&'a str>,
     },
-    /// The object is gone from the definition table and from TADIR.
+    /// The object is gone from the definition table and from TADIR (a row flagged `DELFLAG = X`
+    /// does not count).
     Absent,
 }
 
@@ -301,7 +312,15 @@ pub fn judge(expect: &Expect<'_>, kind: Kind, evidence: &Evidence) -> Proof {
         &evidence.definition,
         present,
     );
-    let directory = seen("TADIR".to_owned(), &evidence.directory, present);
+    let directory = if present {
+        seen("TADIR".to_owned(), &evidence.directory, true)
+    } else {
+        seen(
+            "TADIR".to_owned(),
+            &without_deleted(&evidence.directory),
+            false,
+        )
+    };
 
     seen("SEOCLASS".to_owned(), &evidence.runner, false);
 

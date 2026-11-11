@@ -95,7 +95,16 @@ fn directory_row(name: &str, package: &str) -> Result<Response, TransportError> 
 }
 
 fn directory_absent() -> Result<Response, TransportError> {
-    empty(&["OBJ_NAME", "DEVCLASS"])
+    empty(&["OBJ_NAME", "DEVCLASS", "DELFLAG"])
+}
+
+/// A TADIR row with its delete flag: `X` is a deletion recorded in a transport request.
+fn directory_flagged(name: &str, package: &str, flag: &str) -> Result<Response, TransportError> {
+    reply(&[
+        ("OBJ_NAME", &[Some(name)]),
+        ("DEVCLASS", &[Some(package)]),
+        ("DELFLAG", &[Some(flag)]),
+    ])
 }
 
 fn runner_row() -> Result<Response, TransportError> {
@@ -184,7 +193,7 @@ fn every_kind_reads_its_definition_table_the_directory_and_the_runner_in_one_new
             [
                 body.to_owned(),
                 format!(
-                    "SELECT OBJ_NAME, DEVCLASS FROM TADIR WHERE PGMID = 'R3TR' AND OBJECT = '{}' AND OBJ_NAME = 'YTEST_ABAPREACH_DT'",
+                    "SELECT OBJ_NAME, DEVCLASS, DELFLAG FROM TADIR WHERE PGMID = 'R3TR' AND OBJECT = '{}' AND OBJ_NAME = 'YTEST_ABAPREACH_DT'",
                     kind.token()
                 ),
                 format!("SELECT CLSNAME FROM SEOCLASS WHERE CLSNAME = '{RUNNER}'"),
@@ -419,6 +428,60 @@ fn a_delete_is_confirmed_only_when_every_row_and_the_runner_are_gone() {
             assert!(mismatch(&proof).contains(text), "{kind:?}: {proof:?}");
             assert_eq!(confirm(true, &proof), Status::Partial);
         }
+    }
+}
+
+#[test]
+fn a_tadir_row_flagged_deleted_with_no_definition_counts_as_deleted() {
+    for kind in KINDS {
+        let flagged = evidence(
+            kind,
+            "YT",
+            vec![
+                definition_absent(kind),
+                directory_flagged("YT", "ZPKG", "X"),
+                runner_absent(),
+            ],
+        );
+
+        assert_eq!(
+            judge(&Expect::Absent, kind, &flagged),
+            Proof::Matches,
+            "{kind:?}"
+        );
+
+        // A blank flag is a live entry; a definition that is still there is never deleted.
+        let live = evidence(
+            kind,
+            "YT",
+            vec![
+                definition_absent(kind),
+                directory_flagged("YT", "ZPKG", ""),
+                runner_absent(),
+            ],
+        );
+        let proof = judge(&Expect::Absent, kind, &live);
+
+        assert!(
+            mismatch(&proof).contains("TADIR still has a row"),
+            "{kind:?}: {proof:?}"
+        );
+
+        let kept = evidence(
+            kind,
+            "YT",
+            vec![
+                definition_row(kind, "YT"),
+                directory_flagged("YT", "ZPKG", "X"),
+                runner_absent(),
+            ],
+        );
+        let proof = judge(&Expect::Absent, kind, &kept);
+
+        assert!(
+            mismatch(&proof).contains("definition"),
+            "{kind:?}: {proof:?}"
+        );
     }
 }
 

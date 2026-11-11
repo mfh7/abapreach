@@ -15,7 +15,7 @@ use crate::operation::delete_adt::Opener;
 use crate::operation::deploy::{CancelFlag, INTERRUPT_EXIT_CODE};
 use crate::operation::payload::Kind;
 use crate::operation::runner::{RunnerEnd, RunnerRun};
-use crate::operation::runner_evidence::{Probe, read_evidence, read_inactive};
+use crate::operation::runner_evidence::{Probe, read_evidence, read_inactive, without_deleted};
 use crate::runner_protocol::{Nonce, Parsed, RunMode, RunStatus, parse_post_reply};
 use std::time::{Duration, Instant};
 
@@ -449,7 +449,7 @@ fn snapshot(
         },
         Intent::Create | Intent::Delete => Snapshot {
             definition: evidence.definition,
-            directory: evidence.directory,
+            directory: without_deleted(&evidence.directory),
             inactive: Ok(None),
         },
     }
