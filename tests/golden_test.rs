@@ -98,56 +98,49 @@ fn every_help_version_and_grammar_error_is_the_golden_text() {
     }
 }
 
+/// The M6 contract: the DDIC types and `TRAN` are types, `--prog` is an option of `create`, and
+/// the footprint of the temporary class is in the help of `read` and of the simulate options.
 #[test]
-fn tran_as_a_type_is_the_unknown_type_error_with_the_list_without_tran() {
-    let cases: [(&str, &[&str]); 4] = [
-        (
-            "err-read-unknown-type.txt",
-            &["read", "TRAN", "x", "out", "--conn", "c"],
-        ),
-        (
-            "err-deploy-unknown-type.txt",
-            &["deploy", "TRAN", "x", "f", "--conn", "c"],
-        ),
-        (
-            "err-create-unknown-type.txt",
-            &["create", "TRAN", "x", "--text", "t", "--conn", "c"],
-        ),
-        (
-            "err-delete-unknown-type.txt",
-            &["delete", "TRAN:X", "--plan", "p", "--conn", "c"],
-        ),
-    ];
-
-    for (file, args) in cases {
-        let output = binary(args);
-        let expected = golden("new", file)
-            .replace("BOGUS:X", "TRAN:X")
-            .replace("'BOGUS'", "'TRAN'");
-
-        assert_eq!(text(&output.stderr), expected, "{args:?}");
-        assert_eq!(text(&output.stdout), "", "{args:?}");
-        assert_eq!(output.status.code(), Some(2), "{args:?}");
+fn the_cli_golden_texts_name_the_new_types_the_prog_option_and_the_footprint() {
+    for file in [
+        "err-read-unknown-type.txt",
+        "err-deploy-unknown-type.txt",
+        "err-create-unknown-type.txt",
+        "help-read.txt",
+        "help-deploy.txt",
+        "help-create.txt",
+    ] {
         assert!(
-            !expected.contains("|TRAN") && !expected.contains(", TRAN]"),
-            "{expected}"
+            golden("new", file).contains("DTEL, DOMA, TABL, TTYP, TRAN"),
+            "{file}"
         );
     }
 
-    // `--prog` belongs to no type any more.
-    let output = binary(&[
-        "create", "PROG", "ZX", "--text", "t", "--prog", "ZR", "--conn", "c",
-    ]);
+    for file in ["err-delete-unknown-type.txt", "err-delete-bad-target.txt"] {
+        assert!(
+            golden("new", file).contains("(PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN)"),
+            "{file}"
+        );
+    }
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        text(&output.stderr).contains("unexpected argument '--prog'"),
-        "{}",
-        text(&output.stderr)
+    assert!(golden("new", "help-create.txt").contains("--prog <PROG>"));
+
+    for file in ["help-deploy.txt", "help-create.txt", "help-delete.txt"] {
+        assert!(
+            golden("new", file).contains("a temporary class in $TMP"),
+            "{file}"
+        );
+    }
+
+    assert!(golden("new", "help-read.txt").contains("temporary class"));
+    // The top level does not change: the footprint sits in the help of the subcommands.
+    assert_eq!(
+        minus_tran(&golden("old", "help-top.txt")),
+        golden("new", "help-top.txt")
     );
 }
 
-// ---- the rule against the old branch ----------------------------------------------------------
+// ---- the rule against the old branch (MCP schema) ------------------------------------------------
 
 /// Text: no line that names `--prog`, and `TRAN` gone from the lists that remain.
 fn minus_tran(old: &str) -> String {
@@ -160,113 +153,6 @@ fn minus_tran(old: &str) -> String {
 
     text.push('\n');
     text
-}
-
-#[test]
-fn the_golden_text_is_the_old_text_minus_tran_except_the_two_inline_help_forms() {
-    for (file, _, _) in COMMANDS {
-        if file == "help-read.txt" || file == "help-deploy.txt" {
-            continue;
-        }
-
-        assert_eq!(
-            minus_tran(&golden("old", file)),
-            golden("new", file),
-            "{file}"
-        );
-    }
-}
-
-#[test]
-fn the_two_inline_help_forms_keep_every_option_sentence_and_possible_value() {
-    for file in ["help-read.txt", "help-deploy.txt"] {
-        let (old, new) = (golden("old", file), golden("new", file));
-
-        // The type argument: the block of values became the inline list, without `TRAN`.
-        assert!(
-            old.contains("Possible values:\n          - PROG\n"),
-            "{file}"
-        );
-        assert!(
-            new.contains("<KIND>  [possible values: PROG, FUNC, CLAS, INTF]"),
-            "{file}"
-        );
-        assert!(!new.contains("TRAN"), "{file}");
-
-        // Everything else is the same words: each option line of the wide layout is a line of the
-        // compact one (name and value on one line, help after them).
-        let words = |text: &str| -> Vec<String> {
-            text.lines()
-                .flat_map(str::split_whitespace)
-                .map(str::to_owned)
-                .filter(|word| word != "-" && !word.starts_with("TRAN"))
-                .collect()
-        };
-        let kept = words(&new);
-
-        for word in words(&old) {
-            if [
-                "Possible",
-                "values:",
-                "A",
-                "report",
-                "transaction;",
-                "it",
-                "has",
-                "no",
-                "ADT",
-                "path",
-                "and",
-                "runs",
-                "over",
-                "the",
-                "RFC",
-                "EXT",
-                "only",
-                "PROG",
-                "FUNC",
-                "CLAS",
-                "INTF",
-                "(see",
-                "a",
-                "summary",
-                "with",
-                "'-h')",
-                "Print",
-                "help",
-            ]
-            .contains(&word.as_str())
-            {
-                continue;
-            }
-
-            assert!(kept.contains(&word), "{file}: {word}");
-        }
-    }
-}
-
-fn remove_tran(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            map.remove("prog");
-
-            for (key, child) in map.iter_mut() {
-                if key == "enum" {
-                    if let Value::Array(items) = child {
-                        items.retain(|item| item != "TRAN");
-                    }
-                } else if key == "description"
-                    && let Value::String(description) = child
-                {
-                    *description = description.replace("|TRAN", "");
-                } else {
-                    remove_tran(child);
-                }
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(remove_tran),
-        _ => {}
-    }
 }
 
 #[derive(Clone, Default)]
@@ -305,20 +191,15 @@ fn tools_list(write_offered: bool) -> Value {
 }
 
 #[test]
-fn the_mcp_tool_list_is_the_golden_schema_and_the_old_schema_minus_tran_and_prog() {
+fn the_mcp_tool_list_is_the_golden_schema_of_the_m6_contract() {
     for (file, write_offered) in [
         ("mcp-tools-write.json", true),
         ("mcp-tools-read.json", false),
     ] {
         let tools = tools_list(write_offered);
         let expected: Value = serde_json::from_str(&golden("new", file)).unwrap();
-        let mut old: Value = serde_json::from_str(&golden("old", file)).unwrap();
 
         assert_eq!(tools, expected, "{file}");
-
-        remove_tran(&mut old);
-
-        assert_eq!(old, expected, "{file}");
         assert_eq!(
             format!("{}\n", serde_json::to_string_pretty(&tools).unwrap()),
             golden("new", file),
@@ -326,13 +207,48 @@ fn the_mcp_tool_list_is_the_golden_schema_and_the_old_schema_minus_tran_and_prog
         );
     }
 
-    let write = golden("old", "mcp-tools-write.json");
+    // Since M6 Task 26 the schema no longer relates to the old branch by a deletion: it carries
+    // the DDIC and transaction types, `prog`, the XML `source` of a create, and the footprint.
+    let write = golden("new", "mcp-tools-write.json");
 
-    assert!(
-        write.contains("\"prog\"") && write.contains("\"TRAN\""),
-        "the old schema had them"
-    );
-    assert!(!golden("new", "mcp-tools-write.json").contains("TRAN"));
+    for needle in [
+        "\"TRAN\"",
+        "\"DTEL\"",
+        "\"prog\"",
+        "temporary class in $TMP",
+    ] {
+        assert!(write.contains(needle), "{needle}");
+    }
+
+    let tools = tools_list(true);
+    let tools = tools.as_array().unwrap();
+    let find = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+
+    // The one hint that changed is the read-only hint of `abap_read_source`.
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            name == "abap_read_table",
+            "{name}"
+        );
+    }
+
+    for name in [
+        "abap_read_source",
+        "abap_simulate",
+        "abap_create_simulate",
+        "abap_delete_simulate",
+    ] {
+        assert!(
+            find(name)["description"]
+                .as_str()
+                .unwrap()
+                .contains("temporary class in $TMP"),
+            "{name}"
+        );
+    }
 }
 
 // ---- the MCP type errors ------------------------------------------------------------------------
@@ -390,51 +306,49 @@ fn mcp_text(tool: &str, arguments: Value) -> (bool, String) {
 }
 
 #[test]
-fn tran_as_an_mcp_type_is_the_unknown_type_message_of_the_tool_without_tran() {
-    let create = json!({"conn": "DEV_100", "type": "TRAN", "name": "ZT", "text": "t"});
-    let read = json!({"conn": "DEV_100", "type": "TRAN", "name": "ZT"});
-    let deploy = json!({"conn": "DEV_100", "type": "TRAN", "name": "ZT", "source": "x"});
-    let delete = json!({"conn": "DEV_100", "objects": ["TRAN:ZT"]});
+fn an_unknown_mcp_type_is_refused_with_the_list_that_names_the_ddic_and_transaction_types() {
+    let source = "STOP: type must be one of PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN";
+    let create =
+        "STOP: type must be one of PROG, FUGR, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN";
 
     for (tool, arguments, expected) in [
         (
             "abap_create_simulate",
-            create.clone(),
-            "STOP: type must be one of PROG, FUGR, FUNC, CLAS, INTF",
+            json!({"conn": "DEV_100", "type": "BOGUS", "name": "ZT", "text": "t"}),
+            create,
         ),
         (
             "abap_create",
-            json!({"conn": "DEV_100", "type": "TRAN", "name": "ZT", "text": "t", "plan_token": "x"}),
-            "STOP: type must be one of PROG, FUGR, FUNC, CLAS, INTF",
+            json!({"conn": "DEV_100", "type": "BOGUS", "name": "ZT", "text": "t", "plan_token": "x"}),
+            create,
         ),
         (
             "abap_read_source",
-            read,
-            "STOP: type must be one of PROG, FUNC, CLAS, INTF",
+            json!({"conn": "DEV_100", "type": "BOGUS", "name": "ZT"}),
+            source,
         ),
         (
             "abap_simulate",
-            deploy,
-            "STOP: type must be one of PROG, FUNC, CLAS, INTF",
-        ),
-        (
-            "abap_delete_simulate",
-            delete,
-            "STOP: error: invalid value 'TRAN:ZT'",
+            json!({"conn": "DEV_100", "type": "BOGUS", "name": "ZT", "source": "x"}),
+            source,
         ),
     ] {
         let (is_error, message) = mcp_text(tool, arguments);
 
         assert!(is_error, "{tool}");
-
-        if tool == "abap_delete_simulate" {
-            assert!(
-                message.contains("delete target must be TYPE:NAME (PROG|FUGR|FUNC|CLAS|INTF)")
-                    && !message.contains("|TRAN"),
-                "{message}"
-            );
-        } else {
-            assert_eq!(message, expected, "{tool}");
-        }
+        assert_eq!(message, expected, "{tool}");
     }
+
+    let (is_error, message) = mcp_text(
+        "abap_delete_simulate",
+        json!({"conn": "DEV_100", "objects": ["BOGUS:ZT"]}),
+    );
+
+    assert!(is_error);
+    assert!(
+        message.contains(
+            "delete target must be TYPE:NAME (PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN)"
+        ),
+        "{message}"
+    );
 }

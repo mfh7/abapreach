@@ -1324,8 +1324,10 @@ fn doctor_probes_both_backends_and_warns_once() {
     let directory = tempfile::tempdir().unwrap();
     let mut fake = Fake::default();
 
-    fake.adt
-        .push_back(scripted(vec![Ok(Response::text(200, "<app:service/>"))]));
+    let mut replies = vec![Ok(Response::text(200, "<app:service/>"))];
+
+    replies.extend(common::doctor_runner_replies());
+    fake.adt.push_back(scripted(replies));
     fake.library.push_back(Ok(RfcLibraryInfo {
         identity: RfcLibraryIdentity {
             path: "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so".to_owned(),
@@ -2022,7 +2024,7 @@ fn delete_accepts_type_name_targets_and_rejects_bad_ones_locally() {
         &["--plan", "p", "--conn", "dev_100"][..],
         &["PROG:ZX", "--conn", "dev_100"],
         &["PROG:ZX", "--plan", "p"],
-        &["TABL:ZX", "--plan", "p", "--conn", "dev_100"],
+        &["VIEW:ZX", "--plan", "p", "--conn", "dev_100"],
         &["PROG:", "--plan", "p", "--conn", "dev_100"],
         &["ZX", "--plan", "p", "--conn", "dev_100"],
     ] {

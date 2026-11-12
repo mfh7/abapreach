@@ -1,9 +1,9 @@
 # Roadmap
 
-Version 1.0.0 brings every feature of the earlier Python tooling into the Rust binary. That
-scope is fixed: features are not added to match other tools, and none of the Python features
-is dropped. Each milestone ships as a minor release (0.12.0, 0.13.0, ...); 1.0.0 follows when
-every feature below is released and the [release gate](#release-gate) passes. Shipped work
+Version 1.0.0 brings every feature of the earlier internal tooling into the Rust binary. That
+scope is fixed: features are not added to match other tools, and no feature of the earlier
+tooling is dropped. Each milestone ships as a minor release (0.12.0, 0.13.0, ...); 1.0.0 follows
+when every feature below is released and the [release gate](#release-gate) passes. Shipped work
 moves to the [changelog](../CHANGELOG.md).
 
 ## Milestones
@@ -16,7 +16,7 @@ moves to the [changelog](../CHANGELOG.md).
 | 0.13.0 | Function modules, classes with local includes, interfaces: read and deploy; create of function groups, function modules, classes and interfaces; read with line ranges (released) |
 | 0.14.0 | MCP server (stdio), `read-table`, `delete` (released) |
 | 0.15.0 | Programs and includes: `create PROG` (program and include), include read, deploy and delete; ADT HTTP logoff fix; MCP additions (released) |
-| 0.16.0 | DDIC: data elements, domains, tables (transparent tables and structures), table types; transaction codes (`TRAN`) (planned) |
+| 0.16.0 | DDIC: data elements, domains, tables (transparent tables and structures), table types; transaction codes (`TRAN`): read, simulate, create and delete, through classrun on the 7.50 and 7.40 systems (released) |
 | later | The remaining features below, one milestone at a time |
 
 Platforms come before new features, so every feature after 0.12.0 is built and tested on
@@ -31,23 +31,26 @@ first.
 | :--- | :--- | :--- |
 | **ADT** | HTTPS, or an RFC library for the ADT tunnel | everything ADT offers |
 | **ADT?** | same as ADT | ADT if live tests confirm the object type |
-| **classrun** | same as ADT | a temporary class created over ADT and run through `/sap/bc/adt/oo/classrun` calls standard function modules on the server, then is deleted; for objects ADT has no endpoint for |
+| **classrun** | same as ADT | a temporary class created over ADT and run through `/sap/bc/adt/oo/classrun` calls standard function modules on the server, then is deleted; for objects ADT has no endpoint for. It needs developer authorization for a temporary `$TMP` class; nothing is installed on the SAP system |
 | **standard?** | depends on the path found | offered only if its milestone proves a standard SAP path (ADT, classrun, or a remote-enabled standard function module); otherwise not supported |
 
 **ADT** covers both ADT HTTP and the RFC tunnel through `SADT_REST_RFC_ENDPOINT`; neither
 needs anything installed in SAP.
 
+The access paths were compared for the DDIC types on the 7.50 and 7.40 systems; the results are in
+[Behavior differences: Access path comparison](behavior-differences.md#access-path-comparison-0160-rc6).
+
 ## Released in 0.11.0
 
-| Feature | Python origin | Path |
+| Feature | Reference command | Path |
 | :--- | :--- | :--- |
 | Read and deploy `PROG` | `rfc-deploy PROG` | ADT |
 | `doctor` | new | ADT, RFC |
-| `foreign_inactive` guard | FM verdict | ADT |
+| `foreign_inactive` guard | function module verdict | ADT |
 
 ## Shipped in 0.13.0
 
-| Feature | Python origin | Path |
+| Feature | Reference command | Path |
 | :--- | :--- | :--- |
 | Read with line ranges (`--lines`, stdout only) | `rfc-read source` | ADT |
 | Function modules, with interface-change report and where-used advisory | `rfc-deploy FUNC` | ADT |
@@ -56,27 +59,41 @@ needs anything installed in SAP.
 | Create function groups, function modules, classes and interfaces | `rfc-deploy create` | ADT |
 
 The status of each path is in [Getting started: Tested environment](getting-started.md#tested-environment),
-and the intentional differences from the Python tooling are in
+and the intentional differences from the reference behavior are in
 [Behavior differences](behavior-differences.md).
+
+## Shipped in 0.16.0
+
+| Feature | Reference command | Path |
+| :--- | :--- | :--- |
+| Data elements (`DTEL`), domains (`DOMA`), transparent tables and structures (`TABL`), table types (`TTYP`): read, simulate, deploy, create, delete | `rfc-read`, `rfc-deploy` DDIC commands | classrun on 7.50 and 7.40 |
+| Transaction codes (`TRAN`) for report programs: read, create, delete (no deploy) | `rfc-read`, `rfc-deploy` transaction commands | classrun on 7.50 and 7.40 |
+| MCP: the DDIC and `TRAN` types; `read` of these types takes the write slot and is refused under `mcp_write = off` | MCP server (0.14.0) | stdio |
+
+DDIC changes are decided like SAP activation: a change that needs SE14 conversion is refused,
+and a table that holds data is not deleted. The file size limit is 256 KiB.
+
+Each of these runs a temporary class in `$TMP`, so every operation needs a modifiable system and
+developer authorization. Setup and limits: [Getting started: DDIC objects and transaction codes](getting-started.md#ddic-objects-and-transaction-codes),
+[Deploy safety: DDIC and TRAN](deploy-safety.md#ddic-and-tran), and [MCP server](mcp.md#ddic-and-tran-types).
+
+Not in 0.16.0: messages (`MSAG`), text pools (`TEXT`), CDS (`DDLS`), enhancements (`ENHO`), restore
+of an old version (`rfc-deploy restore`), and the lifecycle (inactive, activate, ATC, ABAP Unit).
+Deploy of `TRAN` does not exist: a transaction code is created and deleted, not changed.
 
 ## Planned for 1.0.0
 
 ### Other object types
 
-| Feature | Python origin | Path |
+| Feature | Reference command | Path |
 | :--- | :--- | :--- |
-| Data elements, domains, tables, table types (0.16.0) | `DTEL` `DOMA` `TABL` `TTYP` | ADT for data elements and structures on 7.50; classrun for the rest and on 7.40 |
-| Transaction codes (0.16.0) | `TRAN` | classrun |
 | Message classes, text pools | `MSAG` `TEXT` | ADT? |
 | CDS views | `DDLS` | ADT? |
 | Enhancement implementations | `ENHO` | ADT? |
 
-DDIC changes are decided like SAP activation: a change that needs SE14 conversion is refused,
-and a table that holds data is not deleted.
-
 ### Lifecycle and quality
 
-| Feature | Python origin | Path |
+| Feature | Reference command | Path |
 | :--- | :--- | :--- |
 | Version list and diff | `rfc-read versions` | ADT? |
 | Restore an old version | `rfc-deploy restore` | standard? |
@@ -88,7 +105,7 @@ and a table that holds data is not deleted.
 
 ### System information
 
-| Feature | Python origin | Path |
+| Feature | Reference command | Path |
 | :--- | :--- | :--- |
 | Ping and system info | `rfc-read ping` | ADT, RFC |
 | Short dumps (ST22) | `rfc-read dumps` | ADT? |
@@ -98,23 +115,23 @@ and a table that holds data is not deleted.
 
 ### Setup
 
-| Feature | Python origin | Path |
+| Feature | Reference command | Path |
 | :--- | :--- | :--- |
 | `doctor`: installed objects, capabilities | new | ADT, RFC |
 
 ## Shipped in 0.14.0
 
-| Feature | Python origin | Path |
+| Feature | Reference command | Path |
 | :--- | :--- | :--- |
 | Read a table through the data preview (`read-table`) | `rfc-read table` | ADT, RFC SADT for the admitted shape |
 | Delete with a reviewed plan (`delete`) | `rfc-deploy delete` | ADT, RFC SADT fallback before the first LOCK |
-| MCP server (`abapreach mcp`): read tools, write tools behind `mcp_write` | MCP server (Python) | stdio |
+| MCP server (`abapreach mcp`): read tools, write tools behind `mcp_write` | MCP server (earlier tooling) | stdio |
 
 Setup and limits: [MCP server](mcp.md) and [Deploy safety: Delete](deploy-safety.md#delete).
 
 ## Shipped in 0.15.0
 
-| Feature | Python origin | Path |
+| Feature | Reference command | Path |
 | :--- | :--- | :--- |
 | Create a program (`create PROG --subc 1`), with an optional FILE that runs a simulate deploy | `rfc-deploy create PROG` | ADT, RFC SADT |
 | Create an include (`create PROG --subc I`); read, deploy (`--main`) and delete of program includes | `rfc-deploy create PROG` (include create parity only; the other include operations are not in the parity matrix) | ADT, RFC SADT |
@@ -125,7 +142,7 @@ Setup and limits: [Getting started: Program includes](getting-started.md#program
 
 Not in 0.15.0: DDIC (`DTEL`, `DOMA`, `TABL`, `TTYP`), messages (`MSAG`), text pools (`TEXT`), CDS
 (`DDLS`), enhancements (`ENHO`), restore of an old version (`rfc-deploy restore`), and the
-lifecycle (inactive, activate, ATC, ABAP Unit).
+lifecycle (inactive, activate, ATC, ABAP Unit). DDIC and `TRAN` shipped in 0.16.0.
 
 ## MCP server (0.14.0)
 
@@ -162,11 +179,10 @@ live test is released as ADT HTTP only and documented that way.
 
 1. The license terms for using the SAP GUI RFC library and the NW RFC SDK from a third-party
    program are confirmed from SAP's own text, for each platform that claims RFC.
-2. Every row of the feature table runs on at least one path and passes the parity test
-   against the Python tooling: same status, exit code and SAP state, same guards.
+2. Every row of the feature table runs on at least one path and passes the comparison against
+   the reference behavior: same status, exit code and SAP state, same guards.
 3. The final ADT HTTP versus RFC comparison is published in the README.
 4. The public repository starts from a clean snapshot.
-5. The Python tooling is archived with documentation that credits its role.
 
 ## Not planned
 

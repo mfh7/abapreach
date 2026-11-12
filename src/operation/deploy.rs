@@ -144,6 +144,8 @@ pub struct CancelFlag {
     write_in_flight: Arc<AtomicUsize>,
     /// The process was told to end (signal or closed input), not just one request cancelled.
     shutdown: Arc<AtomicBool>,
+    /// How many interrupts the handler saw while something was held; two skip a reconciliation.
+    interrupts: Arc<AtomicUsize>,
 }
 
 impl CancelFlag {
@@ -196,6 +198,11 @@ impl CancelFlag {
         WriteScope(self)
     }
 
+    /// Whether a second interrupt arrived while the first was deferred.
+    pub fn is_second_interrupt(&self) -> bool {
+        self.interrupts.load(Ordering::SeqCst) >= 2
+    }
+
     /// A SIGINT must not end the process while a lock is held or a create write is unresolved.
     /// The flag then makes the operation settle safely before it reports.
     pub fn on_interrupt(&self) -> InterruptAction {
@@ -203,6 +210,7 @@ impl CancelFlag {
             return InterruptAction::ExitNow;
         }
 
+        self.interrupts.fetch_add(1, Ordering::SeqCst);
         self.request_shutdown();
 
         InterruptAction::Deferred

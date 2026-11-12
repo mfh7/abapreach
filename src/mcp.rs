@@ -2,6 +2,7 @@
 //! (framing, negotiation, discovery); what a tool does lives behind [`ToolHandler`], and a write
 //! is never decided by anything a client sends.
 
+use crate::cli::RUNNER_KINDS;
 use crate::extension::{ExtensionKind, Verbs};
 use crate::operation::deploy::CancelFlag;
 use serde_json::{Map, Value, json};
@@ -41,6 +42,22 @@ pub const WRITE_TOOLS: [&str; 6] = [
     "abap_delete_simulate",
     "abap_delete",
 ];
+
+/// Whether `token` names a DDIC or transaction type: the types that run through a temporary class.
+pub fn is_runner_type(token: &str) -> bool {
+    RUNNER_KINDS.iter().any(|kind| kind.token() == token)
+}
+
+/// Whether a call takes the single in-flight slot: a write tool, and a read of a DDIC or
+/// transaction type, which creates and deletes a temporary class.
+pub fn holds_slot(name: &str, arguments: Option<&Map<String, Value>>) -> bool {
+    WRITE_TOOLS.contains(&name)
+        || (name == "abap_read_source"
+            && arguments
+                .and_then(|arguments| arguments.get("type"))
+                .and_then(Value::as_str)
+                .is_some_and(is_runner_type))
+}
 
 /// The first protocol version that has elicitation.
 const ELICITATION_SINCE: &str = "2025-06-18";
@@ -308,7 +325,7 @@ impl<H: ToolHandler> Server<H> {
             Some(_) => return Some(error(id, INVALID_PARAMS, "arguments must be an object")),
         };
 
-        let write = WRITE_TOOLS.contains(&name);
+        let write = holds_slot(name, Some(arguments));
 
         // The client cancelled this request before it started: nothing runs, nothing is sent.
         // A shutdown stops a write that has not begun, and the client still gets an answer.
@@ -416,7 +433,13 @@ fn tool_name(message: &Value) -> Option<&str> {
 }
 
 fn is_write_call(message: &Value) -> bool {
-    tool_name(message).is_some_and(|name| WRITE_TOOLS.contains(&name))
+    tool_name(message).is_some_and(|name| {
+        let arguments = message["params"]
+            .get("arguments")
+            .and_then(Value::as_object);
+
+        holds_slot(name, arguments)
+    })
 }
 
 /// Settles what only the reader can settle while the main loop is busy; `true` when the message
@@ -683,7 +706,10 @@ impl Link<'_> {
         message: &Value,
         read: &mut dyn FnMut(&str, &Map<String, Value>) -> ToolResult,
     ) -> Option<Value> {
-        let name = tool_name(message).filter(|name| READ_TOOLS.contains(name))?;
+        // A read that takes the slot is not served beside a write.
+        let name = tool_name(message)
+            .filter(|name| READ_TOOLS.contains(name))
+            .filter(|_| !is_write_call(message))?;
         let arguments = match message["params"].get("arguments") {
             None => Map::new(),
             Some(Value::Object(arguments)) => arguments.clone(),
@@ -813,7 +839,10 @@ fn property(kind: &str, description: &str) -> Value {
 }
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
-    let read_only = READ_TOOLS.contains(&name);
+    let read = READ_TOOLS.contains(&name);
+    // Reading a DDIC or transaction type creates and deletes a temporary class, so the hint of
+    // `abap_read_source` is false for every type; the class is no destruction.
+    let read_only = read && name != "abap_read_source";
 
     json!({
         "name": name,
@@ -821,7 +850,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
         "inputSchema": {"type": "object", "properties": properties, "required": required},
         "annotations": {
             "readOnlyHint": read_only,
-            "destructiveHint": !read_only,
+            "destructiveHint": !read,
             "openWorldHint": false,
         },
     })
@@ -873,7 +902,11 @@ fn build_tools(write_offered: bool, writable: &[String], kinds: &[ExtensionKind]
         "boolean",
         "Create the include of a program if it does not exist",
     );
-    let source_kinds = ["PROG", "FUNC", "CLAS", "INTF"];
+    let runner_tokens: Vec<&str> = RUNNER_KINDS.iter().map(|kind| kind.token()).collect();
+    let source_kinds: Vec<&str> = ["PROG", "FUNC", "CLAS", "INTF"]
+        .into_iter()
+        .chain(runner_tokens.iter().copied())
+        .collect();
     let with_verb = |verb: Verbs| {
         kinds
             .iter()
@@ -882,10 +915,12 @@ fn build_tools(write_offered: bool, writable: &[String], kinds: &[ExtensionKind]
     };
     let create_kinds: Vec<&str> = ["PROG", "FUGR", "FUNC", "CLAS", "INTF"]
         .into_iter()
+        .chain(runner_tokens.iter().copied())
         .chain(with_verb(Verbs::CREATE))
         .collect();
     let delete_kinds: Vec<&str> = ["PROG", "FUGR", "FUNC", "CLAS", "INTF"]
         .into_iter()
+        .chain(runner_tokens.iter().copied())
         .chain(with_verb(Verbs::DELETE))
         .collect();
     let main = property(
@@ -904,7 +939,9 @@ fn build_tools(write_offered: bool, writable: &[String], kinds: &[ExtensionKind]
     });
     let mut create_properties = json!({
         "conn": conn, "type": object_type(&create_kinds), "name": name,
-        "text": property("string", "Object description"),
+        "text": property("string", "Object description (optional for DTEL, DOMA, TABL and TTYP, whose XML carries it; required for every other type)"),
+        "source": property("string", "XML of the object, sent as is (DTEL, DOMA, TABL and TTYP only)"),
+        "prog": property("string", "Report the transaction starts (TRAN only, required there)"),
         "package": property("string", "Package (required except FUNC)"), "tr": tr, "fugr": fugr,
         "subc": json!({
             "type": "string",
@@ -927,7 +964,7 @@ fn build_tools(write_offered: bool, writable: &[String], kinds: &[ExtensionKind]
     let mut tools = vec![
         tool(
             "abap_read_source",
-            "Read live source and its hash. Read-only.",
+            "Read live source and its hash. Read-only for PROG, FUNC, CLAS and INTF. For DTEL, DOMA, TABL, TTYP and TRAN it creates and deletes a temporary class in $TMP on the SAP system (no definition is written), takes the single in-flight slot, and returns the XML (TRAN: six lines) and its hash.",
             json!({
                 "conn": conn, "type": object_type(&source_kinds), "name": name,
                 "include": include, "fugr": fugr, "main": main,
@@ -952,31 +989,31 @@ fn build_tools(write_offered: bool, writable: &[String], kinds: &[ExtensionKind]
         tools.extend([
             write_tool(
                 "abap_simulate",
-                "Simulate a source deploy (diff and checks). Issues a plan_token only if the simulation is OK.",
+                "Simulate a source or XML deploy (diff and checks). For DTEL, DOMA, TABL and TTYP it creates and deletes a temporary class in $TMP (no definition is written). Issues a plan_token only if the simulation is OK.",
                 deploy_properties.clone(),
                 &["conn", "type", "name", "source"],
             ),
             write_tool(
                 "abap_deploy",
-                "Deploy source to SAP (WRITE). Needs a plan_token from abap_simulate with identical arguments; single use, 15 minutes.",
+                "Deploy source or XML to SAP (WRITE). TRAN has no deploy. Needs a plan_token from abap_simulate with identical arguments; single use, 15 minutes.",
                 with_token(&deploy_properties),
                 &["conn", "type", "name", "source", "plan_token"],
             ),
             write_tool(
                 "abap_create_simulate",
-                "Simulate creating a new object. Issues a plan_token only if the simulation is OK.",
+                "Simulate creating a new object. For DTEL, DOMA, TABL, TTYP and TRAN it creates and deletes a temporary class in $TMP (nothing is created). Issues a plan_token only if the simulation is OK.",
                 create_properties.clone(),
-                &["conn", "type", "name", "text"],
+                &["conn", "type", "name"],
             ),
             write_tool(
                 "abap_create",
-                "Create a new object in SAP (WRITE, without source). Needs a plan_token from abap_create_simulate with identical arguments.",
+                "Create a new object in SAP (WRITE, without source except the XML of DTEL, DOMA, TABL and TTYP). Needs a plan_token from abap_create_simulate with identical arguments.",
                 with_token(&create_properties),
-                &["conn", "type", "name", "text", "plan_token"],
+                &["conn", "type", "name", "plan_token"],
             ),
             write_tool(
                 "abap_delete_simulate",
-                "Plan the deletion of objects. Issues a plan_token only if every object is SIMULATED_OK.",
+                "Plan the deletion of objects. For DTEL, DOMA, TABL, TTYP and TRAN rows it creates and deletes a temporary class in $TMP per row (nothing is deleted); at most one such row per call. Issues a plan_token only if every object is SIMULATED_OK.",
                 delete_properties.clone(),
                 &["conn", "objects"],
             ),
@@ -1139,6 +1176,36 @@ mod tests {
                 .starts_with("CANCELED: ")
         );
         assert!(shutdown);
+    }
+
+    #[test]
+    fn a_queued_eof_refuses_a_ddic_read_like_a_write_but_not_a_source_read() {
+        let read = |kind: &str| {
+            json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                   "params": {"name": "abap_read_source", "arguments": {"type": kind}}})
+        };
+
+        for kind in ["DTEL", "DOMA", "TABL", "TTYP", "TRAN"] {
+            let (reply, calls, shutdown) = call_after_eof(&read(kind));
+            let reply = reply.unwrap();
+
+            assert_eq!(calls, 0, "{kind}: the handler must not see the read");
+            assert_eq!(reply["result"]["isError"], true, "{kind}");
+            assert!(
+                reply["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("CANCELED: "),
+                "{kind}"
+            );
+            assert!(shutdown, "{kind}");
+        }
+
+        let (reply, calls, shutdown) = call_after_eof(&read("PROG"));
+
+        assert_eq!(calls, 1);
+        assert_eq!(reply.unwrap()["result"]["isError"], true);
+        assert!(!shutdown);
     }
 
     #[test]

@@ -1,12 +1,12 @@
 Usage: abapreach deploy [OPTIONS] --conn <CONN> <KIND> <NAME> <FILE>
 
 Arguments:
-  <KIND>  [possible values: PROG, FUNC, CLAS, INTF]
+  <KIND>  [possible values: PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN]
   <NAME>  
   <FILE>  
 
 Options:
-      --simulate           
+      --simulate           For DTEL, DOMA, TABL, TTYP and TRAN a simulate still creates and deletes a temporary class in $TMP
       --base <BASE>        
       --tr <TR>            
       --backend <BACKEND>  [possible values: adt, rfc]

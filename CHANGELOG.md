@@ -14,6 +14,56 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
+Version metadata is `0.16.0`. This entry is finalized before the last release candidate.
+
+### Added
+- DDIC types `DTEL`, `DOMA`, `TTYP`, transparent tables and `INTTAB` structures (`TABL`), and
+  transaction codes `TRAN`, for `read`, `deploy`, `deploy --simulate`, `create`, `create --simulate`
+  and `delete`. `TRAN` has no `deploy`: use `create` or `delete`.
+- Every operation on these types runs through one temporary runner class, over ADT classrun or RFC
+  SADT. The class is named `<runner_prefix><8 characters>` and created in `$TMP` in each cycle, then
+  removed. `runner_prefix` is set on a server entry of the config file; the default is
+  `YCL_ABAPREACH_RUN_`.
+- `deploy` of these types runs two cycles: run 1 shows the diff and the live hash, run 2 writes.
+- Conversion verdict: a change that SAP converts with SE14 (for example a shorter field or a new
+  type) is rejected with the SE14 reason. Deleting a table that holds rows is rejected.
+- `doctor` prints `RUNNER` lines: the classrun availability, the runner prefix, the post transport,
+  the preflight facts, and the leftover runner classes with their age and the commands that remove
+  them.
+- MCP: all seven tools that take a `type` accept `DTEL`, `DOMA`, `TABL`, `TTYP` and `TRAN`;
+  `abap_deploy` and `abap_simulate` refuse `TRAN`. See
+  [DDIC and `TRAN` types](docs/mcp.md#ddic-and-tran-types).
+
+### Changed
+- MCP: `abap_create` and `abap_create_simulate` refuse `prog` for every type except `TRAN`
+  (`prog only applies to TRAN`), as the CLI does. 0.15.0 ignored it.
+- An unpinned command on a stateless ADT session uses the RFC path. The CLI prints
+  `NOTE: ADT HTTP is stateless on this release; the RFC path is used`.
+- MCP: `abap_read_source` is no longer read-only (`readOnlyHint` is `false` for every type). A read
+  of a DDIC or `TRAN` object takes the single write slot and creates the runner class, so a client
+  that auto-allows `abap_read_source` also allows those classes. `abap_delete` always asks.
+- DDIC `read`: a run that ends `NOT_FOUND` or `REJECTED` exits 1 and writes no file (Python exits
+  2). See [DDIC `read`](docs/behavior-differences.md#ddic-read).
+- System change option guard: the runner rejects only `EDTFLAG` `N`, SAP's standard rule. The Python
+  tool rejected any non-empty value. See
+  [System change option guard](docs/behavior-differences.md#system-change-option-guard).
+
+### Fixed
+- RFC backend: the connection now opens with `NO_BASXML=1` (classic RFC serialization). Before,
+  `deploy` and `deploy --simulate` of a source of about 59 KB or more over RFC failed with
+  `RfcInvoke: The read XML document had an invalid format` (an `XML_FORMAT_ERROR` dump in
+  `SAPLSADT_REST`): the server could not read the basXML stream of a high-entropy `MESSAGE_BODY`
+  from about 64 KB on.
+
+### Known limitations
+- A client killed (SIGKILL) while an ADT HTTP stateful session holds the class lock leaves that lock
+  until the server session times out: about 38 minutes observed on a 7.50 system. `doctor` lists the
+  runner class and the remove commands; they succeed once the lock is gone.
+- Tested so far: the types and `TRAN` pass over ADT HTTP on the 7.50 system and over RFC SADT on the
+  7.40 system. RFC SADT also works on the 7.50 system. ADT HTTP cells on the 7.40 system are
+  UNSUPPORTED (no stateful session). The classrun POST also runs over RFC SADT, so a connection
+  without an HTTP route can use these types.
+
 ## [0.15.0] - 2026-11-07
 
 ### Added

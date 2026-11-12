@@ -627,15 +627,19 @@ fn the_unknown_type_texts_list_the_extension_type() {
     let (delete, _) = stops(&["delete", "BOGUS:ZX", "--plan", "p"], "dev_100", &registry);
 
     assert!(
-        read.contains("[possible values: PROG, FUNC, CLAS, INTF, XTEST]"),
+        read.contains(
+            "[possible values: PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN, XTEST]"
+        ),
         "{read}"
     );
     assert!(
-        create.contains("[possible values: PROG, FUGR, FUNC, CLAS, INTF, XTEST]"),
+        create.contains(
+            "[possible values: PROG, FUGR, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN, XTEST]"
+        ),
         "{create}"
     );
     assert!(
-        delete.contains("delete target must be TYPE:NAME (PROG|FUGR|FUNC|CLAS|INTF|XTEST)"),
+        delete.contains("delete target must be TYPE:NAME (PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN|XTEST)"),
         "{delete}"
     );
 }
@@ -653,10 +657,13 @@ fn without_an_extension_the_type_is_an_unknown_type() {
 
     assert!(read.contains("invalid value 'XTEST'"), "{read}");
     assert!(
-        read.contains("[possible values: PROG, FUNC, CLAS, INTF]"),
+        read.contains("[possible values: PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN]"),
         "{read}"
     );
-    assert!(delete.contains("(PROG|FUGR|FUNC|CLAS|INTF)"), "{delete}");
+    assert!(
+        delete.contains("(PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN)"),
+        "{delete}"
+    );
     assert!(option.contains("unexpected argument '--note'"), "{option}");
 }
 
@@ -1775,7 +1782,10 @@ fn the_tool_list_offers_the_type_and_the_option_where_the_hook_says() {
 
         assert_eq!(
             properties["type"]["enum"],
-            json!(["PROG", "FUGR", "FUNC", "CLAS", "INTF", "XTEST"]),
+            json!([
+                "PROG", "FUGR", "FUNC", "CLAS", "INTF", "DTEL", "DOMA", "TABL", "TTYP", "TRAN",
+                "XTEST"
+            ]),
             "{name}"
         );
         assert_eq!(properties["note"]["type"], "string", "{name}");
@@ -1791,7 +1801,7 @@ fn the_tool_list_offers_the_type_and_the_option_where_the_hook_says() {
             .unwrap();
 
         assert!(
-            description.ends_with("PROG|FUGR|FUNC|CLAS|INTF|XTEST"),
+            description.ends_with("PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN|XTEST"),
             "{description}"
         );
     }
@@ -1800,7 +1810,9 @@ fn the_tool_list_offers_the_type_and_the_option_where_the_hook_says() {
     for name in ["abap_read_source", "abap_simulate", "abap_deploy"] {
         assert_eq!(
             find(name)["inputSchema"]["properties"]["type"]["enum"],
-            json!(["PROG", "FUNC", "CLAS", "INTF"]),
+            json!([
+                "PROG", "FUNC", "CLAS", "INTF", "DTEL", "DOMA", "TABL", "TTYP", "TRAN"
+            ]),
             "{name}"
         );
     }
@@ -1834,10 +1846,12 @@ fn the_unknown_type_texts_of_the_tools_list_the_extension_type() {
 
     assert_eq!(
         created.text,
-        "STOP: type must be one of PROG, FUGR, FUNC, CLAS, INTF, XTEST"
+        "STOP: type must be one of PROG, FUGR, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN, XTEST"
     );
     assert!(
-        deleted.text.contains("(PROG|FUGR|FUNC|CLAS|INTF|XTEST)"),
+        deleted
+            .text
+            .contains("(PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN|XTEST)"),
         "{}",
         deleted.text
     );
@@ -1847,7 +1861,7 @@ fn the_unknown_type_texts_of_the_tools_list_the_extension_type() {
     );
     assert_eq!(
         unknown.text,
-        "STOP: type must be one of PROG, FUNC, CLAS, INTF"
+        "STOP: type must be one of PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN"
     );
     assert_eq!(rig.fake.opens(), (0, 0, 0, 0));
 }
@@ -2460,6 +2474,7 @@ static PACKAGE_LONG: [OptionSpec; 1] = [option("ypackage", "package")];
 static SHARED_ID: [OptionSpec; 1] = [option("yopt", "other")];
 static SHARED_LONG: [OptionSpec; 1] = [option("yother", "yopt")];
 static YOPT: [OptionSpec; 1] = [option("yopt", "yopt")];
+static SOURCE_ID: [OptionSpec; 1] = [option("source", "ysource")];
 
 const fn spec_with(options: &'static [OptionSpec], token: &'static str) -> KindSpec {
     let mut kind = spec(token, "y (YKIND)");
@@ -2469,11 +2484,13 @@ const fn spec_with(options: &'static [OptionSpec], token: &'static str) -> KindS
 }
 
 static TEXT_ID_KIND: KindSpec = spec_with(&TEXT_ID, "YKIND");
+static SOURCE_ID_KIND: KindSpec = spec_with(&SOURCE_ID, "YKIND");
 static PACKAGE_LONG_KIND: KindSpec = spec_with(&PACKAGE_LONG, "YKIND");
 static YOPT_KIND: KindSpec = spec_with(&YOPT, "YKIND");
 static SHARED_ID_KIND: KindSpec = spec_with(&SHARED_ID, "YOTHER");
 static SHARED_LONG_KIND: KindSpec = spec_with(&SHARED_LONG, "YOTHER");
 static TEXT_ID_KINDS: [ExtensionKind; 1] = [ExtensionKind::new(&TEXT_ID_KIND)];
+static SOURCE_ID_KINDS: [ExtensionKind; 1] = [ExtensionKind::new(&SOURCE_ID_KIND)];
 static PACKAGE_LONG_KINDS: [ExtensionKind; 1] = [ExtensionKind::new(&PACKAGE_LONG_KIND)];
 static SHARED_ID_KINDS: [ExtensionKind; 2] = [
     ExtensionKind::new(&YOPT_KIND),
@@ -2494,6 +2511,15 @@ static YOPT_KIND_B: KindSpec = spec_with(&YOPT, "YOTHER");
 fn an_option_id_that_is_a_standard_argument_is_refused() {
     let _ = Registry::new().with(Colliding {
         kinds: &TEXT_ID_KINDS,
+        faults: &[],
+    });
+}
+
+#[test]
+#[should_panic(expected = "extension option source is a standard create argument")]
+fn the_ddic_source_option_is_reserved_against_an_extension() {
+    let _ = Registry::new().with(Colliding {
+        kinds: &SOURCE_ID_KINDS,
         faults: &[],
     });
 }
@@ -2539,5 +2565,14 @@ fn a_standard_fault_target_is_refused() {
     let _ = Registry::new().with(Colliding {
         kinds: &FINE_KINDS,
         faults: &["PUT"],
+    });
+}
+
+#[test]
+#[should_panic(expected = "fault target CLASSRUN is a standard target")]
+fn the_classrun_fault_target_is_reserved_against_an_extension() {
+    let _ = Registry::new().with(Colliding {
+        kinds: &FINE_KINDS,
+        faults: &["CLASSRUN"],
     });
 }

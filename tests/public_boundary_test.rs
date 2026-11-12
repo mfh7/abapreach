@@ -122,6 +122,46 @@ fn the_public_docs_name_no_custom_function_module_and_no_private_crate() {
     assert!(found.is_empty(), "forbidden strings in: {found:?}");
 }
 
+// ---- the generated runner class ----------------------------------------------------------------------
+
+/// The runner class source is built from the template files and the allow-lists. The forbidden
+/// strings must be in none of them: not in the template files, not in the generated source, and
+/// not in the lists the scanner trusts.
+#[test]
+fn the_runner_templates_name_no_custom_function_module_and_no_private_crate() {
+    use abapreach::operation::runner_scan::{ALLOWED_CLASSES, ALLOWED_FUNCTIONS};
+    use abapreach::operation::runner_template::{TEMPLATES, generate, template_lines};
+
+    let files = text_files(&["src/operation/runner_template"]);
+
+    assert!(
+        files
+            .iter()
+            .any(|(name, _)| name.ends_with("core_impl.abap")),
+        "the template files are scanned: {files:?}"
+    );
+
+    for (name, text) in &files {
+        assert!(!holds_forbidden(text), "{name}");
+    }
+
+    for template in TEMPLATES {
+        let generated =
+            generate(template, "YCL_ABAPREACH_RUN_AB12CD34", &["QUJD".to_owned()]).unwrap();
+
+        assert!(!holds_forbidden(&generated), "{}", template.name);
+        assert!(
+            !holds_forbidden(&template_lines(template).join("\n")),
+            "{}",
+            template.name
+        );
+    }
+
+    for name in ALLOWED_FUNCTIONS.iter().chain(ALLOWED_CLASSES) {
+        assert!(!holds_forbidden(name), "{name}");
+    }
+}
+
 // ---- the extension token and the identifiers ------------------------------------------------------
 
 fn is_word_byte(byte: u8) -> bool {

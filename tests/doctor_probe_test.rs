@@ -16,6 +16,8 @@ use std::rc::Rc;
 const DISCOVERY_URI: &str = "/sap/bc/adt/discovery";
 const WARNING: &str = "WARNING: connection DEV_100 uses insecure TLS or HTTP.";
 const DENIED_LINE: &str = "policy read_table_denied: USR02, USH02, USH02_ARC_TMP, USRPWDHISTORY, RFCDES, RSECTAB, RSECACTB, SSF_PSE_D";
+const PREFLIGHT_LINE: &str = "RUNNER preflight: T000 CCCATEGORY=C CCCORACTIV=1 CCNOCLIIND=- \
+    TRNSPACE /0CUST/ EDITFLAG=X";
 const LIBRARY_PATH: &str = "/opt/sap/nwrfcsdk/lib/libsapnwrfc.so";
 
 fn library() -> Result<RfcLibraryInfo, String> {
@@ -55,11 +57,151 @@ fn shared<T: SadtTransport + 'static>(transport: T) -> (Rc<RefCell<T>>, Opened) 
 }
 
 fn discovery() -> Opened {
-    shared(ScriptedTransport::replies(vec![Ok(Response::text(
-        200,
-        "<app:service/>",
-    ))]))
+    shared(ScriptedTransport::replies(discovery_with(runner_replies(
+        classrun_found(),
+        search_reply(&[]),
+        Vec::new(),
+    ))))
     .1
+}
+
+/// The discovery reply followed by the replies of the runner reads.
+fn discovery_with(
+    runner: Vec<Result<Response, TransportError>>,
+) -> Vec<Result<Response, TransportError>> {
+    let mut replies = vec![Ok(Response::text(200, "<app:service/>"))];
+
+    replies.extend(runner);
+
+    replies
+}
+
+/// A SADT session whose runner reads find nothing to report.
+fn sadt_runner() -> Opened {
+    shared(ScriptedTransport::replies(runner_replies(
+        classrun_found(),
+        search_reply(&[]),
+        Vec::new(),
+    )))
+    .1
+}
+
+fn rows(columns: &[(&str, &[Option<&str>])]) -> Result<Response, TransportError> {
+    Ok(Response::text(200, common::preview(columns)))
+}
+
+fn classrun_found() -> Result<Response, TransportError> {
+    rows(&[("CLSNAME", &[Some("IF_OO_ADT_CLASSRUN")])])
+}
+
+fn classrun_missing() -> Result<Response, TransportError> {
+    let none: &[Option<&str>] = &[];
+
+    rows(&[("CLSNAME", none)])
+}
+
+fn search_reply(names: &[&str]) -> Result<Response, TransportError> {
+    let mut xml = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8"?><adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">"#,
+    );
+
+    for name in names {
+        xml.push_str(&format!(
+            r#"<adtcore:objectReference adtcore:uri="/sap/bc/adt/oo/classes/{}" adtcore:type="CLAS/OC" adtcore:name="{name}" adtcore:packageName="$TMP"/>"#,
+            name.to_ascii_lowercase()
+        ));
+    }
+
+    xml.push_str("</adtcore:objectReferences>");
+
+    Ok(Response::text(200, xml))
+}
+
+/// The metadata of a runner class; `None` leaves out the time stamps.
+fn class_meta(created_at: Option<&str>) -> Result<Response, TransportError> {
+    class_times(created_at, None)
+}
+
+/// The metadata of a runner class with the creation and change time stamps; `None` leaves one out.
+fn class_times(
+    created_at: Option<&str>,
+    changed_at: Option<&str>,
+) -> Result<Response, TransportError> {
+    let stamp = |name: &str, value: Option<&str>| {
+        value
+            .map(|value| format!(r#" adtcore:{name}="{value}""#))
+            .unwrap_or_default()
+    };
+    let stamps = format!(
+        "{}{}",
+        stamp("createdAt", created_at),
+        stamp("changedAt", changed_at)
+    );
+
+    Ok(Response::text(
+        200,
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?><class:abapClass xmlns:class="http://www.sap.com/adt/oo/classes" xmlns:adtcore="http://www.sap.com/adt/core" adtcore:name="X"{stamps}/>"#
+        ),
+    ))
+}
+
+fn preflight_replies(editflag: &str) -> Vec<Result<Response, TransportError>> {
+    vec![
+        rows(&[
+            ("CCCATEGORY", &[Some("C")]),
+            ("CCCORACTIV", &[Some("1")]),
+            ("CCNOCLIIND", &[None]),
+        ]),
+        rows(&[("EDITFLAG", &[Some(editflag)])]),
+    ]
+}
+
+/// The replies of the runner reads after the discovery: the interface preview, the leftover
+/// search, one metadata read per listed class, and the two preflight previews.
+fn runner_replies(
+    classrun: Result<Response, TransportError>,
+    search: Result<Response, TransportError>,
+    metadata: Vec<Result<Response, TransportError>>,
+) -> Vec<Result<Response, TransportError>> {
+    let mut replies = vec![classrun, search];
+
+    replies.extend(metadata);
+    replies.extend(preflight_replies("X"));
+
+    replies
+}
+
+/// An ISO time stamp this many seconds before now, in UTC.
+fn seconds_ago(seconds: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - seconds;
+    let (days, rest) = ((now / 86_400) as i64, now % 86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3_600,
+        rest % 3_600 / 60,
+        rest % 60
+    )
 }
 
 fn adt_only_env(directory: &Path) -> BTreeMap<String, String> {
@@ -80,10 +222,12 @@ fn adt_only_env(directory: &Path) -> BTreeMap<String, String> {
     ])
 }
 
-/// Doctor must never open the SADT session; a ping is the only RFC logon it may make.
+/// Doctor opens a SADT session only when no ADT session answered (the runner facts need one
+/// transport); a ping is the only other RFC logon it may make.
 #[derive(Default)]
 struct Fake {
     adt: VecDeque<Opened>,
+    sadt: VecDeque<Opened>,
     library: VecDeque<Result<RfcLibraryInfo, String>>,
     ping: VecDeque<Result<(), TransportError>>,
     adt_calls: usize,
@@ -100,8 +244,7 @@ impl Factories for Fake {
 
     fn rfc(&mut self, _: &Connection) -> Opened {
         self.sadt_calls += 1;
-
-        panic!("doctor must not open an SADT RFC session")
+        self.sadt.pop_front().expect("unexpected SADT RFC session")
     }
 
     fn rfc_library(&mut self, _: &Connection) -> Result<RfcLibraryInfo, String> {
@@ -171,10 +314,11 @@ fn doctor(directory: &Path, fake: &mut Fake) -> Exit {
 fn doctor_probes_both_backends_with_one_logon_each() {
     let directory = tempfile::tempdir().unwrap();
     let mut fake = Fake::default();
-    let (cell, opened) = shared(ScriptedTransport::replies(vec![Ok(Response::text(
-        200,
-        "<app:service/>",
-    ))]));
+    let (cell, opened) = shared(ScriptedTransport::replies(discovery_with(runner_replies(
+        classrun_found(),
+        search_reply(&[]),
+        Vec::new(),
+    ))));
 
     fake.adt.push_back(opened);
     fake.library.push_back(library());
@@ -201,6 +345,12 @@ fn doctor_probes_both_backends_with_one_logon_each() {
                  source discovered chars UTF-16"
             ),
             "RFC SADT probe: ok",
+            "RUNNER classrun: available",
+            "RUNNER prefix: YCL_ABAPREACH_RUN_",
+            "RUNNER post transport: http",
+            "RUNNER leftovers: none",
+            PREFLIGHT_LINE,
+            "RUNNER authorization: not probed",
             "capability read PROG: ADT HTTP, RFC SADT",
             "capability deploy PROG: ADT HTTP, RFC SADT",
             "capability doctor: ADT HTTP, RFC SADT",
@@ -221,7 +371,9 @@ fn doctor_probes_both_backends_with_one_logon_each() {
 
     let transport = cell.borrow();
 
-    assert_eq!(transport.calls.len(), 1);
+    // The discovery, then the interface preview, the leftover search and two preflight previews
+    // on the same session.
+    assert_eq!(transport.calls.len(), 5);
     assert_eq!(transport.calls[0].method, "GET");
     assert_eq!(transport.calls[0].uri, DISCOVERY_URI);
     assert_eq!(transport.closes, 1);
@@ -268,6 +420,14 @@ fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
 
     fake.library.push_back(library());
     fake.ping.push_back(Ok(()));
+    fake.sadt.push_back(
+        shared(ScriptedTransport::replies(runner_replies(
+            classrun_found(),
+            search_reply(&[]),
+            Vec::new(),
+        )))
+        .1,
+    );
 
     let exit = run(
         ["abapreach", "doctor", "--conn", "qas_100"]
@@ -296,6 +456,12 @@ fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
                  source discovered chars UTF-16"
             ),
             "RFC SADT probe: ok",
+            "RUNNER classrun: available",
+            "RUNNER prefix: YCL_ABAPREACH_RUN_",
+            "RUNNER post transport: sadt",
+            "RUNNER leftovers: none",
+            PREFLIGHT_LINE,
+            "RUNNER authorization: not probed",
             "capability read PROG: RFC SADT",
             "capability deploy PROG: RFC SADT",
             "capability doctor: RFC SADT",
@@ -319,6 +485,7 @@ fn a_failed_adt_probe_does_not_stop_the_rfc_probes() {
     )));
     fake.library.push_back(library());
     fake.ping.push_back(Ok(()));
+    fake.sadt.push_back(sadt_runner());
 
     let exit = doctor(directory.path(), &mut fake);
 
@@ -509,6 +676,37 @@ fn doctor_reports_the_stateful_session_and_leaves_the_deploy_capability_with_rfc
             (1, 1, 1),
             "{stateful}"
         );
+    }
+}
+
+/// A stateless ADT session with an RFC route runs the runner commands over RFC, so the POST
+/// travels over SADT; with a stateful session it travels over HTTP.
+#[test]
+fn doctor_reports_the_transport_a_runner_would_really_use() {
+    let mut kept = Response::text(200, "<app:service/>");
+    kept.headers
+        .insert("Set-Cookie".to_owned(), "sap-contextid=ctx".to_owned());
+
+    for (discovery, expected) in [
+        (kept, "RUNNER post transport: http"),
+        (
+            Response::text(200, "<app:service/>"),
+            "RUNNER post transport: sadt",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(Ok(Box::new(HttpTransport::for_test(vec![
+            Ok(discovery),
+            Ok(Response::empty(200)),
+        ]))));
+        fake.library.push_back(library());
+        fake.ping.push_back(Ok(()));
+
+        let exit = doctor(directory.path(), &mut fake);
+
+        assert_eq!(runner_line(&exit, "RUNNER post transport"), expected);
     }
 }
 
@@ -815,6 +1013,7 @@ fn doctor_reports_a_sap_gui_family_library_named_by_the_override() {
         "explicit ABAPREACH_RFC_LIBRARY",
     ));
     fake.ping.push_back(Ok(()));
+    fake.sadt.push_back(sadt_runner());
 
     let exit = run(
         ["abapreach", "doctor", "--conn", "qas_100"]
@@ -959,6 +1158,7 @@ fn doctor_with_policies(policies: &str) -> Exit {
 
     fake.library.push_back(library());
     fake.ping.push_back(Ok(()));
+    fake.sadt.push_back(sadt_runner());
 
     run(
         ["abapreach", "doctor", "--conn", "qas_100"]
@@ -1055,4 +1255,396 @@ fn an_adt_only_connection_reports_ext_as_not_applicable() {
         (fake.adt_calls, fake.library_calls, fake.ping_calls),
         (1, 0, 0)
     );
+}
+
+const RUN_A: &str = "YCL_ABAPREACH_RUN_AB12CD34";
+const RUN_B: &str = "YCL_ABAPREACH_RUN_ZZ000000";
+const SEARCH_URI: &str = "/sap/bc/adt/repository/informationsystem/search?operation=quickSearch\
+                          &query=YCL_ABAPREACH_RUN_*&maxResults=20&objectType=CLAS%2FOC";
+
+/// A doctor run on the dual connection whose ADT session follows `runner`; returns the exit and
+/// the session for call assertions.
+fn adt_doctor(
+    runner: Vec<Result<Response, TransportError>>,
+) -> (Exit, Rc<RefCell<ScriptedTransport>>) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let (cell, opened) = shared(ScriptedTransport::replies(discovery_with(runner)));
+
+    fake.adt.push_back(opened);
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    (exit, cell)
+}
+
+fn runner_line<'a>(exit: &'a Exit, label: &str) -> &'a str {
+    exit.stdout
+        .lines()
+        .find(|line| line.starts_with(label))
+        .unwrap_or_else(|| panic!("no {label} line in {}", exit.stdout))
+}
+
+#[test]
+fn doctor_lists_leftovers_with_their_age_and_marks_the_stale_one() {
+    let (exit, cell) = adt_doctor(runner_replies(
+        classrun_found(),
+        search_reply(&[RUN_A, RUN_B]),
+        vec![
+            class_meta(Some(&seconds_ago(120))),
+            class_meta(Some(&seconds_ago(3 * 3_600))),
+        ],
+    ));
+
+    assert_eq!(exit.code, 0, "{}", exit.stdout);
+    assert_eq!(
+        runner_line(&exit, "RUNNER leftovers"),
+        format!(
+            "RUNNER leftovers: 2 ({RUN_A} 2m, {RUN_B} 3h stale; remove with abapreach delete \
+             --simulate CLAS:<name> --plan <FILE> --conn DEV_100, then without --simulate)"
+        )
+    );
+
+    let transport = cell.borrow();
+
+    assert_eq!(transport.calls[2].method, "GET");
+    assert_eq!(transport.calls[2].uri, SEARCH_URI);
+    assert_eq!(
+        transport.calls[3].uri,
+        format!("/sap/bc/adt/oo/classes/{}", RUN_A.to_ascii_lowercase())
+    );
+    assert_eq!(
+        transport.calls[4].uri,
+        format!("/sap/bc/adt/oo/classes/{}", RUN_B.to_ascii_lowercase())
+    );
+    transport.assert_finished();
+}
+
+#[test]
+fn a_class_without_a_time_stamp_has_an_unknown_age_and_no_stale_mark() {
+    let (exit, _) = adt_doctor(runner_replies(
+        classrun_found(),
+        search_reply(&[RUN_A]),
+        vec![class_meta(None)],
+    ));
+    let line = runner_line(&exit, "RUNNER leftovers");
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} age unknown;")),
+        "{line}"
+    );
+    assert!(!line.contains("stale"), "{line}");
+}
+
+/// The leftovers line of one runner class whose metadata carries the given time stamps.
+fn age_line(created_at: Option<&str>, changed_at: Option<&str>) -> String {
+    let (exit, _) = adt_doctor(runner_replies(
+        classrun_found(),
+        search_reply(&[RUN_A]),
+        vec![class_times(created_at, changed_at)],
+    ));
+
+    runner_line(&exit, "RUNNER leftovers").to_owned()
+}
+
+/// A creation stamp as the system writes it: the date only, at midnight.
+fn midnight_of(stamp: &str) -> String {
+    format!("{}T00:00:00Z", &stamp[..10])
+}
+
+#[test]
+fn the_age_counts_from_the_change_time_when_the_creation_time_is_a_bare_date() {
+    // A date two days back keeps the case independent of the time of day of the run.
+    let line = age_line(
+        Some(&midnight_of(&seconds_ago(2 * 86_400))),
+        Some(&seconds_ago(300)),
+    );
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} 5m;")),
+        "{line}"
+    );
+    assert!(!line.contains("stale"), "{line}");
+}
+
+#[test]
+fn the_age_counts_from_the_creation_time_when_there_is_no_change_time() {
+    let line = age_line(Some(&seconds_ago(300)), None);
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} 5m;")),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_age_counts_from_the_change_time_when_there_is_no_creation_time() {
+    let line = age_line(None, Some(&seconds_ago(300)));
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} 5m;")),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_age_counts_from_the_later_time_when_the_change_time_is_older() {
+    let line = age_line(Some(&seconds_ago(300)), Some(&seconds_ago(3 * 3_600)));
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} 5m;")),
+        "{line}"
+    );
+}
+
+#[test]
+fn the_age_uses_the_time_stamp_that_parses_when_the_other_does_not() {
+    let line = age_line(Some("not a time"), Some(&seconds_ago(300)));
+
+    assert!(
+        line.starts_with(&format!("RUNNER leftovers: 1 ({RUN_A} 5m;")),
+        "{line}"
+    );
+}
+
+#[test]
+fn a_search_that_fills_its_limit_prints_a_truncated_count() {
+    let names: Vec<String> = (0..20)
+        .map(|index| format!("YCL_ABAPREACH_RUN_AB12CD{index:02}"))
+        .collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let metadata = (0..20)
+        .map(|_| class_meta(Some(&seconds_ago(30))))
+        .collect();
+    let (exit, _) = adt_doctor(runner_replies(
+        classrun_found(),
+        search_reply(&refs),
+        metadata,
+    ));
+    let line = runner_line(&exit, "RUNNER leftovers");
+
+    assert!(line.starts_with("RUNNER leftovers: 20+ ("), "{line}");
+    assert!(line.contains("YCL_ABAPREACH_RUN_AB12CD19 0m"), "{line}");
+}
+
+#[test]
+fn an_unavailable_classrun_handler_is_reported_with_its_reason() {
+    let (exit, _) = adt_doctor(runner_replies(
+        classrun_missing(),
+        search_reply(&[]),
+        Vec::new(),
+    ));
+
+    assert_eq!(exit.code, 0);
+    assert_eq!(
+        runner_line(&exit, "RUNNER classrun"),
+        "RUNNER classrun: unavailable (interface IF_OO_ADT_CLASSRUN not found)"
+    );
+}
+
+#[test]
+fn an_empty_discovery_document_still_detects_the_classrun_interface_by_preview() {
+    // A 7.40 system answers the discovery with an empty service document, so the interface is
+    // read from the repository table instead.
+    let (exit, cell) = adt_doctor(runner_replies(
+        classrun_found(),
+        search_reply(&[]),
+        Vec::new(),
+    ));
+
+    assert_eq!(
+        runner_line(&exit, "RUNNER classrun"),
+        "RUNNER classrun: available"
+    );
+
+    let transport = cell.borrow();
+    let request = &transport.calls[1];
+
+    assert_eq!(request.method, "POST");
+    assert!(
+        request.uri.contains("ddicEntityName=SEOCLASS"),
+        "{}",
+        request.uri
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&request.body),
+        "SELECT CLSNAME FROM SEOCLASS WHERE CLSNAME = 'IF_OO_ADT_CLASSRUN'"
+    );
+}
+
+#[test]
+fn a_preview_that_cannot_answer_leaves_the_classrun_state_unknown() {
+    let (exit, _) = adt_doctor(runner_replies(
+        Ok(Response::text(500, "")),
+        search_reply(&[]),
+        Vec::new(),
+    ));
+
+    assert_eq!(exit.code, 0);
+    assert_eq!(
+        runner_line(&exit, "RUNNER classrun"),
+        "RUNNER classrun: unknown (not detectable: SEOCLASS: HTTP 500)"
+    );
+}
+
+#[test]
+fn a_failed_leftover_search_is_unknown_and_does_not_fail_the_doctor() {
+    let (exit, _) = adt_doctor(runner_replies(
+        classrun_found(),
+        Ok(Response::text(500, "")),
+        Vec::new(),
+    ));
+
+    assert_eq!(exit.code, 0);
+    assert_eq!(
+        runner_line(&exit, "RUNNER leftovers"),
+        "RUNNER leftovers: unknown (search failed: HTTP 500)"
+    );
+}
+
+#[test]
+fn a_refusing_preflight_is_printed_with_its_reason() {
+    let mut replies = runner_replies(classrun_found(), search_reply(&[]), Vec::new());
+
+    replies.truncate(2);
+    replies.extend(preflight_replies(""));
+
+    let (exit, _) = adt_doctor(replies);
+
+    assert_eq!(exit.code, 0);
+    assert_eq!(
+        runner_line(&exit, "RUNNER preflight"),
+        "RUNNER preflight: T000 CCCATEGORY=C CCCORACTIV=1 CCNOCLIIND=- TRNSPACE /0CUST/ \
+         EDITFLAG=-; repository changes are not allowed (customer namespace /0CUST/ is not \
+         modifiable; TRNSPACE EDITFLAG -)"
+    );
+}
+
+#[test]
+fn doctor_reads_the_runner_facts_over_sadt_when_no_adt_session_answered() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let (cell, opened) = shared(ScriptedTransport::replies(runner_replies(
+        classrun_found(),
+        search_reply(&[RUN_A]),
+        vec![class_meta(Some(&seconds_ago(900)))],
+    )));
+
+    fake.adt
+        .push_back(Ok(Box::new(ScriptedTransport::replies(vec![Ok(
+            Response::text(503, ""),
+        )]))));
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+    fake.sadt.push_back(opened);
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stdout);
+    assert_eq!(fake.sadt_calls, 1);
+    assert_eq!(
+        runner_line(&exit, "RUNNER post transport"),
+        "RUNNER post transport: http"
+    );
+    assert!(
+        runner_line(&exit, "RUNNER leftovers").contains(&format!("{RUN_A} 15m stale")),
+        "{}",
+        exit.stdout
+    );
+    assert_eq!(cell.borrow().closes, 1);
+    cell.borrow().assert_finished();
+}
+
+#[test]
+fn unreachable_backends_leave_the_runner_facts_unknown() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(Ok(Box::new(ScriptedTransport::replies(vec![Ok(
+            Response::text(503, ""),
+        )]))));
+    fake.library.push_back(Err("not found".to_owned()));
+
+    let exit = doctor(directory.path(), &mut fake);
+    let reason = "no backend answered";
+
+    assert_eq!(exit.code, 1);
+    assert_eq!(fake.sadt_calls, 0);
+    assert_eq!(
+        runner_line(&exit, "RUNNER classrun"),
+        format!("RUNNER classrun: unknown ({reason})")
+    );
+    assert_eq!(
+        runner_line(&exit, "RUNNER leftovers"),
+        format!("RUNNER leftovers: unknown ({reason})")
+    );
+    assert_eq!(
+        runner_line(&exit, "RUNNER preflight"),
+        format!("RUNNER preflight: unknown ({reason})")
+    );
+    assert_eq!(
+        runner_line(&exit, "RUNNER authorization"),
+        "RUNNER authorization: not probed"
+    );
+}
+
+#[test]
+fn the_runner_lines_sit_between_the_sadt_probe_and_the_capability_lines() {
+    let (exit, _) = adt_doctor(runner_replies(
+        classrun_found(),
+        search_reply(&[]),
+        Vec::new(),
+    ));
+    let lines: Vec<&str> = exit.stdout.lines().collect();
+    let sadt = lines
+        .iter()
+        .position(|line| line.starts_with("RFC SADT probe"))
+        .unwrap();
+    let capability = lines
+        .iter()
+        .position(|line| line.starts_with("capability"))
+        .unwrap();
+    let runner: Vec<usize> = (0..lines.len())
+        .filter(|&at| lines[at].starts_with("RUNNER "))
+        .collect();
+
+    assert_eq!(
+        runner,
+        (sadt + 1..capability).collect::<Vec<_>>(),
+        "{}",
+        exit.stdout
+    );
+    assert_eq!(runner.len(), 6);
+}
+
+#[test]
+fn the_runner_probes_are_read_only_and_leak_neither_host_nor_secret() {
+    let (exit, cell) = adt_doctor(runner_replies(
+        classrun_found(),
+        search_reply(&[RUN_A]),
+        vec![class_meta(Some(&seconds_ago(60)))],
+    ));
+
+    for secret in ["example.com", "secret-pw"] {
+        assert!(!exit.stdout.contains(secret), "{}", exit.stdout);
+        assert!(!exit.stderr.contains(secret), "{}", exit.stderr);
+    }
+
+    let transport = cell.borrow();
+
+    for call in &transport.calls {
+        assert!(
+            call.method == "GET"
+                || (call.method == "POST" && call.uri.contains("datapreview/ddic")),
+            "{} {}",
+            call.method,
+            call.uri
+        );
+    }
+
+    // Discovery, interface preview, search, one metadata read, two preflight previews.
+    assert_eq!(transport.calls.len(), 6);
 }

@@ -3,3 +3,10 @@
 # The golden help texts are clap output: compared byte for byte, so they keep LF on every
 # platform, and their trailing whitespace is part of the output (not a `git diff --check` error).
 tests/golden/** text eol=lf -whitespace
+# Fixtures are server replies and files compared byte for byte: LF on every platform, as a
+# Windows checkout with CRLF would put a CR the server never sends into every row.
+tests/fixtures/** text eol=lf
+# Shipped inside every release archive and compared byte for byte with the archived copy, so a
+# Windows checkout must not turn them into CRLF.
+LICENSE text eol=lf
+THIRD-PARTY-NOTICES text eol=lf

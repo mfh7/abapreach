@@ -1,6 +1,7 @@
 use crate::app::{Factories, RfcLibraryInfo, end_session};
 use crate::config::{Connection, LocalCredentialsPermission, tls_warning};
 use crate::extension::{Registry, doctor_line};
+use crate::operation::doctor_runner::RunnerFacts;
 use crate::transport::Request;
 use crate::transport::rfc::identity_report;
 
@@ -114,10 +115,11 @@ impl Doctor {
         let mut adt_passed = false;
         let mut rfc_passed = false;
         let mut stateful = None;
+        let mut runner = None;
 
         match connection.adt {
             Some(_) => {
-                let (probe, close_note) = adt_probe(connection, factories);
+                let (probe, close_note) = adt_probe(connection, factories, &mut runner);
 
                 match probe {
                     Ok(probe) => {
@@ -209,6 +211,18 @@ impl Doctor {
             lines.push(line);
         }
 
+        // The runner facts are read on the ADT session of the discovery probe; without one, on a
+        // single SADT session when the RFC probe passed.
+        let mut runner_notes = Vec::new();
+        let facts = match runner {
+            Some(facts) => facts,
+            None if rfc_passed => runner_over_sadt(connection, factories, &mut runner_notes),
+            None => RunnerFacts::unknown("no backend answered"),
+        };
+
+        lines.extend(facts.lines(connection));
+        lines.extend(runner_notes);
+
         // A capability line names only the backends whose probe passed; nothing passed reads `none`.
         let adt = adt_passed.then_some("ADT HTTP");
         let rfc = rfc_passed.then_some("RFC SADT");
@@ -257,6 +271,7 @@ fn capability(backends: &[Option<&str>]) -> String {
 fn adt_probe(
     connection: &Connection,
     factories: &mut dyn Factories,
+    runner: &mut Option<RunnerFacts>,
 ) -> (Result<AdtProbe, String>, Option<String>) {
     let mut transport = match factories.adt(connection) {
         Ok(transport) => transport,
@@ -264,6 +279,12 @@ fn adt_probe(
     };
     let response = transport.request(Request::get(DISCOVERY_URI));
     let stateful = transport.stateful_supported();
+
+    // The same logon serves the runner reads, so the discovery stays the one ADT logon.
+    if response.as_ref().is_ok_and(|reply| reply.status == 200) {
+        *runner = Some(RunnerFacts::read(transport.as_mut(), connection));
+    }
+
     let note = end_session(transport.as_mut());
     let probe = response
         .map_err(|error| error.to_string())
@@ -279,4 +300,22 @@ fn adt_probe(
         });
 
     (probe, note)
+}
+
+/// The runner reads on one SADT session, for a connection whose ADT probe did not pass. A failed
+/// close is the `W:` line returned beside the facts.
+fn runner_over_sadt(
+    connection: &Connection,
+    factories: &mut dyn Factories,
+    notes: &mut Vec<String>,
+) -> RunnerFacts {
+    let mut transport = match factories.rfc(connection) {
+        Ok(transport) => transport,
+        Err(error) => return RunnerFacts::unknown(&format!("cannot open a SADT session: {error}")),
+    };
+    let facts = RunnerFacts::read(transport.as_mut(), connection);
+
+    notes.extend(end_session(transport.as_mut()));
+
+    facts
 }

@@ -18,20 +18,29 @@ use crate::object::{
     check_read_extension,
 };
 use crate::operation::create::{CreateInput, CreateProg};
+use crate::operation::create_ddic::{self, DdicCreate};
 use crate::operation::delete::{self, Context};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
+use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch, batch_unsent_failure};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
+use crate::operation::deploy_ddic::{self, DdicDeploy};
 use crate::operation::doctor::Doctor;
+use crate::operation::payload::Kind;
 use crate::operation::read::{ReadProg, ReadTarget};
+use crate::operation::read_ddic::{self, DdicRead};
 use crate::operation::read_table::{
     CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableError, ReadTableRequest,
 };
+use crate::operation::runner_tran::{self, TranCreate, TranRead};
+use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
 use crate::policy::Terminal;
+use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
     DynamicRfcApi, Env, FunctionApi, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
 };
 use crate::transport::{SadtTransport, TransportError};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -342,12 +351,30 @@ fn with_warning(mut exit: Exit, warning: Option<&str>) -> Exit {
     exit
 }
 
-fn stop(message: impl std::fmt::Display) -> Exit {
+pub(crate) fn stop(message: impl std::fmt::Display) -> Exit {
     Exit {
         code: 2,
         stdout: String::new(),
         stderr: format!("STOP: {message}"),
     }
+}
+
+/// The STOP of the rule a DDIC or transaction command broke; a command that passed its rules ran
+/// before this is reached, so a passed check here is a bug that stops instead of panicking.
+fn runner_exit(checked: Result<(), String>) -> Exit {
+    let Err(message) = checked else {
+        return stop(
+            "internal error: a DDIC or transaction command passed its rules but did not run",
+        );
+    };
+
+    stop(message)
+}
+
+/// The text of the XML FILE of a DDIC command.
+fn read_xml(file: &Path) -> Result<String, Exit> {
+    fs::read_to_string(file)
+        .map_err(|error| stop(format!("cannot read {}: {error}", file.display())))
 }
 
 fn connection_id(command: &Command) -> Option<&str> {
@@ -500,6 +527,14 @@ fn execute(
         };
     }
 
+    // A DDIC or transaction row is checked here before any connection.
+    if let Command::Delete { targets, tr, .. } = &command
+        && runner_cli::first_kind(targets).is_some()
+        && let Err(message) = runner_cli::check_delete(targets, tr.as_deref())
+    {
+        return stop(message);
+    }
+
     match command {
         Command::Doctor { .. } => {
             let report = Doctor::probe_with(connection, local_credentials, factories, registry);
@@ -595,6 +630,20 @@ fn execute(
             connection,
             factories,
             |transport, selection, cancel, fresh| {
+                if runner_cli::first_kind(&targets).is_some() {
+                    return delete_runner_attempt(
+                        transport,
+                        selection,
+                        cancel,
+                        fresh,
+                        connection,
+                        &targets,
+                        tr.as_deref(),
+                        simulate,
+                        &plan,
+                    );
+                }
+
                 delete_attempt(
                     transport,
                     selection,
@@ -624,6 +673,48 @@ fn execute(
         } => {
             let kind = match kind {
                 TypeArg::Standard(kind) => kind,
+                TypeArg::Runner(kind) => {
+                    let options = SourceOptions {
+                        include,
+                        fugr: fugr.as_deref(),
+                        main: main.as_deref(),
+                        create_include: false,
+                    };
+
+                    let checked = runner_cli::check_read(kind, &name, &out, force, lines, &options);
+
+                    if kind == Kind::Tran && checked.is_ok() {
+                        let request = TranRead {
+                            name: &name,
+                            out: &out,
+                        };
+
+                        return runner_tran::read(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    if kind != Kind::Tran && checked.is_ok() {
+                        let request = DdicRead {
+                            kind,
+                            name: &name,
+                            out: &out,
+                            force,
+                        };
+
+                        return read_ddic::read(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    return runner_exit(checked);
+                }
                 TypeArg::Extension(kind) => {
                     let request = ReadRequest {
                         name: &name,
@@ -715,15 +806,99 @@ fn execute(
             text,
             package,
             fugr,
+            prog,
             subc,
             tr,
             simulate,
             backend,
             ..
         } => {
+            if prog.is_some() && !matches!(kind, TypeArg::Runner(Kind::Tran)) {
+                return stop(runner_cli::PROG_RULE);
+            }
+
             let kind = match kind {
                 TypeArg::Standard(kind) => kind,
+                TypeArg::Runner(kind) => {
+                    let options = CreateOptions {
+                        text: text.as_deref(),
+                        package: package.as_deref(),
+                        tr: tr.as_deref(),
+                        fugr: fugr.as_deref(),
+                        subc,
+                        prog: prog.as_deref(),
+                        file: file.as_deref(),
+                    };
+
+                    let checked = runner_cli::check_create(kind, &name, &options);
+
+                    // `check_create` makes `--prog` mandatory for a TRAN.
+                    if let (Kind::Tran, Ok(()), Some(report)) = (kind, &checked, prog.as_deref()) {
+                        let request = TranCreate {
+                            name: &name,
+                            report,
+                            text: text.as_deref(),
+                            package: package.as_deref(),
+                            tr: tr.as_deref(),
+                            simulate,
+                        };
+
+                        return runner_tran::create(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    // `check_create` makes FILE mandatory for a DDIC type.
+                    if let (Ok(()), Some(file)) = (&checked, file.as_deref()) {
+                        let xml = match read_xml(file) {
+                            Ok(xml) => xml,
+                            Err(exit) => return exit,
+                        };
+
+                        if !simulate {
+                            let request = DdicCreate {
+                                kind,
+                                name: &name,
+                                xml: &xml,
+                                package: package.as_deref(),
+                                text: text.as_deref(),
+                                tr: tr.as_deref(),
+                            };
+
+                            return create_ddic::create(
+                                connection,
+                                backend.map(backend_kind),
+                                &request,
+                                factories,
+                            );
+                        }
+
+                        let request = DdicSimulate {
+                            kind,
+                            name: &name,
+                            xml: &xml,
+                            tr: tr.as_deref(),
+                            simulation: Simulation::Create {
+                                package: package.as_deref(),
+                                text: text.as_deref(),
+                            },
+                        };
+
+                        return simulate_ddic::simulate(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    return runner_exit(checked);
+                }
                 TypeArg::Extension(kind) => {
+                    let text = text.unwrap_or_default();
                     let request = CreateRequest {
                         name: &name,
                         text: &text,
@@ -744,6 +919,8 @@ fn execute(
                     );
                 }
             };
+
+            let text = text.unwrap_or_default();
 
             if let Err(message) = check_create(
                 kind,
@@ -831,6 +1008,62 @@ fn execute(
         } => {
             let kind = match kind {
                 TypeArg::Standard(kind) => kind,
+                TypeArg::Runner(kind) => {
+                    let options = SourceOptions {
+                        include,
+                        fugr: fugr.as_deref(),
+                        main: main.as_deref(),
+                        create_include,
+                    };
+
+                    let checked = runner_cli::check_deploy(kind, &name, tr.as_deref(), &options);
+
+                    if simulate && checked.is_ok() {
+                        let xml = match read_xml(&file) {
+                            Ok(xml) => xml,
+                            Err(exit) => return exit,
+                        };
+                        let request = DdicSimulate {
+                            kind,
+                            name: &name,
+                            xml: &xml,
+                            tr: tr.as_deref(),
+                            simulation: Simulation::Deploy {
+                                base: base.as_deref(),
+                            },
+                        };
+
+                        return simulate_ddic::simulate(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    if checked.is_ok() {
+                        let xml = match read_xml(&file) {
+                            Ok(xml) => xml,
+                            Err(exit) => return exit,
+                        };
+                        let request = DdicDeploy {
+                            kind,
+                            name: &name,
+                            xml: &xml,
+                            tr: tr.as_deref(),
+                            base: base.as_deref(),
+                        };
+
+                        return deploy_ddic::deploy(
+                            connection,
+                            backend.map(backend_kind),
+                            &request,
+                            factories,
+                        );
+                    }
+
+                    return runner_exit(checked);
+                }
                 // `deploy` parses an extension type only so that it can say why it stops.
                 TypeArg::Extension(kind) => {
                     return stop(
@@ -1003,6 +1236,112 @@ fn delete_attempt(
         .is_some_and(|extension| extension.wrote());
 
     if let Some((failure, message)) = unsent.filter(|_| !sent) {
+        if !cancel.is_set() {
+            return Attempt {
+                fallback_allowed: true,
+                ..Attempt::failed(message, failure)
+            }
+            .noted(fresh_note)
+            .noted(note);
+        }
+
+        outcome.exit = 130;
+    }
+
+    Attempt {
+        outcome,
+        failure: None,
+        fallback_allowed: false,
+        detail: None,
+    }
+    .noted(fresh_note)
+    .noted(note)
+}
+
+/// One attempt of a delete batch with DDIC rows: those rows run in their own temporary class, the
+/// other rows over the ADT backend the router picked.
+#[allow(clippy::too_many_arguments)]
+fn delete_runner_attempt(
+    transport: &mut dyn SadtTransport,
+    selection: &Selection,
+    cancel: &CancelFlag,
+    fresh: &mut dyn FnMut() -> Opened,
+    connection: &Connection,
+    targets: &[DeleteTarget],
+    tr: Option<&str>,
+    simulate: bool,
+    plan: &Path,
+) -> Attempt {
+    // The ADT side needs a stateful session for its own rows and the runner cycle needs one on
+    // ADT HTTP; a release without one runs the batch over RFC.
+    if transport.stateful_supported() == Some(false) {
+        let note = end_session(transport);
+
+        return Attempt {
+            fallback_allowed: true,
+            ..Attempt::failed(
+                NO_STATEFUL_SESSION.to_owned(),
+                Failure::CapabilityUnavailable,
+            )
+        }
+        .noted(note);
+    }
+
+    let context = Context {
+        conn: &connection.id,
+        user: &connection.user,
+        policies: &connection.policies,
+        confirmer: &Terminal,
+    };
+    // Both sides open their new sessions from the one router closure.
+    let shared = RefCell::new(fresh);
+    let mut open_adt = || {
+        let mut guard = shared.borrow_mut();
+
+        (**guard)()
+    };
+    let mut open_runner = || {
+        let mut guard = shared.borrow_mut();
+
+        (**guard)()
+    };
+    let (mut outcome, unsent, fresh_note) = {
+        let mut adt = AdtDelete::with_cancel(
+            &mut *transport,
+            &connection.user,
+            &mut open_adt,
+            cancel.clone(),
+        );
+        let mut runner = DdicDelete::new(
+            DdicEnv::of(connection, selection.backend),
+            &mut open_runner,
+            cancel.clone(),
+        );
+        let mut outcome = {
+            let mut mixed = RunnerBatch::new(&mut adt, &mut runner);
+
+            delete::run_until(
+                &mut mixed,
+                &context,
+                targets,
+                tr,
+                simulate,
+                plan,
+                &mut || cancel.is_set(),
+            )
+        };
+
+        runner.finish(&mut outcome);
+
+        (
+            outcome,
+            batch_unsent_failure(&runner, &adt),
+            adt.close_note(),
+        )
+    };
+    let note = end_session(transport);
+
+    if let Some((failure, message)) = unsent {
         if !cancel.is_set() {
             return Attempt {
                 fallback_allowed: true,
@@ -1380,5 +1719,30 @@ fn as_note(block: String) -> String {
     match block.strip_prefix("ERROR: ") {
         Some(rest) => format!("NOTE: {rest}"),
         None => block,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runner_exit;
+
+    #[test]
+    fn a_broken_rule_is_the_stop_of_its_message() {
+        let exit = runner_exit(Err("FILE is required".to_owned()));
+
+        assert_eq!(exit.code, 2);
+        assert_eq!(exit.stderr, "STOP: FILE is required");
+    }
+
+    #[test]
+    fn a_passed_check_is_a_stop_and_never_a_panic() {
+        let exit = runner_exit(Ok(()));
+
+        assert_eq!(exit.code, 2);
+        assert!(
+            exit.stderr.starts_with("STOP: internal error"),
+            "{}",
+            exit.stderr
+        );
     }
 }

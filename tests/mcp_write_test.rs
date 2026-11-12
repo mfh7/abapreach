@@ -460,7 +460,11 @@ fn write_tools_are_listed_with_the_connections_that_may_write() {
 
         assert_eq!(description.contains("DEV_100, RFC_100"), is_write, "{tool}");
         assert!(!description.contains("QAS_100"), "{tool}");
-        assert_eq!(tool["annotations"]["readOnlyHint"], !is_write);
+        // `abap_read_source` is the one tool whose read-only hint changed (M6).
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            !is_write && tool["name"] != "abap_read_source"
+        );
         assert_eq!(tool["annotations"]["destructiveHint"], is_write);
     }
 }

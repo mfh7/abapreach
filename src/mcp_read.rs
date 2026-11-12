@@ -10,7 +10,7 @@ use crate::config::{Config, Connection, scrub};
 use crate::domain::{Outcome, Status};
 use crate::extension::Registry;
 use crate::hash::source_hash;
-use crate::mcp::{ToolHandler, ToolResult};
+use crate::mcp::{ToolHandler, ToolResult, is_runner_type};
 use crate::object::check_read;
 use crate::operation::deploy::known_lock_handles;
 use crate::operation::read::{ReadProg, ReadTarget, project_lines};
@@ -21,6 +21,10 @@ use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
+
+/// The refusal of a type no read tool knows.
+pub(crate) const READ_TYPES: &str =
+    "type must be one of PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN";
 
 pub(crate) const SECRET_REJECTED: &str = "REJECTED: payload contains a configured secret";
 
@@ -67,11 +71,19 @@ impl<'a> ReadTools<'a> {
     fn read_source(&mut self, arguments: &Map<String, Value>) -> Result<ToolResult, String> {
         let kind = required(arguments, "type")?;
         let token = kind;
+
+        // A DDIC or transaction read needs the policy and the slot of the write tools.
+        if is_runner_type(token) {
+            return Err(format!(
+                "reading {token} needs the write-capable MCP tools of the server (a temporary class)"
+            ));
+        }
+
         let kind = ObjectKind::from_str(token, false).map_err(|_| {
             self.registry
                 .and_then(|registry| registry.kind(token))
                 .and_then(|kind| kind.spec().mcp_read_refusal)
-                .unwrap_or("type must be one of PROG, FUNC, CLAS, INTF")
+                .unwrap_or(READ_TYPES)
                 .to_owned()
         })?;
 

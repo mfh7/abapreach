@@ -42,8 +42,10 @@ SAP GUI.
 ### Release files
 
 Each release lists one archive per target, named `abapreach-<version>-<target>`:
-a `.zip` for Windows and a `.tar.gz` for macOS and Linux. The archive holds the single
-executable (`abapreach`, or `abapreach.exe` on Windows). `<target>` is one of
+a `.zip` for Windows and a `.tar.gz` for macOS and Linux. The archive holds three
+entries: the executable (`abapreach`, or `abapreach.exe` on Windows), `LICENSE` (MIT)
+and `THIRD-PARTY-NOTICES` (the licenses of the bundled open source components).
+`<target>` is one of
 `aarch64-apple-darwin` (macOS arm64), `x86_64-pc-windows-msvc` (Windows x64),
 `x86_64-unknown-linux-gnu` (Linux x64) and `aarch64-unknown-linux-gnu` (Linux arm64).
 Each archive has a SHA256 value on the release page and in a `.sha256` file next to
@@ -430,7 +432,7 @@ the range. The matrix exercises `--lines` on `FUNC` only.
 Without `--include`, `CLAS` means the main source.
 
 The file format of a `FUNC` is the ADT format: `FUNCTION <name> IMPORTING ... .` followed by
-the body. A file in the Python format, whose first line is the `*"` interface header, is
+the body. A file in the reference format, whose first line is the `*"` interface header, is
 refused with exit 2 (`STOP`). An unchanged signature is not reported; a changed
 signature prints `INTERFACE CHANGED`, the parameter diff and the callers (see
 [Deploy safety](deploy-safety.md#function-modules)).
@@ -521,14 +523,40 @@ path; see [Deploy safety: Delete](deploy-safety.md#delete).
 
 To use ABAPReach from an AI assistant, see [MCP server](mcp.md).
 
+## DDIC objects and transaction codes
+
+Data elements (`DTEL`), domains (`DOMA`), tables (`TABL`: transparent tables and structures), table
+types (`TTYP`) and transaction codes (`TRAN`) use the same commands. The source of a DDIC object is its
+XML, which `read` writes; `TRAN` has no source and is created with `--prog`:
+
+```sh
+abapreach read DTEL ZDE_EXAMPLE ./ZDE_EXAMPLE.xml --conn A4H_001
+abapreach deploy DTEL ZDE_EXAMPLE ./ZDE_EXAMPLE.xml --simulate --base HASH_FROM_READ --conn A4H_001
+abapreach deploy DTEL ZDE_EXAMPLE ./ZDE_EXAMPLE.xml --base HASH_FROM_READ --conn A4H_001
+abapreach create TRAN ZEXAMPLE --prog ZEXAMPLE_REPORT --text 'Example transaction' --simulate --conn A4H_001
+abapreach delete --simulate TRAN:ZEXAMPLE --plan delete.plan --conn A4H_001
+```
+
+Every operation on these types, `read` included, creates and removes a temporary class in `$TMP`, so
+the system must allow repository changes and the user needs developer authorization for that class.
+`TRAN` has no deploy; use `create` and `delete`. The `DDIC` conversion rules, the footprint and the
+authorizations are in [Deploy safety: DDIC and TRAN](deploy-safety.md#ddic-and-tran). The path each
+type takes on the 7.50 and 7.40 systems is in
+[Behavior differences: Access path comparison](behavior-differences.md#access-path-comparison-0160-rc6).
+
 ## Tested environment
 
-The 0.15.0 release matrix ran on `v0.15.0-rc.6` (the binaries that were released as 0.15.0), with the release and the fault-injection builds,
-on each platform and path, against two systems. It covers the core, platform, fault-injection, ca,
-delete, read-table, policy, MCP and Python-parity groups, and the 0.15.0 scenarios (program create
-and include, include delete, Python parity, the MCP write tools).
+The 0.16.0 release matrix ran on `v0.16.0-rc.6` (the release binaries of 0.16.0), with the release and
+the fault-injection builds, on each platform and path, against two systems. The final runs have no FAIL
+cell and no leftover test object. The matrix covers the core, platform, fault-injection, delete,
+read-table, policy, MCP and reference-comparison groups, and the 0.16.0 scenarios for the DDIC types and
+`TRAN` (read, simulate, deploy, create, delete, and the conversion guard). Some runs were repeated because
+the test environment failed, not the product: on Windows x64 native, the 7.40 system's `rfc-gui` group
+had 4 VM transport errors in its first run and passed on rerun (166 cells), and the 7.50 system's
+`rfc-sdk` group was rerun to complete its cleanup cells (185 cells). The rc.6 changes are in the test
+harness only; no product change was needed.
 The interactive group (prompts and Ctrl-C) is from the 0.13.0 matrix (`v0.13.0-rc.4`) and was not
-rerun for 0.15.0. The two systems:
+rerun for 0.16.0. The two systems:
 
 - a SAP 7.50 system with a stateful ADT HTTP session, a second developer user and transport
   requests;
@@ -540,30 +568,37 @@ Each cell has one of three results:
 - **UNSUPPORTED**: the scenario could not run there, for the reason the cell gives. It is not
   a failure. It is also not evidence that the feature works in that case.
 - **FAIL**: the scenario ran on a supported path and a check did not hold. No cell failed in the
-  0.15.0 matrix on its final run (see the note under the table).
+  0.16.0 matrix on its final run.
 
-### Support by platform and path
+### Results by platform and system
 
-Each row is one platform. Each cell shows PASS / UNSUPPORTED / FAIL counts over the matrix cells of
-that platform on that system.
+Each cell is the PASS and FAIL count of the final rc.6 run for that platform and system. The final
+runs have no FAIL cell. UNSUPPORTED counts are not listed for rc.6; the reasons are in
+[Unsupported cells](#unsupported-cells).
 
 | Platform | SAP 7.50 system | SAP 7.40 system |
 | :--- | :---: | :---: |
-| macOS arm64 | 456 / 108 / 0 ¹ | 333 / 231 / 0 ¹ |
-| Windows x64, native | 456 / 108 / 0 ¹ | 333 / 231 / 0 ¹ |
-| Windows x64, emulated on an ARM64 virtual machine | 456 / 108 / 0 | 333 / 231 / 0 ¹ |
-| Linux x64 | 458 / 108 / 0 ¹ | 335 / 231 / 0 |
-| Linux arm64 | 304 / 262 / 0 | 199 / 367 / 0 ¹ |
+| macOS arm64, ADT HTTP / RFC SAP GUI library / RFC SDK | 228 / 243 / 243 PASS | 58 / 218 / 218 PASS |
+| Windows x64, native | 520 PASS, plus 185 PASS on the RFC SDK rerun ¹ | 372 PASS, plus 166 PASS on the RFC SAP GUI rerun ¹ |
+| Windows x64, emulated on an ARM64 virtual machine | 523 PASS | 376 PASS |
+| Linux x64 | 525 PASS | 378 PASS |
+| Linux arm64 | 348 PASS | 218 PASS |
 
-¹ The MCP write group was rerun on the same host and binary. In the first run, the plan-token
-binding cell of the test harness sent an argument that the 0.15.0 MCP schema does not have; the
-server ignored it, as it ignores every unknown argument, and the cell failed on its own wrong
-expectation. The harness was fixed and the group was rerun: every cell passed. The count above is
-the first run with the rerun group in place of its first result.
+¹ On the 7.50 system, a test-environment alarm cut the native run during its cleanup phase, so the RFC SDK
+group was rerun to complete the cleanup. On the 7.40 system, the first run had 4 VM transport errors, and
+the RFC SAP GUI group was rerun. Every cell in both reruns passed.
 
-Totals: the SAP 7.50 system has 2130 PASS, 694 UNSUPPORTED and 0 FAIL cells. The SAP 7.40 system has
-1533 PASS, 1291 UNSUPPORTED and 0 FAIL cells. Every lane reported no leftover test objects, and the
-sweeps at start and end passed on every final run, each verified in a fresh session.
+Every lane reported no leftover test object. The sweeps at the start and at the end passed on every
+final run, each verified in a fresh session. The 7.50 system's fresh listing after the last run showed
+only the three test objects the matrix keeps.
+
+**Reference comparison.** The DDIC and `TRAN` operations were compared with the reference behavior on
+the 7.50 system: 6 cells PASS, 24 EXPECTED (the intentional differences in
+[Behavior differences](behavior-differences.md#ddic-and-tran-differences-0160)), 0 FAIL, and 3 cells
+UNSUPPORTED: the preflight refusal (the test user has every authorization), the leftover check (it needs
+a build with fault injection), and the `TRAN` parity check (the reference prints parity only for function
+modules). On the 7.40 system the reference operations cannot run, because the reference deploy function
+module is not installed there.
 
 The MCP cells drive the server with a scripted client that reproduces each client's advertised
 capabilities. The real clients were tested separately (see
@@ -575,10 +610,18 @@ An UNSUPPORTED cell has one of these reasons:
 
 - **Availability.** The SAP 7.40 system holds only `$TMP` objects, so `--tr` and
   transportable-package cells are UNSUPPORTED there.
-- **Not in this release.** The transaction code (`TRAN`) create, read and delete cells are
-  UNSUPPORTED on every platform and system in 0.15.0; TRAN is planned for 0.16.0 (see
-  [TRAN is not supported](behavior-differences.md#tran-is-not-supported)).
-- **Stateful session.** The SAP 7.40 system has no stateful ADT HTTP session, so ADT HTTP write cells
+- **No ADT endpoint.** In the access path comparison, the ADT built-in endpoints were exercised for data
+  element read and delete and structure read on the 7.50 system (see
+  [Behavior differences](behavior-differences.md#access-path-comparison-0160-rc6)). The two data element write cells read `HTTP 400` (the comparison's request lacked a `searchHelp`
+  element); the other cells read `UNSUPPORTED: no ADT
+  endpoint on 7.50 or 7.40`, or `structures endpoint: only read is implemented here (write not attempted)`.
+  Classrun runs these operations on both systems, so this affects only the ADT built-in path, which
+  ABAPReach does not use for DDIC writes.
+- **Operation not defined.** `deploy` of `TRAN` does not exist: a transaction code is created and deleted
+  only (`TRAN has no deploy; use create or delete`). The ADT path has no simulate for DDIC objects.
+- **Stateful session.** The SAP 7.40 system has no stateful ADT HTTP session. ADT HTTP cells for the DDIC
+  types and `TRAN` are UNSUPPORTED there with the reason `ADT HTTP session is stateless on this release;
+  the temporary runner class needs a stateful session (use the RFC path)`. The other ADT HTTP write cells
   run there only in their pinned and fallback form. The RFC paths cover the same scenarios.
 - **Platform.** SAP GUI for Java for Linux is x86_64 only, so Linux arm64 has no SAP GUI library.
   `LD_LIBRARY_PATH` is a Linux loader variable and does not apply on macOS or Windows.
@@ -587,9 +630,9 @@ An UNSUPPORTED cell has one of these reasons:
   remote execution gave the process none, so that group ran over ssh with a pseudo-terminal. The
   native Windows host ran it over a pseudo-terminal as well.
 - **Fault injection.** Fault injection drops RFC replies only. ADT HTTP has no fault cell.
-- **Python parity.** The parity cells run the same operation through the Python tooling. Its deploy
-  function module is not installed on the 7.40 system, so parity runs on the 7.50 system only, except
-  `read-table`, which passes on both systems.
+- **Reference comparison.** The comparison cells run the same operation through the reference tool. Its
+  deploy function module is not installed on the 7.40 system, so the comparison runs on the 7.50 system
+  only, except `read-table`, which passes on both systems.
 - **Testability.** A condition that a live run cannot produce is covered only by an offline fake.
   Those cells carry no live evidence (see [Fixture-only cases](#fixture-only-cases)).
 
@@ -657,6 +700,9 @@ models them, so they carry no live evidence:
 - `clas-activation-messages-w` and `clas-activation-messages-e`: a warning-only and an error
   activation response.
 - `clas-activation-outside-class`: a worklist entry outside the class URI.
+- `m6-tran-insert-failure`: a transaction code insert that fails after its `TADIR` row was written
+  (the `TADIR` cleanup and `CREATE: PARTIAL`); a live run cannot force it without writing a `TSTC` row
+  behind the product or racing it.
 - `include-uncertain-absent`, `include-uncertain-same`, `include-uncertain-differs` and
   `include-uncertain-unreadable`: the uncertain `--create-include` POST, in each reconciliation state.
 - `create-uncertain-absent`: the object-absent branch after an uncertain create.
@@ -708,27 +754,17 @@ Both RFC paths reached the systems through SAProuter.
 
 ### Timing
 
-Median wall time in milliseconds, one workstation, the same network, the same
-program. Each RFC command opens its own RFC connection through SAProuter.
-`doctor` on RFC, which only opens a connection and pings, takes 450 to 500 ms,
-so most of the gap to ADT HTTP is that connection setup.
+Median cell time in milliseconds from the rc.6 matrix on macOS arm64. The cells are the ones that
+pass on all three paths of each system, so the paths run the same operations. Each RFC cell opens its
+own RFC connection through SAProuter, which is most of the gap to ADT HTTP.
 
-| Command | 7.50 ADT HTTP | 7.50 RFC GUI | 7.50 RFC SDK | 7.40 RFC GUI | 7.40 RFC SDK |
-| :--- | ---: | ---: | ---: | ---: | ---: |
-| `read` | 337 | 737 | 692 | 676 | 645 |
-| `deploy --simulate` | 737 | 975 | 923 | 903 | 803 |
-| `deploy` | 1015 | 1179 | 1209 | 1094 | 975 |
-| unchanged `deploy` | 323 | 723 | 744 | 680 | 607 |
+| System | ADT HTTP | RFC, SAP GUI library | RFC, NW RFC SDK | Cells compared per path |
+| :--- | ---: | ---: | ---: | ---: |
+| 7.50 system | 1028 | 1315 | 1350 | 219 |
+| 7.40 system | 183 | 669 | 655 | 49 |
 
-`read` is the median of three runs; the other rows are single runs. A second
-measurement of 10 `read` runs of a 6-line program on 7.40 gave 147 ms over ADT
-HTTP (132 to 162), 703 ms over RFC with SAP GUI (645 to 716), and 670 ms over
-RFC with the SDK (598 to 720). The two RFC libraries stay within each other's
-range.
-
-The same matrix passed with SAP GUI 8.10 revision 11 (RFC library patch level
-1544) before the upgrade to revision 15. The timing table comes from the
-revision 11 run.
+On the 7.40 system, ADT HTTP has fewer common cells because its HTTP session is stateless; see
+[Unsupported cells](#unsupported-cells).
 
 ### Also tested on the RFC paths
 

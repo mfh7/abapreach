@@ -1,7 +1,7 @@
 Usage: abapreach read [OPTIONS] --conn <CONN> <KIND> <NAME> <OUT>
 
 Arguments:
-  <KIND>  [possible values: PROG, FUNC, CLAS, INTF]
+  <KIND>  [possible values: PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN]
   <NAME>  
   <OUT>   
 
@@ -14,3 +14,5 @@ Options:
       --backend <BACKEND>  [possible values: adt, rfc]
       --conn <CONN>        
   -h, --help               Print help
+
+DTEL, DOMA, TABL, TTYP and TRAN are read through a temporary class that the command creates in $TMP and deletes again.

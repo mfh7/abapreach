@@ -14,6 +14,8 @@ pub mod mcp_write;
 pub mod object;
 pub mod operation;
 pub mod policy;
+pub mod runner_cli;
+pub mod runner_protocol;
 pub mod signature;
 pub mod transport;
 

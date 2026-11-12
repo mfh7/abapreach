@@ -1,8 +1,10 @@
 [package]
 name = "abapreach"
-version = "0.15.0"
+version = "0.16.0"
 description = "Read and safely deploy existing ABAP programs via ADT HTTP or RFC/SADT."
 edition = "2024"
+license = "MIT"
+publish = false
 
 [features]
 test-support = []
@@ -26,6 +28,8 @@ libloading = "0.9.0"
 thiserror = "2.0.21"
 similar = "3.2.1"
 ctrlc = { version = "3.5.2", features = ["termination"] }
+# The OS random source for the runner class name; already in the tree through tempfile.
+getrandom = "0.4.3"
 
 [dev-dependencies]
 # Tests need the fakes behind `test-support`, so a plain `cargo test` turns the feature on.

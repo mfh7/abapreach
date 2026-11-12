@@ -103,6 +103,11 @@ impl<'a> AdtDelete<'a> {
         }
     }
 
+    /// Whether a delete request has started on this side.
+    pub fn wrote(&self) -> bool {
+        self.wrote
+    }
+
     /// The pre-send connectivity failure of a read when no write has started: the whole batch can
     /// then run again on another backend, because nothing was changed.
     /// A transport that keeps no stateful session cannot hold the lock, so the batch cannot run
@@ -260,7 +265,7 @@ impl<'a> AdtDelete<'a> {
             DeleteKind::Clas => ObjectKind::Clas,
             DeleteKind::Intf => ObjectKind::Intf,
             DeleteKind::Fugr => return Ok(Some((group_uri(name), None))),
-            DeleteKind::Extension(kind) => {
+            DeleteKind::Extension(_) | DeleteKind::Runner(_) => {
                 return Err(format!("{} is not an ADT object", kind.token()));
             }
             DeleteKind::Func => {
@@ -585,7 +590,7 @@ impl DeleteBackend for AdtDelete<'_> {
         let mut where_used = Vec::new();
 
         match kind {
-            DeleteKind::Extension(kind) => {
+            DeleteKind::Extension(_) | DeleteKind::Runner(_) => {
                 return Err(format!("{} is not an ADT object", kind.token()));
             }
             DeleteKind::Fugr => {

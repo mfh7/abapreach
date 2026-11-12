@@ -651,7 +651,7 @@ fn local_name<'a>(element: &'a BytesStart<'_>) -> &'a str {
 }
 
 /// Text of a `&name;` or `&#nnn;` reference inside element text.
-fn reference_text(reference: &BytesRef<'_>) -> Result<String, String> {
+pub(crate) fn reference_text(reference: &BytesRef<'_>) -> Result<String, String> {
     let resolved = match reference
         .resolve_char_ref()
         .map_err(|error| error.to_string())?

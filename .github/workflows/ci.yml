@@ -33,6 +33,10 @@ jobs:
             arch: x64
           - label: ubuntu-24.04-arm
             arch: arm64
+    # Full debug info for every test binary of both suites filled the ubuntu-24.04 x64 disk
+    # (0.16.0-rc.1). Line tables keep file and line in panics and backtraces.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     defaults:
       run:
         shell: bash
@@ -75,6 +79,18 @@ jobs:
           rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
           rustup default 1.99.1
           rustc --version | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # THIRD-PARTY-NOTICES ships in every release archive. The generated text does not depend on
+      # the OS, so one runner proves the committed file is current.
+      - name: Check that THIRD-PARTY-NOTICES is current
+        if: matrix.runner.label == 'ubuntu-24.04'
+        run: |
+          cargo install cargo-about --locked --version 0.9.3 --features cli
+          cargo about generate about-text.hbs -o "$RUNNER_TEMP/THIRD-PARTY-NOTICES"
+          if ! diff -u THIRD-PARTY-NOTICES "$RUNNER_TEMP/THIRD-PARTY-NOTICES"; then
+            echo "::error::THIRD-PARTY-NOTICES is out of date; run: cargo about generate about-text.hbs -o THIRD-PARTY-NOTICES"
+            exit 1
+          fi
 
       - name: Check formatting
         run: cargo fmt --check

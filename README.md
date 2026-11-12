@@ -5,7 +5,7 @@
 **Read and deploy ABAP source from the command line, over ADT HTTP or RFC, including
 systems you can only reach through SAProuter.**
 
-![version](https://img.shields.io/badge/version-0.15.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
+![version](https://img.shields.io/badge/version-0.16.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
 
 ```text
 $ abapreach deploy PROG ZDEMO ZDEMO.abap --base 63886692bf65... --conn A4H_001
@@ -40,8 +40,10 @@ ACTIVE
 
 ABAPReach reads and deploys existing programs (`PROG`), function modules (`FUNC`), classes with
 their local includes (`CLAS`) and interfaces (`INTF`), and creates function groups, function
-modules, classes and interfaces. Every other feature of the earlier Python tooling is scheduled
-for 1.0.0; see the [roadmap](#roadmap).
+modules, classes and interfaces. Since 0.16.0 it also reads, simulates, deploys, creates and deletes
+data elements (`DTEL`), domains (`DOMA`), tables (`TABL`), table types (`TTYP`) and transaction codes
+(`TRAN`). Every other feature of the earlier internal tool is scheduled for 1.0.0; see the
+[roadmap](#roadmap).
 
 ## Quick start
 
@@ -175,16 +177,20 @@ in ABAPReach; installing and licensing it is up to you. Pick a backend with `--b
 first, and a connection without `host` and `port` runs on RFC only. `FUNC`, `CLAS` and `INTF`
 use the same two paths; the result of each path is in
 [Getting started: Tested environment](docs/getting-started.md#tested-environment).
+The DDIC types and `TRAN` run as a temporary class in `$TMP`, over ADT HTTP on the 7.50 system and
+over RFC on both systems; the 7.40 system keeps no stateful ADT HTTP session. Nothing is installed on
+the SAP system, but the user needs developer authorization for that class. See
+[Deploy safety: DDIC and TRAN](docs/deploy-safety.md#ddic-and-tran).
 
 ## Platforms
 
-Release 0.15.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
+Release 0.16.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
 library lookup per OS, the release file checks, the Linux glibc baseline, the credential
 file permission rules and the test matrix are in
 [Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
-The 0.15.0 release matrix ran on `v0.15.0-rc.6`, the binaries that were released; its final runs
-have no FAIL cell, and every UNSUPPORTED cell is listed with its reason. The interactive group (prompts and Ctrl-C), including
-the interrupt-while-locked cells, is from the 0.13.0 matrix and was not rerun. See
+The 0.16.0 release matrix ran on `v0.16.0-rc.6`, the release binaries; its final runs have no FAIL
+cell, and every UNSUPPORTED cell has its reason listed. The interactive group (prompts and Ctrl-C),
+including the interrupt-while-locked cells, is from the 0.13.0 matrix and was not rerun. See
 [Tested environment](docs/getting-started.md#tested-environment).
 
 An explicit `ABAPREACH_RFC_LIBRARY` that cannot be loaded stops the command with an
@@ -276,9 +282,9 @@ activation: the command reports the real result (for example `ACTIVE`, exit code
 
 ## Roadmap
 
-ABAPReach started as Python tooling (0.1.0 to 0.10.0) used in daily SAP development. The Rust
-CLI ports it. 1.0.0 ships when every Python feature runs in the Rust binary, behaves the same,
-and passes a live test.
+ABAPReach is a Rust CLI. It replaces an earlier internal tool that was used in daily SAP development.
+1.0.0 ships when every feature of that tool runs in the Rust binary, behaves the same, and passes a
+live test.
 
 <table>
   <tr>
@@ -299,11 +305,11 @@ and passes a live test.
   </tr>
   <tr>
     <td align="left">Create objects</td>
-    <td align="left"><b>0.13.0</b> for function groups, function modules, classes and interfaces; <b>0.14.0</b> delete; <b>0.15.0</b> programs and includes</td>
+    <td align="left"><b>0.13.0</b> for function groups, function modules, classes and interfaces; <b>0.14.0</b> delete; <b>0.15.0</b> programs and includes; <b>0.16.0</b> DDIC and transaction codes</td>
   </tr>
   <tr>
     <td align="left">DDIC (data elements, domains, tables, table types), transaction codes</td>
-    <td align="left">planned for <b>0.16.0</b></td>
+    <td align="left"><b>0.16.0</b> read, simulate, deploy, create and delete (transaction codes: no deploy), classrun on the 7.50 and 7.40 systems</td>
   </tr>
   <tr>
     <td align="left">Messages, text pools, CDS, enhancements</td>
@@ -323,7 +329,7 @@ and passes a live test.
   </tr>
   <tr>
     <td align="left">MCP server</td>
-    <td align="left"><b>0.14.0</b> (stdio; read tools, token and confirm write policies); <b>0.15.0</b> <code>subc</code> and <code>main</code> arguments; see <a href="docs/mcp.md">MCP server</a></td>
+    <td align="left"><b>0.14.0</b> (stdio; read tools, token and confirm write policies); <b>0.15.0</b> <code>subc</code> and <code>main</code> arguments; <b>0.16.0</b> DDIC and transaction code types; see <a href="docs/mcp.md">MCP server</a></td>
   </tr>
   <tr>
     <td align="left">Windows x64, Linux x64 and arm64 binaries</td>
@@ -337,13 +343,14 @@ Every planned row is part of 1.0.0. The full list, with the path each feature us
 ## Command reference
 
 ```text
-abapreach read PROG|FUNC|CLAS|INTF <NAME> <OUT_FILE> [--force] [--include CCIMP|CCDEF|CCMAC|CCAU]
-    [--fugr <GROUP>] [--lines A-B] [--main <PROG>] --conn <SID>_<client>
-abapreach deploy PROG|FUNC|CLAS|INTF <NAME> <FILE> [--simulate] [--base <hash>] [--tr <request>]
-    [--include CCIMP|CCDEF|CCMAC|CCAU] [--create-include] [--fugr <GROUP>] [--main <PROG>]
+abapreach read PROG|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN <NAME> <OUT_FILE> [--force]
+    [--include CCIMP|CCDEF|CCMAC|CCAU] [--fugr <GROUP>] [--lines A-B] [--main <PROG>] [--backend adt|rfc]
+    --conn <SID>_<client>
+abapreach deploy PROG|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP <NAME> <FILE> [--simulate] [--base <hash>]
+    [--tr <request>] [--include CCIMP|CCDEF|CCMAC|CCAU] [--create-include] [--fugr <GROUP>] [--main <PROG>]
     [--backend adt|rfc] --conn <SID>_<client>
-abapreach create PROG|FUGR|FUNC|CLAS|INTF <NAME> [FILE] --text '<text>' [--package <PACKAGE>]
-    [--subc 1|I] [--fugr <GROUP>] [--tr <request>] [--simulate]
+abapreach create PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN <NAME> [FILE] [--text '<text>']
+    [--package <PACKAGE>] [--subc 1|I] [--fugr <GROUP>] [--prog <REPORT>] [--tr <request>] [--simulate]
     [--backend adt|rfc] --conn <SID>_<client>
 abapreach delete TYPE:NAME... [--simulate] [--tr <request>] --plan <FILE> --conn <SID>_<client>
 abapreach read-table <TABLE> [--fields <A,B>] [--where '<condition>'] [--rows 1-5000] --conn <SID>_<client>
@@ -354,7 +361,9 @@ abapreach mcp
 `read` refuses to overwrite an existing file unless `--force` is set; with `--lines`, the output
 must be `-` (stdout). `--base` and `--backend` both pin the backend, so a failed attempt never
 switches to the other one. `--include` and `--create-include` apply to `CLAS` only. `--main` applies to
-a `PROG` include only. `--subc` applies to `PROG` only.
+a `PROG` include only. `--subc` applies to `PROG` only. `--prog` is required for `TRAN` and applies to
+`TRAN` only. `--text` is required except for `DTEL`, `DOMA`, `TABL` and `TTYP`, whose description is in
+the XML file.
 The grammar and the limits are in [Getting started](docs/getting-started.md#program-includes).
 [Getting started](docs/getting-started.md#other-source-objects) has examples.
 
@@ -364,7 +373,7 @@ The grammar and the limits are in [Getting started](docs/getting-started.md#prog
 - [Deploy safety](docs/deploy-safety.md): guards, policies, exit codes, recovery.
 - [MCP server](docs/mcp.md): `abapreach mcp`, client setup, write policies and support by client.
 - [Behavior differences](docs/behavior-differences.md): where the Rust CLI differs from the
-  Python tooling.
+  earlier internal tool, and the access path comparison for the DDIC types.
 - [Roadmap](docs/roadmap.md): every feature on the way to 1.0.0.
 - [Changelog](CHANGELOG.md).
 
@@ -376,3 +385,15 @@ cargo test
 
 The `test-support` feature is turned on for tests by the dev-dependency, so no flag is needed.
 Mutation testing of the pure logic modules uses `cargo mutants`.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The release binaries include third-party open source
+components; their licenses are in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES).
+
+ABAPReach reads and changes objects in SAP systems. You are responsible for the
+authorization to do so, for your change and transport procedures, and for
+backups; try it on a non-production system first.
+
+SAP and ABAP are trademarks or registered trademarks of SAP SE. ABAPReach is not
+affiliated with, endorsed by or sponsored by SAP SE.

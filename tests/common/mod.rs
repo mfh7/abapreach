@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub mod runner_fake;
+
 #[derive(Deserialize)]
 pub struct Fixture {
     pub system: String,
@@ -170,4 +172,25 @@ pub fn preview(columns: &[(&str, &[Option<&str>])]) -> String {
     xml.push_str("</dataPreview:tableData>");
 
     xml
+}
+
+/// The replies of the `doctor` runner reads on one session after the discovery: the interface
+/// preview (found), an empty leftover search, and the two preflight previews.
+pub fn doctor_runner_replies() -> Vec<Result<Response, TransportError>> {
+    let found = preview(&[("CLSNAME", &[Some("IF_OO_ADT_CLASSRUN")])]);
+    let t000 = preview(&[
+        ("CCCATEGORY", &[Some("C")]),
+        ("CCCORACTIV", &[Some("1")]),
+        ("CCNOCLIIND", &[None]),
+    ]);
+    let space = preview(&[("EDITFLAG", &[Some("X")])]);
+    let search = concat!(
+        r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">"#,
+        r#"</adtcore:objectReferences>"#,
+    );
+
+    [found.as_str(), search, t000.as_str(), space.as_str()]
+        .into_iter()
+        .map(|body| Ok(Response::text(200, body)))
+        .collect()
 }
