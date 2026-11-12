@@ -164,9 +164,10 @@ Entries that are not in the list above, decided by the maintainers:
 - **ii.** Warnings (`W:`) go to stderr, as in every command since 0.11.0. Stdout carries only the result.
 - **iii.** A `read` whose live object is not active, or whose hash does not match, exits 1 (the operation
   failed after a connection). The reference exits 2, which is a stop before anything ran.
-- **Simulate `CONVERSION` line.** The line carries one more field, `daction=`, the action SAP decides
-  for the dependent objects (`CONVERSION <table>: action=ALT modeflag=F daction=ALT allowed=X rows=0`).
-  The reference line has no `daction=`; the other fields are the same.
+- **Simulate `CONVERSION` line.** The line carries one more field, `daction=`, the database action from the
+  `DD_DECIDE` result for the table; an `MDF` whose `daction` is `ALT` is treated as `ALT`. Example:
+  `CONVERSION <table>: action=ALT modeflag=F daction=ALT allowed=X rows=0`. The reference line has no
+  `daction=`; the other fields are the same.
 
 The conversion verdict follows the SAP activation rules (`DD_DECIDE`): a change SAP applies
 directly, such as a new field, is activated; a change that needs an SE14 conversion is refused before

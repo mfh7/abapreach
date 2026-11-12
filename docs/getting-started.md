@@ -612,7 +612,8 @@ An UNSUPPORTED cell has one of these reasons:
   transportable-package cells are UNSUPPORTED there.
 - **No ADT endpoint.** In the access path comparison, the ADT built-in endpoints were exercised for data
   element read and delete and structure read on the 7.50 system (see
-  [Behavior differences](behavior-differences.md#access-path-comparison-0160-rc6)). The other cells read `UNSUPPORTED: no ADT
+  [Behavior differences](behavior-differences.md#access-path-comparison-0160-rc6)). The two data element write cells read `HTTP 400` (the comparison's request lacked a `searchHelp`
+  element); the other cells read `UNSUPPORTED: no ADT
   endpoint on 7.50 or 7.40`, or `structures endpoint: only read is implemented here (write not attempted)`.
   Classrun runs these operations on both systems, so this affects only the ADT built-in path, which
   ABAPReach does not use for DDIC writes.
