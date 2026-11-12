@@ -164,10 +164,15 @@ Entries that are not in the list above, decided by the maintainers:
 - **ii.** Warnings (`W:`) go to stderr, as in every command since 0.11.0. Stdout carries only the result.
 - **iii.** A `read` whose live object is not active, or whose hash does not match, exits 1 (the operation
   failed after a connection). The reference exits 2, which is a stop before anything ran.
+- **Simulate `CONVERSION` line.** The line carries one more field, `daction=`, the action SAP decides
+  for the dependent objects (`CONVERSION <table>: action=ALT modeflag=F daction=ALT allowed=X rows=0`).
+  The reference line has no `daction=`; the other fields are the same.
 
-The conversion verdict follows the SAP activation rules: a change that needs SE14 conversion is
-refused. A table that holds rows is not converted or deleted (`Table <name> (N rows) needs SE14 conversion;
-change rejected`). On an empty table the conversion is allowed.
+The conversion verdict follows the SAP activation rules (`DD_DECIDE`): a change SAP applies
+directly, such as a new field, is activated; a change that needs an SE14 conversion is refused before
+anything is written (`Table <name> (N rows) needs SE14 conversion; change rejected`). This holds on an
+empty table too: removing a field from a table with 0 rows was refused in the rc.6 path comparison.
+A table that holds rows is not deleted.
 
 ### TRAN (0.16.0)
 
@@ -217,13 +222,17 @@ Each cell ran three times; the timings are medians. The results on the 7.50 syst
 On the 7.40 system only classrun runs: every applicable cell passes on the RFC path. The ADT built-in
 endpoints do not exist there, and the function module is not installed.
 
-Verdict: classrun stays. The function module path is about 12 times faster on the 7.50 system (summed
+Verdict: classrun stays. The function module path needs a custom function module installed on the SAP
+system, which ABAPReach does not require anywhere. It is about 12 times faster on the 7.50 system (summed
 median times 16.6 s against 205 s over the compared cells), but it fails five cells on correctness:
-data element deploy and create, structure deploy, and table deploy and create. Its activation check
-reports that the active version does not match the file for files that are not in SAP's canonical form.
+data element deploy and create, structure deploy, and table deploy and create. Those failures come from its strict
+activation check, which reports that the active version does not match the file for files that are not
+in SAP's canonical form.
 In the first run classrun had one cell that did not match; after the table rerun it has no FAIL cell.
-ADT built-in endpoints cover only data element read and delete and structure read on the 7.50 system,
-and nothing on the 7.40 system.
+ABAPReach does not use the ADT DDIC endpoints. In this comparison, data element read and delete and
+structure read worked over them on the 7.50 system; a data element create or deploy failed with HTTP 400
+on the request the comparison sent (a missing `searchHelp` element), so it shows no limit of the endpoint
+itself; structure writes were not attempted. The 7.40 system has none of these endpoints.
 
 ## `create PROG` operation (0.15.0)
 

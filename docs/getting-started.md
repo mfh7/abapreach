@@ -610,8 +610,9 @@ An UNSUPPORTED cell has one of these reasons:
 
 - **Availability.** The SAP 7.40 system holds only `$TMP` objects, so `--tr` and
   transportable-package cells are UNSUPPORTED there.
-- **No ADT endpoint.** The ADT built-in endpoints of the 7.50 and 7.40 systems cover only some DDIC
-  operations (data element read and delete, structure read). The other cells read `UNSUPPORTED: no ADT
+- **No ADT endpoint.** In the access path comparison, the ADT built-in endpoints were exercised for data
+  element read and delete and structure read on the 7.50 system (see
+  [Behavior differences](behavior-differences.md#access-path-comparison-0160-rc6)). The other cells read `UNSUPPORTED: no ADT
   endpoint on 7.50 or 7.40`, or `structures endpoint: only read is implemented here (write not attempted)`.
   Classrun runs these operations on both systems, so this affects only the ADT built-in path, which
   ABAPReach does not use for DDIC writes.
@@ -698,6 +699,9 @@ models them, so they carry no live evidence:
 - `clas-activation-messages-w` and `clas-activation-messages-e`: a warning-only and an error
   activation response.
 - `clas-activation-outside-class`: a worklist entry outside the class URI.
+- `m6-tran-insert-failure`: a transaction code insert that fails after its `TADIR` row was written
+  (the `TADIR` cleanup and `CREATE: PARTIAL`); a live run cannot force it without writing a `TSTC` row
+  behind the product or racing it.
 - `include-uncertain-absent`, `include-uncertain-same`, `include-uncertain-differs` and
   `include-uncertain-unreadable`: the uncertain `--create-include` POST, in each reconciliation state.
 - `create-uncertain-absent`: the object-absent branch after an uncertain create.

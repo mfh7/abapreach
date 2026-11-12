@@ -307,7 +307,8 @@ transport. If the class cannot be removed, the result carries `RUNNER_LEFTOVER` 
 names the class and the two commands that remove it.
 
 If a run dumps on the server, the short dump stays in transaction `ST22`. The result reports the
-failure. Read the dump in `ST22` before any retry. The rc.6 matrix left no new dump on either system.
+failure. Read the dump in `ST22` before any retry. The rc.6 access path comparison counted no new dump on
+either system; the release matrix does not read `ST22`.
 
 **Modifiable system (SE06).** A run creates a class, which is a change to the repository. A system
 whose system change option does not allow repository changes is refused before any class is
@@ -350,7 +351,9 @@ reaches a transparent table prints a `WHERE-USED` line in the simulate output.
 A name that exists is `CREATE: REJECTED`. A failed activation after the create is `CREATE: INACTIVE`
 (exit 1): the object exists and is inactive. A failed insert of a transaction code removes the
 `TADIR` row it wrote; if that cleanup fails, the result is `CREATE: PARTIAL` (exit 1) and names the
-left-behind `TADIR` entry. The uncertain-create rules of [Create](#create) apply.
+left-behind `TADIR` entry; this path has offline evidence only (see
+[Fixture-only cases](getting-started.md#fixture-only-cases)). The uncertain-create rules of
+[Create](#create) apply.
 
 **Delete.** A batch runs in this order: `TRAN`, `TTYP`, `TABL`, `DTEL`, `DOMA`. Before any delete, the
 simulate checks that the object is not in use, that a table holds no rows, and that the plan is still
