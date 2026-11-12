@@ -1,7 +1,8 @@
 # Deploy safety
 
 This guide describes what ABAPReach checks before and after it writes an existing `PROG`,
-`FUNC`, `CLAS` or `INTF`, and what it checks when it creates an object. It is not a substitute
+`FUNC`, `CLAS` or `INTF`, and what it checks when it creates an object. The DDIC types and
+transaction codes have their own rules, in [DDIC and TRAN](#ddic-and-tran). It is not a substitute
 for reviewing your local change and your SAP transport state.
 
 ## Recommended sequence
@@ -230,7 +231,7 @@ For a transportable object, ABAPReach relies on the `CORRNR` returned by the
 SAP lock. If the lock returns no request, it stops before syntax check or PUT,
 even when `--tr` was supplied. It also refuses a mismatched `--tr`. See
 [Behavior differences](behavior-differences.md#a-transportable-object-whose-lock-reports-no-transport-request-is-refused)
-for the difference from the earlier Python tooling.
+for the difference from the earlier internal tool.
 
 If activation fails after a PUT, the failed source may remain as the
 program's inactive version while the active source stays unchanged. The tool
@@ -291,6 +292,73 @@ their transport request and where-used references; no object is changed.
 - **Rollback.** There is no automatic rollback and no restore step in this release. A deleted
   object is not restored by ABAPReach; restore is in the [roadmap](roadmap.md) (`Versions, restore,
   activation`).
+
+## DDIC and TRAN
+
+This section covers the data elements (`DTEL`), domains (`DOMA`), tables (`TABL`: transparent tables
+and structures), table types (`TTYP`) and transaction codes (`TRAN`) of 0.16.0. They run on the 7.50
+and 7.40 systems through a temporary class (classrun). Nothing is installed on the SAP system.
+
+**Footprint.** Every operation on these types, `read` and every simulate included, creates one
+temporary class in `$TMP`, runs it and deletes it. The `TADIR` entry of that class is created and
+removed; no transport request entry is written for it. A deploy does it twice: run 1 shows the diff
+and the live hash, run 2 writes. Each result prints a `RUNNER:` line with the class name and the
+transport. If the class cannot be removed, the result carries `RUNNER_LEFTOVER` and exits 1; the text
+names the class and the two commands that remove it.
+
+If a run dumps on the server, the short dump stays in transaction `ST22`. The result reports the
+failure. Read the dump in `ST22` before any retry. The rc.6 matrix left no new dump on either system.
+
+**Modifiable system (SE06).** A run creates a class, which is a change to the repository. A system
+whose system change option does not allow repository changes is refused before any class is
+created: the preflight stops with exit 2 and the message
+`<operation> <TYPE> needs a temporary class; repository changes are not allowed on <system>/<client> (<reason>)`.
+The reason is the SE06 setting or the client setting. Client restrictions such as `CCNOCLIIND`
+and productive clients are refused the same way. `doctor` prints the preflight result for each
+connection. Ask the system owner before you run these types on a productive system: the temporary
+class is a repository change, and an audit can see it.
+
+**Authorization.** The run uses the authorization of the logged-on user; nothing is escalated.
+The prerequisites are:
+
+- `S_DEVELOP` for `CLAS` in `$TMP`: create, change and activate of the temporary class;
+- `S_ADT_RES` for the classrun URI;
+- DDIC and CTS authorization for the target object.
+
+A refusal by SAP on the class create, activation or classrun POST (HTTP 403, `no authorization`) is
+`REJECTED`, exit 1, with the SAP text and the hint `the temporary runner class needs CLAS create/activate
+in $TMP and ADT classrun access`. There is no fallback to another path. `doctor` checks that the
+handlers exist, not the authorizations, and prints `authorization not probed`.
+**Gap:** the rc.6 matrix ran as one user with full authorization. No restricted user was available,
+so the authorization refusal is covered only by offline fixtures.
+
+**Deploy.** Deploy of `DTEL`, `DOMA`, `TABL` and `TTYP` follows the sequence at the top of this guide:
+simulate with `--base`, review the diff, then deploy. After activation the file is compared with the
+active definition. The master language fields (`DTELMASTER`, `DOMMASTER`, `MASTERLANG`) do not fail
+that check when the file leaves them empty; SAP fills them, and the result carries the note
+`W: active definition differs from the file (SAP canonical); run read again before the next edit`.
+Read the object again before the next edit, so the file holds the canonical form.
+
+**Conversion.** The verdict is the one SAP activation takes (`DD_DECIDE`), printed as a
+`CONVERSION` line in the simulate output. A change SAP applies directly, such as a new field, is
+activated. A change that needs an SE14 conversion is refused before anything is written, for example
+a shorter field or a changed type on a table that holds rows, and also removing a field, even from an
+empty table (rc.6 path comparison). Changing the table class (`TABCLASS`) is refused. A data element change that
+reaches a transparent table prints a `WHERE-USED` line in the simulate output.
+
+**Create.** `create` of a DDIC object needs the XML as `FILE`. `create TRAN` needs `--prog <REPORT>`.
+A name that exists is `CREATE: REJECTED`. A failed activation after the create is `CREATE: INACTIVE`
+(exit 1): the object exists and is inactive. A failed insert of a transaction code removes the
+`TADIR` row it wrote; if that cleanup fails, the result is `CREATE: PARTIAL` (exit 1) and names the
+left-behind `TADIR` entry. The uncertain-create rules of [Create](#create) apply.
+
+**Delete.** A batch runs in this order: `TRAN`, `TTYP`, `TABL`, `DTEL`, `DOMA`. Before any delete, the
+simulate checks that the object is not in use, that a table holds no rows, and that the plan is still
+the same at execute time. Each refusal is `REJECTED` and the batch continues with the next object. An
+object locked in your own transport request follows that request; an object in another user's request
+is rejected. A transportable object needs `--tr`.
+
+**Limits.** The file size limit is 256 KiB. `TABL` writes cover transparent tables and structures only.
 
 ## Cancellation and SIGKILL
 

@@ -5,10 +5,10 @@ Each tool maps to one CLI operation with the same guards. Stdout carries protoco
 only. The server accepts MCP protocol versions `2025-11-25`, `2025-06-18`, `2025-03-26` and
 `2024-11-05`.
 
-Status in 0.15.0: the client gate ran with Claude Code. On macOS it covered the program and include
-tools in token and confirm modes. On native Windows x64 it covered token mode only: program create
-(see [Support by client](#support-by-client)).
-OpenCode, pi and Codex were not rerun for 0.15.0. Their behaviour is unchanged from the 0.14.0 gate
+Status in 0.16.0: the client gate ran with Claude Code on the 0.16.0-rc.6 binary. It covered the
+DDIC and `TRAN` tools in `off`, `token` and `confirm` modes on macOS, and in `token` mode on native
+Windows x64 (see [Support by client](#support-by-client)).
+OpenCode, pi and Codex were not rerun for 0.16.0. Their behaviour is unchanged from the 0.14.0 gate
 and was not re-verified in this release.
 
 ## Configuration
@@ -231,11 +231,12 @@ result is claimed for this release.
 
 ## Support by client
 
-Observed in the 0.14.0 gate (macOS, plus native Windows x64 for Claude Code). The 0.15.0 gate is in the notes below.
+Observed in the 0.14.0 gate (macOS, plus native Windows x64 for Claude Code), and in the 0.16.0 gate
+for Claude Code. The 0.15.0 and 0.16.0 gates are in the notes below.
 
 | Client | Read tools | Token writes | Confirm writes (elicitation) | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| Claude Code | PASS | PASS: create, simulate, deploy, read back (macOS; native Windows x64 smoke) | PASS: accept and decline; delete decline keeps the object, accept deletes | Supported |
+| Claude Code | PASS | PASS: create, simulate, deploy, read back, including `DTEL` and `TRAN` (macOS; native Windows x64 smoke) | PASS: accept and decline; delete decline keeps the object, accept deletes; batch delete asks for `DELETE 2` | Supported |
 | OpenCode | PASS | Not observed | PASS on a 7.40 system: Esc cancels (`cancelled`), Submit with the typed name deletes | Supported for confirm delete. No Decline button: Esc is cancel. |
 | pi | PASS | Not observed | Refused. Exact text: `STOP: abap_delete always needs a human confirmation and this client cannot answer a confirmation (it did not advertise elicitation, or its protocol is older than 2025-06-18)`. For other writes under `confirm`: `STOP: mcp_write is confirm for <connection> and this client cannot answer a confirmation (...)` with the same reason. | UNSUPPORTED for writes under `confirm` |
 | Codex | Not verified | Not verified | Not verified | Not verified in this release |
@@ -244,11 +245,17 @@ Notes:
 
 - Under `token`, a write needs a real plan token from the same session; the server refuses an
   unknown or used token with `STOP: plan_token is unknown or already used; simulate again`.
-- 0.15.0 gate, Claude Code (`claude -p`, Haiku), against the SAP 7.50 system. macOS: `create PROG`
-  (program and include) with `token` simulate and create answered `SIMULATED_OK` and `ACTIVE`. Under
-  `confirm` (interactive): a batch delete of three programs and includes asked for `DELETE 3` and
-  removed them. Native Windows x64: token mode only, with program create. It ran no include and no
-  `confirm` mode.
+- 0.16.0 gate (rc.6), Claude Code in print mode and interactive, against the 7.50 system. macOS:
+  `off` lists only the two read tools; a read of a `DTEL` is refused with
+  `STOP: reading DTEL needs a temporary class; mcp_write is off for <connection>`. `token`: create
+  and deploy of a `DTEL` (the diff is printed, the result is `ACTIVE` with the note
+  `W: active definition differs from the file (SAP canonical)`), create of a `PROG` and a `TRAN`,
+  and a `TRAN` delete in `-p` mode, which cannot answer the form and is cancelled. `confirm`
+  (interactive): a deploy of the `DTEL` asked for the typed name and was accepted; a `TRAN` delete
+  that was declined kept the transaction code, and a fresh one that was accepted deleted it; a batch
+  delete of the `DTEL` and the `PROG` asked for `DELETE 2` and removed both. Native Windows x64:
+  `token` mode, with the same `DTEL`, `PROG` and `TRAN` steps.
+- The 0.16.0 gate ran no `confirm` mode on Windows x64 and no OpenCode, pi or Codex run.
 
 ## Cancellation
 
@@ -273,4 +280,4 @@ clearing it by hand.
 ## See also
 
 - [Deploy safety](deploy-safety.md#delete): confirmation, reconciliation and recovery of delete.
-- [Behavior differences](behavior-differences.md#delete-shared-operation-0140): differences from the Python tooling.
+- [Behavior differences](behavior-differences.md#delete-shared-operation-0140): differences from the reference tool.
