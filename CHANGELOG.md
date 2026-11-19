@@ -12,7 +12,10 @@ not features available in the current Rust CLI. Their tags live in the
 internal repository where that implementation was developed. See the
 [roadmap](docs/roadmap.md) for the path to 1.0.0, which brings all of them to Rust.
 
-## 0.16.1 (unreleased)
+## [Unreleased]
+
+Version metadata is `0.16.1`. This entry is finalized before the last release candidate.
+
 
 ### Added
 - `deploy`, `deploy --simulate` and `delete` over ADT: `--tr <request>` now adds a transportable
@@ -45,21 +48,20 @@ internal repository where that implementation was developed. See the
   is left; remove it in SE03 (Change Object Directory Entries) or SE80` (issue #12).
 - MCP server (issue #15): `connections.json` and `connections.local.json` are re-read on every tool
   call, so a connection added while the server runs resolves. Policies stay as the server started
-  with them; a call that finds other policies logs `W: policies changed in connections.json;
-  restart the MCP server to apply them` to stderr. A connection absent at start (new server or new client) gets the start
-  top-level policies with `mcp_write` off and the built-in tables added to the deny list, until
-  restart; a file that no longer parses stops the call with the parse error. A connection that the
-  file named at start keeps its start target and credentials: when the file now resolves it
-  differently, the call stops with `STOP: connection <ID> changed in connections.json since the
-  MCP server started; restart the MCP server to use it` and nothing is contacted. See [MCP configuration](docs/mcp.md#configuration).
+  with them; a call that finds other policies logs `W: policies changed in connections.json; restart
+  the MCP server to apply them` to stderr. A connection absent at start (new server or new client)
+  gets the start top-level policies with `mcp_write` off and the built-in tables added to the deny
+  list, until restart; a file that no longer parses stops the call with the parse error. A
+  connection that the file named at start keeps its start target and credentials: when the file now
+  resolves it differently, the call stops with `STOP: connection <ID> changed in connections.json
+  since the MCP server started; restart the MCP server to use it` and nothing is contacted. See [MCP
+  configuration](docs/mcp.md#configuration).
 
 ### Fixed
 - `read` creates a missing parent directory of the output path (source, DDIC XML and `TRAN`
   output); a parent that cannot be created is `cannot create directory <dir>: <error>` (issue #14).
 
-## [Unreleased]
-
-Version metadata is `0.16.0`. This entry is finalized before the last release candidate.
+## [0.16.0] - 2026-11-12
 
 ### Added
 - DDIC types `DTEL`, `DOMA`, `TTYP`, transparent tables and `INTTAB` structures (`TABL`), and
