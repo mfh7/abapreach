@@ -205,9 +205,12 @@ pub fn post_transport(backend: BackendKind, sadt_post_works: bool) -> PostTransp
     }
 }
 
-/// Where the classrun POST goes. The class cycle never leaves its backend; only the POST may.
+/// Where the classrun POST goes. It never goes through the session of the class cycle: some
+/// releases answer a POST from the session that created and activated the class with `Class does
+/// not implement if_oo_adt_classrun~main method`, while a new connection runs the same class.
 pub enum PostRoute<'a> {
-    /// The session of the class cycle.
+    /// A new session of the cycle backend, opened by the opener of the cycle after the source
+    /// check and closed after the reply.
     Cycle,
     /// A new ADT HTTP session opened for the POST alone and logged off right after it.
     Http(&'a mut Opener<'a>),
@@ -425,7 +428,7 @@ pub fn run_cycle(
         out: OutType::default(),
         directory_left: false,
     };
-    let end = match cycle.steps(post) {
+    let end = match cycle.steps(post, open) {
         Ok(end) | Err(end) => end,
     };
 
@@ -484,7 +487,11 @@ struct Cycle<'a> {
 }
 
 impl Cycle<'_> {
-    fn steps(&mut self, post: PostRoute<'_>) -> Result<RunnerEnd, RunnerEnd> {
+    fn steps(
+        &mut self,
+        post: PostRoute<'_>,
+        open: &mut Opener<'_>,
+    ) -> Result<RunnerEnd, RunnerEnd> {
         self.preflight()?;
         self.checkpoint()?;
         self.create()?;
@@ -502,7 +509,7 @@ impl Cycle<'_> {
         self.verify_source()?;
         self.checkpoint()?;
 
-        Ok(self.post(post))
+        Ok(self.post(post, open))
     }
 
     fn checkpoint(&self) -> Result<(), RunnerEnd> {
@@ -912,31 +919,38 @@ impl Cycle<'_> {
     }
 
     /// The single classrun POST. It is never repeated, on any transport.
-    fn post(&mut self, route: PostRoute<'_>) -> RunnerEnd {
+    fn post(&mut self, route: PostRoute<'_>, open: &mut Opener<'_>) -> RunnerEnd {
         let mut request = Request::post(format!("{CLASSRUN}/{}", self.name()), Vec::new());
 
         request
             .headers
             .insert("Accept".to_owned(), "text/plain".to_owned());
 
-        let result = match route {
-            PostRoute::Cycle => self.send(request),
-            PostRoute::Http(open) => match open() {
-                Ok(mut session) => {
-                    let result = RunnerGated::new(&mut *session).request(request);
+        // The POST session; ADT HTTP has no admission layer of its own, so the gate arms there
+        // and the RFC-SADT session applies its own admission.
+        let (opened, gated) = match route {
+            PostRoute::Cycle => (open(), self.input.backend == BackendKind::AdtHttp),
+            PostRoute::Http(open_post) => (open_post(), true),
+        };
+        let result = match opened {
+            Ok(mut session) => {
+                let result = if gated {
+                    RunnerGated::new(&mut *session).request(request)
+                } else {
+                    session.request(request)
+                };
 
-                    if let Err(error) = session.close() {
-                        self.notes.push(format!("W: session close failed: {error}"));
-                    }
+                if let Err(error) = session.close() {
+                    self.notes.push(format!("W: session close failed: {error}"));
+                }
 
-                    result
-                }
-                Err(error) => {
-                    return RunnerEnd::Rejected(format!(
-                        "runner POST failed: cannot open the POST session: {error}"
-                    ));
-                }
-            },
+                result
+            }
+            Err(error) => {
+                return RunnerEnd::Rejected(format!(
+                    "runner POST failed: cannot open the POST session: {error}"
+                ));
+            }
         };
 
         match result {

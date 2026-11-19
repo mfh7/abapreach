@@ -60,6 +60,13 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
 ### Fixed
 - `read` creates a missing parent directory of the output path (source, DDIC XML and `TRAN`
   output); a parent that cannot be created is `cannot create directory <dir>: <error>` (issue #14).
+- Classrun runner (issue #12): the classrun `POST` now runs on a new session of the cycle backend
+  (a new HTTP session, or a new RFC connection posting over SADT), opened after the source check
+  and closed after the reply. The cycle session keeps the class lock, the delete and the proofs.
+  On some releases (SAP_BASIS 758) a `POST` from the session that created and activated the class
+  answered `Class does not implement if_oo_adt_classrun~main method!`, while a new connection ran
+  the same class. A new session that cannot be opened is `REJECTED: runner POST failed: cannot
+  open the POST session` before any `POST`, and the cleanup still runs.
 
 ## [0.16.0] - 2026-11-12
 

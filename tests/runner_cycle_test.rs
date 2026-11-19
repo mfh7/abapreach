@@ -540,6 +540,7 @@ fn the_http_cycle_runs_every_step_in_order_and_removes_the_class() {
         "POST /sap/bc/adt/activation?method=activate&preauditRequested=true".to_owned(),
         format!("GET {object}/source/main?version=active"),
         format!("POST /sap/bc/adt/oo/classrun/{name}"),
+        format!("GET {LOGOFF}"),
         format!("POST {object}?_action=LOCK&accessMode=MODIFY"),
         format!("DELETE {object}?lockHandle=h%2B1%2F%3D"),
         format!("GET {LOGOFF}"),
@@ -582,9 +583,10 @@ fn the_rfc_cycle_needs_no_logoff_and_closes_its_connections() {
     assert!(sap.classes.is_empty());
     assert_eq!(sap.count(Step::Logoff), 0);
     assert_eq!(sap.count(Step::Preflight), 0);
-    // The cycle connection, the connection of the class proof and that of the directory proof.
-    assert_eq!(sap.sessions, 3);
-    assert_eq!(sap.closes, 3);
+    // The cycle connection, the connection of the POST, the connection of the class proof and
+    // that of the directory proof.
+    assert_eq!(sap.sessions, 4);
+    assert_eq!(sap.closes, 4);
     assert_eq!(run.post, PostTransport::Sadt);
     assert!(run.runner_line().unwrap().contains("post via sadt"));
 }
@@ -597,12 +599,17 @@ fn the_http_cycle_logs_off_once_per_class_and_once_for_the_proof() {
 
     let sap = sap.borrow();
 
-    // Session 1 is the cycle (ended by the DELETE 2xx), session 2 the class proof, session 3 the
-    // directory proof.
-    assert_eq!(sap.count(Step::Logoff), 3);
-    assert_eq!(sap.on_session(1, Step::Logoff), 1);
-    assert_eq!(sap.on_session(2, Step::Logoff), 1);
-    assert_eq!(sap.on_session(3, Step::Logoff), 1);
+    // Session 1 is the cycle (ended by the DELETE 2xx), session 2 the POST, session 3 the class
+    // proof, session 4 the directory proof.
+    assert_eq!(sap.count(Step::Logoff), 4);
+
+    for session in 1..=4 {
+        assert_eq!(
+            sap.on_session(session, Step::Logoff),
+            1,
+            "session {session}"
+        );
+    }
 }
 
 #[test]
@@ -612,8 +619,8 @@ fn every_row_opens_a_fresh_session_and_the_batch_logs_off_per_class() {
     let rows = run_rows(&[1, 2, 3], |_| http_row(&sap, &cancel));
 
     assert!(rows.iter().all(|row| matches!(row, Row::Ran(_))));
-    assert_eq!(sap.borrow().sessions, 9);
-    assert_eq!(sap.borrow().count(Step::Logoff), 9);
+    assert_eq!(sap.borrow().sessions, 12);
+    assert_eq!(sap.borrow().count(Step::Logoff), 12);
 }
 
 // --- the repository preflight ----------------------------------------------------------------
@@ -1465,6 +1472,103 @@ fn a_post_session_that_cannot_open_is_rejected_and_the_class_is_removed() {
     assert_clean(&sap, &run);
 }
 
+/// The session each logged request ran on, for the first request whose line starts with `prefix`.
+fn session_of(sap: &Shared, prefix: &str) -> usize {
+    sap.borrow()
+        .log
+        .iter()
+        .find(|(_, line)| line.starts_with(prefix))
+        .map(|(session, _)| *session)
+        .unwrap_or_else(|| panic!("no request {prefix}"))
+}
+
+#[test]
+fn the_classrun_post_runs_on_a_new_session_of_the_cycle_backend_after_the_source_check() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(backend == BackendKind::AdtHttp);
+        let run = match backend {
+            BackendKind::AdtHttp => http_row(&sap, &CancelFlag::new()),
+            BackendKind::RfcSadt => rfc_row(&sap, &CancelFlag::new()),
+        };
+
+        assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+
+        let cycle = session_of(&sap, "POST /sap/bc/adt/oo/classes");
+        let post = session_of(&sap, "POST /sap/bc/adt/oo/classrun/");
+        let lock = session_of(&sap, "DELETE ");
+        let sap_ref = sap.borrow();
+        let posts: Vec<usize> = sap_ref
+            .log
+            .iter()
+            .filter(|(_, line)| line.starts_with("POST /sap/bc/adt/oo/classrun/"))
+            .map(|(session, _)| *session)
+            .collect();
+
+        assert_eq!(posts, vec![post], "{backend:?}: one POST");
+        assert_ne!(post, cycle, "{backend:?}: not the cycle session");
+        // The cycle session keeps the lock and the delete, and the POST session is the one
+        // opened after the source check, so it is younger than the cycle session.
+        assert_eq!(lock, cycle, "{backend:?}");
+        assert!(post > cycle, "{backend:?}");
+        // The POST session carries nothing but the POST (and its logoff over HTTP).
+        assert!(
+            sap_ref
+                .log
+                .iter()
+                .filter(|(session, _)| *session == post)
+                .all(
+                    |(_, line)| line.starts_with("POST /sap/bc/adt/oo/classrun/")
+                        || line.contains("logoff")
+                ),
+            "{backend:?}: {:?}",
+            sap_ref.log
+        );
+        drop(sap_ref);
+        assert_clean(&sap, &run);
+    }
+}
+
+#[test]
+fn a_post_session_of_the_cycle_backend_that_cannot_open_is_rejected_before_any_post() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(backend == BackendKind::AdtHttp);
+        let opened = std::cell::Cell::new(0);
+        // The first open is the cycle session, the second the POST session; later ones (the
+        // cleanup proof) work.
+        let mut open = || -> Opened {
+            opened.set(opened.get() + 1);
+
+            if opened.get() == 2 {
+                return Err(TransportError::PreSendConnectivity("no session".to_owned()));
+            }
+
+            match backend {
+                BackendKind::AdtHttp => http_session(&sap),
+                BackendKind::RfcSadt => rfc_session(&sap),
+            }
+        };
+        let run = run_cycle(
+            &input(backend, true),
+            &mut open,
+            PostRoute::Cycle,
+            &CancelFlag::new(),
+        );
+
+        assert!(
+            rejected(&run).starts_with("runner POST failed: cannot open the POST session"),
+            "{backend:?}: {:?}",
+            run.end
+        );
+        assert_eq!(sap.borrow().count(Step::Post), 0);
+        assert_eq!(
+            sap.borrow().count(Step::Delete),
+            1,
+            "{backend:?}: cleanup ran"
+        );
+        assert_clean(&sap, &run);
+    }
+}
+
 #[test]
 fn the_arm_ends_with_the_cycle_so_a_late_post_is_refused_on_sadt() {
     let sap = new_sap(true);
@@ -1823,7 +1927,7 @@ fn a_class_of_about_ninety_kilobytes_runs_the_whole_cycle() {
 }
 
 #[test]
-fn a_session_that_died_in_the_post_is_replaced_for_the_cleanup() {
+fn a_session_that_dies_in_the_post_leaves_the_cycle_session_and_its_cleanup_alone() {
     for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
         let sap = new_sap(true);
 
@@ -1842,14 +1946,10 @@ fn a_session_that_died_in_the_post_is_replaced_for_the_cleanup() {
         );
         assert_clean(&sap, &run);
         assert_eq!(run.exit_code(0), 0);
-        // The first attempt is not silent even though the retry removed the class.
-        assert!(
-            run.notes
-                .iter()
-                .any(|note| note.starts_with("W: runner cleanup lock failed: HTTP 500")),
-            "{:?}",
-            run.notes
-        );
+        // The POST ran on its own session, so the lock and the delete of the cycle session work
+        // at the first attempt: no retry, no note.
+        assert!(run.notes.is_empty(), "{backend:?}: {:?}", run.notes);
+        assert_eq!(sap.borrow().count(Step::Delete), 1, "{backend:?}");
     }
 }
 
