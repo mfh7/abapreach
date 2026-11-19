@@ -6,7 +6,7 @@
 use crate::app::{Attempt, Factories, end_session, route};
 use crate::backend::OperationKind;
 use crate::cli::{IncludeKind, LineRange, ObjectKind};
-use crate::config::{Config, Connection, scrub};
+use crate::config::{Config, ConfigPaths, Connection, McpPolicies, scrub};
 use crate::domain::{Outcome, Status};
 use crate::extension::Registry;
 use crate::hash::source_hash;
@@ -19,6 +19,7 @@ use crate::operation::read_table::{
 };
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -26,10 +27,24 @@ use std::path::Path;
 pub(crate) const READ_TYPES: &str =
     "type must be one of PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN";
 
+/// The stderr line of a call that found other policies in the file than the server started with.
+const POLICIES_CHANGED: &str =
+    "W: policies changed in connections.json; restart the MCP server to apply them";
+
 pub(crate) const SECRET_REJECTED: &str = "REJECTED: payload contains a configured secret";
+
+/// What a server that re-reads its connection files keeps from its start.
+struct Reload {
+    paths: ConfigPaths,
+    /// The policies of every server as the start loaded them; a later edit never changes them.
+    start: McpPolicies,
+}
 
 pub struct ReadTools<'a> {
     config: Config,
+    reload: Option<Reload>,
+    /// The stderr lines of the calls so far; `take_warnings` hands them to the session log.
+    warnings: RefCell<Vec<String>>,
     env: BTreeMap<String, String>,
     factories: &'a mut dyn Factories,
     /// The extension types the tools refuse by name; none without a registry.
@@ -44,10 +59,36 @@ impl<'a> ReadTools<'a> {
     ) -> Self {
         Self {
             config,
+            reload: None,
+            warnings: RefCell::default(),
             env,
             factories,
             registry: None,
         }
+    }
+
+    /// Re-reads the connection files on every call to resolve the connection, so a connection
+    /// added while the server runs resolves. The policies stay the ones `config` holds now: an
+    /// edit of the file during a session cannot loosen them. A server that was absent at start
+    /// runs with the strictest policies (`mcp_write` off) until the next start.
+    #[must_use]
+    pub fn with_reload(mut self, paths: ConfigPaths) -> Self {
+        self.reload = Some(Reload {
+            paths,
+            start: self.config.mcp_policies(),
+        });
+
+        self
+    }
+
+    /// The stderr lines collected since the last call of this method. One tool call may resolve
+    /// its connection twice, so a repeated line counts once.
+    pub fn take_warnings(&self) -> Vec<String> {
+        let mut lines = std::mem::take(&mut *self.warnings.borrow_mut());
+
+        lines.dedup();
+
+        lines
     }
 
     /// Lets `abap_read_source` name the refusal of an extension type.
@@ -60,8 +101,25 @@ impl<'a> ReadTools<'a> {
 
     pub(crate) fn connection(&self, arguments: &Map<String, Value>) -> Result<Connection, String> {
         let id = required(arguments, "conn")?;
+        let Some(reload) = &self.reload else {
+            return self.config.resolve(id, &self.env);
+        };
+        let mut connection =
+            Config::load(reload.paths.clone(), &self.env)?.resolve(id, &self.env)?;
+        // `Policies::default()` is the strictest set: no MCP write, the default deny list.
+        let frozen = reload
+            .start
+            .get(&connection.system_id)
+            .cloned()
+            .unwrap_or_default();
 
-        self.config.resolve(id, &self.env)
+        if connection.policies.for_mcp() != frozen {
+            self.warnings.borrow_mut().push(POLICIES_CHANGED.to_owned());
+        }
+
+        connection.policies = frozen;
+
+        Ok(connection)
     }
 
     pub(crate) fn factories(&mut self) -> &mut dyn Factories {

@@ -228,8 +228,9 @@ Read the object before any retry.
 ## Transport requests and failed activation
 
 For a transportable object, ABAPReach relies on the `CORRNR` returned by the
-SAP lock. If the lock returns no request, it stops before syntax check or PUT,
-even when `--tr` was supplied. It also refuses a mismatched `--tr`. See
+SAP lock. If the lock returns no request, it stops before syntax check or PUT
+unless `--tr` names a modifiable workbench request of yours, which it checks
+first (0.16.1) and then adds the object to. It also refuses a mismatched `--tr`. See
 [Behavior differences](behavior-differences.md#a-transportable-object-whose-lock-reports-no-transport-request-is-refused)
 for the difference from the earlier internal tool.
 
@@ -285,8 +286,9 @@ their transport request and where-used references; no object is changed.
   row that deletes nothing keeps its session. Within a batch, programs come before their includes.
 - **Transport request.** An object in your own request follows that request. An explicit `--tr`
   that differs from the request of the lock is rejected. An object locked in another user's
-  request is rejected, and so is a transportable object without a request. Transport-request
-  checks run at execute time, because simulate does not lock the object.
+  request is rejected. A transportable object without a request is rejected unless `--tr` names a
+  modifiable workbench request of yours (0.16.1). Transport-request checks run at execute time,
+  because simulate does not lock the object.
 - **Where-used of a program (0.15.0).** The simulate of a `PROG` lists the programs that include it,
   then the transactions that start it as `WHERE-USED TRAN <tcode>` (over ADT HTTP and over RFC SADT).
 - **Rollback.** There is no automatic rollback and no restore step in this release. A deleted

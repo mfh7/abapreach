@@ -16,6 +16,42 @@ pub const NAME_PLACEHOLDER: &str = "<NAME>";
 const CORE_DECLARATIONS: &str = include_str!("runner_template/core_decl.abap");
 const CORE_METHODS: &str = include_str!("runner_template/core_impl.abap");
 
+/// The ABAP type of the `OUT` parameter of `IF_OO_ADT_CLASSRUN~MAIN`. It differs between
+/// releases, so the runner declares its output reference with the type the system reports.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OutType {
+    /// `IF_OO_ADT_INTRNL_CLASSRUN`: the 7.40 and 7.50 systems, and the text of the template.
+    #[default]
+    Internal,
+    /// `IF_OO_ADT_CLASSRUN_OUT`: newer releases.
+    Out,
+}
+
+impl OutType {
+    /// The type found in `SEOSUBCODF`; any other value, including none, is an error that names it.
+    pub fn from_found(found: &str) -> Result<Self, String> {
+        match found {
+            "IF_OO_ADT_INTRNL_CLASSRUN" => Ok(Self::Internal),
+            "IF_OO_ADT_CLASSRUN_OUT" => Ok(Self::Out),
+            other => Err(format!(
+                "the classrun OUT parameter has the type {other:?}; known types are \
+                 IF_OO_ADT_INTRNL_CLASSRUN and IF_OO_ADT_CLASSRUN_OUT"
+            )),
+        }
+    }
+
+    /// The upper-case interface name.
+    pub fn interface(self) -> &'static str {
+        match self {
+            Self::Internal => "IF_OO_ADT_INTRNL_CLASSRUN",
+            Self::Out => "IF_OO_ADT_CLASSRUN_OUT",
+        }
+    }
+}
+
+/// The interface the core declaration of the template names.
+const TEMPLATE_OUT_TYPE: &str = "if_oo_adt_intrnl_classrun";
+
 /// A class name is at most 30 characters and starts with `Y` or `Z`.
 const MAX_NAME: usize = 30;
 /// The widest payload line the encoder writes.
@@ -92,6 +128,18 @@ pub fn template_hash(template: &TypeTemplate) -> String {
 /// The name and every payload line are checked here, so nothing outside the safe set can reach
 /// the source.
 pub fn generate(template: &TypeTemplate, name: &str, payload: &[String]) -> Result<String, String> {
+    generate_for(template, name, payload, OutType::default())
+}
+
+/// [`generate`] for a system whose classrun `OUT` parameter has the type `out`. The type is one of
+/// two fixed interface names, so it adds no user value to the code. The default type gives the
+/// output of [`generate`], byte for byte.
+pub fn generate_for(
+    template: &TypeTemplate,
+    name: &str,
+    payload: &[String],
+    out: OutType,
+) -> Result<String, String> {
     check_name(name)?;
 
     if payload.is_empty() {
@@ -107,6 +155,10 @@ pub fn generate(template: &TypeTemplate, name: &str, payload: &[String]) -> Resu
     }
 
     let mut source = assemble(template, name, payload).join("\n");
+
+    if out != OutType::Internal {
+        source = source.replacen(TEMPLATE_OUT_TYPE, &out.interface().to_ascii_lowercase(), 1);
+    }
 
     source.push('\n');
 

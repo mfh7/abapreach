@@ -9,6 +9,7 @@ use abapreach::operation::runner::{
     CycleInput, PostRoute, PostTransport, Row, RunnerEnd, RunnerRun, post_transport, run_cycle,
     run_rows,
 };
+use abapreach::operation::runner_template::OutType;
 use abapreach::transport::http::HttpTransport;
 use abapreach::transport::rfc::{FakeRfcApi, RfcTransport};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError, runner_verdict};
@@ -22,6 +23,7 @@ use common::preview;
 
 const PREFIX: &str = "YTEST_ABAPREACH_RUN_";
 const SOURCE: &str = "CLASS <N> DEFINITION.\nENDCLASS.\n";
+const INTERNAL: &str = "IF_OO_ADT_INTRNL_CLASSRUN";
 const LOGOFF: &str = "/sap/public/bc/icf/logoff";
 const HINT: &str =
     "the temporary runner class needs CLAS create/activate in $TMP and ADT classrun access";
@@ -99,6 +101,12 @@ struct Sap {
     dead: Vec<usize>,
     /// `EDITFLAG` of the customer namespace; `None` answers no row.
     namespace_flag: Option<&'static str>,
+    /// The type of the classrun `OUT` parameter; `None` answers no row.
+    out_type: Option<&'static str>,
+    /// The `Accept` header of every source PUT.
+    put_accepts: Vec<Option<String>>,
+    /// `TADIR` still holds a row for the runner after its delete.
+    tadir_row: bool,
 }
 
 type Shared = Rc<RefCell<Sap>>;
@@ -152,6 +160,12 @@ impl Sap {
         }
 
         let step = step_of(&request).unwrap_or_else(|| panic!("unexpected {request:?}"));
+
+        if step == Step::Put {
+            self.put_accepts
+                .push(request.headers.get("Accept").cloned());
+        }
+
         let seen = {
             let count = self.counts.entry(format!("{step:?}")).or_default();
 
@@ -233,6 +247,40 @@ impl Sap {
                     match self.namespace_flag {
                         Some(flag) => preview(&[("EDITFLAG", &[Some(flag)])]),
                         None => preview(&[("EDITFLAG", none)]),
+                    }
+                } else if body.contains(" FROM TADIR ") {
+                    let runner = body.split('\'').nth(1).unwrap_or_default().to_owned();
+
+                    assert_eq!(
+                        body,
+                        format!(
+                            "SELECT PGMID, OBJECT, OBJ_NAME FROM TADIR WHERE OBJ_NAME IN ( '{runner}' )"
+                        )
+                    );
+
+                    if self.tadir_row {
+                        preview(&[
+                            ("PGMID", &[Some("R3TR")]),
+                            ("OBJECT", &[Some("CLAS")]),
+                            ("OBJ_NAME", &[Some(runner.as_str())]),
+                        ])
+                    } else {
+                        preview(&[("PGMID", none), ("OBJECT", none), ("OBJ_NAME", none)])
+                    }
+                } else if body.contains(" FROM SEOSUBCODF ") {
+                    match self.out_type {
+                        Some(found) => preview(&[
+                            ("CLSNAME", &[Some("IF_OO_ADT_CLASSRUN")]),
+                            ("CMPNAME", &[Some("MAIN")]),
+                            ("SCONAME", &[Some("OUT")]),
+                            ("TYPE", &[Some(found)]),
+                        ]),
+                        None => preview(&[
+                            ("CLSNAME", none),
+                            ("CMPNAME", none),
+                            ("SCONAME", none),
+                            ("TYPE", none),
+                        ]),
                     }
                 } else {
                     panic!("unexpected preview {body}");
@@ -385,11 +433,19 @@ fn new_sap(stateful: bool) -> Shared {
     Rc::new(RefCell::new(Sap {
         stateful,
         namespace_flag: Some("X"),
+        out_type: Some(INTERNAL),
         ..Sap::default()
     }))
 }
 
-fn build(name: &str) -> Result<String, String> {
+thread_local! {
+    /// The `OUT` types the cycle passed to `build`, in order.
+    static BUILT_WITH: RefCell<Vec<OutType>> = const { RefCell::new(Vec::new()) };
+}
+
+fn build(name: &str, out: OutType) -> Result<String, String> {
+    BUILT_WITH.with(|seen| seen.borrow_mut().push(out));
+
     Ok(SOURCE.replace("<N>", name))
 }
 
@@ -476,6 +532,7 @@ fn the_http_cycle_runs_every_step_in_order_and_removes_the_class() {
         "GET /sap/bc/adt/discovery".to_owned(),
         "POST /sap/bc/adt/datapreview/ddic?rowNumber=1&ddicEntityName=T000".to_owned(),
         "POST /sap/bc/adt/datapreview/ddic?rowNumber=1&ddicEntityName=TRNSPACE".to_owned(),
+        "POST /sap/bc/adt/datapreview/ddic?rowNumber=1&ddicEntityName=SEOSUBCODF".to_owned(),
         "POST /sap/bc/adt/oo/classes".to_owned(),
         format!("POST {object}?_action=LOCK&accessMode=MODIFY"),
         format!("PUT {object}/source/main?lockHandle=h%2B1%2F%3D"),
@@ -487,6 +544,8 @@ fn the_http_cycle_runs_every_step_in_order_and_removes_the_class() {
         format!("DELETE {object}?lockHandle=h%2B1%2F%3D"),
         format!("GET {LOGOFF}"),
         format!("GET {object}"),
+        format!("GET {LOGOFF}"),
+        "POST /sap/bc/adt/datapreview/ddic?rowNumber=1&ddicEntityName=TADIR".to_owned(),
         format!("GET {LOGOFF}"),
     ];
 
@@ -523,9 +582,9 @@ fn the_rfc_cycle_needs_no_logoff_and_closes_its_connections() {
     assert!(sap.classes.is_empty());
     assert_eq!(sap.count(Step::Logoff), 0);
     assert_eq!(sap.count(Step::Preflight), 0);
-    // The cycle connection and the connection of the proof.
-    assert_eq!(sap.sessions, 2);
-    assert_eq!(sap.closes, 2);
+    // The cycle connection, the connection of the class proof and that of the directory proof.
+    assert_eq!(sap.sessions, 3);
+    assert_eq!(sap.closes, 3);
     assert_eq!(run.post, PostTransport::Sadt);
     assert!(run.runner_line().unwrap().contains("post via sadt"));
 }
@@ -538,10 +597,12 @@ fn the_http_cycle_logs_off_once_per_class_and_once_for_the_proof() {
 
     let sap = sap.borrow();
 
-    // Session 1 is the cycle (ended by the DELETE 2xx), session 2 the proof.
-    assert_eq!(sap.count(Step::Logoff), 2);
+    // Session 1 is the cycle (ended by the DELETE 2xx), session 2 the class proof, session 3 the
+    // directory proof.
+    assert_eq!(sap.count(Step::Logoff), 3);
     assert_eq!(sap.on_session(1, Step::Logoff), 1);
     assert_eq!(sap.on_session(2, Step::Logoff), 1);
+    assert_eq!(sap.on_session(3, Step::Logoff), 1);
 }
 
 #[test]
@@ -551,8 +612,8 @@ fn every_row_opens_a_fresh_session_and_the_batch_logs_off_per_class() {
     let rows = run_rows(&[1, 2, 3], |_| http_row(&sap, &cancel));
 
     assert!(rows.iter().all(|row| matches!(row, Row::Ran(_))));
-    assert_eq!(sap.borrow().sessions, 6);
-    assert_eq!(sap.borrow().count(Step::Logoff), 6);
+    assert_eq!(sap.borrow().sessions, 9);
+    assert_eq!(sap.borrow().count(Step::Logoff), 9);
 }
 
 // --- the repository preflight ----------------------------------------------------------------
@@ -581,17 +642,17 @@ fn the_preflight_runs_before_the_class_on_the_cycle_session_and_prints_its_facts
             Some(PREFLIGHT_LINE),
             "{backend:?}"
         );
-        assert_eq!(sap.count(Step::Preview), 2, "{backend:?}: two previews");
+        assert_eq!(sap.count(Step::Preview), 4, "{backend:?}: four previews");
         assert_eq!(
             lines[..first_create]
                 .iter()
                 .filter(|line| line.contains("datapreview"))
                 .count(),
-            2,
-            "{backend:?}: both before the create"
+            3,
+            "{backend:?}: all before the create"
         );
         // Same session as the cycle: no extra session for the preflight.
-        assert_eq!(sap.on_session(1, Step::Preview), 2, "{backend:?}");
+        assert_eq!(sap.on_session(1, Step::Preview), 3, "{backend:?}");
         assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
     }
 }
@@ -677,6 +738,175 @@ fn a_preview_that_is_never_sent_does_not_start_the_cycle() {
         assert_eq!(sap.borrow().count(Step::Create), 0);
         assert_clean(&sap, &run);
     }
+}
+
+#[test]
+fn the_source_put_names_the_text_it_accepts() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(backend == BackendKind::AdtHttp);
+
+        match backend {
+            BackendKind::AdtHttp => http_row(&sap, &CancelFlag::new()),
+            BackendKind::RfcSadt => rfc_row(&sap, &CancelFlag::new()),
+        };
+
+        assert_eq!(
+            sap.borrow().put_accepts,
+            vec![Some("text/plain".to_owned())],
+            "{backend:?}"
+        );
+    }
+}
+
+// --- the cleanup proof reads the repository directory ------------------------------------------
+
+#[test]
+fn a_class_that_is_gone_but_still_has_a_directory_row_is_a_leftover() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(backend == BackendKind::AdtHttp);
+
+        sap.borrow_mut().tadir_row = true;
+
+        let run = match backend {
+            BackendKind::AdtHttp => http_row(&sap, &CancelFlag::new()),
+            BackendKind::RfcSadt => rfc_row(&sap, &CancelFlag::new()),
+        };
+        let name = run.name.clone().unwrap();
+
+        assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+        assert_eq!(run.leftover.as_deref(), Some(name.as_str()), "{backend:?}");
+        assert!(
+            run.notes
+                .iter()
+                .any(|note| note == "W: runner cleanup proof: TADIR still holds the class"),
+            "{:?}",
+            run.notes
+        );
+        assert_eq!(run.exit_code(0), 1);
+        assert!(
+            run.leftover_text()
+                .unwrap()
+                .starts_with("RUNNER_LEFTOVER: ")
+        );
+    }
+}
+
+#[test]
+fn a_class_that_is_gone_with_no_directory_row_is_clean() {
+    let sap = new_sap(true);
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(
+        run.leftover.is_none() && run.notes.is_empty(),
+        "{:?}",
+        run.notes
+    );
+    // The directory is read in a new session after the class proof, once.
+    assert_eq!(sap.borrow().count(Step::Preview), 4);
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn a_directory_read_that_fails_is_a_leftover() {
+    for injected in [Fault::Status(500, "boom"), Fault::NotSent] {
+        let sap = new_sap(true);
+
+        // The fourth preview: three before the class, then the directory read; the retry on a
+        // fresh session reads it again.
+        fault(&sap, Step::Preview, 4, injected.clone());
+        fault(&sap, Step::Preview, 5, injected);
+
+        let run = http_row(&sap, &CancelFlag::new());
+        let name = run.name.clone().unwrap();
+
+        assert_eq!(run.leftover.as_deref(), Some(name.as_str()));
+        assert!(
+            run.notes
+                .iter()
+                .any(|note| note.starts_with("W: runner cleanup proof failed: TADIR ")),
+            "{:?}",
+            run.notes
+        );
+    }
+}
+
+// --- the type of the classrun OUT parameter --------------------------------------------------
+
+fn built_with() -> Vec<OutType> {
+    BUILT_WITH.with(|seen| std::mem::take(&mut *seen.borrow_mut()))
+}
+
+#[test]
+fn the_class_source_is_built_with_the_out_type_the_system_reports() {
+    for (found, expected) in [
+        (INTERNAL, OutType::Internal),
+        ("IF_OO_ADT_CLASSRUN_OUT", OutType::Out),
+    ] {
+        for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+            let sap = new_sap(backend == BackendKind::AdtHttp);
+
+            sap.borrow_mut().out_type = Some(found);
+            built_with();
+
+            let run = match backend {
+                BackendKind::AdtHttp => http_row(&sap, &CancelFlag::new()),
+                BackendKind::RfcSadt => rfc_row(&sap, &CancelFlag::new()),
+            };
+
+            assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+            assert_eq!(built_with(), vec![expected], "{found} {backend:?}");
+            assert_clean(&sap, &run);
+        }
+    }
+}
+
+#[test]
+fn an_unknown_or_missing_out_type_stops_before_anything_is_created() {
+    for found in [Some("IF_SOMETHING_ELSE"), Some(""), None] {
+        for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+            let sap = new_sap(backend == BackendKind::AdtHttp);
+
+            sap.borrow_mut().out_type = found;
+            built_with();
+
+            let run = match backend {
+                BackendKind::AdtHttp => http_row(&sap, &CancelFlag::new()),
+                BackendKind::RfcSadt => rfc_row(&sap, &CancelFlag::new()),
+            };
+            let RunnerEnd::Stop(text) = &run.end else {
+                panic!("a stop is expected: {:?}", run.end);
+            };
+
+            assert!(
+                text.starts_with("read DTEL cannot use the classrun runner: "),
+                "{text}"
+            );
+            assert!(
+                text.contains(&format!("{:?}", found.unwrap_or_default())),
+                "{text}"
+            );
+            assert!(built_with().is_empty());
+            assert_eq!(sap.borrow().count(Step::Create), 0);
+            assert_clean(&sap, &run);
+        }
+    }
+}
+
+#[test]
+fn an_out_type_preview_that_is_never_sent_does_not_start_the_cycle() {
+    let sap = new_sap(true);
+
+    fault(&sap, Step::Preview, 3, Fault::NotSent);
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(
+        matches!(&run.end, RunnerEnd::NotStarted(_)),
+        "{:?}",
+        run.end
+    );
+    assert_eq!(sap.borrow().count(Step::Create), 0);
+    assert_clean(&sap, &run);
 }
 
 // --- failures before the POST ----------------------------------------------------------------
@@ -1515,7 +1745,7 @@ fn an_activation_with_warnings_only_proceeds_to_the_post() {
 
 #[test]
 fn a_class_of_about_ninety_kilobytes_runs_the_whole_cycle() {
-    let big = |name: &str| -> Result<String, String> {
+    let big = |name: &str, _: OutType| -> Result<String, String> {
         let mut source = format!("CLASS {name} DEFINITION.\nENDCLASS.\n");
 
         for row in 0..2300 {

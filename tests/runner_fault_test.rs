@@ -10,6 +10,7 @@ use abapreach::backend::BackendKind;
 use abapreach::fault::{self, Fault, Target};
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::operation::runner::{CycleInput, PostRoute, RunnerEnd, RunnerRun, run_cycle};
+use abapreach::operation::runner_template::OutType;
 use abapreach::transport::rfc::{
     RfcApi, RfcEndpointRequest, RfcEndpointResponse, RfcTransport, SADT_REST_RFC_ENDPOINT,
 };
@@ -130,7 +131,7 @@ fn opener(backend: Backend, sap: &Shared) -> Opened {
     }
 }
 
-fn build(name: &str) -> Result<String, String> {
+fn build(name: &str, _: OutType) -> Result<String, String> {
     Ok(format!("CLASS {name} DEFINITION.\nENDCLASS.\n"))
 }
 

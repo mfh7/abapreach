@@ -11,17 +11,28 @@ use crate::domain::Status;
 use crate::operation::delete_adt::Opener;
 use crate::operation::payload::Kind;
 use crate::operation::read_table::{ReadTableError, fetch};
+use crate::operation::runner_template::OutType;
 use crate::transport::{SadtTransport, TransportError};
 use std::collections::BTreeMap;
 
 /// The only tables a preview of this module reads, in the order of [`Table`].
-pub const FIXED_TABLES: [&str; 9] = [
-    "DD01L", "DD04L", "DD02L", "DD40L", "TADIR", "TSTC", "SEOCLASS", "T000", "TRNSPACE",
+pub const FIXED_TABLES: [&str; 10] = [
+    "DD01L",
+    "DD04L",
+    "DD02L",
+    "DD40L",
+    "TADIR",
+    "TSTC",
+    "SEOCLASS",
+    "T000",
+    "TRNSPACE",
+    "SEOSUBCODF",
 ];
 /// The most previews one operation sends, far below the 35 per connection of the RFC route.
-pub const PREVIEWS_MAX: usize = 5;
-/// Of those, the preflight sends at most this many; the evidence sends the rest.
-pub const PREFLIGHT_PREVIEWS: usize = 2;
+pub const PREVIEWS_MAX: usize = 6;
+/// Of those, the checks before the class exists send at most this many (the two of the preflight
+/// and the type of the classrun `OUT` parameter); the evidence sends the rest.
+pub const PREFLIGHT_PREVIEWS: usize = 3;
 
 const NAME_MAX: usize = 30;
 
@@ -36,6 +47,7 @@ enum Table {
     Seoclass,
     T000,
     Trnspace,
+    Seosubcodf,
 }
 
 impl Table {
@@ -380,6 +392,152 @@ pub fn classrun_interface(transport: &mut dyn SadtTransport) -> Result<bool, Str
         CLASSRUN_INTERFACE,
     )
     .map(|row| row.is_some())
+}
+
+/// Whether `TADIR` still holds a row for the runner class, from one preview. `Err` is the reason
+/// it could not be read, starting with `TADIR`. The delete of a class can leave the row behind
+/// when no source is left, so the class `GET` alone does not prove the cleanup.
+pub fn runner_directory_row(
+    transport: &mut dyn SadtTransport,
+    runner: &str,
+) -> Result<bool, String> {
+    let runner = literal(runner)?;
+    let condition = format!("OBJ_NAME IN ( '{runner}' )");
+
+    match read(
+        transport,
+        Table::Tadir,
+        "PGMID, OBJECT, OBJ_NAME",
+        &condition,
+    ) {
+        Ok(None) => Ok(false),
+        Ok(Some(row))
+            if row
+                .get("OBJ_NAME")
+                .is_some_and(|got| got.eq_ignore_ascii_case(runner)) =>
+        {
+            Ok(true)
+        }
+        Ok(Some(_)) => Err("TADIR returned a different object".to_owned()),
+        Err(ReadTableError::Rejected(message) | ReadTableError::Failed { message, .. }) => {
+            Err(format!("TADIR {message}"))
+        }
+    }
+}
+
+/// The most rows of one orphan preview.
+const ORPHAN_ROWS: u32 = 50;
+
+/// The names of the class rows of `TADIR` under `prefix` that have no row in `SEOCLASS`: the
+/// directory entry of a runner class whose class is gone. Two previews. `Err` is the reason one
+/// of them could not be read.
+pub fn runner_orphans(
+    transport: &mut dyn SadtTransport,
+    prefix: &str,
+) -> Result<Vec<String>, String> {
+    let prefix = literal(prefix)?;
+    let column = |data: &crate::operation::read_table::TableData, name: &str| {
+        data.columns.iter().position(|column| column == name)
+    };
+    let directory = fetch(
+        transport,
+        Table::Tadir.name(),
+        &format!("SELECT PGMID, OBJECT, OBJ_NAME FROM TADIR WHERE OBJ_NAME LIKE '{prefix}%'"),
+        ORPHAN_ROWS,
+    )
+    .map_err(|error| describe(Table::Tadir, &error))?;
+    let classes = fetch(
+        transport,
+        Table::Seoclass.name(),
+        &format!("SELECT CLSNAME FROM SEOCLASS WHERE CLSNAME LIKE '{prefix}%'"),
+        ORPHAN_ROWS,
+    )
+    .map_err(|error| describe(Table::Seoclass, &error))?;
+    let (Some(object), Some(name), Some(class)) = (
+        column(&directory, "OBJECT"),
+        column(&directory, "OBJ_NAME"),
+        column(&classes, "CLSNAME"),
+    ) else {
+        return Err("TADIR or SEOCLASS answered without the expected columns".to_owned());
+    };
+    let present: Vec<String> = classes
+        .rows
+        .iter()
+        .filter_map(|row| row.get(class))
+        .map(|value| value.trim().to_ascii_uppercase())
+        .collect();
+
+    Ok(directory
+        .rows
+        .iter()
+        .filter(|row| row.get(object).is_some_and(|value| value.trim() == "CLAS"))
+        .filter_map(|row| row.get(name))
+        .map(|value| value.trim().to_ascii_uppercase())
+        .filter(|value| !present.contains(value))
+        .collect())
+}
+
+/// Why the type of the classrun `OUT` parameter is not known.
+#[derive(Debug)]
+pub enum OutTypeError {
+    /// A lost connection or a refused logon: the command may try another route.
+    Lost(TransportError),
+    /// The command stops (exit 2) with this text: the preview failed, or the type is not one the
+    /// runner knows.
+    Stop(String),
+}
+
+/// The type of parameter `OUT` of `IF_OO_ADT_CLASSRUN~MAIN`, from one preview of `SEOSUBCODF`.
+/// Releases differ in it, and the runner declares its output reference with it.
+pub fn classrun_out_type(transport: &mut dyn SadtTransport) -> Result<OutType, OutTypeError> {
+    // `IN` with one value: a single-value `=` in a data preview is unreliable on some releases.
+    let condition = format!(
+        "CLSNAME IN ( '{CLASSRUN_INTERFACE}' ) AND CMPNAME IN ( 'MAIN' ) AND SCONAME IN ( 'OUT' )"
+    );
+    let row = match read(
+        transport,
+        Table::Seosubcodf,
+        "CLSNAME, CMPNAME, SCONAME, TYPE",
+        &condition,
+    ) {
+        Ok(row) => row,
+        Err(ReadTableError::Failed {
+            failure: Failure::Authorization,
+            message,
+        }) => return Err(OutTypeError::Lost(TransportError::Authorization(message))),
+        Err(ReadTableError::Failed {
+            failure: Failure::PreSendConnectivity,
+            message,
+        }) => {
+            return Err(OutTypeError::Lost(TransportError::PreSendConnectivity(
+                message,
+            )));
+        }
+        Err(error) => {
+            return Err(OutTypeError::Stop(format!(
+                "the type of the classrun OUT parameter could not be read ({})",
+                describe(Table::Seosubcodf, &error)
+            )));
+        }
+    };
+    // A row of another parameter is not trusted.
+    let found = row
+        .filter(|row| {
+            [
+                ("CLSNAME", CLASSRUN_INTERFACE),
+                ("CMPNAME", "MAIN"),
+                ("SCONAME", "OUT"),
+            ]
+            .iter()
+            .all(|(key, want)| {
+                row.get(*key)
+                    .is_some_and(|got| got.eq_ignore_ascii_case(want))
+            })
+        })
+        .and_then(|mut row| row.remove("TYPE"))
+        .unwrap_or_default();
+
+    OutType::from_found(&found).map_err(OutTypeError::Stop)
 }
 
 /// What the repository preflight found.

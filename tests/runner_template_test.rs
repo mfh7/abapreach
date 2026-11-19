@@ -5,7 +5,8 @@
 use abapreach::operation::payload::{Kind, Mode, Request, encode};
 use abapreach::operation::runner_scan::{ALLOWED_CLASSES, ALLOWED_FUNCTIONS, scan};
 use abapreach::operation::runner_template::{
-    CORE_ONLY, NAME_PLACEHOLDER, TEMPLATES, TypeTemplate, generate, template_hash, template_lines,
+    CORE_ONLY, NAME_PLACEHOLDER, OutType, TEMPLATES, TypeTemplate, generate, generate_for,
+    template_hash, template_lines,
 };
 use abapreach::runner_protocol::{RunMode, RunStatus};
 
@@ -870,4 +871,78 @@ fn a_name_right_after_an_arrow_is_scanned() {
 #[test]
 fn a_statement_may_start_with_a_bracket_inside_logic() {
     scan("[ lv_a AND lv_b ].", None).unwrap();
+}
+
+// ---- the type of the classrun OUT parameter (issue #12) -------------------------------------------
+
+#[test]
+fn only_the_two_known_out_types_are_accepted_and_each_names_its_interface() {
+    assert_eq!(
+        OutType::from_found("IF_OO_ADT_INTRNL_CLASSRUN"),
+        Ok(OutType::Internal)
+    );
+    assert_eq!(
+        OutType::from_found("IF_OO_ADT_CLASSRUN_OUT"),
+        Ok(OutType::Out)
+    );
+    assert_eq!(OutType::Internal.interface(), "IF_OO_ADT_INTRNL_CLASSRUN");
+    assert_eq!(OutType::Out.interface(), "IF_OO_ADT_CLASSRUN_OUT");
+
+    for other in [
+        "",
+        " ",
+        "IF_OO_ADT_CLASSRUN",
+        "if_oo_adt_classrun_out",
+        "ZIF_X",
+    ] {
+        let error = OutType::from_found(other).unwrap_err();
+
+        assert!(error.contains(&format!("{other:?}")), "{error}");
+    }
+}
+
+#[test]
+fn the_default_generation_is_the_internal_interface_and_stays_byte_identical() {
+    for template in TEMPLATES {
+        assert_eq!(
+            generate_for(template, NAME, &payload(), OutType::Internal).unwrap(),
+            source(template),
+            "{}",
+            template.name
+        );
+        assert!(
+            source(template).contains("mo_out     TYPE REF TO if_oo_adt_intrnl_classrun,"),
+            "{}",
+            template.name
+        );
+    }
+}
+
+#[test]
+fn the_out_type_changes_exactly_the_one_declaration_line_and_still_scans() {
+    for template in TEMPLATES {
+        let internal = source(template);
+        let out = generate_for(template, NAME, &payload(), OutType::Out).unwrap();
+        let (internal, out): (Vec<_>, Vec<_>) = (internal.lines().collect(), out.lines().collect());
+
+        assert_eq!(internal.len(), out.len());
+
+        let changed: Vec<usize> = (0..internal.len())
+            .filter(|&i| internal[i] != out[i])
+            .collect();
+
+        assert_eq!(changed.len(), 1, "{}: {changed:?}", template.name);
+        assert_eq!(
+            out[changed[0]],
+            "      mo_out     TYPE REF TO if_oo_adt_classrun_out,"
+        );
+        scan(&out.join("\n"), Some(NAME))
+            .unwrap_or_else(|found| panic!("{}: {found:?}", template.name));
+    }
+}
+
+#[test]
+fn the_scanner_allow_lists_both_out_interfaces() {
+    assert!(ALLOWED_CLASSES.contains(&"IF_OO_ADT_INTRNL_CLASSRUN"));
+    assert!(ALLOWED_CLASSES.contains(&"IF_OO_ADT_CLASSRUN_OUT"));
 }

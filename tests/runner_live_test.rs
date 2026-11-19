@@ -14,7 +14,7 @@ use abapreach::config::{Config, ConfigPaths};
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::operation::payload::{self, Kind, Mode};
 use abapreach::operation::runner::{CycleInput, PostRoute, RunnerEnd, run_cycle};
-use abapreach::operation::runner_template::{TEMPLATES, generate};
+use abapreach::operation::runner_template::{OutType, TEMPLATES, generate_for};
 use abapreach::runner_protocol::{Nonce, Parsed, RunMode, parse_post_reply};
 use abapreach::{Factories, RealFactories};
 use std::collections::BTreeMap;
@@ -98,7 +98,7 @@ fn one_template_mode_through_the_real_runner_cycle() {
         .iter()
         .find(|template| template.name == kind.token())
         .unwrap_or_else(|| panic!("no template for {}", kind.token()));
-    let build = |class: &str| generate(template, class, &payload_lines);
+    let build = |class: &str, out: OutType| generate_for(template, class, &payload_lines, out);
     let operation = format!("live {} {}", mode_token(&required("MODE")), kind.token());
     let input = CycleInput {
         operation: &operation,

@@ -121,13 +121,14 @@ fn transport_request_rules_apply_right_after_the_lock_in_simulate_and_deploy() {
             Some("DEVK000001"),
             "--tr is not allowed for a local ($TMP) object",
         ),
+        // With `--tr` the request is checked and added; see `deploy_object_test`.
         (
             false,
             "",
-            Some("DEVK000001"),
-            "the lock returned no transport request",
+            None,
+            "the lock returned no transport request; pass --tr <request> to add the object to a \
+             modifiable request of yours",
         ),
-        (false, "", None, "the lock returned no transport request"),
         (
             false,
             "DEVK000001",

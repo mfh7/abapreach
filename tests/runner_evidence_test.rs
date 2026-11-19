@@ -6,9 +6,10 @@ mod common;
 use abapreach::domain::Status;
 use abapreach::operation::payload::Kind;
 use abapreach::operation::runner_evidence::{
-    Evidence, Expect, FIXED_TABLES, PREFLIGHT_PREVIEWS, PREVIEWS_MAX, Proof, confirm, judge,
-    preflight, read_evidence,
+    Evidence, Expect, FIXED_TABLES, OutTypeError, PREFLIGHT_PREVIEWS, PREVIEWS_MAX, Proof,
+    classrun_out_type, confirm, judge, preflight, read_evidence,
 };
+use abapreach::operation::runner_template::OutType;
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use common::preview;
 use std::cell::RefCell;
@@ -219,7 +220,7 @@ fn every_kind_reads_its_definition_table_the_directory_and_the_runner_in_one_new
 
 #[test]
 fn no_preview_names_a_table_outside_the_fixed_list_and_the_counts_stay_bounded() {
-    assert_eq!(FIXED_TABLES.len(), 9);
+    assert_eq!(FIXED_TABLES.len(), 10);
 
     for kind in KINDS {
         let log = scripted(vec![
@@ -249,8 +250,8 @@ fn no_preview_names_a_table_outside_the_fixed_list_and_the_counts_stay_bounded()
         }
     }
 
-    assert_eq!(PREVIEWS_MAX, 5);
-    assert_eq!(PREFLIGHT_PREVIEWS, 2);
+    assert_eq!(PREVIEWS_MAX, 6);
+    assert_eq!(PREFLIGHT_PREVIEWS, 3);
 }
 
 #[test]
@@ -596,7 +597,7 @@ fn the_preflight_reads_exactly_two_fixed_tables_and_prints_what_it_found() {
             "SELECT EDITFLAG FROM TRNSPACE WHERE NAMESPACE = '/0CUST/'",
         ]
     );
-    assert_eq!(log.requests.len(), PREFLIGHT_PREVIEWS);
+    assert_eq!(log.requests.len(), 2);
     assert!(found.refusal.is_none() && found.notes.is_empty());
     assert_eq!(
         found.line,
@@ -676,4 +677,97 @@ fn a_client_that_is_not_three_digits_sends_no_preview() {
         assert!(preflight(&mut fake, client).is_err(), "{client:?}");
         assert!(log.borrow().requests.is_empty());
     }
+}
+
+// ---- the type of the classrun OUT parameter (issue #12) -------------------------------------------
+
+fn out_probe(
+    replies: Vec<Result<Response, TransportError>>,
+) -> (Result<OutType, OutTypeError>, Shared) {
+    let log = scripted(replies);
+    let mut fake = Fake(log.clone());
+
+    (classrun_out_type(&mut fake), log)
+}
+
+fn out_row(found: &str) -> Result<Response, TransportError> {
+    reply(&[
+        ("CLSNAME", &[Some("IF_OO_ADT_CLASSRUN")]),
+        ("CMPNAME", &[Some("MAIN")]),
+        ("SCONAME", &[Some("OUT")]),
+        ("TYPE", &[Some(found)]),
+    ])
+}
+
+#[test]
+fn the_out_type_is_one_fixed_preview_of_the_subroutine_table() {
+    let (result, log) = out_probe(vec![out_row("IF_OO_ADT_INTRNL_CLASSRUN")]);
+    let log = log.borrow();
+
+    assert_eq!(result.unwrap(), OutType::Internal);
+    assert_eq!(log.requests.len(), 1);
+    assert_eq!(
+        String::from_utf8_lossy(&log.requests[0].body),
+        "SELECT CLSNAME, CMPNAME, SCONAME, TYPE FROM SEOSUBCODF WHERE CLSNAME IN \
+         ( 'IF_OO_ADT_CLASSRUN' ) AND CMPNAME IN ( 'MAIN' ) AND SCONAME IN ( 'OUT' )"
+    );
+    assert!(log.requests[0].uri.ends_with("ddicEntityName=SEOSUBCODF"));
+    assert!(FIXED_TABLES.contains(&"SEOSUBCODF"));
+}
+
+#[test]
+fn the_newer_interface_is_accepted() {
+    let (result, _) = out_probe(vec![out_row("IF_OO_ADT_CLASSRUN_OUT")]);
+
+    assert_eq!(result.unwrap(), OutType::Out);
+}
+
+#[test]
+fn an_unknown_empty_or_missing_out_type_stops_and_names_what_was_found() {
+    for (reply, shown) in [
+        (out_row("IF_SOMETHING_ELSE"), "\"IF_SOMETHING_ELSE\""),
+        (out_row(""), "\"\""),
+        (empty(&["CLSNAME", "CMPNAME", "SCONAME", "TYPE"]), "\"\""),
+        // A row of another parameter is not trusted.
+        (
+            reply(&[
+                ("CLSNAME", &[Some("IF_OO_ADT_CLASSRUN")]),
+                ("CMPNAME", &[Some("MAIN")]),
+                ("SCONAME", &[Some("IN")]),
+                ("TYPE", &[Some("IF_OO_ADT_CLASSRUN_OUT")]),
+            ]),
+            "\"\"",
+        ),
+    ] {
+        let (result, _) = out_probe(vec![reply]);
+        let Err(OutTypeError::Stop(message)) = result else {
+            panic!("a stop is expected");
+        };
+
+        assert!(message.contains(shown), "{message}");
+        assert!(message.contains("IF_OO_ADT_CLASSRUN_OUT"), "{message}");
+    }
+}
+
+#[test]
+fn an_unreadable_out_type_stops_and_a_lost_connection_is_passed_on() {
+    let (result, _) = out_probe(vec![Ok(Response::text(500, ""))]);
+
+    assert!(matches!(result, Err(OutTypeError::Stop(_))), "{result:?}");
+
+    let (result, _) = out_probe(vec![Err(TransportError::PreSendConnectivity(
+        "down".to_owned(),
+    ))]);
+
+    assert!(matches!(
+        result,
+        Err(OutTypeError::Lost(TransportError::PreSendConnectivity(_)))
+    ));
+
+    let (result, _) = out_probe(vec![Ok(Response::text(401, ""))]);
+
+    assert!(matches!(
+        result,
+        Err(OutTypeError::Lost(TransportError::Authorization(_)))
+    ));
 }

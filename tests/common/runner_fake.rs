@@ -276,7 +276,8 @@ impl Sap {
         let quoted: Vec<&str> = body.split('\'').skip(1).step_by(2).collect();
 
         if (world.broken || (self.inactive_fails && body.contains("AS4LOCAL = 'N'")))
-            && !matches!(table, "T000" | "TRNSPACE")
+            && !matches!(table, "T000" | "TRNSPACE" | "SEOSUBCODF")
+            && !body.contains(" WHERE OBJ_NAME IN ( ")
         {
             return Response::text(500, "preview failed");
         }
@@ -294,6 +295,24 @@ impl Sap {
             }
             "TRNSPACE" => {
                 return Response::text(200, preview(&[("EDITFLAG", &[Some("X")])]));
+            }
+            "SEOSUBCODF" => {
+                return Response::text(
+                    200,
+                    preview(&[
+                        ("CLSNAME", &[Some("IF_OO_ADT_CLASSRUN")]),
+                        ("CMPNAME", &[Some("MAIN")]),
+                        ("SCONAME", &[Some("OUT")]),
+                        ("TYPE", &[Some("IF_OO_ADT_INTRNL_CLASSRUN")]),
+                    ]),
+                );
+            }
+            // The cleanup proof of the runner class: the directory row goes with the class.
+            "TADIR" if body.contains(" WHERE OBJ_NAME IN ( ") => {
+                return Response::text(
+                    200,
+                    preview(&[("PGMID", none), ("OBJECT", none), ("OBJ_NAME", none)]),
+                );
             }
             "TADIR" => (world.directory, quoted.last().copied().unwrap_or_default()),
             "SEOCLASS" => (

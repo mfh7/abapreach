@@ -12,6 +12,42 @@ not features available in the current Rust CLI. Their tags live in the
 internal repository where that implementation was developed. See the
 [roadmap](docs/roadmap.md) for the path to 1.0.0, which brings all of them to Rust.
 
+## 0.16.1 (unreleased)
+
+### Added
+- `deploy`, `deploy --simulate` and `delete` over ADT: `--tr <request>` now adds a transportable
+  object that no open request holds (the lock answers no `CORRNR`) to that request. Before any
+  write ABAPReach reads the request from `E070` over the data preview and stops unless it exists,
+  is a workbench request and not a task, is modifiable, and is owned by the logon user or holds a
+  modifiable task of that user. `deploy` prints `transport request <request> (object added)`;
+  `deploy --simulate` prints `WILL ADD <TYPE> <NAME> to <request>`. Without `--tr` the STOP stays
+  and names the way out. The MCP `tr` argument follows the same rule.
+- `doctor` prints `RUNNER out type: <interface>`, the type of the classrun `OUT` parameter, and a
+  `RUNNER orphan: <class>` line for each runner class that has a `TADIR` row and no class.
+
+### Changed
+- Classrun runner (issue #12): the runner class declares its output reference with the type of
+  parameter `OUT` of `IF_OO_ADT_CLASSRUN~MAIN`, read from `SEOSUBCODF` before the class is created.
+  `IF_OO_ADT_INTRNL_CLASSRUN` (7.40, 7.50; the generated class is unchanged) and
+  `IF_OO_ADT_CLASSRUN_OUT` (newer releases) are known; any other type stops the run (exit 2) and
+  names the type found. The new `SEOSUBCODF` read uses `IN` with one value per column, because a
+  single-value `=` in a data preview `WHERE` is reported unreliable on some releases (issue #13).
+- Runner source `PUT` sends `Accept: text/plain`; a release that refuses a source `PUT` without it
+  answered `HTTP 400: Accept header missing` (issue #12).
+- Runner cleanup proof: after the class `GET` answers 404, a new session reads `TADIR` for the
+  runner name. A row left there is a leftover (`RUNNER_LEFTOVER`); a failed read is
+  `W: runner cleanup proof failed: TADIR <reason>` and also counts as a leftover (issue #12).
+- MCP server (issue #15): `connections.json` and `connections.local.json` are re-read on every tool
+  call, so a connection added while the server runs resolves. Policies stay as the server started
+  with them; a call that finds other policies logs `W: policies changed in connections.json;
+  restart the MCP server to apply them` to stderr. A server absent at start gets the strictest
+  policy (`mcp_write` off) until restart; a file that no longer parses stops the call with the
+  parse error. See [MCP configuration](docs/mcp.md#configuration).
+
+### Fixed
+- `read` creates a missing parent directory of the output path (source, DDIC XML and `TRAN`
+  output); a parent that cannot be created is `cannot create directory <dir>: <error>` (issue #14).
+
 ## [Unreleased]
 
 Version metadata is `0.16.0`. This entry is finalized before the last release candidate.

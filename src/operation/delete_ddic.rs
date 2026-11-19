@@ -29,7 +29,7 @@ use crate::operation::runner_reconcile::{
     Clock, Intent, ReadRun, Subject, SystemClock, Verdict, reconcile, settle,
 };
 use crate::operation::runner_route::random_nonce;
-use crate::operation::runner_template::{TEMPLATES, generate};
+use crate::operation::runner_template::{OutType, TEMPLATES, generate_for};
 use crate::runner_protocol::parse_post_reply;
 use crate::runner_protocol::{Level, Nonce, Parsed, Report, RunMode, RunStatus, Stop};
 use std::cell::RefCell;
@@ -570,7 +570,7 @@ fn cycle(
         .iter()
         .find(|template| template.name == kind.token())
         .ok_or_else(|| format!("no runner template for {}", kind.token()))?;
-    let build = |class: &str| generate(template, class, payload_lines);
+    let build = |class: &str, out: OutType| generate_for(template, class, payload_lines, out);
     let operation = format!("delete {}", kind.token());
     let input = CycleInput {
         operation: &operation,

@@ -43,6 +43,51 @@ fn assert_refused(requests: &[Request]) {
     }
 }
 
+/// The previews of 0.16.1: the runner (the `OUT` type, the directory proof, the orphans) and the
+/// request check of `--tr`.
+const RUNNER_PREVIEWS: [(&str, &str); 7] = [
+    (
+        "SEOSUBCODF",
+        "SELECT CLSNAME, CMPNAME, SCONAME, TYPE FROM SEOSUBCODF WHERE CLSNAME IN ( 'IF_OO_ADT_CLASSRUN' ) AND CMPNAME IN ( 'MAIN' ) AND SCONAME IN ( 'OUT' )",
+    ),
+    (
+        "TADIR",
+        "SELECT PGMID, OBJECT, OBJ_NAME FROM TADIR WHERE OBJ_NAME IN ( 'YCL_ABAPREACH_RUN_AB12CD34' )",
+    ),
+    (
+        "TADIR",
+        "SELECT PGMID, OBJECT, OBJ_NAME FROM TADIR WHERE OBJ_NAME LIKE 'YCL_ABAPREACH_RUN_%'",
+    ),
+    (
+        "SEOCLASS",
+        "SELECT CLSNAME FROM SEOCLASS WHERE CLSNAME LIKE 'YCL_ABAPREACH_RUN_%'",
+    ),
+    (
+        "SEOCLASS",
+        "SELECT CLSNAME FROM SEOCLASS WHERE CLSNAME IN ( 'IF_OO_ADT_CLASSRUN' )",
+    ),
+    // The request of `--tr` for an object no open request holds.
+    (
+        "E070",
+        "SELECT TRKORR, STRKORR, TRFUNCTION, TRSTATUS, AS4USER FROM E070 WHERE TRKORR IN ( 'HD1K917833' )",
+    ),
+    (
+        "E070",
+        "SELECT TRKORR FROM E070 WHERE STRKORR IN ( 'HD1K917833' ) AND AS4USER IN ( 'HR_ABAP' ) AND TRSTATUS IN ( 'D' )",
+    ),
+];
+
+#[test]
+fn the_previews_of_the_runner_and_the_request_check_are_admitted() {
+    for (entity, body) in RUNNER_PREVIEWS {
+        for rows in [1, 50] {
+            let request = preview_request(entity, body, rows).unwrap();
+
+            assert!(admits(&request), "must be admitted: {request:?}");
+        }
+    }
+}
+
 #[test]
 fn the_request_the_operation_builds_is_admitted() {
     for (entity, body, rows) in [

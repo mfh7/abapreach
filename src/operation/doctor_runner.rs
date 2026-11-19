@@ -6,7 +6,10 @@
 use crate::backend::BackendKind;
 use crate::config::Connection;
 use crate::operation::runner::{PostTransport, post_transport};
-use crate::operation::runner_evidence::{Preflight, classrun_interface, preflight};
+use crate::operation::runner_evidence::{
+    OutTypeError, Preflight, classrun_interface, classrun_out_type, preflight, runner_orphans,
+};
+use crate::operation::runner_template::OutType;
 use crate::runner_protocol::scrub_text;
 use crate::transport::{Request, SadtTransport};
 use quick_xml::events::{BytesStart, Event};
@@ -39,6 +42,10 @@ pub struct RunnerFacts {
     /// The listed classes and the number of classes the search returned.
     leftovers: Result<(Vec<Leftover>, usize), String>,
     preflight: Result<Preflight, String>,
+    /// The type of the classrun `OUT` parameter, or why it is not known.
+    out_type: Result<OutType, String>,
+    /// The runner classes that have a directory row and no class.
+    orphans: Result<Vec<String>, String>,
     /// The session these facts were read on keeps no ADT state, so an unpinned runner command
     /// takes the RFC path when the connection has one.
     adt_stateless: bool,
@@ -51,6 +58,8 @@ impl RunnerFacts {
             classrun: Err(reason.to_owned()),
             leftovers: Err(reason.to_owned()),
             preflight: Err(reason.to_owned()),
+            out_type: Err(reason.to_owned()),
+            orphans: Err(reason.to_owned()),
             adt_stateless: false,
         }
     }
@@ -67,6 +76,14 @@ impl RunnerFacts {
             leftovers: read_leftovers(transport, &connection.runner_prefix, now),
             preflight: preflight(transport, &connection.client)
                 .map_err(|error| scrub_text(&error.to_string())),
+            out_type: classrun_out_type(transport).map_err(|error| {
+                scrub_text(&match error {
+                    OutTypeError::Lost(error) => error.to_string(),
+                    OutTypeError::Stop(reason) => reason,
+                })
+            }),
+            orphans: runner_orphans(transport, &connection.runner_prefix)
+                .map_err(|reason| scrub_text(&reason)),
             adt_stateless: transport.stateful_supported() == Some(false),
         }
     }
@@ -112,6 +129,15 @@ impl RunnerFacts {
                 lines.extend(result.notes.iter().map(|note| scrub_text(note)));
             }
             Err(reason) => lines.push(format!("RUNNER preflight: unknown ({reason})")),
+        }
+
+        lines.push(match &self.out_type {
+            Ok(out) => format!("RUNNER out type: {}", out.interface()),
+            Err(reason) => format!("RUNNER out type: unknown ({reason})"),
+        });
+        match &self.orphans {
+            Ok(names) => lines.extend(names.iter().map(|name| format!("RUNNER orphan: {name}"))),
+            Err(reason) => lines.push(format!("RUNNER orphans: unknown ({reason})")),
         }
 
         lines.push("RUNNER authorization: not probed".to_owned());

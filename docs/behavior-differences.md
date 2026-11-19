@@ -387,13 +387,23 @@ the program's inactive version (an entry in `DWINACTIV`), the active source
 is unchanged, and the status is `INACTIVE` with exit 1. Inspect the inactive
 version before attempting another deploy.
 
-### A transportable object whose lock reports no transport request is refused
+### A transportable object whose lock reports no transport request needs `--tr`
 
 When the lock of a transportable object (package not `$TMP`) answers 200
-without a `CORRNR`, `abapreach` stops with `STOP: the object is not local but
-the lock returned no transport request` (exit 2) after releasing the lock
-and before the syntax check and PUT. This holds even when `--tr` is given:
-an empty `CORRNR` is never replaced by `--tr`.
+without a `CORRNR`, no modifiable request holds the object. Without `--tr`,
+`abapreach` stops with `STOP: the object is not local but the lock returned no
+transport request; pass --tr <request> to add the object to a modifiable request
+of yours` (exit 2) after releasing the lock and before the syntax check and PUT.
+
+With `--tr <request>` (0.16.1), `abapreach` first reads the request from `E070`
+over the data preview (read-only) and stops, writing nothing, unless the
+request exists, is a workbench request and not a task, is modifiable, and is
+owned by the logon user or holds a modifiable task of that user. These are the
+rules the classrun runner applies to its `--tr`. The write then carries
+`corrNr=<request>` and SAP records the object in that request; `deploy` prints
+`transport request <request> (object added)`, and `deploy --simulate` prints
+`WILL ADD <TYPE> <NAME> to <request>`. `delete` over ADT follows the same rule at
+execute time. A `CORRNR` that the lock does name must still equal `--tr`.
 
 The reference tooling would still write there. For a transportable object it
 requires `--tr`, checks that the request is a modifiable workbench request
@@ -403,12 +413,10 @@ locks with exactly that request (`set_lifecycle_corr`: `mo_lm->corrnr =
 mv_trkorr`). The request of the write is therefore chosen by the client,
 not read from the object lock.
 
-`abapreach` stays strict on purpose: on the ADT path, the `CORRNR` of the
-lock response is the only statement SAP makes about the request that owns
-the object lock. With an empty `CORRNR`, the tool cannot prove that the
-`--tr` request owns the object. It refuses before writing and releases the
-lock. Assign the object to a transport request on the SAP side, then retry
-only after verifying the lock response.
+`abapreach` does not read `TLOCK`: an object that another request already
+holds answers a `CORRNR` at the lock, so this path is reached only for an
+object that no open request holds. A write that SAP refuses for a wrong
+request is reported as the SAP answer.
 
 ### Related behavior and comparison limits
 

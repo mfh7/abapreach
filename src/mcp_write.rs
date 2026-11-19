@@ -1850,6 +1850,23 @@ impl<G: WriteGate> ToolHandler for McpTools<'_, G> {
         arguments: &Map<String, Value>,
         session: &mut dyn Session,
     ) -> ToolResult {
+        let result = self.dispatch(name, arguments, session);
+
+        for line in self.read.take_warnings() {
+            session.log(&line);
+        }
+
+        result
+    }
+}
+
+impl<G: WriteGate> McpTools<'_, G> {
+    fn dispatch(
+        &mut self,
+        name: &str,
+        arguments: &Map<String, Value>,
+        session: &mut dyn Session,
+    ) -> ToolResult {
         // What earlier calls left is told now; what this call leaves waits for the next one.
         let carried = std::mem::take(&mut self.notices);
         let result = match name {

@@ -14,7 +14,11 @@ and was not re-verified in this release.
 ## Configuration
 
 The server reads the connection file named by `ABAP_CONNECTIONS` (see
-[Getting started](getting-started.md#configure-a-connection)). Write tools are controlled by the
+[Getting started](getting-started.md#configure-a-connection)). It re-reads `connections.json` and
+`connections.local.json` on every tool call to resolve the connection, so a connection added while
+the server runs resolves without a restart. A file that no longer parses stops that call with the
+parse error; the server keeps running. The policies are not re-read: they stay as the server
+started with them. Write tools are controlled by the
 `mcp_write` policy. Policies can be set at the top level of `connections.json` and per server
 in `servers[]`; a server value overrides the top-level value.
 
@@ -44,11 +48,17 @@ The other keys of the file are omitted here. Add the server entries as described
 - The server waits up to 300 s for an answer to the form. After that the write is not
   confirmed (`write not confirmed: timed out after 300 s`). A late answer is ignored.
 
-**Residual risk.** The policy is loaded once, when the server starts. An agent that can edit
-`connections.json` can relax `mcp_write`, for example from `confirm` to `token`, which drops the
-per-write human confirmation (delete keeps its confirmation). The change takes effect at the
-next server start. The server does not detect the edit. Keep `connections.json`
-outside the agent's writable scope (recommendation, not a tested control).
+**Residual risk.** The policies (`mcp_write`, `read_table_denied` and the per-server policies) are
+loaded once, when the server starts. Connections are re-read on every call; policies are not. An
+agent that edits `connections.json` during a session therefore cannot loosen them: a call whose
+file holds other policies than the server started with runs with the start values and logs one line
+to stderr, `W: policies changed in connections.json; restart the MCP server to apply them`. A
+server that was absent at start runs with the strictest policy (`mcp_write` off) until the next
+start. An edit made before the next start still takes effect then, so a start loads whatever the
+file holds: an agent that can edit `connections.json` can relax `mcp_write`, for example from
+`confirm` to `token`, which drops the per-write human confirmation (delete keeps its
+confirmation), once the server restarts. Keep `connections.json` outside the agent's writable
+scope (recommendation, not a tested control).
 
 ## Tools
 

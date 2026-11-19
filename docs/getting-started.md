@@ -394,7 +394,8 @@ source has changed, `--base` stops the run. If `doctor` reports that ADT HTTP
 has no stateful session, add `--backend rfc` to both commands after checking
 the RFC probe; `--base` prevents automatic backend fallback. A transportable
 object may require `--tr <request>`; the request must agree with the SAP lock
-response. Deploy can leave an inactive version after failed activation. Read
+response, and for an object that no open request holds, `--tr` names the modifiable request of
+yours that takes it. Deploy can leave an inactive version after failed activation. Read
 [Deploy safety](deploy-safety.md) and [Behavior differences](behavior-differences.md)
 before the first write.
 

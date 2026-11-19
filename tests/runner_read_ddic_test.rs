@@ -654,8 +654,9 @@ fn a_read_sends_at_most_the_preview_budget() {
     let (kind, xml, name, hash) = FIXTURES[0];
     let done = Case::new(kind, name, fixture_reply(xml, hash)).go();
 
-    // Two for the preflight and three for the evidence.
-    assert_eq!(done.sap.borrow().previews, 5);
+    // Two for the preflight, one for the `OUT` type, one for the directory proof of the runner
+    // and three for the evidence.
+    assert_eq!(done.sap.borrow().previews, 7);
 }
 
 // ---- the file rules ---------------------------------------------------------------------------------

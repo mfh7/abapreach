@@ -472,8 +472,9 @@ fn create_simulate_prints_the_guards_and_writes_no_evidence_preview() {
             "validated; nothing was written".to_owned(),
         ]
     );
-    // Only the two previews of the preflight: a simulate writes nothing to prove.
-    assert_eq!(rig.sap.borrow().previews, 2);
+    // Only the previews before the class (two of the preflight, the `OUT` type) and the
+    // directory proof of the runner: a simulate writes nothing to prove.
+    assert_eq!(rig.sap.borrow().previews, 4);
     assert_eq!(rig.classes(), 0);
 }
 
@@ -521,8 +522,9 @@ fn create_passes_the_class_rejections_through_as_english_text() {
             assert_eq!(shown[shown.len() - 2], "CREATE: REJECTED", "{text}");
             assert_eq!(shown[shown.len() - 1], *text);
             assert_eq!(rig.classes(), 0);
-            // A rejection writes nothing: no evidence preview beyond the preflight.
-            assert_eq!(rig.sap.borrow().previews, 2, "{text}");
+            // A rejection writes nothing: no evidence preview beyond the checks before the class
+            // and the directory proof of the runner.
+            assert_eq!(rig.sap.borrow().previews, 4, "{text}");
         }
     }
 }

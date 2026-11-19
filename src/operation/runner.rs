@@ -9,7 +9,10 @@ use crate::operation::deploy::{
     CancelFlag, INTERRUPT_EXIT_CODE, LOCK_ACCEPT, LockInfo, activation_request_xml,
     encode_lock_handle, known_lock_handles, leaf_texts, parse_lock,
 };
-use crate::operation::runner_evidence::preflight;
+use crate::operation::runner_evidence::{
+    OutTypeError, classrun_out_type, preflight, runner_directory_row,
+};
+use crate::operation::runner_template::OutType;
 use crate::transport::{
     Request, Response, RunnerArm, SadtTransport, TransportError, runner_verdict,
 };
@@ -223,8 +226,8 @@ pub struct CycleInput<'a> {
     pub backend: BackendKind,
     /// Whether the connection has an RFC route, which decides the text of a stateless HTTP stop.
     pub rfc_available: bool,
-    /// The full class source for a runner name.
-    pub build: &'a dyn Fn(&str) -> Result<String, String>,
+    /// The full class source for a runner name and the type of the classrun `OUT` parameter.
+    pub build: &'a dyn Fn(&str, OutType) -> Result<String, String>,
 }
 
 /// How a row ended, before the cleanup is taken into account.
@@ -408,6 +411,7 @@ pub fn run_cycle(
         fatal: None,
         source: None,
         expected: None,
+        out: OutType::default(),
     };
     let end = match cycle.steps(post) {
         Ok(end) | Err(end) => end,
@@ -460,6 +464,8 @@ struct Cycle<'a> {
     /// The class source for the current name, and the hash the active source must have.
     source: Option<String>,
     expected: Option<String>,
+    /// The type of the classrun `OUT` parameter the preflight found.
+    out: OutType,
 }
 
 impl Cycle<'_> {
@@ -512,10 +518,33 @@ impl Cycle<'_> {
         )
     }
 
-    /// Everything checked before the class exists: the session, then the repository.
+    /// Everything checked before the class exists: the session, the repository, and the type of
+    /// the classrun `OUT` parameter.
     fn preflight(&mut self) -> Result<(), RunnerEnd> {
         self.session_probe()?;
-        self.repository_check()
+        self.repository_check()?;
+        self.out_type_check()
+    }
+
+    /// One preview on the cycle session: releases type the `OUT` parameter of the classrun
+    /// handler differently, and the class source declares its output reference with that type.
+    /// An unknown type stops the run before anything is written.
+    fn out_type_check(&mut self) -> Result<(), RunnerEnd> {
+        let found = if self.input.backend == BackendKind::AdtHttp {
+            classrun_out_type(&mut RunnerGated::new(&mut *self.session))
+        } else {
+            classrun_out_type(&mut *self.session)
+        };
+
+        self.out = found.map_err(|error| match error {
+            OutTypeError::Lost(error) => RunnerEnd::NotStarted(error),
+            OutTypeError::Stop(reason) => RunnerEnd::Stop(format!(
+                "{} cannot use the classrun runner: {reason}",
+                self.input.operation
+            )),
+        })?;
+
+        Ok(())
     }
 
     /// Two data previews on the cycle session. A system that forbids repository changes stops
@@ -637,7 +666,7 @@ impl Cycle<'_> {
     fn send_create(&mut self, name: &str) -> Result<(), TransportError> {
         self.name = Some(name.to_owned());
 
-        let source = match (self.input.build)(name) {
+        let source = match (self.input.build)(name, self.out) {
             Ok(source) => source,
             Err(message) => {
                 self.fatal = Some(RunnerEnd::Stop(message.clone()));
@@ -756,6 +785,10 @@ impl Cycle<'_> {
             "Content-Type".to_owned(),
             "text/plain; charset=utf-8".to_owned(),
         );
+        // Some releases refuse a source PUT without an `Accept` header (HTTP 400).
+        request
+            .headers
+            .insert("Accept".to_owned(), "text/plain".to_owned());
 
         match self.send(request) {
             Ok(response) if ok(&response) => Ok(()),
@@ -956,11 +989,47 @@ impl Cycle<'_> {
         self.delete_class();
 
         match self.exists(open) {
-            Ok(false) => true,
+            Ok(false) => self.directory_gone(open),
             Ok(true) => {
                 self.notes.push(
                     "W: runner cleanup proof: the class still exists in a new session".to_owned(),
                 );
+
+                false
+            }
+            Err(reason) => {
+                self.notes
+                    .push(format!("W: runner cleanup proof failed: {reason}"));
+
+                false
+            }
+        }
+    }
+
+    /// Whether the repository directory no longer holds the class, read from a new session. A
+    /// row left behind and a read that fails both count as a leftover.
+    fn directory_gone(&mut self, open: &mut Opener<'_>) -> bool {
+        let mut fresh = match open() {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                self.notes.push(format!(
+                    "W: runner cleanup proof failed: TADIR cannot open a new session: {error}"
+                ));
+
+                return false;
+            }
+        };
+        let found = runner_directory_row(&mut *fresh, self.name());
+
+        if let Err(error) = fresh.close() {
+            self.notes.push(format!("W: session close failed: {error}"));
+        }
+
+        match found {
+            Ok(false) => true,
+            Ok(true) => {
+                self.notes
+                    .push("W: runner cleanup proof: TADIR still holds the class".to_owned());
 
                 false
             }
