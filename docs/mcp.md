@@ -16,8 +16,12 @@ and was not re-verified in this release.
 The server reads the connection file named by `ABAP_CONNECTIONS` (see
 [Getting started](getting-started.md#configure-a-connection)). It re-reads `connections.json` and
 `connections.local.json` on every tool call to resolve the connection, so a connection added while
-the server runs resolves without a restart. A file that no longer parses stops that call with the
-parse error; the server keeps running. The policies are not re-read: they stay as the server
+the server runs resolves without a restart. A connection that the file named at start keeps its
+start target (host, port, client, `insecure` flag, RFC route, credentials and runner prefix): when
+the file now resolves it differently, the call stops with `STOP: connection <ID> changed in
+connections.json since the MCP server started; restart the MCP server to use it` and nothing is
+contacted. A file that no longer parses stops that call with the parse error; the server keeps
+running. The policies are not re-read: they stay as the server
 started with them. Write tools are controlled by the
 `mcp_write` policy. Policies can be set at the top level of `connections.json` and per server
 in `servers[]`; a server value overrides the top-level value.
@@ -48,7 +52,9 @@ The other keys of the file are omitted here. Add the server entries as described
 - The server waits up to 300 s for an answer to the form. After that the write is not
   confirmed (`write not confirmed: timed out after 300 s`). A late answer is ignored.
 
-**Residual risk.** The policies (`mcp_write`, `read_table_denied` and the per-server policies) are
+**Residual risk.** The target of a connection that the server started with is frozen too, so an
+edit of `connections.json` cannot point a started connection at another host or make it send its
+credentials elsewhere during a session. The policies (`mcp_write`, `read_table_denied` and the per-server policies) are
 loaded once, when the server starts. Connections are re-read on every call; policies are not. An
 agent that edits `connections.json` during a session therefore cannot loosen them: a call whose
 file holds other policies than the server started with runs with the start values and logs one line

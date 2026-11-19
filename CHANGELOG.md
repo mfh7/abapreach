@@ -23,7 +23,9 @@ internal repository where that implementation was developed. See the
   `deploy --simulate` prints `WILL ADD <TYPE> <NAME> to <request>`. Without `--tr` the STOP stays
   and names the way out. The MCP `tr` argument follows the same rule.
 - `doctor` prints `RUNNER out type: <interface>`, the type of the classrun `OUT` parameter, and a
-  `RUNNER orphan: <class>` line for each runner class that has a `TADIR` row and no class.
+  `RUNNER orphan: <class>` line for each runner class that has a `TADIR` row and no class. When
+  either orphan preview returns its limit of 50 rows, `doctor` prints `RUNNER orphans: more than 50
+  rows, list incomplete` instead of a list.
 
 ### Changed
 - Classrun runner (issue #12): the runner class declares its output reference with the type of
@@ -37,14 +39,19 @@ internal repository where that implementation was developed. See the
   `HTTP 400: Accept header missing` (issue #12).
 - Runner cleanup proof: after the class `GET` answers 404, a new session reads `TADIR` for the
   runner name. A row left there is a leftover (`RUNNER_LEFTOVER`); a failed read is
-  `W: runner cleanup proof failed: TADIR <reason>` and also counts as a leftover (issue #12).
+  `W: runner cleanup proof failed: TADIR <reason>` and also counts as a leftover. The same check
+  runs when a lost create leaves the class state unknown and the class `GET` answers 404. When only
+  the `TADIR` row is left, `RUNNER_LEFTOVER` adds `hint: only the object directory entry (TADIR)
+  is left; remove it in SE03 (Change Object Directory Entries) or SE80` (issue #12).
 - MCP server (issue #15): `connections.json` and `connections.local.json` are re-read on every tool
   call, so a connection added while the server runs resolves. Policies stay as the server started
   with them; a call that finds other policies logs `W: policies changed in connections.json;
   restart the MCP server to apply them` to stderr. A server absent at start gets the start
   top-level policies with `mcp_write` off and the built-in tables added to the deny list, until
-  restart; a file that no longer parses stops the call with the
-  parse error. See [MCP configuration](docs/mcp.md#configuration).
+  restart; a file that no longer parses stops the call with the parse error. A connection that the
+  file named at start keeps its start target and credentials: when the file now resolves it
+  differently, the call stops with `STOP: connection <ID> changed in connections.json since the
+  MCP server started; restart the MCP server to use it` and nothing is contacted. See [MCP configuration](docs/mcp.md#configuration).
 
 ### Fixed
 - `read` creates a missing parent directory of the output path (source, DDIC XML and `TRAN`

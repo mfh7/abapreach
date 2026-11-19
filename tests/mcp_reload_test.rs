@@ -336,3 +336,144 @@ fn a_server_absent_at_start_keeps_the_start_deny_list_and_the_defaults() {
         write.text
     );
 }
+
+// ---- the target of a connection that the server started with is frozen -----------------------
+
+const CHANGED: &str = "STOP: connection DEV_100 changed in connections.json since the MCP server started; restart the MCP server to use it";
+
+fn target(id: &str, host: &str, insecure: bool) -> String {
+    format!(
+        r#"{{"systemId":"{id}","host":"{host}","port":443,"clients":["100"],"adt":{{"insecure":{insecure}}}}}"#
+    )
+}
+
+/// A read and a write call of `DEV_100`; neither may open a connection (the fake has no
+/// transport to give, so a connect panics) and both stop with the same text.
+#[track_caller]
+fn assert_refused(tools: &mut McpTools<'_, TokenGate>, session: &mut Logging) {
+    let read = call(
+        tools,
+        session,
+        "abap_read_source",
+        json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST"}),
+    );
+    let table = call(
+        tools,
+        session,
+        "abap_read_table",
+        json!({"conn": "DEV_100", "table": "T001"}),
+    );
+    let write = call(
+        tools,
+        session,
+        "abap_simulate",
+        json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST", "source": "REPORT ytest."}),
+    );
+
+    for result in [read, table, write] {
+        assert!(result.is_error);
+        assert_eq!(result.text, CHANGED);
+    }
+}
+
+#[test]
+fn a_changed_host_of_a_known_connection_is_refused_and_nothing_is_contacted() {
+    let rig = rig(&[target("DEV", "example.com", true)], "");
+    let mut fake = Fake::default();
+    let mut tools = rig.tools(&mut fake);
+    let mut session = Logging::default();
+
+    rig.write(&[target("DEV", "attacker.example.net", true)], "");
+
+    assert_refused(&mut tools, &mut session);
+}
+
+#[test]
+fn a_changed_insecure_flag_of_a_known_connection_is_refused() {
+    let rig = rig(&[target("DEV", "example.com", false)], "");
+    let mut fake = Fake::default();
+    let mut tools = rig.tools(&mut fake);
+    let mut session = Logging::default();
+
+    rig.write(&[target("DEV", "example.com", true)], "");
+
+    assert_refused(&mut tools, &mut session);
+}
+
+#[test]
+fn a_removed_server_entry_of_a_known_connection_is_refused() {
+    let rig = rig(&[target("DEV", "example.com", true)], "");
+    let mut fake = Fake::default();
+    let mut tools = rig.tools(&mut fake);
+    let mut session = Logging::default();
+
+    rig.write(&[target("NEW", "example.com", true)], "");
+
+    assert_refused(&mut tools, &mut session);
+}
+
+#[test]
+fn a_changed_credential_in_the_local_file_is_refused() {
+    // `LOC_100` has no credential in the environment, so they come from the local file.
+    let mut rig = rig(&[target("LOC", "example.com", true)], "");
+
+    rig.env.remove("LOC_100_USER");
+    std::fs::write(
+        &rig.paths.local,
+        r#"{"LOC_100_USER":"user","LOC_100_PASS":"first"}"#,
+    )
+    .unwrap();
+
+    let mut fake = Fake::default();
+    let mut tools = rig.tools(&mut fake);
+    let mut session = Logging::default();
+
+    std::fs::write(
+        &rig.paths.local,
+        r#"{"LOC_100_USER":"user","LOC_100_PASS":"second"}"#,
+    )
+    .unwrap();
+
+    let result = call(
+        &mut tools,
+        &mut session,
+        "abap_read_source",
+        json!({"conn": "LOC_100", "type": "PROG", "name": "YTEST"}),
+    );
+
+    assert!(result.is_error);
+    assert_eq!(
+        result.text,
+        "STOP: connection LOC_100 changed in connections.json since the MCP server started; \
+         restart the MCP server to use it"
+    );
+}
+
+#[test]
+fn an_unchanged_known_connection_works_while_another_entry_changes() {
+    let rig = rig(&[target("DEV", "example.com", true)], "");
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(source(PROGRAM));
+
+    let mut tools = rig.tools(&mut fake);
+    let mut session = Logging::default();
+
+    rig.write(
+        &[
+            target("DEV", "example.com", true),
+            target("NEW", "other.example.com", false),
+        ],
+        "",
+    );
+
+    let result = call(
+        &mut tools,
+        &mut session,
+        "abap_read_source",
+        json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST"}),
+    );
+
+    assert!(!result.is_error, "{}", result.text);
+    assert_eq!(result.structured["source"], PROGRAM);
+}

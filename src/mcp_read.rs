@@ -31,6 +31,24 @@ pub(crate) const READ_TYPES: &str =
 const POLICIES_CHANGED: &str =
     "W: policies changed in connections.json; restart the MCP server to apply them";
 
+/// The STOP of a call whose connection the file now points elsewhere.
+fn changed(id: &str) -> String {
+    format!(
+        "connection {id} changed in connections.json since the MCP server started; restart the \
+         MCP server to use it"
+    )
+}
+
+/// Whether two resolutions of one connection reach the same system with the same credentials:
+/// everything but the policies, which the server freezes on their own.
+fn same_target(now: &Connection, start: &Connection) -> bool {
+    let mut now = now.clone();
+
+    now.policies = start.policies.clone();
+
+    now == *start
+}
+
 pub(crate) const SECRET_REJECTED: &str = "REJECTED: payload contains a configured secret";
 
 /// What a server that re-reads its connection files keeps from its start.
@@ -38,6 +56,8 @@ struct Reload {
     paths: ConfigPaths,
     /// The policies of every server as the start loaded them; a later edit never changes them.
     start: McpPolicies,
+    /// The connections of the start; a later edit of the file cannot move one to another target.
+    known: BTreeMap<String, Result<Connection, String>>,
 }
 
 pub struct ReadTools<'a> {
@@ -76,6 +96,7 @@ impl<'a> ReadTools<'a> {
         self.reload = Some(Reload {
             paths,
             start: self.config.mcp_policies(),
+            known: self.config.start_connections(&self.env),
         });
 
         self
@@ -104,8 +125,23 @@ impl<'a> ReadTools<'a> {
         let Some(reload) = &self.reload else {
             return self.config.resolve(id, &self.env);
         };
-        let mut connection =
-            Config::load(reload.paths.clone(), &self.env)?.resolve(id, &self.env)?;
+        let fresh = Config::load(reload.paths.clone(), &self.env)?;
+        let (system_id, client) = Config::parse_id(id)?;
+        let key = format!("{system_id}_{client}");
+        let mut connection = match reload.known.get(&key) {
+            // A connection of the start keeps its start target and credentials: the file may
+            // add connections, never redirect one that is in use.
+            Some(Ok(start)) => match fresh.resolve(id, &self.env) {
+                Ok(now) if same_target(&now, start) => start.clone(),
+                _ => return Err(changed(&key)),
+            },
+            Some(Err(reason)) => return Err(reason.clone()),
+            None => fresh.resolve(id, &self.env)?,
+        };
+        // The policies of a connection of the start are the frozen ones below.
+        let fresh_policies = fresh
+            .resolve(id, &self.env)
+            .map_or_else(|_| connection.policies.clone(), |now| now.policies);
         // A server absent at start gets the strictest set the start allows: no MCP write, and a
         // deny list that is the start list plus the built-in tables.
         let frozen = reload
@@ -114,7 +150,7 @@ impl<'a> ReadTools<'a> {
             .unwrap_or_else(|| reload.start.absent())
             .clone();
 
-        if connection.policies.for_mcp() != frozen {
+        if fresh_policies.for_mcp() != frozen {
             self.warnings.borrow_mut().push(POLICIES_CHANGED.to_owned());
         }
 

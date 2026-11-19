@@ -1546,6 +1546,36 @@ fn a_directory_row_without_a_class_is_an_orphan_and_a_row_with_a_class_is_not() 
 }
 
 #[test]
+fn a_preview_that_returns_the_row_limit_makes_the_orphan_list_incomplete() {
+    let names: Vec<String> = (0..50)
+        .map(|n| format!("YCL_ABAPREACH_RUN_{n:08}"))
+        .collect();
+    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+
+    // Either preview at the limit: a truncated class list would report live classes as orphans,
+    // a truncated directory list would hide orphans.
+    for (directory, classes) in [
+        (directory_reply(&borrowed), class_rows_reply(&[])),
+        (directory_reply(&[]), class_rows_reply(&borrowed)),
+    ] {
+        let mut replies = runner_replies(classrun_found(), search_reply(&[]), Vec::new());
+        let last = replies.len();
+
+        replies[last - 2] = directory;
+        replies[last - 1] = classes;
+
+        let (exit, _) = adt_doctor(replies);
+
+        assert_eq!(
+            runner_line(&exit, "RUNNER orphans"),
+            "RUNNER orphans: more than 50 rows, list incomplete"
+        );
+        assert!(!exit.stdout.contains("RUNNER orphan:"), "{}", exit.stdout);
+        assert_eq!(exit.code, 0);
+    }
+}
+
+#[test]
 fn no_orphan_gives_no_orphan_line_and_an_unreadable_directory_is_unknown() {
     let (exit, _) = adt_doctor(runner_replies(
         classrun_found(),

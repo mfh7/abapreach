@@ -7,7 +7,8 @@ use crate::backend::BackendKind;
 use crate::config::Connection;
 use crate::operation::runner::{PostTransport, post_transport};
 use crate::operation::runner_evidence::{
-    OutTypeError, Preflight, classrun_interface, classrun_out_type, preflight, runner_orphans,
+    Orphans, OutTypeError, Preflight, classrun_interface, classrun_out_type, preflight,
+    runner_orphans,
 };
 use crate::operation::runner_template::OutType;
 use crate::runner_protocol::scrub_text;
@@ -45,7 +46,7 @@ pub struct RunnerFacts {
     /// The type of the classrun `OUT` parameter, or why it is not known.
     out_type: Result<OutType, String>,
     /// The runner classes that have a directory row and no class.
-    orphans: Result<Vec<String>, String>,
+    orphans: Result<Orphans, String>,
     /// The session these facts were read on keeps no ADT state, so an unpinned runner command
     /// takes the RFC path when the connection has one.
     adt_stateless: bool,
@@ -136,7 +137,13 @@ impl RunnerFacts {
             Err(reason) => format!("RUNNER out type: unknown ({reason})"),
         });
         match &self.orphans {
-            Ok(names) => lines.extend(names.iter().map(|name| format!("RUNNER orphan: {name}"))),
+            Ok(Orphans::Found(names)) => {
+                lines.extend(names.iter().map(|name| format!("RUNNER orphan: {name}")));
+            }
+            Ok(Orphans::Incomplete) => lines.push(format!(
+                "RUNNER orphans: more than {} rows, list incomplete",
+                Orphans::LIMIT
+            )),
             Err(reason) => lines.push(format!("RUNNER orphans: unknown ({reason})")),
         }
 

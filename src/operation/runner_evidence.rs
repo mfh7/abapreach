@@ -428,13 +428,25 @@ pub fn runner_directory_row(
 /// The most rows of one orphan preview.
 const ORPHAN_ROWS: u32 = 50;
 
+/// What the orphan previews found.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Orphans {
+    /// The runner classes that have a directory row and no class.
+    Found(Vec<String>),
+    /// A preview returned the row limit: a cut class list would report live classes as orphans
+    /// and a cut directory list would hide some, so no list is given.
+    Incomplete,
+}
+
+impl Orphans {
+    /// The row limit of one orphan preview, as printed.
+    pub const LIMIT: u32 = ORPHAN_ROWS;
+}
+
 /// The names of the class rows of `TADIR` under `prefix` that have no row in `SEOCLASS`: the
 /// directory entry of a runner class whose class is gone. Two previews. `Err` is the reason one
 /// of them could not be read.
-pub fn runner_orphans(
-    transport: &mut dyn SadtTransport,
-    prefix: &str,
-) -> Result<Vec<String>, String> {
+pub fn runner_orphans(transport: &mut dyn SadtTransport, prefix: &str) -> Result<Orphans, String> {
     let prefix = literal(prefix)?;
     let column = |data: &crate::operation::read_table::TableData, name: &str| {
         data.columns.iter().position(|column| column == name)
@@ -453,6 +465,13 @@ pub fn runner_orphans(
         ORPHAN_ROWS,
     )
     .map_err(|error| describe(Table::Seoclass, &error))?;
+    if [&directory, &classes]
+        .iter()
+        .any(|data| data.rows.len() >= ORPHAN_ROWS as usize)
+    {
+        return Ok(Orphans::Incomplete);
+    }
+
     let (Some(object), Some(name), Some(class)) = (
         column(&directory, "OBJECT"),
         column(&directory, "OBJ_NAME"),
@@ -467,14 +486,16 @@ pub fn runner_orphans(
         .map(|value| value.trim().to_ascii_uppercase())
         .collect();
 
-    Ok(directory
-        .rows
-        .iter()
-        .filter(|row| row.get(object).is_some_and(|value| value.trim() == "CLAS"))
-        .filter_map(|row| row.get(name))
-        .map(|value| value.trim().to_ascii_uppercase())
-        .filter(|value| !present.contains(value))
-        .collect())
+    Ok(Orphans::Found(
+        directory
+            .rows
+            .iter()
+            .filter(|row| row.get(object).is_some_and(|value| value.trim() == "CLAS"))
+            .filter_map(|row| row.get(name))
+            .map(|value| value.trim().to_ascii_uppercase())
+            .filter(|value| !present.contains(value))
+            .collect(),
+    ))
 }
 
 /// Why the type of the classrun `OUT` parameter is not known.

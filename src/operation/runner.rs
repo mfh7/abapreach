@@ -174,6 +174,9 @@ pub const STATELESS: &str = "ADT HTTP session is stateless on this release; the 
 const TEMPLATE_BUG: &str =
     "W: the generated runner class did not activate; please report this as a bug";
 const MASK: &str = "<lock handle>";
+/// Added to the leftover text when only the object directory entry stays.
+const DIRECTORY_HINT: &str = "\nhint: only the object directory entry (TADIR) is left; remove it \
+                              in SE03 (Change Object Directory Entries) or SE80";
 /// The most of a SAP message that reaches a diagnostic.
 const MESSAGE_LIMIT: usize = 200;
 
@@ -265,6 +268,8 @@ pub struct RunnerRun {
     pub interrupted: bool,
     /// The status of the POST is unknown and is reconciled, never resent (the batch stops).
     pub uncertain: bool,
+    /// The leftover is the `TADIR` row alone: the class itself is proven gone.
+    directory_only: bool,
     conn: String,
 }
 
@@ -285,8 +290,13 @@ impl RunnerRun {
             format!(
                 "RUNNER_LEFTOVER: {name}\n\
                  abapreach delete --simulate CLAS:{name} --plan <FILE> --conn {conn}\n\
-                 abapreach delete CLAS:{name} --plan <FILE> --conn {conn}",
-                conn = self.conn
+                 abapreach delete CLAS:{name} --plan <FILE> --conn {conn}{hint}",
+                conn = self.conn,
+                hint = if self.directory_only {
+                    DIRECTORY_HINT
+                } else {
+                    ""
+                }
             )
         })
     }
@@ -379,6 +389,7 @@ pub fn run_cycle(
         preflight: None,
         interrupted: false,
         uncertain: false,
+        directory_only: false,
         conn: input.conn.to_owned(),
     };
 
@@ -412,6 +423,7 @@ pub fn run_cycle(
         source: None,
         expected: None,
         out: OutType::default(),
+        directory_left: false,
     };
     let end = match cycle.steps(post) {
         Ok(end) | Err(end) => end,
@@ -444,6 +456,7 @@ pub fn run_cycle(
     run.preflight = cycle.preflight.take();
     run.interrupted = cancel.is_set();
     run.uncertain = matches!(run.end, RunnerEnd::PostUncertain(_));
+    run.directory_only = run.leftover.is_some() && cycle.directory_left;
 
     run
 }
@@ -466,6 +479,8 @@ struct Cycle<'a> {
     expected: Option<String>,
     /// The type of the classrun `OUT` parameter the preflight found.
     out: OutType,
+    /// The last proof found the class gone and `TADIR` still holding its row.
+    directory_left: bool,
 }
 
 impl Cycle<'_> {
@@ -946,6 +961,8 @@ impl Cycle<'_> {
     fn cleanup(&mut self, open: &mut Opener<'_>) -> bool {
         if self.class == Class::Maybe {
             match self.exists(open) {
+                // A half-finished create can leave the directory row without the class.
+                Ok(false) if !self.directory_gone(open) => return true,
                 Ok(false) => self.class = Class::Absent,
                 Ok(true) => self.class = Class::Present,
                 Err(_) => return true,
@@ -986,6 +1003,7 @@ impl Cycle<'_> {
     /// One delete attempt on the current session and the proof from a new one; `true` when the
     /// proof finds the class gone. Every failure leaves its reason in the notes.
     fn delete_and_prove(&mut self, open: &mut Opener<'_>) -> bool {
+        self.directory_left = false;
         self.delete_class();
 
         match self.exists(open) {
@@ -1028,6 +1046,7 @@ impl Cycle<'_> {
         match found {
             Ok(false) => true,
             Ok(true) => {
+                self.directory_left = true;
                 self.notes
                     .push("W: runner cleanup proof: TADIR still holds the class".to_owned());
 

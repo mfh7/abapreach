@@ -783,10 +783,18 @@ fn a_class_that_is_gone_but_still_has_a_directory_row_is_a_leftover() {
             run.notes
         );
         assert_eq!(run.exit_code(0), 1);
-        assert!(
-            run.leftover_text()
-                .unwrap()
-                .starts_with("RUNNER_LEFTOVER: ")
+        // Only the directory row is left: the delete commands cannot remove it, so the text says
+        // where to.
+        assert_eq!(
+            run.leftover_text(),
+            Some(format!(
+                "RUNNER_LEFTOVER: {name}\n\
+                 abapreach delete --simulate CLAS:{name} --plan <FILE> --conn dev\n\
+                 abapreach delete CLAS:{name} --plan <FILE> --conn dev\n\
+                 hint: only the object directory entry (TADIR) is left; remove it in SE03 \
+                 (Change Object Directory Entries) or SE80"
+            )),
+            "{backend:?}"
         );
     }
 }
@@ -827,6 +835,8 @@ fn a_directory_read_that_fails_is_a_leftover() {
             "{:?}",
             run.notes
         );
+        // The row is not known to be there, so the text names no SE03 step.
+        assert!(!run.leftover_text().unwrap().contains("hint:"));
     }
 }
 
@@ -1122,6 +1132,33 @@ fn a_lost_create_that_never_ran_leaves_nothing_and_deletes_nothing() {
     assert!(rejected(&run).starts_with("runner create failed:"));
     assert_eq!(sap.borrow().count(Step::Delete), 0);
     assert_clean(&sap, &run);
+}
+
+#[test]
+fn a_lost_create_whose_class_is_gone_but_whose_directory_row_stays_is_a_leftover() {
+    let sap = new_sap(true);
+
+    sap.borrow_mut().tadir_row = true;
+    // The create reply is lost; the class is not there, but its directory entry is.
+    fault(&sap, Step::Create, 1, Fault::LostBefore);
+
+    let run = http_row(&sap, &CancelFlag::new());
+    let name = run.name.clone().unwrap();
+
+    assert_eq!(run.leftover.as_deref(), Some(name.as_str()));
+    assert!(
+        run.notes
+            .iter()
+            .any(|note| note == "W: runner cleanup proof: TADIR still holds the class"),
+        "{:?}",
+        run.notes
+    );
+    assert_eq!(sap.borrow().count(Step::Delete), 0);
+    assert!(
+        run.leftover_text()
+            .unwrap()
+            .ends_with("remove it in SE03 (Change Object Directory Entries) or SE80")
+    );
 }
 
 #[test]

@@ -341,6 +341,30 @@ impl Config {
             .collect()
     }
 
+    /// Every connection the file names, resolved as it stands now, keyed `<SID>_<client>`. The
+    /// MCP server keeps this snapshot of its start: a connection that is in it keeps its target
+    /// and credentials for the whole session. A connection whose resolution fails is kept with
+    /// its error.
+    pub fn start_connections(
+        &self,
+        env: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, Result<Connection, String>> {
+        self.servers
+            .iter()
+            .flat_map(|server| {
+                server
+                    .clients
+                    .iter()
+                    .map(|client| format!("{}_{client}", server.system_id))
+            })
+            .map(|id| {
+                let connection = self.resolve(&id, env);
+
+                (id, connection)
+            })
+            .collect()
+    }
+
     fn effective_policies(&self, server: &Server) -> Policies {
         server.policies.as_ref().map_or_else(
             || self.policies.clone(),
