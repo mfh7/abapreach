@@ -67,6 +67,10 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
   answered `Class does not implement if_oo_adt_classrun~main method!`, while a new connection ran
   the same class. A new session that cannot be opened is `REJECTED: runner POST failed: cannot
   open the POST session` before any `POST`, and the cleanup still runs.
+- RFC backends (rfc-gui, rfc-sdk): a request sent over `SADT_REST_RFC_ENDPOINT` without an `Accept`
+  header now carries `Accept: */*`; a request that names `Accept` is sent unchanged. On SAP_BASIS
+  758 the endpoint answered `HTTP 400` to such requests, so `doctor` printed `RUNNER leftovers:
+  unknown (search failed: HTTP 400)` (issue #12).
 
 ## [0.16.0] - 2026-11-12
 

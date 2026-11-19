@@ -33,6 +33,32 @@ fn reuse() {
 }
 
 #[test]
+fn default_accept() {
+    let mut transport = RfcTransport::new(FakeRfcApi::ok());
+
+    transport
+        .request(Request::get("/sap/bc/adt/discovery"))
+        .unwrap();
+
+    assert_eq!(
+        transport.api().last_request().headers,
+        BTreeMap::from([("Accept".to_owned(), "*/*".to_owned())])
+    );
+
+    let mut named = Request::get("/sap/bc/adt/discovery");
+
+    named
+        .headers
+        .insert("accept".to_owned(), "application/xml".to_owned());
+    transport.request(named).unwrap();
+
+    assert_eq!(
+        transport.api().last_request().headers,
+        BTreeMap::from([("accept".to_owned(), "application/xml".to_owned())])
+    );
+}
+
+#[test]
 fn payload() {
     let mut transport = RfcTransport::new(FakeRfcApi::ok());
 
