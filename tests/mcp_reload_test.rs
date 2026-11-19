@@ -98,7 +98,7 @@ fn rig(servers: &[String], top: &str) -> Rig {
         connections.display().to_string(),
     )]);
 
-    for id in ["DEV_100", "NEW_100"] {
+    for id in ["DEV_100", "DEV_200", "NEW_100"] {
         env.insert(format!("{id}_USER"), "user".to_owned());
         env.insert(format!("{id}_PASS"), "secret-pw".to_owned());
     }
@@ -476,4 +476,101 @@ fn an_unchanged_known_connection_works_while_another_entry_changes() {
 
     assert!(!result.is_error, "{}", result.text);
     assert_eq!(result.structured["source"], PROGRAM);
+}
+
+// ---- an id that the start did not know gets the strictest policies ----------------------------
+
+fn clients(id: &str, host: &str, clients: &str, policies: &str) -> String {
+    format!(
+        r#"{{"systemId":"{id}","host":"{host}","port":443,"clients":[{clients}],"adt":{{"insecure":true}}{policies}}}"#
+    )
+}
+
+#[track_caller]
+fn assert_write_off(tools: &mut McpTools<'_, TokenGate>, session: &mut Logging, conn: &str) {
+    let result = call(
+        tools,
+        session,
+        "abap_simulate",
+        json!({"conn": conn, "type": "PROG", "name": "YTEST", "source": "REPORT ytest."}),
+    );
+
+    assert!(result.is_error);
+    assert!(
+        result
+            .text
+            .contains(&format!("MCP writes are off for {conn} (policy mcp_write)")),
+        "{}",
+        result.text
+    );
+}
+
+#[test]
+fn a_new_client_of_a_write_enabled_server_cannot_write() {
+    let token = r#","policies":{"mcp_write":"token"}"#;
+    let rig = rig(&[clients("DEV", "example.com", r#""100""#, token)], "");
+    let mut fake = Fake::default();
+    let mut tools = rig.tools(&mut fake);
+    let mut session = Logging::default();
+
+    rig.write(
+        &[clients("DEV", "example.com", r#""100","200""#, token)],
+        "",
+    );
+
+    assert_write_off(&mut tools, &mut session, "DEV_200");
+}
+
+#[test]
+fn a_second_entry_with_a_known_system_id_is_not_reachable() {
+    let token = r#","policies":{"mcp_write":"token"}"#;
+    let rig = rig(&[clients("DEV", "example.com", r#""100""#, token)], "");
+    let mut fake = Fake::default();
+    let mut tools = rig.tools(&mut fake);
+    let mut session = Logging::default();
+
+    rig.write(
+        &[
+            clients("DEV", "example.com", r#""100""#, token),
+            clients("DEV", "other.example.com", r#""200""#, token),
+        ],
+        "",
+    );
+
+    // The first entry of a system id wins at resolution, so the second one is not reachable at
+    // all; it can neither write nor connect.
+    let result = call(
+        &mut tools,
+        &mut session,
+        "abap_simulate",
+        json!({"conn": "DEV_200", "type": "PROG", "name": "YTEST", "source": "REPORT ytest."}),
+    );
+
+    assert!(result.is_error);
+    assert_eq!(result.text, "STOP: client 200 not configured for DEV");
+}
+
+#[test]
+fn a_lower_case_start_entry_counts_as_known_and_stays_as_the_start_saw_it() {
+    // A system id in lower case never resolved: the start keeps that answer for the session, so
+    // upper-casing the entry later does not give the id a fresh target.
+    let rig = rig(&[clients("dev", "example.com", r#""100""#, "")], "");
+    let mut fake = Fake::default();
+    let mut tools = rig.tools(&mut fake);
+    let mut session = Logging::default();
+
+    rig.write(
+        &[clients("DEV", "attacker.example.net", r#""100""#, "")],
+        "",
+    );
+
+    let result = call(
+        &mut tools,
+        &mut session,
+        "abap_read_source",
+        json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST"}),
+    );
+
+    assert!(result.is_error);
+    assert_eq!(result.text, "STOP: unknown system DEV");
 }

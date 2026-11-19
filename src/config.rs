@@ -343,7 +343,7 @@ impl Config {
 
     /// Every connection the file names, resolved as it stands now, keyed `<SID>_<client>`. The
     /// MCP server keeps this snapshot of its start: a connection that is in it keeps its target
-    /// and credentials for the whole session. A connection whose resolution fails is kept with
+    /// and credentials for the whole session. Keys are upper case. A connection whose resolution fails is kept with
     /// its error.
     pub fn start_connections(
         &self,
@@ -360,7 +360,8 @@ impl Config {
             .map(|id| {
                 let connection = self.resolve(&id, env);
 
-                (id, connection)
+                // Keyed in upper case, like the id of a call after `parse_id`.
+                (id.to_ascii_uppercase(), connection)
             })
             .collect()
     }

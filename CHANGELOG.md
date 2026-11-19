@@ -46,7 +46,7 @@ internal repository where that implementation was developed. See the
 - MCP server (issue #15): `connections.json` and `connections.local.json` are re-read on every tool
   call, so a connection added while the server runs resolves. Policies stay as the server started
   with them; a call that finds other policies logs `W: policies changed in connections.json;
-  restart the MCP server to apply them` to stderr. A server absent at start gets the start
+  restart the MCP server to apply them` to stderr. A connection absent at start (new server or new client) gets the start
   top-level policies with `mcp_write` off and the built-in tables added to the deny list, until
   restart; a file that no longer parses stops the call with the parse error. A connection that the
   file named at start keeps its start target and credentials: when the file now resolves it

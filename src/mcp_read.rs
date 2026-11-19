@@ -127,28 +127,31 @@ impl<'a> ReadTools<'a> {
         };
         let fresh = Config::load(reload.paths.clone(), &self.env)?;
         let (system_id, client) = Config::parse_id(id)?;
-        let key = format!("{system_id}_{client}");
-        let mut connection = match reload.known.get(&key) {
+        let key = format!("{system_id}_{client}").to_ascii_uppercase();
+        let (mut connection, started) = match reload.known.get(&key) {
             // A connection of the start keeps its start target and credentials: the file may
             // add connections, never redirect one that is in use.
             Some(Ok(start)) => match fresh.resolve(id, &self.env) {
-                Ok(now) if same_target(&now, start) => start.clone(),
+                Ok(now) if same_target(&now, start) => (start.clone(), true),
                 _ => return Err(changed(&key)),
             },
             Some(Err(reason)) => return Err(reason.clone()),
-            None => fresh.resolve(id, &self.env)?,
+            None => (fresh.resolve(id, &self.env)?, false),
         };
-        // The policies of a connection of the start are the frozen ones below.
+        // The policies of a connection of the start are the frozen ones of its server; any other
+        // connection, a new server, a new client of a known server or a second entry with the
+        // same system id, gets the strictest set the start allows: no MCP write, and a deny list
+        // that is the start list plus the built-in tables.
         let fresh_policies = fresh
             .resolve(id, &self.env)
             .map_or_else(|_| connection.policies.clone(), |now| now.policies);
-        // A server absent at start gets the strictest set the start allows: no MCP write, and a
-        // deny list that is the start list plus the built-in tables.
-        let frozen = reload
-            .start
-            .get(&connection.system_id)
-            .unwrap_or_else(|| reload.start.absent())
-            .clone();
+        let frozen = if started {
+            reload.start.get(&connection.system_id)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| reload.start.absent())
+        .clone();
 
         if fresh_policies.for_mcp() != frozen {
             self.warnings.borrow_mut().push(POLICIES_CHANGED.to_owned());

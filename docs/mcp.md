@@ -59,7 +59,7 @@ loaded once, when the server starts. Connections are re-read on every call; poli
 agent that edits `connections.json` during a session therefore cannot loosen them: a call whose
 file holds other policies than the server started with runs with the start values and logs one line
 to stderr, `W: policies changed in connections.json; restart the MCP server to apply them`. A
-server that was absent at start runs with the top-level policies of the start, `mcp_write` off and
+connection that was absent at start (a new server, or a new client of a known server) runs with the top-level policies of the start, `mcp_write` off and
 the built-in tables added to `read_table_denied`, until the next start. An edit made before the next start still takes effect then, so a start loads whatever the
 file holds: an agent that can edit `connections.json` can relax `mcp_write`, for example from
 `confirm` to `token`, which drops the per-write human confirmation (delete keeps its
