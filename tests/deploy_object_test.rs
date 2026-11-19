@@ -753,6 +753,14 @@ fn a_deploy_with_an_interface_change_and_a_failed_where_used_still_activates() {
     // The where-used request neither locks nor writes: lock, PUT and activation stay one each.
     assert_eq!(fake.count("POST", "_action=LOCK"), 1);
     assert_eq!(fake.count("PUT", ""), 1);
+    // The source PUT names the text it accepts: a release refuses it without the header.
+    assert_eq!(
+        fake.calls[fake.position("PUT", "")]
+            .headers
+            .get("Accept")
+            .map(String::as_str),
+        Some("text/plain")
+    );
     assert_eq!(fake.count("POST", "activation?"), 1);
     assert!(
         fake.position("POST", "usageReferences") < fake.position("POST", "_action=LOCK"),

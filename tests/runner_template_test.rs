@@ -43,6 +43,34 @@ const PINNED: [(&str, &str); 6] = [
     ),
 ];
 
+/// Filled from the generated sources of 0.16.0 (commit 539f13a).
+const GENERATED: [(&str, &str); 6] = [
+    (
+        "CORE",
+        "dc63f6f2d12c1e69c4c45a78a351f4e83506435bf727af43d4d668ee7fcd0b08",
+    ),
+    (
+        "TRAN",
+        "5b99718f96dae2dd50931369433d3c67318d2d44df9d921de705ae0f48ada9fa",
+    ),
+    (
+        "DTEL",
+        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+    ),
+    (
+        "DOMA",
+        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+    ),
+    (
+        "TABL",
+        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+    ),
+    (
+        "TTYP",
+        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+    ),
+];
+
 fn payload() -> Vec<String> {
     vec![
         "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=".to_owned(),
@@ -915,6 +943,24 @@ fn the_default_generation_is_the_internal_interface_and_stays_byte_identical() {
             "{}",
             template.name
         );
+    }
+}
+
+/// The SHA-256 of the generated source of every template for `NAME` and `payload()`, as 0.16.0
+/// generated it: a change of the default path, not only of a template line, changes one of them.
+#[test]
+fn the_generated_source_of_the_default_path_is_pinned() {
+    use sha2::{Digest, Sha256};
+
+    for (name, hash) in GENERATED {
+        let template = TEMPLATES
+            .iter()
+            .find(|template| template.name == name)
+            .unwrap();
+        let digest = Sha256::digest(source(template).as_bytes());
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+
+        assert_eq!(hex, hash, "{name}");
     }
 }
 

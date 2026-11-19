@@ -940,6 +940,25 @@ fn an_unrecorded_object_is_deleted_into_the_request_of_the_plan() {
 }
 
 #[test]
+fn a_malformed_request_is_refused_by_the_format_check_before_any_preview() {
+    let main = Fake::default().lock(PROG, false, "").post(
+        &format!("{PROG}?_action=UNLOCK&lockHandle={ENCODED}"),
+        200,
+        "",
+    );
+    let (reply, calls, _) = with_backend(main, vec![], |backend| {
+        backend.delete(DeleteKind::Prog, "ZPROG", Some("DEVK 1"))
+    });
+
+    assert_eq!(
+        reply,
+        DeleteReply::Rejected("invalid --tr: DEVK 1".to_owned())
+    );
+    assert_eq!(count(&calls, "DELETE"), 0);
+    assert!(uris(&calls).iter().all(|uri| !uri.contains("datapreview")));
+}
+
+#[test]
 fn a_request_that_breaks_a_rule_unlocks_and_never_deletes() {
     let main = Fake::default()
         .lock(PROG, false, "")

@@ -45,6 +45,7 @@
     "method": "PUT",
     "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/source/main?lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D&corrNr=DEVK900001",
     "headers": {
+     "Accept": "text/plain",
      "Content-Type": "text/plain; charset=utf-8"
     },
     "body": ""
@@ -58,6 +59,7 @@
     "method": "PUT",
     "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/definitions?lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D&corrNr=DEVK900001",
     "headers": {
+     "Accept": "text/plain",
      "Content-Type": "text/plain; charset=utf-8"
     },
     "body": ""
@@ -84,6 +86,7 @@
     "method": "PUT",
     "uri": "/sap/bc/adt/oo/classes/ytest_abapreach_cl6/includes/testclasses?lockHandle=qdbcyR6xoaD%2BxAqwYue9KQ4XHbM%3D&corrNr=DEVK900001",
     "headers": {
+     "Accept": "text/plain",
      "Content-Type": "text/plain; charset=utf-8"
     },
     "body": ""

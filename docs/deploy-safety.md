@@ -231,7 +231,7 @@ For a transportable object, ABAPReach relies on the `CORRNR` returned by the
 SAP lock. If the lock returns no request, it stops before syntax check or PUT
 unless `--tr` names a modifiable workbench request of yours, which it checks
 first (0.16.1) and then adds the object to. It also refuses a mismatched `--tr`. See
-[Behavior differences](behavior-differences.md#a-transportable-object-whose-lock-reports-no-transport-request-is-refused)
+[Behavior differences](behavior-differences.md#a-transportable-object-whose-lock-reports-no-transport-request-needs---tr)
 for the difference from the earlier internal tool.
 
 If activation fails after a PUT, the failed source may remain as the

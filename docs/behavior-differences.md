@@ -403,7 +403,8 @@ rules the classrun runner applies to its `--tr`. The write then carries
 `corrNr=<request>` and SAP records the object in that request; `deploy` prints
 `transport request <request> (object added)`, and `deploy --simulate` prints
 `WILL ADD <TYPE> <NAME> to <request>`. `delete` over ADT follows the same rule at
-execute time. A `CORRNR` that the lock does name must still equal `--tr`.
+execute time and prints no `object added` line. A `CORRNR` that the lock does name must
+still equal `--tr`.
 
 The reference tooling would still write there. For a transportable object it
 requires `--tr`, checks that the request is a modifiable workbench request

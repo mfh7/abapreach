@@ -106,12 +106,13 @@ impl<'a> ReadTools<'a> {
         };
         let mut connection =
             Config::load(reload.paths.clone(), &self.env)?.resolve(id, &self.env)?;
-        // `Policies::default()` is the strictest set: no MCP write, the default deny list.
+        // A server absent at start gets the strictest set the start allows: no MCP write, and a
+        // deny list that is the start list plus the built-in tables.
         let frozen = reload
             .start
             .get(&connection.system_id)
-            .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| reload.start.absent())
+            .clone();
 
         if connection.policies.for_mcp() != frozen {
             self.warnings.borrow_mut().push(POLICIES_CHANGED.to_owned());

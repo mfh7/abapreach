@@ -692,6 +692,10 @@ impl DeleteBackend for AdtDelete<'_> {
         if let (false, true, Some(wanted)) = (lock.is_local, lock.corrnr.is_empty(), tr) {
             let user = self.user.clone();
 
+            if let Err(reason) = check_request(wanted) {
+                return self.refuse(&uri, &lock, reason);
+            }
+
             if let Err(reason) = check_open_request(self.active(), wanted, &user) {
                 return self.refuse(&uri, &lock, reason);
             }

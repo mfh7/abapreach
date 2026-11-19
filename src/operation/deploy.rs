@@ -1610,6 +1610,10 @@ impl Run<'_> {
             "Content-Type".to_owned(),
             "text/plain; charset=utf-8".to_owned(),
         );
+        // Some releases refuse a source PUT without an `Accept` header (HTTP 400).
+        request
+            .headers
+            .insert("Accept".to_owned(), "text/plain".to_owned());
 
         match self.call(request) {
             Ok(response) if (200..300).contains(&response.status) => {

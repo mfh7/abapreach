@@ -79,10 +79,13 @@ fn payload() {
     assert_eq!(fixture_request.uri, V1_PUT_URI);
     assert_eq!(
         fixture_request.headers,
-        BTreeMap::from([(
-            "Content-Type".to_owned(),
-            "text/plain; charset=utf-8".to_owned(),
-        )])
+        BTreeMap::from([
+            ("Accept".to_owned(), "text/plain".to_owned()),
+            (
+                "Content-Type".to_owned(),
+                "text/plain; charset=utf-8".to_owned(),
+            ),
+        ])
     );
     assert_eq!(
         fixture_request.body.as_slice(),

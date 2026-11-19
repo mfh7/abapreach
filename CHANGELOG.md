@@ -32,16 +32,18 @@ internal repository where that implementation was developed. See the
   `IF_OO_ADT_CLASSRUN_OUT` (newer releases) are known; any other type stops the run (exit 2) and
   names the type found. The new `SEOSUBCODF` read uses `IN` with one value per column, because a
   single-value `=` in a data preview `WHERE` is reported unreliable on some releases (issue #13).
-- Runner source `PUT` sends `Accept: text/plain`; a release that refuses a source `PUT` without it
-  answered `HTTP 400: Accept header missing` (issue #12).
+- The source `PUT` of the runner class and of `deploy` (PROG, FUNC, CLAS, INTF and class includes)
+  sends `Accept: text/plain`; a release that refuses a source `PUT` without it answered
+  `HTTP 400: Accept header missing` (issue #12).
 - Runner cleanup proof: after the class `GET` answers 404, a new session reads `TADIR` for the
   runner name. A row left there is a leftover (`RUNNER_LEFTOVER`); a failed read is
   `W: runner cleanup proof failed: TADIR <reason>` and also counts as a leftover (issue #12).
 - MCP server (issue #15): `connections.json` and `connections.local.json` are re-read on every tool
   call, so a connection added while the server runs resolves. Policies stay as the server started
   with them; a call that finds other policies logs `W: policies changed in connections.json;
-  restart the MCP server to apply them` to stderr. A server absent at start gets the strictest
-  policy (`mcp_write` off) until restart; a file that no longer parses stops the call with the
+  restart the MCP server to apply them` to stderr. A server absent at start gets the start
+  top-level policies with `mcp_write` off and the built-in tables added to the deny list, until
+  restart; a file that no longer parses stops the call with the
   parse error. See [MCP configuration](docs/mcp.md#configuration).
 
 ### Fixed

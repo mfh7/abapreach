@@ -291,3 +291,48 @@ fn a_file_that_no_longer_parses_stops_the_call_and_the_server_stays_up() {
 
     assert!(!fixed.is_error, "{}", fixed.text);
 }
+
+#[test]
+fn a_server_absent_at_start_keeps_the_start_deny_list_and_the_defaults() {
+    // The start list holds a table that is no default; a list replaces the defaults in the file.
+    let rig = rig(
+        &[entry("DEV", "")],
+        r#""policies":{"read_table_denied":["PA0008"],"mcp_write":"token"},"#,
+    );
+    let mut fake = Fake::default();
+    let mut tools = rig.tools(&mut fake);
+    let mut session = Logging::default();
+
+    // An alias server appears: no deny list of its own, and a looser top-level file.
+    rig.write(
+        &[entry("DEV", ""), entry("NEW", "")],
+        r#""policies":{"read_table_denied":[],"mcp_write":"token"},"#,
+    );
+
+    for table in ["PA0008", "USR02"] {
+        let result = call(
+            &mut tools,
+            &mut session,
+            "abap_read_table",
+            json!({"conn": "NEW_100", "table": table}),
+        );
+
+        assert!(result.is_error, "{table}");
+        assert!(result.text.contains("read_table_denied"), "{}", result.text);
+    }
+
+    let write = call(
+        &mut tools,
+        &mut session,
+        "abap_simulate",
+        json!({"conn": "NEW_100", "type": "PROG", "name": "YTEST", "source": "REPORT ytest."}),
+    );
+
+    assert!(
+        write
+            .text
+            .contains("MCP writes are off for NEW_100 (policy mcp_write)"),
+        "{}",
+        write.text
+    );
+}
