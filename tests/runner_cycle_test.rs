@@ -1954,6 +1954,40 @@ fn a_session_that_dies_in_the_post_leaves_the_cycle_session_and_its_cleanup_alon
 }
 
 #[test]
+fn a_cleanup_that_fails_once_is_retried_on_a_fresh_session_and_ends_clean() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(backend == BackendKind::AdtHttp);
+
+        // The write lock is the first LOCK, the cleanup lock the second; the retry takes the
+        // third and works.
+        fault(&sap, Step::Lock, 2, Fault::Status(500, "x"));
+
+        let cancel = CancelFlag::new();
+        let run = match backend {
+            BackendKind::AdtHttp => http_row(&sap, &cancel),
+            BackendKind::RfcSadt => rfc_row(&sap, &cancel),
+        };
+
+        assert!(
+            matches!(&run.end, RunnerEnd::Posted(_)),
+            "{backend:?}: {:?}",
+            run.end
+        );
+        assert_clean(&sap, &run);
+        assert_eq!(run.exit_code(0), 0, "{backend:?}");
+        assert!(
+            run.notes
+                .iter()
+                .any(|note| note.starts_with("W: runner cleanup lock failed: HTTP 500")),
+            "{backend:?}: {:?}",
+            run.notes
+        );
+        assert_eq!(sap.borrow().count(Step::Lock), 3, "{backend:?}");
+        assert_eq!(sap.borrow().count(Step::Delete), 1, "{backend:?}");
+    }
+}
+
+#[test]
 fn a_leftover_always_carries_its_reason_in_the_notes() {
     let sap = new_sap(true);
 
