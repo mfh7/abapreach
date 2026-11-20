@@ -985,6 +985,56 @@ fn an_mcp_run_allow_entry_without_a_type_stops_the_load_with_the_form_to_write()
 }
 
 #[test]
+fn an_mcp_run_allow_name_that_is_a_pattern_or_malformed_stops_the_load() {
+    let long_class = format!("CLAS:Z{}", "A".repeat(30));
+    let long_report = format!("PROG:Z{}", "A".repeat(40));
+    let long_group = format!("FUGR:Z{}", "A".repeat(26));
+
+    for (entry, needle) in [
+        ("CLAS:ZCL_*", "pattern character"),
+        ("PROG:Z%", "pattern character"),
+        ("FUGR:ZG?", "pattern character"),
+        ("CLAS:Z*", "pattern character"),
+        ("CLAS:ZCL A", "blank"),
+        ("PROG:ZREP X", "blank"),
+        (long_class.as_str(), "at most 30"),
+        (long_report.as_str(), "at most 40"),
+        (long_group.as_str(), "at most 26"),
+        ("CLAS:1ZCL", "invalid name"),
+        ("CLAS:ZCL-A", "invalid name"),
+        ("PROG:ZREP.", "invalid name"),
+        ("CLAS:ZCL\u{c4}", "invalid name"),
+    ] {
+        let bad = format!(r#","policies":{{"mcp_run_allow":["{entry}"]}}"#);
+        let top = effective(&bad, "").unwrap_err();
+        let server = effective("", &bad).unwrap_err();
+
+        assert!(
+            top.contains("mcp_run_allow") && top.contains(needle),
+            "{entry}: {top}"
+        );
+        assert!(
+            server.contains("servers[0].policies") && server.contains(needle),
+            "{entry}: {server}"
+        );
+    }
+
+    // Exact names of the longest allowed length and a namespaced name load.
+    let good = effective(
+        &format!(
+            r#","policies":{{"mcp_run_allow":["clas:{}","PROG:/ns/zrep","FUGR:{}"]}}"#,
+            "A".repeat(30),
+            "G".repeat(26)
+        ),
+        "",
+    )
+    .unwrap();
+
+    assert_eq!(good.mcp_run_allow.len(), 3);
+    assert_eq!(good.mcp_run_allow[1], "PROG:/NS/ZREP");
+}
+
+#[test]
 fn an_unknown_run_value_stops_the_load_and_mcp_counts_direct_as_plan() {
     for bad in [
         r#","policies":{"run":"always"}"#,

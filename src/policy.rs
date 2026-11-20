@@ -281,7 +281,55 @@ pub fn parse_run_allow_entry(entry: &str) -> Result<String, String> {
         return Err(format!("mcp_run_allow entry {entry:?} has no name; {form}"));
     }
 
+    check_run_allow_name(entry, &object_type, &name)?;
+
     Ok(format!("{object_type}:{name}"))
+}
+
+/// The name rule of an `mcp_run_allow` entry: one exact object name, never a pattern. The length
+/// is the one of the type (class 30, report 40, function group 26); the characters are `A-Z`,
+/// `0-9`, `_` and `/` (a namespace), starting with a letter or `/`.
+fn check_run_allow_name(entry: &str, object_type: &str, name: &str) -> Result<(), String> {
+    let longest = match object_type {
+        "CLAS" => 30,
+        "PROG" => 40,
+        _ => 26,
+    };
+
+    if name.chars().any(|character| "*%?+".contains(character)) {
+        return Err(format!(
+            "mcp_run_allow entry {entry:?} holds a pattern character; write one exact object name, \
+             patterns are not supported"
+        ));
+    }
+
+    if name.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "mcp_run_allow entry {entry:?} holds a blank in the name; write one exact object name"
+        ));
+    }
+
+    if name.len() > longest {
+        return Err(format!(
+            "mcp_run_allow entry {entry:?} has a name of {} characters; a {object_type} name has at \
+             most {longest}",
+            name.len()
+        ));
+    }
+
+    let allowed = name.starts_with(|first: char| first.is_ascii_alphabetic() || first == '/')
+        && name.bytes().all(|byte| {
+            byte.is_ascii_uppercase() || byte.is_ascii_digit() || b"_/".contains(&byte)
+        });
+
+    if !allowed {
+        return Err(format!(
+            "mcp_run_allow entry {entry:?} has an invalid name; use A-Z, 0-9, _ and / (a \
+             namespace), starting with a letter or /"
+        ));
+    }
+
+    Ok(())
 }
 
 impl PolicyDocument {

@@ -736,6 +736,17 @@ mod tests {
 
         assert!(class("zcl_a").check_not_runner("ZCL_RUNX_").is_ok());
         assert!(class("zcl_run_a").check_not_runner("ZCL_RUNX_").is_ok());
+        // Only the generated shape (prefix plus eight characters) is a runner class.
+        assert!(
+            class("zcl_runx_helper")
+                .check_not_runner("ZCL_RUNX_")
+                .is_ok()
+        );
+        assert!(
+            class("ycl_abapreach_run_x")
+                .check_not_runner("ZCL_RUNX_")
+                .is_ok()
+        );
 
         for name in ["zcl_runx_ab12cd34", "ycl_abapreach_run_ab12cd34"] {
             let refused = class(name).check_not_runner("ZCL_RUNX_").unwrap_err();

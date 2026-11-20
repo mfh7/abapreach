@@ -49,7 +49,8 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
   (dumps)`, `RUN_UNKNOWN: the reply was lost; the code may have run`, `REJECTED`, `STOP`. The
   first Ctrl-C prints `I: run in progress on the server; waiting for the reply (Ctrl-C again to
   leave)` on stderr and waits for the reply, the second leaves with exit 130. A temporary runner
-  class (the `runner_prefix` of the connection or `YCL_ABAPREACH_RUN_`) is never run. The plan binds the main source of a class or report, not the
+  class (the `runner_prefix` of the connection or `YCL_ABAPREACH_RUN_`, plus exactly eight characters
+  of `0-9A-Z`) is never run. The plan binds the main source of a class or report, not the
   includes it calls.
 - `run PROG <report>` (0.17.0): submits an active executable report inside the temporary runner
   class (`SUBMIT ... EXPORTING LIST TO MEMORY AND RETURN`, new runner mode `RUN_PROG`) and prints
@@ -84,7 +85,8 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
   waiting text (it was not printed before).
 - Policy keys `run` (`off`, `plan`, `direct`; default `plan`), `mcp_run` (`off`, `confirm`; default
   `off`), `mcp_run_allow` (exact `TYPE:NAME` entries: `CLAS:`, `PROG:` or `FUGR:`; a plain name stops
-  the configuration load) and `mcp_run_snippet` (`off`, `on`; default `off`). `run:
+  the configuration load; so does a name with a blank, a pattern character, an invalid character or
+  a length over the limit of its type) and `mcp_run_snippet` (`off`, `on`; default `off`). `run:
   off` also refuses `run` and `aunit` on the CLI and in MCP. A 0.16 binary stops on a configuration that holds them.
 - MCP tool `abap_run` (class, report and snippet), behind `mcp_run` and `mcp_run_allow` (a snippet also
   behind `mcp_run_snippet: on`); it and `abap_aunit` are

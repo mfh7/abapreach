@@ -151,12 +151,7 @@ fn a_standard_class_cannot_arm_as_a_runner() {
 fn a_runner_class_cannot_be_armed_as_a_class_to_run() {
     // The connection's own prefix and the product default are both refused, whatever the
     // case, and nothing stays armed after the refusal.
-    for name in [
-        "ZCL_RUNX_AB12CD34",
-        "YCL_ABAPREACH_RUN_AB12CD34",
-        "ZCL_RUNX_",
-        "YCL_ABAPREACH_RUN_",
-    ] {
+    for name in ["ZCL_RUNX_AB12CD34", "YCL_ABAPREACH_RUN_AB12CD34"] {
         let error = RunnerArm::arm_class(name, PREFIX).unwrap_err();
 
         assert!(error.contains("temporary runner class"), "{name}: {error}");
@@ -166,5 +161,8 @@ fn a_runner_class_cannot_be_armed_as_a_class_to_run() {
     // A prefix that is another connection's does not make a plain class a runner.
     assert!(RunnerArm::arm_class("ZCL_RUN_OTHER", PREFIX).is_ok());
     // The default prefix is refused even when the connection has its own.
-    assert!(RunnerArm::arm_class("YCL_ABAPREACH_RUN_X", "ZCL_RUNX_").is_err());
+    assert!(RunnerArm::arm_class("YCL_ABAPREACH_RUN_AB12CD34", "ZCL_RUNX_").is_err());
+    // Only the generated shape counts: a hand-written class under the prefix is an ordinary class.
+    assert!(RunnerArm::arm_class("YCL_ABAPREACH_RUN_X", "ZCL_RUNX_").is_ok());
+    assert!(RunnerArm::arm_class("ZCL_RUNX_HELPER", "ZCL_RUNX_").is_ok());
 }

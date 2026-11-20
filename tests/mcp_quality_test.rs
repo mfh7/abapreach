@@ -730,9 +730,9 @@ fn the_allow_list_matches_exact_names_without_regard_to_case() {
 
     assert!(!result.is_error, "{}", result.text);
 
-    // A prefix of the name is not a match: there are no patterns.
+    // A prefix of the name is not a match: a pattern entry never loads (see the config tests).
     let mut prefix =
-        rig(r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_TES","CLAS:ZCL_TEST*"]}"#);
+        rig(r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_TES","CLAS:ZCL_TEST2"]}"#);
     let result = prefix.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
 
     assert!(result.is_error);

@@ -32,13 +32,23 @@ const BIAS_LIMIT: u8 = 252;
 /// The reason `run CLAS` gives for a temporary runner class.
 pub const RUNNER_CLASS_REFUSED: &str = "a temporary runner class is not run; delete it (doctor)";
 
-/// Whether `name` is a temporary runner class of a connection with `runner_prefix`: it starts
-/// with that prefix or with the product default. Such a class carries a payload of its own (a
-/// leftover of a crash), so `run CLAS` never runs one.
+/// Whether `name` is a temporary runner class of a connection with `runner_prefix`: the prefix
+/// (or the product default) followed by exactly the generated suffix, eight characters of
+/// `[0-9A-Z]` (see [`runner_name`]). Such a class carries a payload of its own (a leftover of a
+/// crash), so `run CLAS` never runs one. A class that only starts with the prefix, such as a
+/// hand-written `YCL_ABAPREACH_RUN_HELPER`, is an ordinary class.
 pub fn is_runner_class(name: &str, runner_prefix: &str) -> bool {
     let name = name.trim().to_ascii_uppercase();
+    let shaped = |prefix: &str| {
+        name.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.len() == SUFFIX_LENGTH
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        })
+    };
 
-    name.starts_with(&runner_prefix.to_ascii_uppercase()) || name.starts_with(DEFAULT_RUNNER_PREFIX)
+    shaped(&runner_prefix.to_ascii_uppercase()) || shaped(DEFAULT_RUNNER_PREFIX)
 }
 
 /// The `runner_prefix` rule: upper-case letters, digits, and underscore, starting with `Y` or

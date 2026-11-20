@@ -743,10 +743,14 @@ print( |count: { lv_count }| ).
 
 - The name rule: only `Z` and `Y` names run; `--allow-standard` allows a standard class or report.
   A namespaced class name is refused: its classrun path is not verified. A snippet has no name.
-- A temporary runner class is never run: a name that starts with the connection's `runner_prefix`
-  or with the default `YCL_ABAPREACH_RUN_` is a `STOP` (`a temporary runner class is not run; delete
-  it (doctor)`). A leftover of a crashed operation carries its own payload; remove it with the
-  commands `doctor` prints.
+- A temporary runner class is never run: a name that is the connection's `runner_prefix` or the
+  default `YCL_ABAPREACH_RUN_` followed by exactly eight characters of `0-9` and `A-Z` (the shape
+  ABAPReach generates) is a `STOP` (`a temporary runner class is not run; delete it (doctor)`). A
+  class that only starts with the prefix, such as `YCL_ABAPREACH_RUN_HELPER`, is an ordinary class.
+  A leftover of a crashed operation carries its own payload; remove it with the commands `doctor`
+  prints. The `runner_prefix` of a server entry starts with `Y` or `Z`, has at most 22 characters
+  of `A-Z`, `0-9` and `_`, and defaults to `YCL_ABAPREACH_RUN_`; a runner class is that prefix plus
+  the eight generated characters (at most 30 characters).
 - The connection policy `run` decides how: `plan` (the default) needs the two steps above;
   `direct` lets the CLI run without `--plan`; `off` refuses `run` (and `aunit`) on the CLI and in
   MCP. See [MCP server: `mcp_run`](mcp.md#mcp_run) for the MCP opt-in.
