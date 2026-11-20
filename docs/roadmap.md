@@ -105,6 +105,12 @@ Deploy of `TRAN` does not exist: a transaction code is created and deleted, not 
 | Inactive objects, activation | `inactive`, `activate` | ADT |
 | ATC, ABAP Unit | `atc`, `aunit` | ADT |
 
+### SAP_BASIS 758 follow-ups
+
+| Feature | Note |
+| :--- | :--- |
+| TABL conversion check on 758 | 758 has no `DD_DECIDE`, so a TABL change that needs the conversion verdict is rejected. The class `CL_DD_DECIDE` exists on 758 and may replace it; its API is unverified and needs a design note. |
+
 ### System information
 
 | Feature | Reference command | Path |

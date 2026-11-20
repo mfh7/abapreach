@@ -147,6 +147,16 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
   header now carries `Accept: */*`; a request that names `Accept` is sent unchanged. On SAP_BASIS
   758 the endpoint answered `HTTP 400` to such requests, so `doctor` printed `RUNNER leftovers:
   unknown (search failed: HTTP 400)` (issue #12).
+- `delete FUGR` on SAP_BASIS 758: the member listing has an expandable `FUGR/FF` category node
+  without a name, which stopped the delete with `member listing: invalid function module name ""`.
+  The category node is skipped; an unnamed module node is still an error.
+- `aunit` on SAP_BASIS 758: the existence read of the object sent `Accept: application/xml`,
+  which the release answers with `HTTP 406`; it now accepts any representation.
+- TABL conversion check on SAP_BASIS 758: the release has no function module `DD_DECIDE`, so the
+  runner aborted and `deploy TABL` printed `ERROR` (`the simulate status is uncertain`). A change
+  that needs the conversion verdict is now `REJECTED: The conversion check of <table> is not
+  available on this release (no function module DD_DECIDE)`. Changes decided before that step
+  (new tables, no change, table class) are unaffected.
 
 ## [0.16.0] - 2026-11-12
 
