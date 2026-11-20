@@ -25,6 +25,7 @@ use crate::hash::{local_source_lines, source_hash};
 use crate::operation::delete_adt::Opener;
 use crate::operation::deploy::{CancelFlag, INTERRUPT_EXIT_CODE};
 use crate::operation::payload::{RunProg, RunRequest, encode_run};
+use crate::operation::quality::STATELESS_HTTP;
 use crate::operation::run::{
     ClassFacts, ClassRun, NOT_A_DRY_RUN, RUN_FAILED, RUN_UNKNOWN, RunResult, Stop, Verdict,
     check_client, column, cut, get, is_runtime_error_body, join_lines, object_version, preview,
@@ -274,6 +275,20 @@ impl RunnerRunOp<'_> {
     fn inspect(&self, transport: &mut dyn SadtTransport) -> Result<ClassFacts, Stop> {
         check_client(transport, &self.connection.client)?;
 
+        // The first reply of the session shows whether it keeps state. The temporary class of a
+        // report or snippet needs that, and the reads of a stateless session cannot be trusted
+        // (an existing report may answer 404), so the command leaves before it reads anything
+        // else and before anything is written. Without an RFC route the cycle reports it.
+        if self.backend == BackendKind::AdtHttp
+            && self.connection.rfc.is_some()
+            && transport.stateful_supported() == Some(false)
+        {
+            return Err(Stop::Failed {
+                failure: Failure::CapabilityUnavailable,
+                message: STATELESS_HTTP.to_owned(),
+            });
+        }
+
         match &self.args.snippet {
             Some(snippet) => {
                 // The rules of the snippet run before any connection; the check here only keeps
@@ -300,6 +315,12 @@ impl RunnerRunOp<'_> {
 
         match response.status {
             200 => {}
+            404 if transport.stateful_supported() == Some(false) => {
+                return Err(Stop::Rejected(format!(
+                    "report {name} was not found, but this ADT HTTP session is stateless and \
+                     cannot show that it does not exist; use --backend rfc"
+                )));
+            }
             404 => return Err(Stop::Rejected(format!("report {name} does not exist"))),
             status => {
                 return Err(Stop::Rejected(format!(

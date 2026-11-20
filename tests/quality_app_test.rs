@@ -35,6 +35,26 @@ impl SadtTransport for Shared {
     }
 }
 
+/// A session whose first reply sets no context cookie: the stateless ADT HTTP of a 7.40 system.
+struct Stateless(Rc<RefCell<ScriptedTransport>>);
+
+impl SadtTransport for Stateless {
+    fn request(
+        &mut self,
+        request: abapreach::transport::Request,
+    ) -> Result<Response, TransportError> {
+        self.0.borrow_mut().request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.0.borrow_mut().close()
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        Some(false)
+    }
+}
+
 #[derive(Default)]
 struct Fake {
     adt: VecDeque<Opened>,
@@ -92,6 +112,12 @@ fn adt(replies: Vec<Reply>) -> (Rc<RefCell<ScriptedTransport>>, Opened) {
     let cell = Rc::new(RefCell::new(ScriptedTransport::replies(replies)));
 
     (cell.clone(), Ok(Box::new(Shared(cell))))
+}
+
+fn stateless(replies: Vec<Reply>) -> (Rc<RefCell<ScriptedTransport>>, Opened) {
+    let cell = Rc::new(RefCell::new(ScriptedTransport::replies(replies)));
+
+    (cell.clone(), Ok(Box::new(Stateless(cell))))
 }
 
 fn client(category: &str) -> Reply {
@@ -387,4 +413,158 @@ fn the_policy_keys_are_known_and_a_bad_value_stops_the_load() {
     );
 
     assert_eq!(exit.code, 2);
+}
+
+// ---- a stateless ADT HTTP session ------------------------------------------------------------------
+
+#[track_caller]
+fn assert_left_for_rfc(exit: &Exit, fake: &Fake, adt: &Rc<RefCell<ScriptedTransport>>) {
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        exit.stdout.starts_with("backend: rfc\nreason: "),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stderr
+            .contains("NOTE: ADT HTTP session is stateless on this release"),
+        "{}",
+        exit.stderr
+    );
+    assert!(
+        exit.stderr.contains(
+            "NOTE: ADT HTTP failed before anything was written; falling back to RFC SADT"
+        ),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    // Only the first read reached the stateless session; nothing was written there.
+    assert_eq!(adt.borrow().calls.len(), 1);
+    assert!(
+        adt.borrow()
+            .calls
+            .iter()
+            .all(|call| call.method == "POST" || call.method == "GET")
+    );
+}
+
+#[test]
+fn aunit_leaves_a_stateless_http_session_for_rfc_before_reading_the_object() {
+    // The stateless session would answer 404 for an object that exists.
+    let (adt, opened) = stateless(vec![client("T"), Ok(Response::text(404, ""))]);
+    let (_, rfc) = self::adt(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(opened);
+    fake.rfc.push_back(rfc);
+
+    let exit = go(
+        &["aunit", "CLAS", "ZCL_TEST", "--conn", "dev_100"],
+        "{}",
+        &mut fake,
+    );
+
+    assert_left_for_rfc(&exit, &fake, &adt);
+    assert!(exit.stdout.ends_with("AUNIT: ACTIVE"), "{}", exit.stdout);
+    assert!(!exit.stdout.contains("does not exist"));
+}
+
+#[test]
+fn activate_and_inactive_leave_a_stateless_http_session_for_rfc() {
+    let (adt, opened) = stateless(vec![client("T")]);
+    let (_, rfc) = self::adt(vec![client("T"), ok(INACTIVE)]);
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(opened);
+    fake.rfc.push_back(rfc);
+
+    let exit = go(
+        &[
+            "activate",
+            "PROG/P:ztest_main",
+            "--simulate",
+            "--conn",
+            "dev_100",
+        ],
+        "{}",
+        &mut fake,
+    );
+
+    assert_left_for_rfc(&exit, &fake, &adt);
+    assert!(
+        exit.stdout
+            .contains("SIMULATED_OK PROG/P:ZTEST_MAIN user DEVUSER")
+    );
+
+    let (adt, opened) = stateless(vec![ok("<empty/>")]);
+    let (_, rfc) = self::adt(vec![ok(INACTIVE)]);
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(opened);
+    fake.rfc.push_back(rfc);
+
+    let exit = go(&["inactive", "--conn", "dev_100"], "{}", &mut fake);
+
+    assert_left_for_rfc(&exit, &fake, &adt);
+    assert!(
+        exit.stdout.contains("PROG/P ZTEST_MAIN DEVUSER"),
+        "{}",
+        exit.stdout
+    );
+}
+
+#[test]
+fn backend_pins_aunit_activate_and_inactive() {
+    for args in [
+        vec!["inactive", "--backend", "rfc", "--conn", "dev_100"],
+        vec![
+            "aunit",
+            "CLAS",
+            "ZCL_TEST",
+            "--backend",
+            "rfc",
+            "--conn",
+            "dev_100",
+        ],
+    ] {
+        let (_, rfc) = adt(vec![client("T"), ok(INACTIVE), ok("<class/>"), ok(CLEAN)]);
+        let mut fake = Fake::default();
+
+        fake.rfc.push_back(rfc);
+
+        let exit = go(&args, "{}", &mut fake);
+
+        assert_eq!(exit.code, 0, "{args:?}: {}", exit.stderr);
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1), "{args:?}");
+        assert!(
+            exit.stdout
+                .starts_with("backend: rfc\nreason: explicit --backend")
+        );
+    }
+
+    // A pinned ADT session is never left, and its 404 is not taken for a missing object.
+    let (_, opened) = stateless(vec![client("T"), Ok(Response::text(404, ""))]);
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(opened);
+
+    let exit = go(
+        &[
+            "aunit",
+            "CLAS",
+            "ZCL_TEST",
+            "--backend",
+            "adt",
+            "--conn",
+            "dev_100",
+        ],
+        "{}",
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 1, "{}", exit.stdout);
+    assert!(exit.stderr.contains("stateless"), "{}", exit.stderr);
+    assert!(!exit.stdout.contains("does not exist"), "{}", exit.stdout);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
 }

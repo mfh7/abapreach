@@ -410,6 +410,14 @@ fn run_object(
         return Err(QualityError::from_transport(&error));
     }
 
+    // A stateless session may answer 404 for an object that exists: the read proves nothing.
+    if response.status == 404 && transport.stateful_supported() == Some(false) {
+        return Err(QualityError::rejected(format!(
+            "{target} was not found, but this ADT HTTP session is stateless and cannot show \
+             that it does not exist; use --backend rfc"
+        )));
+    }
+
     if response.status == 404 {
         let reason = format!("{target} does not exist");
 

@@ -54,6 +54,8 @@ struct Front {
     told: Vec<InterruptAction>,
     leftover: Option<String>,
     cancel: CancelFlag,
+    /// The ADT HTTP session keeps no state: the first reply sets no context cookie.
+    stateless: bool,
 }
 
 type Shell = Rc<RefCell<Front>>;
@@ -61,6 +63,7 @@ type Shell = Rc<RefCell<Front>>;
 struct FrontSession {
     inner: Box<dyn SadtTransport>,
     front: Shell,
+    http: bool,
 }
 
 impl FrontSession {
@@ -155,6 +158,10 @@ impl SadtTransport for FrontSession {
     }
 
     fn stateful_supported(&self) -> Option<bool> {
+        if self.http && self.front.borrow().stateless {
+            return Some(false);
+        }
+
         self.inner.stateful_supported()
     }
 }
@@ -174,6 +181,7 @@ impl Factories for Factory {
         Ok(Box::new(FrontSession {
             inner: http_session(&self.sap)?,
             front: self.front.clone(),
+            http: true,
         }))
     }
 
@@ -183,6 +191,7 @@ impl Factories for Factory {
         Ok(Box::new(FrontSession {
             inner: rfc_session(&self.sap)?,
             front: self.front.clone(),
+            http: false,
         }))
     }
 
@@ -1559,4 +1568,133 @@ fn mcp_refuses_a_report_that_is_not_on_the_list_and_a_declined_form_runs_nothing
     );
     assert_eq!(rig.posts(), 0);
     assert_eq!(rig.classes(), 0);
+}
+
+// ---- a stateless ADT HTTP session ------------------------------------------------------------------
+
+#[test]
+fn a_stateless_http_session_sends_a_report_or_snippet_simulate_to_rfc() {
+    let mut rig = rig();
+    let plan = rig.plan();
+    let file = rig.snippet_file(SNIPPET);
+
+    rig.front().stateless = true;
+
+    for args in [
+        vec!["PROG", "zreport", "--simulate", "--plan", plan.as_str()],
+        vec![
+            "SNIPPET",
+            file.as_str(),
+            "--simulate",
+            "--plan",
+            plan.as_str(),
+        ],
+    ] {
+        let before = (rig.factory.adt_opened, rig.factory.rfc_opened);
+        let simulated = rig.run("", true, &args);
+
+        assert_eq!(simulated.code, 0, "{args:?}: {}", simulated.stderr);
+        assert!(
+            simulated.stdout.contains("\nBACKEND rfc\n"),
+            "{}",
+            simulated.stdout
+        );
+        assert!(
+            simulated
+                .stderr
+                .contains("NOTE: ADT HTTP session is stateless on this release"),
+            "{}",
+            simulated.stderr
+        );
+        assert!(
+            simulated.stderr.contains(
+                "NOTE: ADT HTTP failed before anything was written; falling back to RFC SADT"
+            ),
+            "{}",
+            simulated.stderr
+        );
+        assert_eq!(
+            (
+                rig.factory.adt_opened - before.0,
+                rig.factory.rfc_opened - before.1
+            ),
+            (1, 1)
+        );
+        assert!(!simulated.stderr.contains("STOP"), "{}", simulated.stderr);
+
+        // The plan pins the backend the simulate used.
+        let saved = fs::read_to_string(&plan).unwrap();
+
+        assert!(saved.contains("\"backend\": \"rfc\""), "{saved}");
+    }
+
+    assert_eq!(rig.classes(), 0);
+    assert_eq!(rig.posts(), 0);
+}
+
+#[test]
+fn a_stateless_http_session_never_turns_a_report_read_into_does_not_exist() {
+    let mut rig = rig();
+    let plan = rig.plan();
+
+    rig.front().stateless = true;
+    rig.front().source = None;
+
+    // RFC is configured: the read happens there, where a 404 is the truth.
+    let routed = rig.run(
+        "",
+        true,
+        &["PROG", "zreport", "--simulate", "--plan", &plan],
+    );
+
+    assert_eq!(routed.code, 1);
+    assert!(
+        routed
+            .stderr
+            .contains("REJECTED: report ZREPORT does not exist")
+    );
+    assert_eq!(rig.factory.rfc_opened, 1);
+
+    // The ADT pin refuses the fallback and says why; it does not claim the report is missing.
+    let pinned = rig.run(
+        "",
+        true,
+        &[
+            "PROG",
+            "zreport",
+            "--simulate",
+            "--plan",
+            &plan,
+            "--backend",
+            "adt",
+        ],
+    );
+
+    assert_eq!(pinned.code, 1);
+    assert!(pinned.stderr.contains("stateless"), "{}", pinned.stderr);
+    assert!(
+        pinned.stderr.contains("pins the backend"),
+        "{}",
+        pinned.stderr
+    );
+    assert!(
+        !pinned.stderr.contains("ZREPORT does not exist"),
+        "{}",
+        pinned.stderr
+    );
+
+    // No RFC route: the 404 of a stateless session is not trusted either.
+    let alone = rig.run(
+        "",
+        false,
+        &["PROG", "zreport", "--simulate", "--plan", &plan],
+    );
+
+    assert_eq!(alone.code, 1);
+    assert!(alone.stderr.contains("stateless"), "{}", alone.stderr);
+    assert!(
+        !alone.stderr.contains("ZREPORT does not exist"),
+        "{}",
+        alone.stderr
+    );
 }

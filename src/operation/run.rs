@@ -108,7 +108,10 @@ impl RunResult {
 
     pub(crate) fn failed(failure: Failure, message: String) -> Self {
         Self {
-            fallback_allowed: failure == Failure::PreSendConnectivity,
+            fallback_allowed: matches!(
+                failure,
+                Failure::PreSendConnectivity | Failure::CapabilityUnavailable
+            ),
             failure: Some(failure),
             detail: Some(message.clone()),
             ..Self::finished(

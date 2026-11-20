@@ -65,6 +65,9 @@ pub(crate) fn attempt(result: Result<Outcome, QualityError>, note: Option<String
     attempt.noted(note)
 }
 
+/// Why a command leaves ADT HTTP before it reads anything that matters.
+pub const STATELESS_HTTP: &str = "ADT HTTP session is stateless on this release";
+
 /// The SELECT of the client role: one preview of `T000`.
 pub fn client_query(client: &str) -> String {
     format!("SELECT CCCATEGORY FROM T000 WHERE MANDT = '{client}'")

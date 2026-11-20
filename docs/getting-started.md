@@ -589,6 +589,16 @@ goes on. A batch without objects exits 1: an empty gate is not a pass.
   refuses a batch of more than 60 objects: its confirmation form lists at most 60, and a run is
   never confirmed from a cut list.
 
+`inactive`, `activate` and `aunit` take `--backend adt|rfc` like `deploy`. Without it they start on ADT
+HTTP, and when the first reply shows a session that keeps no state (a 7.40 system), they stop before
+anything is written and run again over RFC, with the `NOTE: ADT HTTP session is stateless on this
+release` and `NOTE: ADT HTTP failed before anything was written; falling back to RFC SADT` lines. A
+command that ran over RFC prints `backend: rfc` and `reason: <why>` ahead of its output. A stateless
+session may answer 404 for an object that exists, so with `--backend adt` (or without an RFC route) a
+404 stops with the reason instead of `does not exist`. `run PROG` and `run SNIPPET` choose the same
+way; `run CLAS` needs no stateful session and stays on ADT HTTP. The plan file of a run records the
+backend its simulate used, and the run keeps to it.
+
 ## DDIC objects and transaction codes
 
 Data elements (`DTEL`), domains (`DOMA`), tables (`TABL`: transparent tables and structures), table

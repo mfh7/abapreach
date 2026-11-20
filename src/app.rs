@@ -43,7 +43,7 @@ use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
     DynamicRfcApi, Env, FunctionApi, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
 };
-use crate::transport::{SadtTransport, TransportError};
+use crate::transport::{Request, Response, SadtTransport, TransportError};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
@@ -676,9 +676,9 @@ fn execute(
                 )
             },
         ),
-        Command::Inactive { all, .. } => route(
+        Command::Inactive { all, backend, .. } => route(
             OperationKind::Inactive,
-            None,
+            backend.map(backend_kind),
             false,
             connection,
             factories,
@@ -690,7 +690,10 @@ fn execute(
             },
         ),
         Command::Activate {
-            objects, simulate, ..
+            objects,
+            simulate,
+            backend,
+            ..
         } => {
             if let Err(message) = activate::check_targets(&objects) {
                 return stop(message);
@@ -698,7 +701,7 @@ fn execute(
 
             route(
                 OperationKind::Activate,
-                None,
+                backend.map(backend_kind),
                 false,
                 connection,
                 factories,
@@ -720,6 +723,7 @@ fn execute(
             name,
             package,
             tr,
+            backend,
             ..
         } => {
             if connection.policies.run == RunPolicy::Off {
@@ -734,7 +738,7 @@ fn execute(
 
             route(
                 OperationKind::Aunit,
-                None,
+                backend.map(backend_kind),
                 false,
                 connection,
                 factories,
@@ -1791,7 +1795,7 @@ pub(crate) fn route(
             BackendKind::AdtHttp => factories.adt(connection),
             BackendKind::RfcSadt => factories.rfc(connection),
         };
-        let done = match opened {
+        let mut done = match opened {
             Ok(mut transport) => {
                 // A new session of the same backend, for the read that settles a lost reply.
                 let mut fresh = || match backend {
@@ -1799,10 +1803,38 @@ pub(crate) fn route(
                     BackendKind::RfcSadt => factories.rfc(connection),
                 };
 
-                attempt(&mut *transport, &selection, &cancel, &mut fresh)
+                if backend == BackendKind::AdtHttp
+                    && explicit.is_none()
+                    && connection.rfc.is_some()
+                    && probes_stateless(operation)
+                {
+                    let mut gate = StatelessGate::new(&mut *transport);
+                    let done = attempt(&mut gate, &selection, &cancel, &mut fresh);
+
+                    // Nothing was written: the first reply showed a session that keeps no state,
+                    // so its reads cannot be trusted (an existing object may answer 404) and
+                    // the RFC path takes the command.
+                    if gate.tripped {
+                        Attempt {
+                            fallback_allowed: true,
+                            ..Attempt::failed(
+                                quality::STATELESS_HTTP.to_owned(),
+                                Failure::CapabilityUnavailable,
+                            )
+                        }
+                    } else {
+                        done
+                    }
+                } else {
+                    attempt(&mut *transport, &selection, &cancel, &mut fresh)
+                }
             }
             Err(error) => Attempt::from_error(&error),
         };
+
+        if backend == BackendKind::RfcSadt && probes_stateless(operation) {
+            done.outcome.stdout = selection_lines(&selection, &done.outcome.stdout);
+        }
 
         if backend == BackendKind::RfcSadt || !done.fallback_allowed {
             return exit_of(earlier, done.outcome);
@@ -1815,6 +1847,99 @@ pub(crate) fn route(
             "NOTE: {backend} failed before anything was written; falling back to RFC SADT"
         ));
     }
+}
+
+/// The commands whose reads over ADT HTTP need a session that keeps state: the ones that read
+/// the repository without a backend report of their own.
+fn probes_stateless(operation: OperationKind) -> bool {
+    matches!(
+        operation,
+        OperationKind::Inactive | OperationKind::Activate | OperationKind::Aunit
+    )
+}
+
+/// The ADT HTTP transport of a command that reads before it writes anything: the first reply that
+/// shows a session without state ends the command, and every request after it is refused unsent.
+struct StatelessGate<'a> {
+    inner: &'a mut dyn SadtTransport,
+    tripped: bool,
+}
+
+impl<'a> StatelessGate<'a> {
+    fn new(inner: &'a mut dyn SadtTransport) -> Self {
+        Self {
+            inner,
+            tripped: false,
+        }
+    }
+
+    fn refused() -> TransportError {
+        TransportError::PreSendConnectivity(quality::STATELESS_HTTP.to_owned())
+    }
+}
+
+impl SadtTransport for StatelessGate<'_> {
+    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+        if self.tripped {
+            return Err(Self::refused());
+        }
+
+        let response = self.inner.request(request)?;
+
+        if self.inner.stateful_supported() == Some(false) {
+            self.tripped = true;
+
+            return Err(Self::refused());
+        }
+
+        Ok(response)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
+    }
+
+    fn supports_request_timeout(&self) -> bool {
+        self.inner.supports_request_timeout()
+    }
+
+    fn request_within(
+        &mut self,
+        request: Request,
+        limit: Duration,
+    ) -> Result<Response, TransportError> {
+        if self.tripped {
+            return Err(Self::refused());
+        }
+
+        let response = self.inner.request_within(request, limit)?;
+
+        if self.inner.stateful_supported() == Some(false) {
+            self.tripped = true;
+
+            return Err(Self::refused());
+        }
+
+        Ok(response)
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        self.inner.stateful_supported()
+    }
+}
+
+/// The backend and the reason of a command that prints none of its own, ahead of its output.
+fn selection_lines(selection: &Selection, stdout: &str) -> String {
+    let mut lines = vec![
+        format!("backend: {}", selection.backend.token()),
+        format!("reason: {}", selection.reason),
+    ];
+
+    if !stdout.is_empty() {
+        lines.push(stdout.to_owned());
+    }
+
+    lines.join("\n")
 }
 
 fn exit_of(mut stderr: Vec<String>, outcome: Outcome) -> Exit {

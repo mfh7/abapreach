@@ -167,6 +167,9 @@ pub enum Command {
         all: bool,
 
         #[arg(long)]
+        backend: Option<Backend>,
+
+        #[arg(long)]
         conn: String,
     },
     /// Activates own inactive Z/Y objects, named as `inactive` prints them.
@@ -180,6 +183,9 @@ pub enum Command {
 
         #[arg(long)]
         simulate: bool,
+
+        #[arg(long)]
+        backend: Option<Backend>,
 
         #[arg(long)]
         conn: String,
@@ -203,6 +209,9 @@ pub enum Command {
         /// Every program, class and function group of the request and its tasks.
         #[arg(long, conflicts_with_all = ["kind", "package"])]
         tr: Option<String>,
+
+        #[arg(long)]
+        backend: Option<Backend>,
 
         #[arg(long)]
         conn: String,
