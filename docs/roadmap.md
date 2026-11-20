@@ -1,8 +1,9 @@
 # Roadmap
 
 Version 1.0.0 brings every feature of the earlier internal tooling into the Rust binary, plus
-one addition: running ABAP code (`run`). That scope is fixed: no other feature is added to match
-other tools, and no feature of the earlier tooling is dropped. Each milestone ships as a minor
+four additions: running ABAP code (`run`), read-only SQL with joins, object search, and the
+application server instance in `doctor` and ping. That scope is fixed: no other feature is added,
+and no feature of the earlier tooling is dropped. Each milestone ships as a minor
 release (0.12.0, 0.13.0, ...); 1.0.0 follows when every feature below is released and the
 [release gate](#release-gate) passes. Shipped work moves to the [changelog](../CHANGELOG.md).
 
@@ -114,14 +115,18 @@ Deploy of `TRAN` does not exist: a transaction code is created and deleted, not 
 | Where-used | `rfc-read where-used` | ADT? |
 | Test call of a remote FM | `rfc-call` | RFC |
 
-### Run ABAP code
+### Additions beyond the earlier tooling
 
 | Feature | Reference command | Path |
 | :--- | :--- | :--- |
 | Run a class (`IF_OO_ADT_CLASSRUN`), a report, or a code snippet, and return its output | new | classrun; report path to be decided in the milestone design |
+| Read-only SQL with joins (beyond the one-table `read-table`) | new | ADT? |
+| Object search by name pattern and type | new | ADT |
+| The application server instance that answered, in `doctor` and ping | new | ADT, RFC |
 
 `run` executes code on the SAP system, so it gets its own safety gates (decided in the milestone
-design, as for the write commands).
+design, as for the write commands). The SQL path keeps the `read-table` policies (denied tables,
+row limit).
 
 ### Setup
 
