@@ -1443,6 +1443,18 @@ fn mcp_runs_a_report_after_the_human_saw_every_parameter_and_cuts_at_one_mib() {
     assert!(result.text.contains("from the report"), "{}", result.text);
     assert_eq!(human.forms.len(), 1);
 
+    // The text holds the output; the RUNNER lines are in the notes of the structured data only.
+    assert!(!result.text.contains("RUNNER: "), "{}", result.text);
+    assert_eq!(result.text, result.structured["output"].as_str().unwrap());
+    assert!(
+        result.structured["notes"]
+            .as_str()
+            .unwrap()
+            .contains("RUNNER: "),
+        "{}",
+        result.structured["notes"]
+    );
+
     let form = format!("{:?}", human.forms[0]);
 
     for text in [
@@ -1504,6 +1516,8 @@ fn mcp_runs_a_snippet_only_with_its_opt_in_and_shows_all_of_it() {
 
     assert!(!result.is_error, "{}", result.text);
     assert!(result.text.contains("hello"), "{}", result.text);
+    assert!(!result.text.contains("RUNNER: "), "{}", result.text);
+    assert_eq!(result.text, result.structured["output"].as_str().unwrap());
 
     let form = format!("{:?}", human.forms[0]);
 

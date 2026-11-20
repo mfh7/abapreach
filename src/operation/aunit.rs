@@ -381,6 +381,28 @@ fn clean(text: &str) -> String {
     cut
 }
 
+/// The one read that shows whether the ADT HTTP session keeps state, before anything is run. The
+/// status of the reply does not matter here; a failed request or a refused logon does.
+pub fn probe_session(
+    transport: &mut dyn SadtTransport,
+    target: &AunitTarget,
+) -> Result<(), QualityError> {
+    let mut exists = Request::get(target.uri());
+
+    exists
+        .headers
+        .insert("Accept".to_owned(), "application/xml".to_owned());
+
+    let response = transport
+        .request(exists)
+        .map_err(|error| QualityError::from_transport(&error))?;
+
+    match response.authorization_failure() {
+        Some(error) => Err(QualityError::from_transport(&error)),
+        None => Ok(()),
+    }
+}
+
 /// The outcome of one object.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObjectRun {

@@ -112,7 +112,7 @@ impl<G: WriteGate> McpTools<'_, G> {
         drop(factories);
 
         if simulate || found.plan.is_none() {
-            return Ok(self.finish(
+            let mut result = self.finish(
                 &connection,
                 &simulated,
                 None,
@@ -120,7 +120,11 @@ impl<G: WriteGate> McpTools<'_, G> {
                 run_data(&args, None),
                 false,
                 None,
-            ));
+            );
+
+            keep_runner_lines_in_notes(&mut result);
+
+            return Ok(result);
         }
 
         let (Some(plan), Some(facts)) = (found.plan, found.facts) else {
@@ -204,6 +208,8 @@ impl<G: WriteGate> McpTools<'_, G> {
             Some(Settled::new("abap_run", &args.name, &cancel, session)),
         );
 
+        keep_runner_lines_in_notes(&mut result);
+
         // The run has happened even when its output is withheld.
         if result.is_error && result.text.starts_with("REJECTED: payload contains") {
             result.text = format!(
@@ -215,6 +221,45 @@ impl<G: WriteGate> McpTools<'_, G> {
 
         Ok(result)
     }
+}
+
+/// The `RUNNER:` lines (the name of the temporary class, the repository preflight) are for the
+/// log, not for the reader of the output: they stay in `structured.notes` and leave the text.
+/// Every other note (`RUNNER_LEFTOVER` with its cleanup commands, `W:` lines such as a cut output)
+/// stays in the text.
+fn keep_runner_lines_in_notes(result: &mut ToolResult) {
+    let notes = result.structured["notes"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+
+    if !notes.lines().any(is_runner_line) {
+        return;
+    }
+
+    let kept = notes
+        .lines()
+        .filter(|line| !is_runner_line(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let output = result.structured["output"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+
+    result.text = [output.as_str(), kept.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if result.structured.get("message").is_some() {
+        result.structured["message"] = json!(result.text);
+    }
+}
+
+fn is_runner_line(line: &str) -> bool {
+    line.starts_with("RUNNER: ")
 }
 
 /// What the simulate left behind, taken out of the routing closure.
@@ -461,6 +506,68 @@ fn run_data(args: &RunArgs, verdict: Option<Verdict>) -> Value {
 mod tests {
     use super::*;
     use crate::operation::run_plan::{RawArgs, RunArgs};
+
+    fn result_with(output: &str, notes: &str, failed: bool) -> ToolResult {
+        let text = [output, notes]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut structured = json!({"output": output, "notes": notes});
+
+        if failed {
+            structured["message"] = json!(text);
+        }
+
+        ToolResult {
+            text,
+            structured,
+            is_error: failed,
+        }
+    }
+
+    #[test]
+    fn runner_lines_leave_the_text_and_stay_in_the_notes() {
+        let notes = "RUNNER: YCL_ABAPREACH_RUN_AB12CD34 (temporary, $TMP, post via adt, removed after the run)\nRUNNER: preflight T000 CCCATEGORY=T\nW: output cut at 1048576 bytes; 2 bytes left out";
+        let mut result = result_with("hello", notes, false);
+
+        keep_runner_lines_in_notes(&mut result);
+
+        assert_eq!(
+            result.text,
+            "hello\nW: output cut at 1048576 bytes; 2 bytes left out"
+        );
+        assert_eq!(result.structured["notes"], notes);
+        assert_eq!(result.structured["output"], "hello");
+    }
+
+    #[test]
+    fn a_leftover_and_its_cleanup_commands_stay_in_the_text() {
+        let notes = "RUNNER: YCL_ABAPREACH_RUN_AB12CD34 (temporary, $TMP, post via adt, removed after the run)\nRUNNER_LEFTOVER: YCL_ABAPREACH_RUN_AB12CD34\nabapreach delete CLAS:YCL_ABAPREACH_RUN_AB12CD34 --plan <FILE> --conn DEV_100";
+        let mut result = result_with("", notes, true);
+
+        keep_runner_lines_in_notes(&mut result);
+
+        assert!(!result.text.contains("RUNNER: "), "{}", result.text);
+        assert!(
+            result.text.starts_with("RUNNER_LEFTOVER: "),
+            "{}",
+            result.text
+        );
+        assert!(result.text.contains("abapreach delete CLAS:"));
+        assert_eq!(result.structured["message"], json!(result.text));
+        assert_eq!(result.structured["notes"], notes);
+    }
+
+    #[test]
+    fn a_result_without_runner_lines_is_untouched() {
+        let mut result = result_with("hello", "W: something", false);
+        let before = result.text.clone();
+
+        keep_runner_lines_in_notes(&mut result);
+
+        assert_eq!(result.text, before);
+    }
 
     fn facts() -> ClassFacts {
         ClassFacts {

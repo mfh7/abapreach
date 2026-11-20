@@ -10,7 +10,7 @@ use super::{
     WriteGate, ask, bind,
 };
 use crate::app::end_session;
-use crate::backend::OperationKind;
+use crate::backend::{BackendKind, Failure, OperationKind, Router, SelectionReason};
 use crate::config::Connection;
 use crate::domain::{Outcome, Status};
 use crate::mcp::{Session, ToolHandler, ToolResult};
@@ -169,9 +169,69 @@ impl<G: WriteGate> McpTools<'_, G> {
         }
 
         let cancel = session.cancel();
+        // The backend the run will use, known before the form: the one the first request
+        // settled (a stateless ADT HTTP session leaves for RFC), or the only one configured.
+        let mut backend: Option<BackendKind> = None;
+        let settled_before = Outcome {
+            status: Some(Status::Active),
+            exit: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
         let (targets, notes) = match &scope {
-            // One named object needs no request to be known.
-            Scope::Object(target) => (vec![target.clone()], Vec::new()),
+            Scope::Object(target) => {
+                let router = Router::new(connection.adt.is_some(), connection.rfc.is_some());
+                let first = router
+                    .select(OperationKind::Aunit, None, false, Failure::Initial)
+                    .ok();
+
+                // Only ADT HTTP with an RFC route can still change: its first reply shows
+                // whether the session keeps state. Nothing else needs a request.
+                if first != Some(BackendKind::AdtHttp) || connection.rfc.is_none() {
+                    backend = first;
+                } else {
+                    let mut factories = WithCancel {
+                        inner: self.read.factories(),
+                        cancel: cancel.clone(),
+                        opened: None,
+                    };
+                    let exit = crate::app::route(
+                        OperationKind::Aunit,
+                        None,
+                        false,
+                        &connection,
+                        &mut factories,
+                        |transport, selection, _, _| {
+                            backend = Some(selection.backend);
+
+                            let result = if selection.backend == BackendKind::AdtHttp {
+                                aunit::probe_session(transport, target)
+                            } else {
+                                Ok(())
+                            }
+                            .map(|()| settled_before.clone());
+
+                            quality::attempt(result, end_session(transport))
+                        },
+                    );
+
+                    drop(factories);
+
+                    if exit.code != 0 {
+                        return Ok(self.finish(
+                            &connection,
+                            &exit,
+                            None,
+                            None,
+                            json!({}),
+                            true,
+                            None,
+                        ));
+                    }
+                }
+
+                (vec![target.clone()], Vec::new())
+            }
             // The objects of a package or a request are read first, so that the human sees them.
             _ => {
                 let mut resolved: Option<(Vec<AunitTarget>, Vec<String>)> = None;
@@ -186,16 +246,13 @@ impl<G: WriteGate> McpTools<'_, G> {
                     false,
                     &connection,
                     &mut factories,
-                    |transport, _, _, _| {
+                    |transport, selection, _, _| {
+                        backend = Some(selection.backend);
+
                         let result = aunit::resolve_scope(transport, &scope).map(|found| {
                             resolved = Some(found);
 
-                            Outcome {
-                                status: Some(Status::Active),
-                                exit: 0,
-                                stdout: String::new(),
-                                stderr: String::new(),
-                            }
+                            settled_before.clone()
                         });
 
                         quality::attempt(result, end_session(transport))
@@ -233,6 +290,7 @@ impl<G: WriteGate> McpTools<'_, G> {
         );
 
         ticket.listing = tokens.clone();
+        ticket.backend = backend;
 
         batch_listed(&targets)?;
         run_allowed(&connection, &targets)?;
@@ -260,9 +318,12 @@ impl<G: WriteGate> McpTools<'_, G> {
             opened: None,
         };
         let batch = !matches!(scope, Scope::Object(_));
-        let exit = crate::app::route(
+        // The run repeats what the human confirmed. A choice exists only with both backends
+        // configured; with one, the router has nothing to decide.
+        let pinned = backend.filter(|_| connection.adt.is_some() && connection.rfc.is_some());
+        let mut exit = crate::app::route(
             OperationKind::Aunit,
-            None,
+            pinned,
             false,
             &connection,
             &mut factories,
@@ -278,6 +339,12 @@ impl<G: WriteGate> McpTools<'_, G> {
         );
 
         drop(factories);
+
+        // The pin is the backend of the confirmation, not a flag of the caller.
+        exit.stdout = exit.stdout.replace(
+            &format!("reason: {}", SelectionReason::ExplicitBackend),
+            "reason: backend of the confirmation",
+        );
 
         let label = tokens.join(" ");
 

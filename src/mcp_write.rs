@@ -1748,9 +1748,15 @@ pub fn confirmation_summary_with(
         Operation::Activate => "ACTIVATE",
         Operation::Aunit => "RUN ABAP UNIT (runs test code on the system)",
     };
-    let backend = backend_text(ticket, registry);
+    // A run of tests names the backend it resolved before the form; with none resolved the
+    // phrase is left out rather than printing a guess.
+    let backend = if matches!(ticket.operation, Operation::Aunit) && ticket.backend.is_none() {
+        String::new()
+    } else {
+        format!(", backend {}", backend_text(ticket, registry))
+    };
     let mut lines = vec![format!(
-        "{what} on {} (SID {}, client {}), backend {backend}",
+        "{what} on {} (SID {}, client {}){backend}",
         sanitize(&connection.id, SUMMARY_LINE),
         sanitize(&connection.system_id, SUMMARY_LINE),
         sanitize(&connection.client, SUMMARY_LINE),

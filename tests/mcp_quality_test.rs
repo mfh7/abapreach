@@ -48,8 +48,26 @@ impl SadtTransport for Recording {
     }
 }
 
+/// A session whose first reply sets no context cookie: the stateless ADT HTTP of a 7.40 system.
+struct Stateless(Recording);
+
+impl SadtTransport for Stateless {
+    fn request(&mut self, request: Request) -> Reply {
+        self.0.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        Some(false)
+    }
+}
+
 struct Fake {
     adt: VecDeque<Opened>,
+    rfc: VecDeque<Opened>,
     opened: Rc<Cell<usize>>,
 }
 
@@ -64,9 +82,11 @@ impl Factories for Fake {
     }
 
     fn rfc(&mut self, _: &Connection) -> Opened {
-        Err(TransportError::PreSendConnectivity(
-            "no RFC transport scripted".to_owned(),
-        ))
+        self.rfc.pop_front().unwrap_or_else(|| {
+            Err(TransportError::PreSendConnectivity(
+                "no RFC transport scripted".to_owned(),
+            ))
+        })
     }
 
     fn rfc_library(&mut self, _: &Connection) -> Result<RfcLibraryInfo, String> {
@@ -93,13 +113,22 @@ const ALLOW_TEST: &str = r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_TEST
 const ALLOW_AB: &str = r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_A","CLAS:ZCL_B"]}"#;
 
 fn rig(policies: &str) -> Rig {
+    rig_with(policies, "")
+}
+
+/// The same connection with an RFC route, so that a stateless ADT HTTP session can leave for it.
+fn rig_with_rfc(policies: &str) -> Rig {
+    rig_with(policies, r#","rfc":{"ashost":"example.com","sysnr":"00"}"#)
+}
+
+fn rig_with(policies: &str, rfc: &str) -> Rig {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("connections.json");
 
     fs::write(
         &path,
         format!(
-            r#"{{"servers":[{{"systemId":"DEV","host":"example.com","port":443,"clients":["100"],"policies":{policies}}}]}}"#
+            r#"{{"servers":[{{"systemId":"DEV","host":"example.com","port":443,"clients":["100"]{rfc},"policies":{policies}}}]}}"#
         ),
     )
     .unwrap();
@@ -107,6 +136,7 @@ fn rig(policies: &str) -> Rig {
     Rig {
         fake: Fake {
             adt: VecDeque::new(),
+            rfc: VecDeque::new(),
             opened: Rc::new(Cell::new(0)),
         },
         env: BTreeMap::from([
@@ -132,6 +162,30 @@ impl Rig {
         calls
     }
 
+    /// Scripts one stateless ADT session (no context cookie), like a 7.40 system.
+    fn stateless_session(&mut self, replies: Vec<Reply>) -> Calls {
+        let calls: Calls = Rc::default();
+
+        self.fake.adt.push_back(Ok(Box::new(Stateless(Recording {
+            replies: replies.into(),
+            calls: calls.clone(),
+        }))));
+
+        calls
+    }
+
+    /// Scripts one RFC session.
+    fn rfc_session(&mut self, replies: Vec<Reply>) -> Calls {
+        let calls: Calls = Rc::default();
+
+        self.fake.rfc.push_back(Ok(Box::new(Recording {
+            replies: replies.into(),
+            calls: calls.clone(),
+        })));
+
+        calls
+    }
+
     fn call(&mut self, session: &mut dyn Session, name: &str, arguments: Value) -> ToolResult {
         let config = Config::load(ConfigPaths::from_env(&self.env).unwrap(), &self.env).unwrap();
         let mut tools = McpTools::new(
@@ -147,8 +201,14 @@ impl Rig {
     }
 }
 
-/// A client that can answer a form and types `text`.
-struct Typing(&'static str, usize);
+/// A client that can answer a form and types `text`; it keeps the text of the last form.
+struct Typing(&'static str, usize, String);
+
+impl Typing {
+    fn new(text: &'static str) -> Self {
+        Self(text, 0, String::new())
+    }
+}
 
 impl Session for Typing {
     fn can_elicit(&self) -> bool {
@@ -167,6 +227,7 @@ impl Session for Typing {
     ) -> Answer {
         self.1 += 1;
         assert!(!form.message.is_empty());
+        self.2 = form.message.clone();
 
         Answer::Accepted(self.0.to_owned())
     }
@@ -453,7 +514,11 @@ fn under_confirm_the_human_types_the_object_name_before_the_activation() {
     arguments["plan_token"] = simulated.structured["plan_token"].clone();
 
     // A wrong answer activates nothing and spends the token.
-    let wrong = rig.call(&mut Typing("ZOTHER", 0), "abap_activate", arguments.clone());
+    let wrong = rig.call(
+        &mut Typing::new("ZOTHER"),
+        "abap_activate",
+        arguments.clone(),
+    );
 
     assert!(wrong.is_error);
     assert!(wrong.text.contains("did not match"));
@@ -475,7 +540,7 @@ fn under_confirm_the_human_types_the_object_name_before_the_activation() {
         ok(&without("ZTEST_MAIN")),
     ]);
 
-    let mut typing = Typing("ZTEST_MAIN", 0);
+    let mut typing = Typing::new("ZTEST_MAIN");
     let result = rig.call(&mut typing, "abap_activate", arguments);
 
     assert!(!result.is_error, "{}", result.text);
@@ -535,7 +600,11 @@ fn mcp_run_off_refuses_aunit_even_when_writes_are_on() {
         r#"{"mcp_run":"off"}"#,
     ] {
         let mut rig = rig(policies);
-        let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+        let result = rig.call(
+            &mut Typing::new("ZCL_TEST"),
+            "abap_aunit",
+            aunit_arguments(),
+        );
 
         assert!(result.is_error);
         assert!(result.text.contains("policy mcp_run"), "{}", result.text);
@@ -546,7 +615,11 @@ fn mcp_run_off_refuses_aunit_even_when_writes_are_on() {
 #[test]
 fn run_off_refuses_aunit_in_mcp_whatever_mcp_run_says() {
     let mut rig = rig(r#"{"mcp_run":"confirm","run":"off"}"#);
-    let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+    let result = rig.call(
+        &mut Typing::new("ZCL_TEST"),
+        "abap_aunit",
+        aunit_arguments(),
+    );
 
     assert!(result.is_error);
     assert!(result.text.contains("policy run"), "{}", result.text);
@@ -576,7 +649,11 @@ fn aunit_arguments_follow_the_cli_scope_rules() {
         json!({"conn": "DEV_100", "type": "CLAS", "name": "ZCL_TEST", "package": "ZPKG"}),
         json!({"conn": "DEV_100", "package": "ZPKG", "tr": "DEVK900001"}),
     ] {
-        let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", arguments.clone());
+        let result = rig.call(
+            &mut Typing::new("ZCL_TEST"),
+            "abap_aunit",
+            arguments.clone(),
+        );
 
         assert!(result.is_error, "{arguments}");
         assert!(result.text.starts_with("STOP: "), "{}", result.text);
@@ -589,7 +666,7 @@ fn aunit_arguments_follow_the_cli_scope_rules() {
 fn the_human_confirms_and_the_tests_run() {
     let mut rig = rig(ALLOW_TEST);
     let calls = rig.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
-    let mut typing = Typing("ZCL_TEST", 0);
+    let mut typing = Typing::new("ZCL_TEST");
     let result = rig.call(&mut typing, "abap_aunit", aunit_arguments());
 
     assert!(!result.is_error, "{}", result.text);
@@ -607,7 +684,7 @@ fn the_human_confirms_and_the_tests_run() {
 #[test]
 fn a_wrong_answer_runs_no_test() {
     let mut rig = rig(ALLOW_TEST);
-    let result = rig.call(&mut Typing("ZOTHER", 0), "abap_aunit", aunit_arguments());
+    let result = rig.call(&mut Typing::new("ZOTHER"), "abap_aunit", aunit_arguments());
 
     assert!(result.is_error);
     assert!(result.text.contains("did not match"));
@@ -621,7 +698,11 @@ fn failing_tests_are_an_error_result_with_the_alert_lines() {
 
     rig.session(vec![client("T"), ok("<class/>"), ok(FAILED)]);
 
-    let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+    let result = rig.call(
+        &mut Typing::new("ZCL_TEST"),
+        "abap_aunit",
+        aunit_arguments(),
+    );
 
     assert!(result.is_error);
     assert_eq!(result.structured["status"], "REJECTED");
@@ -636,7 +717,11 @@ fn failing_tests_are_an_error_result_with_the_alert_lines() {
 fn a_productive_client_runs_no_test_in_mcp() {
     let mut rig = rig(ALLOW_TEST);
     let calls = rig.session(vec![client("P")]);
-    let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+    let result = rig.call(
+        &mut Typing::new("ZCL_TEST"),
+        "abap_aunit",
+        aunit_arguments(),
+    );
 
     assert!(result.is_error);
     assert!(result.text.contains("productive"));
@@ -661,7 +746,7 @@ fn a_package_batch_is_resolved_first_and_the_human_types_the_count() {
         ok("<class/>"),
         ok(CLEAN),
     ]);
-    let mut typing = Typing("RUN 2", 0);
+    let mut typing = Typing::new("RUN 2");
     let result = rig.call(
         &mut typing,
         "abap_aunit",
@@ -684,7 +769,7 @@ fn a_package_batch_is_resolved_first_and_the_human_types_the_count() {
 fn an_object_missing_from_mcp_run_allow_refuses_the_call_before_any_request() {
     let mut rig = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_OTHER"]}"#);
     let calls = rig.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
-    let mut typing = Typing("ZCL_TEST", 0);
+    let mut typing = Typing::new("ZCL_TEST");
     let result = rig.call(&mut typing, "abap_aunit", aunit_arguments());
 
     assert!(result.is_error);
@@ -708,7 +793,11 @@ fn an_empty_or_absent_mcp_run_allow_refuses_every_object() {
         r#"{"mcp_run":"confirm","mcp_run_allow":[]}"#,
     ] {
         let mut rig = rig(policies);
-        let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+        let result = rig.call(
+            &mut Typing::new("ZCL_TEST"),
+            "abap_aunit",
+            aunit_arguments(),
+        );
 
         assert!(result.is_error);
         assert!(
@@ -726,14 +815,22 @@ fn the_allow_list_matches_exact_names_without_regard_to_case() {
 
     lower.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
 
-    let result = lower.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+    let result = lower.call(
+        &mut Typing::new("ZCL_TEST"),
+        "abap_aunit",
+        aunit_arguments(),
+    );
 
     assert!(!result.is_error, "{}", result.text);
 
     // A prefix of the name is not a match: a pattern entry never loads (see the config tests).
     let mut prefix =
         rig(r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_TES","CLAS:ZCL_TEST2"]}"#);
-    let result = prefix.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+    let result = prefix.call(
+        &mut Typing::new("ZCL_TEST"),
+        "abap_aunit",
+        aunit_arguments(),
+    );
 
     assert!(result.is_error);
     assert_eq!(prefix.opened(), 0);
@@ -750,7 +847,7 @@ fn a_batch_with_one_object_off_the_list_refuses_all_of_it() {
     // Only the resolving session is scripted: no test session may open.
     rig.session(vec![tadir]);
 
-    let mut typing = Typing("RUN 2", 0);
+    let mut typing = Typing::new("RUN 2");
     let result = rig.call(
         &mut typing,
         "abap_aunit",
@@ -788,7 +885,7 @@ fn an_allow_entry_covers_its_own_object_type_only() {
         ),
     ] {
         let mut rig = rig(policies);
-        let mut typing = Typing("ZCL_TEST", 0);
+        let mut typing = Typing::new("ZCL_TEST");
         let result = rig.call(
             &mut typing,
             "abap_aunit",
@@ -828,7 +925,7 @@ fn a_batch_the_confirmation_form_cannot_list_is_refused() {
         ("OBJ_NAME", &objects),
     ]))]);
 
-    let mut typing = Typing("RUN 61", 0);
+    let mut typing = Typing::new("RUN 61");
     let result = rig.call(
         &mut typing,
         "abap_aunit",
@@ -850,7 +947,11 @@ fn a_batch_the_confirmation_form_cannot_list_is_refused() {
 #[test]
 fn run_off_refuses_abap_aunit_before_the_allow_list_and_hides_the_tools() {
     let mut rig = rig(r#"{"mcp_run":"confirm","run":"off","mcp_run_allow":["CLAS:ZCL_TEST"]}"#);
-    let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+    let result = rig.call(
+        &mut Typing::new("ZCL_TEST"),
+        "abap_aunit",
+        aunit_arguments(),
+    );
 
     assert!(result.is_error);
     assert!(result.text.contains("policy run"), "{}", result.text);
@@ -859,6 +960,107 @@ fn run_off_refuses_abap_aunit_before_the_allow_list_and_hides_the_tools() {
     let config = Config::load(ConfigPaths::from_env(&rig.env).unwrap(), &rig.env).unwrap();
 
     assert!(config.mcp_runnable().is_empty());
+}
+
+#[test]
+fn the_aunit_form_names_the_backend_the_run_will_use() {
+    // One backend configured: the form needs no request to name it.
+    let mut rig = rig(ALLOW_TEST);
+
+    rig.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
+
+    let mut typing = Typing::new("ZCL_TEST");
+    let result = rig.call(&mut typing, "abap_aunit", aunit_arguments());
+
+    assert!(!result.is_error, "{}", result.text);
+    assert!(
+        typing.2.contains("(SID DEV, client 100), backend adt"),
+        "{}",
+        typing.2
+    );
+    assert!(!typing.2.contains("unknown"), "{}", typing.2);
+}
+
+#[test]
+fn a_stateful_adt_session_with_an_rfc_route_stays_on_adt_in_form_and_run() {
+    let mut rig = rig_with_rfc(ALLOW_TEST);
+    // The probe session, then the running session; both keep state.
+    let probe = rig.session(vec![ok("<class/>")]);
+    let run = rig.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
+    let mut typing = Typing::new("ZCL_TEST");
+    let result = rig.call(&mut typing, "abap_aunit", aunit_arguments());
+
+    assert!(!result.is_error, "{}", result.text);
+    assert!(typing.2.contains("backend adt"), "{}", typing.2);
+    assert_eq!(probe.borrow().len(), 1);
+    assert!(
+        run.borrow()
+            .iter()
+            .any(|call| call.uri == "/sap/bc/adt/abapunit/testruns")
+    );
+}
+
+#[test]
+fn a_stateless_adt_session_makes_the_form_name_rfc_and_the_run_goes_there() {
+    let mut rig = rig_with_rfc(ALLOW_TEST);
+    // The probe reaches the stateless session once and nothing is written there; the RFC route
+    // of the probe is opened but needs no request, its backend is already settled.
+    let adt = rig.stateless_session(vec![ok("<class/>")]);
+    let rfc = rig.rfc_session(vec![]);
+    let run = rig.rfc_session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
+    let mut typing = Typing::new("ZCL_TEST");
+    let result = rig.call(&mut typing, "abap_aunit", aunit_arguments());
+
+    assert!(!result.is_error, "{}", result.text);
+    assert!(
+        typing.2.contains("(SID DEV, client 100), backend rfc"),
+        "{}",
+        typing.2
+    );
+    assert!(!typing.2.contains("unknown"), "{}", typing.2);
+    assert_eq!(adt.borrow().len(), 1);
+    assert!(rfc.borrow().is_empty());
+    assert!(
+        run.borrow()
+            .iter()
+            .any(|call| call.uri == "/sap/bc/adt/abapunit/testruns")
+    );
+    assert!(
+        result.text.contains("TESTS: 2 methods, 0 alerts"),
+        "{}",
+        result.text
+    );
+    // The pin is the confirmation, not a flag of the caller.
+    assert!(
+        result
+            .text
+            .contains("backend: rfc\nreason: backend of the confirmation"),
+        "{}",
+        result.text
+    );
+    assert!(
+        !result.text.contains("explicit --backend"),
+        "{}",
+        result.text
+    );
+}
+
+#[test]
+fn a_form_whose_backend_cannot_be_known_leaves_the_phrase_out() {
+    use abapreach::mcp_write::{Operation, Ticket, confirmation_summary};
+
+    let ticket = Ticket::new(
+        Operation::Aunit,
+        "DEV_100",
+        BTreeMap::from([("objects".to_owned(), "CLAS:ZCL_TEST".to_owned())]),
+    );
+    let summary = confirmation_summary(&Connection::test_insecure(), &ticket);
+    let first = summary.lines().next().unwrap();
+
+    assert!(first.starts_with("RUN ABAP UNIT"), "{summary}");
+    assert!(first.ends_with(')'), "{summary}");
+    assert!(!first.contains("backend"), "{summary}");
+    assert!(!summary.contains("unknown"), "{summary}");
 }
 
 // ---- the policy keys -----------------------------------------------------------------------------
