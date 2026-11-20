@@ -14,6 +14,7 @@ use crate::domain::{Outcome, Status};
 use crate::hash::{local_source_lines, source_hash};
 use crate::operation::delete_adt::Opener;
 use crate::operation::deploy::{CancelFlag, INTERRUPT_EXIT_CODE};
+use crate::operation::quality::{self, QualityError};
 use crate::operation::read_table::{ReadTableError, TableData, fetch};
 use crate::operation::run_plan::{PlanFacts, RunArgs, RunPlan, plan_changed_text};
 use crate::operation::runner::RunnerGated;
@@ -288,7 +289,7 @@ impl ClassRun<'_> {
     /// The single classrun `POST` of the class, from a new session.
     fn post(&self, open: &mut Opener<'_>) -> RunResult {
         let name = &self.args.name;
-        let arm = match RunnerArm::arm_class(name) {
+        let arm = match RunnerArm::arm_class(name, &self.connection.runner_prefix) {
             Ok(arm) => arm,
             Err(message) => return RunResult::stopped(format!("run admission: {message}")),
         };
@@ -462,34 +463,13 @@ fn object_version(xml: &str) -> Option<String> {
     }
 }
 
-/// The SELECT of the client role: one preview of `T000`.
-pub fn client_query(client: &str) -> String {
-    format!("SELECT CCCATEGORY FROM T000 WHERE MANDT = '{client}'")
-}
-
-/// Refuses a productive client (`T000-CCCATEGORY = 'P'`). A client category that cannot be read
-/// refuses too: an unknown client is not proven safe.
+/// Refuses a productive client or one whose role cannot be read: the one fail-closed T000 check
+/// of `quality`, mapped to what a run reports.
 fn check_client(transport: &mut dyn SadtTransport, client: &str) -> Result<(), Stop> {
-    if client.len() != 3 || !client.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(Stop::Rejected(format!(
-            "client {client:?} is not three digits"
-        )));
-    }
-
-    let data = preview(transport, "T000", &client_query(client))?;
-    let category = column(&data, "CCCATEGORY")
-        .and_then(|index| data.rows.first().and_then(|row| row.get(index)))
-        .map(|value| value.trim().to_ascii_uppercase());
-
-    match category.as_deref() {
-        Some("P") => Err(Stop::Rejected(format!(
-            "client {client} is productive (T000 CCCATEGORY=P); run is refused"
-        ))),
-        Some(_) => Ok(()),
-        None => Err(Stop::Rejected(format!(
-            "client {client} has no readable T000 row; run is refused because the client role is unknown"
-        ))),
-    }
+    quality::check_client(transport, client).map_err(|error| match error {
+        QualityError::Rejected(message) => Stop::Rejected(message),
+        QualityError::Failed { failure, message } => Stop::Failed { failure, message },
+    })
 }
 
 /// Whether the class, or a superclass of it, implements the classrun interface: `SEOMETAREL`
@@ -678,6 +658,12 @@ fn cut(text: &str) -> String {
 
 /// Whether the body of an HTTP 500 is the report of an ABAP runtime error (a short dump), as
 /// opposed to a gateway or ICM error that leaves the work process running.
+///
+/// The markers are provisional and loose: any 500 body that mentions `st22` or `runtime error`
+/// (in a link, a header or ICM text) counts, and the run then reads `RUN_FAILED` ("rolled back")
+/// where `RUN_UNKNOWN` would be the safer word. The exit code is the same for both.
+// TODO(live probe): tighten these to the markers of the SAP short dump page once a live classrun
+// that raises a runtime error shows the exact body, and add that body as a fixture.
 pub fn is_runtime_error_body(body: &[u8]) -> bool {
     let text = String::from_utf8_lossy(body).to_ascii_lowercase();
 
@@ -693,7 +679,7 @@ mod tests {
 
     #[test]
     fn the_previews_of_the_run_pass_the_data_preview_grammar() {
-        validate_preview_body("T000", &client_query("100")).unwrap();
+        validate_preview_body("T000", &quality::client_query("100")).unwrap();
         validate_preview_body(
             "SEOMETAREL",
             "SELECT REFCLSNAME FROM SEOMETAREL WHERE CLSNAME IN ( 'ZCL_A' ) AND REFCLSNAME IN ( 'IF_OO_ADT_CLASSRUN' )",

@@ -32,13 +32,16 @@ fn http_admits(request: &Request) -> bool {
     }
 }
 
+/// A custom `runner_prefix` of a connection; the product default is refused as well.
+const PREFIX: &str = "ZCL_RUNX_";
+
 #[track_caller]
 fn assert_both(name: Option<&str>, request: &Request, expected: bool) {
     for (transport, admits) in [
         ("rfc", rfc_admits as fn(&Request) -> bool),
         ("http", http_admits),
     ] {
-        let _arm = name.map(|name| RunnerArm::arm_class(name).unwrap());
+        let _arm = name.map(|name| RunnerArm::arm_class(name, PREFIX).unwrap());
 
         assert_eq!(
             admits(request),
@@ -101,7 +104,7 @@ fn the_shape_of_the_post_is_exact() {
 #[test]
 fn only_one_post_is_admitted_per_arm() {
     for admits in [rfc_admits as fn(&Request) -> bool, http_admits] {
-        let _arm = RunnerArm::arm_class("ZCL_A").unwrap();
+        let _arm = RunnerArm::arm_class("ZCL_A", PREFIX).unwrap();
 
         // The spent arm is shared by both checks: the first call spends it.
         let first = admits(&classrun("ZCL_A"));
@@ -125,21 +128,43 @@ fn a_name_that_is_not_a_plain_class_name_cannot_be_armed() {
         "ZCL%2FA",
         &"Z".repeat(31),
     ] {
-        assert!(RunnerArm::arm_class(name).is_err(), "{name:?}");
+        assert!(RunnerArm::arm_class(name, PREFIX).is_err(), "{name:?}");
     }
 
-    assert!(RunnerArm::arm_class(&"Z".repeat(30)).is_ok());
+    assert!(RunnerArm::arm_class(&"Z".repeat(30), PREFIX).is_ok());
 }
 
 #[test]
 fn the_arm_of_a_class_is_exclusive_with_the_arm_of_a_runner() {
-    let _class = RunnerArm::arm_class("ZCL_A").unwrap();
+    let _class = RunnerArm::arm_class("ZCL_A", PREFIX).unwrap();
 
     assert!(RunnerArm::arm("YCL_ABAPREACH_RUN_AB12CD34").is_err());
-    assert!(RunnerArm::arm_class("ZCL_B").is_err());
+    assert!(RunnerArm::arm_class("ZCL_B", PREFIX).is_err());
 }
 
 #[test]
 fn a_standard_class_cannot_arm_as_a_runner() {
     assert!(RunnerArm::arm("CL_DEMO_OUTPUT").is_err());
+}
+
+#[test]
+fn a_runner_class_cannot_be_armed_as_a_class_to_run() {
+    // The connection's own prefix and the product default are both refused, whatever the
+    // case, and nothing stays armed after the refusal.
+    for name in [
+        "ZCL_RUNX_AB12CD34",
+        "YCL_ABAPREACH_RUN_AB12CD34",
+        "ZCL_RUNX_",
+        "YCL_ABAPREACH_RUN_",
+    ] {
+        let error = RunnerArm::arm_class(name, PREFIX).unwrap_err();
+
+        assert!(error.contains("temporary runner class"), "{name}: {error}");
+        assert!(!rfc_admits(&classrun(name)), "{name}");
+    }
+
+    // A prefix that is another connection's does not make a plain class a runner.
+    assert!(RunnerArm::arm_class("ZCL_RUN_OTHER", PREFIX).is_ok());
+    // The default prefix is refused even when the connection has its own.
+    assert!(RunnerArm::arm_class("YCL_ABAPREACH_RUN_X", "ZCL_RUNX_").is_err());
 }

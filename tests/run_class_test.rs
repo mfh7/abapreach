@@ -367,7 +367,7 @@ fn the_requests_of_a_simulate_are_pinned() {
     assert!(
         sent[0]
             .1
-            .starts_with("/sap/bc/adt/datapreview/ddic?rowNumber=5&ddicEntityName=T000")
+            .starts_with("/sap/bc/adt/datapreview/ddic?rowNumber=1&ddicEntityName=T000")
     );
     assert_eq!(
         sent[1],
@@ -729,7 +729,7 @@ fn a_productive_client_refuses_every_run_before_the_class_is_read() {
         assert_eq!(exit.code, 1, "{exit:?}");
         assert_eq!(
             exit.stderr,
-            "REJECTED: client 100 is productive (T000 CCCATEGORY=P); run is refused"
+            "REJECTED: client 100 is productive (T000 CCCATEGORY P); nothing was sent"
         );
         // Only the T000 preview was sent: not the class, not a POST.
         assert_eq!(sap.sent().len(), 1);
@@ -1236,4 +1236,58 @@ fn a_dropped_reply_of_the_run_is_unknown_and_never_resent() {
         exit.stderr
     );
     assert_eq!(sap.posts().len(), 1);
+}
+
+#[test]
+fn a_temporary_runner_class_is_never_run_and_nothing_is_opened() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = plan_file(directory.path());
+
+    for name in ["YCL_ABAPREACH_RUN_AB12CD34", "ycl_abapreach_run_ab12cd34"] {
+        for args in [
+            vec!["CLAS", name, "--simulate", "--plan", &plan],
+            vec!["CLAS", name, "--plan", &plan],
+        ] {
+            // No session is scripted: the refusal comes before any connection.
+            let mut sap = Sap::new();
+            let exit = run_with(&mut sap, directory.path(), "", false, &args);
+
+            assert_eq!(exit.code, 2, "{exit:?}");
+            assert!(
+                exit.stderr.starts_with("STOP: ")
+                    && exit
+                        .stderr
+                        .contains("a temporary runner class is not run; delete it (doctor)"),
+                "{}",
+                exit.stderr
+            );
+            assert_eq!(sap.opened, 0);
+            assert!(sap.posts().is_empty());
+        }
+    }
+}
+
+#[test]
+fn a_failed_plan_save_reports_no_passed_simulate() {
+    let directory = tempfile::tempdir().unwrap();
+    let plan = directory
+        .path()
+        .join("missing")
+        .join("plan.json")
+        .display()
+        .to_string();
+    let mut sap = Sap::new().adt_session(reads());
+    let exit = run_with(
+        &mut sap,
+        directory.path(),
+        "",
+        false,
+        &["CLAS", "ZCL_A", "--simulate", "--plan", &plan],
+    );
+
+    assert_eq!(exit.code, 1, "{exit:?}");
+    assert!(exit.stderr.starts_with("ERROR: "), "{}", exit.stderr);
+    assert!(!exit.stdout.contains("SIMULATED_OK"), "{}", exit.stdout);
+    assert!(exit.stdout.is_empty(), "{}", exit.stdout);
+    assert!(sap.posts().is_empty());
 }

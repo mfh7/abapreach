@@ -215,6 +215,51 @@ fn a_run_configuration_with_anything_else_in_it_is_refused() {
 }
 
 #[test]
+fn a_run_configuration_that_changes_the_test_selection_is_refused() {
+    let good = configuration("/sap/bc/adt/oo/classes/zcl_a");
+
+    assert!(admits(&run_with(&good)));
+
+    let cases = [
+        // Tests assigned to the object from other programs would run too.
+        ("assignedTests=\"false\"", "assignedTests=\"true\""),
+        ("sameProgram=\"true\"", "sameProgram=\"false\""),
+        (
+            "appendAssignedTestsPreview=\"true\"",
+            "appendAssignedTestsPreview=\"false\"",
+        ),
+        // Another object set kind changes the selection.
+        (
+            "<objectSet kind=\"inclusive\">",
+            "<objectSet kind=\"exclusive\">",
+        ),
+        ("<objectSet kind=\"inclusive\">", "<objectSet>"),
+        (
+            "<objectSet kind=\"inclusive\">",
+            "<objectSet kind=\"inclusive\" extra=\"x\">",
+        ),
+        // A duration or the URI type left out or changed.
+        ("long=\"true\"", "long=\"false\""),
+        (
+            "<uriType value=\"semantic\"/>",
+            "<uriType value=\"other\"/>",
+        ),
+        // An attribute the command never sends.
+        (
+            "assignedTests=\"false\"",
+            "assignedTests=\"false\" extra=\"x\"",
+        ),
+    ];
+
+    for (from, to) in cases {
+        let body = good.replace(from, to);
+
+        assert_ne!(body, good, "{from}");
+        assert!(!admits(&run_with(&body)), "must be refused: {to}");
+    }
+}
+
+#[test]
 fn the_previews_of_a_batch_and_of_the_client_check_are_admitted() {
     use abapreach::operation::read_table::preview_request;
 

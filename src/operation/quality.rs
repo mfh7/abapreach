@@ -65,9 +65,15 @@ pub(crate) fn attempt(result: Result<Outcome, QualityError>, note: Option<String
     attempt.noted(note)
 }
 
+/// The SELECT of the client role: one preview of `T000`.
+pub fn client_query(client: &str) -> String {
+    format!("SELECT CCCATEGORY FROM T000 WHERE MANDT = '{client}'")
+}
+
 /// Refuses a productive client: `T000-CCCATEGORY = 'P'`. A client that `T000` does not list, or
 /// a role that cannot be read, is refused too: the check fails closed. A lost connection or a
-/// refused logon stay failures that routing understands.
+/// refused logon stay failures that routing understands. The one copy of the rule: `run`,
+/// `activate` and `aunit` all call it.
 pub fn check_client(transport: &mut dyn SadtTransport, client: &str) -> Result<(), QualityError> {
     if client.len() != 3 || !client.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(QualityError::rejected(format!(
@@ -75,8 +81,7 @@ pub fn check_client(transport: &mut dyn SadtTransport, client: &str) -> Result<(
         )));
     }
 
-    let body = format!("SELECT CCCATEGORY FROM T000 WHERE MANDT = '{client}'");
-    let data = match fetch(transport, "T000", &body, 1) {
+    let data = match fetch(transport, "T000", &client_query(client), 1) {
         Ok(data) => data,
         Err(ReadTableError::Failed {
             failure: failure @ (Failure::PreSendConnectivity | Failure::Authorization),

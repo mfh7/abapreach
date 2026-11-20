@@ -78,7 +78,7 @@ can still allow runs, and a connection with `mcp_write: token` still asks the hu
 | :--- | :--- | :--- | :--- |
 | `run` | `off`, `plan`, `direct` | `plan` | `off` refuses `run` and `aunit` on the CLI and in MCP, whatever `mcp_run` says. MCP treats `direct` as `plan`. |
 | `mcp_run` | `off`, `confirm` | `off` | `off` lists neither `abap_run` nor `abap_aunit`, and a call is refused. `confirm` lists both; every call asks the human, whatever `mcp_write` says. |
-| `mcp_run_allow` | list of names | `[]` | The exact class, report and test-object names MCP may run (case ignored, no patterns). `abap_run` runs only a name on the list; `abap_aunit` needs every object of the call on it, including each object a `package` or `tr` resolves to. A name on the list still passes the `Z`/`Y` name rule; MCP has no `--allow-standard`. |
+| `mcp_run_allow` | list of `TYPE:NAME` | `[]` | The exact objects MCP may run, each as `CLAS:NAME`, `PROG:NAME` or `FUGR:NAME` (case ignored, no patterns). An entry covers one type: `CLAS:ZX` does not allow `PROG ZX`. A plain name without a type stops the configuration load with the form to write. `abap_run` runs only an entry of its type and name; `abap_aunit` needs every object of the call on it, including each object a `package` or `tr` resolves to. A name on the list still passes the `Z`/`Y` name rule; MCP has no `--allow-standard`. A temporary runner class (the `runner_prefix` of the connection or `YCL_ABAPREACH_RUN_`) is never run, even when listed. |
 | `mcp_run_snippet` | `off`, `on` | `off` | A snippet runs only with `on` (not available yet). |
 
 The gates apply in this order: `run: off`, then `mcp_run`, then the allow-list. The two tools are
@@ -90,7 +90,9 @@ any of these keys (`unknown field`); they need 0.17.
 `tr`; the result is the one of `aunit`. It checks `mcp_run_allow` once the objects are known: a
 `package` or `tr` is resolved first (reads only), and when any object of the batch is not on the
 list the whole call is refused before the human is asked and before any test runs, naming every
-object that is missing (`not on mcp_run_allow of <conn>: ZCL_B; nothing was run`). The human
+object that is missing (`not on mcp_run_allow of <conn>: CLAS:ZCL_B; nothing was run`). A batch of more than 60 objects is
+refused for the same reason: the confirmation form lists at most 60 and nobody confirms a cut list
+(narrow the `package` or `tr`; the CLI keeps 100). The human
 confirms every call (the object name, or `RUN <n>` for a batch; the form lists every object), there
 is no token, and a client that cannot answer a form is refused. It takes the single in-flight slot
 until the run ends; there is no 55 s answer.

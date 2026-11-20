@@ -529,7 +529,9 @@ To use ABAPReach from an AI assistant, see [MCP server](mcp.md).
 `inactive` lists the inactive objects of the logon user, one line `<ADT type> <name> <user>` each
 (`PROG/P`, `PROG/I`, `CLAS/OC`, `INTF/OI`, `FUGR/F`, `FUGR/FF`, DDIC types, and so on). An include also
 names its main program. Methods and other parts of a class are not listed, only the class. A reply that
-names no user (the flat 7.40 feed) prints `?` as the user.
+names no user (the flat 7.40 feed) prints `?` as the user; the person responsible for the object that
+feed may carry is never read as the owner of the inactive version. An entry that marks an inactive
+deletion ends with ` deleted`.
 
 ```text
 abapreach inactive --conn A4H_001
@@ -552,7 +554,8 @@ abapreach activate PROG/P:ZEXAMPLE CLAS/OC:ZCL_EXAMPLE --conn A4H_001
   `FUGR/F` and every other type stop with the reason; DDIC objects go through the DDIC deploy.
 - Only Z and Y objects of the logon user. The user comes from the inactive list; when the list names none
   (7.40), the author of the inactive version in the version feed decides. An object that is not listed,
-  belongs to someone else or has an unknown owner rejects the whole call before any activation.
+  belongs to someone else or has an unknown owner rejects the whole call before any activation. An
+  entry marked `deleted` is refused with the reason: activating it would complete the deletion.
 - ABAPReach reads `T000` first and refuses a productive client (`CCCATEGORY P`). A client that `T000`
   does not list or that cannot be read is refused too.
 - `--simulate` runs every check above and prints `SIMULATED_OK <token> user <user>` per object.
@@ -582,7 +585,9 @@ goes on. A batch without objects exits 1: an empty gate is not a pass.
   program includes are skipped. `--tr` takes the request and its tasks: `R3TR` programs, classes and
   function groups, and the parts of a class (`LIMU METH`, `CPUB`, `CPRO`, `CPRI`, `CLSD`, `CINC`,
   `CDEF`, `CIMP`), which stand for the class. Other `LIMU` entries (`REPS`, `FUNC`) are not mapped and
-  are counted in a `W:` line. A batch holds at most 100 objects.
+  are counted in a `W:` line. A batch holds at most 100 objects on the CLI. The MCP tool `abap_aunit`
+  refuses a batch of more than 60 objects: its confirmation form lists at most 60, and a run is
+  never confirmed from a cut list.
 
 ## DDIC objects and transaction codes
 
@@ -624,10 +629,20 @@ package. The run executes only when its arguments match the plan file (a mismatc
 exit 2, before any connection) and the live facts still match (otherwise `REJECTED: plan changed
 since simulate (source hash); simulate again`, exit 1). A plan pins the backend it was written on.
 
+The plan binds the **active main source** of the class (`source/main`) and its package, not the local
+class includes (`CCDEF`, `CCIMP`, `CCMAC`) that the main source can call. A local include that changes
+between the simulate and the run does not change the plan, so the run still goes ahead. Simulate
+again after any change to the class, and read the includes before you trust an old plan file. (`run
+PROG` will have the same limit: its plan covers the main program, not its includes.)
+
 Rules before anything is sent:
 
 - Only `Z` and `Y` names run. `--allow-standard` allows a standard class. A namespaced class name
   is refused: its classrun path is not verified.
+- A temporary runner class is never run: a name that starts with the connection's `runner_prefix`
+  or with the default `YCL_ABAPREACH_RUN_` is a `STOP` (`a temporary runner class is not run; delete
+  it (doctor)`). A leftover of a crashed operation carries its own payload; remove it with the
+  commands `doctor` prints.
 - The connection policy `run` decides how: `plan` (the default) needs the two steps above;
   `direct` lets the CLI run without `--plan`; `off` refuses `run` (and `aunit`) on the CLI and in
   MCP. See [MCP server: `mcp_run`](mcp.md#mcp_run) for the MCP opt-in.

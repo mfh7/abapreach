@@ -65,6 +65,10 @@ pub fn execute(
         return stop(message);
     }
 
+    if let Err(message) = args.check_not_runner(&connection.runner_prefix) {
+        return stop(message);
+    }
+
     if let Err(message) = cli_gate(
         &connection.policies,
         &connection.id,
@@ -137,7 +141,11 @@ pub fn execute(
                         .stdout
                         .push_str(&format!("\nplan -> {}", path.display())),
                     Err(message) => {
+                        // No plan was written, so the simulate did not pass: no SIMULATED_OK line
+                        // and no passed status next to exit 1.
                         result.outcome.exit = 1;
+                        result.outcome.status = None;
+                        result.outcome.stdout.clear();
                         result.outcome.stderr = format!("ERROR: {message}");
                     }
                 }

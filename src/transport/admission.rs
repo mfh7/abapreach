@@ -9,7 +9,7 @@ use crate::adt::{
     ActivationBody, ObjectRef, USAGE_REQUEST_XML, classify_activation, parse_object_refs,
 };
 use crate::operation::read_table::validate_preview_body;
-use crate::operation::runner::validate_runner_prefix;
+use crate::operation::runner::{RUNNER_CLASS_REFUSED, is_runner_class, validate_runner_prefix};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::cell::RefCell;
@@ -257,11 +257,17 @@ impl RunnerArm {
     }
 
     /// Arms `name`, an existing class `run CLAS` executes: any upper-case class name that is not
-    /// namespaced, at most 30 characters. Its one classrun POST is admitted like a runner's; no
-    /// other class can be run, and a create that mentions the name stays refused.
-    pub fn arm_class(name: &str) -> Result<Self, String> {
+    /// namespaced, at most 30 characters, and not a temporary runner class (it starts with
+    /// `runner_prefix` or the default prefix: a leftover carries its own payload). Its one
+    /// classrun POST is admitted like a runner's; no other class can be run, and a create that
+    /// mentions the name stays refused.
+    pub fn arm_class(name: &str, runner_prefix: &str) -> Result<Self, String> {
         if !is_class_name(name) {
             return Err("not a class name that can be run".to_owned());
+        }
+
+        if is_runner_class(name, runner_prefix) {
+            return Err(RUNNER_CLASS_REFUSED.to_owned());
         }
 
         Self::arm_checked(name)
@@ -734,7 +740,8 @@ fn is_inactive_user(query: &str) -> bool {
 }
 
 /// The ABAP Unit run configuration the `aunit` command sends: no other element, no text, no
-/// coverage, only harmless tests, and exactly one object of the kinds that have tests (a program,
+/// coverage, only harmless tests, a pinned selection (the object's own tests, every duration,
+/// an inclusive object set), and exactly one object of the kinds that have tests (a program,
 /// a class or a function group). The run executes test code on the server, so this is the one
 /// body of that endpoint that leaves the process.
 fn is_aunit_body(body: &[u8]) -> bool {
@@ -788,6 +795,34 @@ fn is_aunit_body(body: &[u8]) -> bool {
                             return false;
                         }
                     }
+                    // The selection is pinned: the tests of this object and nothing assigned to
+                    // it from elsewhere, every duration, the semantic URI type.
+                    "uriType" if !has_attributes(&element, &[("value", "semantic")]) => {
+                        return false;
+                    }
+                    "testDeterminationStrategy"
+                        if !has_attributes(
+                            &element,
+                            &[
+                                ("sameProgram", "true"),
+                                ("assignedTests", "false"),
+                                ("appendAssignedTestsPreview", "true"),
+                            ],
+                        ) =>
+                    {
+                        return false;
+                    }
+                    "testDurations"
+                        if !has_attributes(
+                            &element,
+                            &[("short", "true"), ("medium", "true"), ("long", "true")],
+                        ) =>
+                    {
+                        return false;
+                    }
+                    "objectSet" if !has_attributes(&element, &[("kind", "inclusive")]) => {
+                        return false;
+                    }
                     "objectReference" => {
                         references += 1;
 
@@ -813,6 +848,33 @@ fn is_aunit_body(body: &[u8]) -> bool {
             Ok(_) | Err(_) => return false,
         }
     }
+}
+
+/// Whether `element` carries exactly the attributes in `expected` (name and value, any order) and
+/// no other. A namespace declaration counts as another attribute.
+fn has_attributes(element: &BytesStart<'_>, expected: &[(&str, &str)]) -> bool {
+    let mut seen = 0;
+
+    for attribute in element.attributes() {
+        let Ok(attribute) = attribute else {
+            return false;
+        };
+        let Ok(value) = attribute.normalized_value(quick_xml::XmlVersion::Implicit1_0) else {
+            return false;
+        };
+        let name = attribute.key.local_name().into_inner();
+
+        if !expected
+            .iter()
+            .any(|(wanted, text)| *wanted == name && *text == value)
+        {
+            return false;
+        }
+
+        seen += 1;
+    }
+
+    seen == expected.len()
 }
 
 /// A program, a class or a function group as the object of an ABAP Unit run.

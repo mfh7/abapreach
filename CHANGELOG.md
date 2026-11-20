@@ -20,7 +20,9 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
 ### Added
 - `inactive [--all]` lists the inactive objects of the logon user (`<ADT type> <name> <user>`, an
   include also names its main program); MCP tool `abap_inactive`. The reply shape of the list is
-  assumed from the ADT format and not yet probed live; `--all` sends `?USERNAME=*`.
+  assumed from the ADT format and not yet probed live; `--all` sends `?USERNAME=*`. An entry marked
+  deleted ends with ` deleted`, and `activate` refuses it. The owner of an entry in the flat 7.40
+  feed comes from the version feed, never from `adtcore:responsible`.
 - `activate [--simulate] TYPE/SUBTYPE:NAME...` activates own inactive Z/Y objects (`PROG/P`,
   `PROG/I`, `CLAS/OC`, `INTF/OI`, `FUGR/FF`), one activation request per object with the worklist
   resend of a transportable class, and proves the result against the inactive list. It refuses a
@@ -30,9 +32,10 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
   tests, every duration) and print `<kind> <level> <prog> <class>-><method>: <text>`; exit 0 only
   without alerts. It refuses a productive client and a policy `run: off`. MCP tool `abap_aunit` sits
   behind the policy `mcp_run: confirm` (default `off`) and `mcp_run_allow`: every object of the call
-  (also each object a `--package` or `--tr` batch resolves to) must be on the list, otherwise the
-  whole call is refused before any test runs, naming the missing objects. The human confirms every
-  call. The reply shape of the run is assumed from the ADT format and not yet probed live.
+  (also each object a `--package` or `--tr` batch resolves to) must be on the list as `TYPE:NAME`,
+  otherwise the whole call is refused before any test runs, naming the missing objects. A batch of
+  more than 60 objects is refused (the confirmation form lists 60; the CLI keeps 100). The human
+  confirms every call. The reply shape of the run is assumed from the ADT format and not yet probed live.
 - RFC admission: the ABAP Unit run configuration (harmless tests, one object) and
   `inactiveobjects?USERNAME=`.
 - `run CLAS <class>` (0.17.0): executes an existing class that implements `IF_OO_ADT_CLASSRUN`
@@ -44,11 +47,15 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
   sent once from a new session; `--timeout` (default 600, at most 3600) bounds it over ADT HTTP
   and is refused on RFC. Outcomes: reply and exit 0, `RUN_FAILED: runtime error; see ST22
   (dumps)`, `RUN_UNKNOWN: the reply was lost; the code may have run`, `REJECTED`, `STOP`. The
-  first Ctrl-C waits for the reply, the second leaves with exit 130. `run PROG` and `run SNIPPET`
+  first Ctrl-C prints `I: run in progress on the server; waiting for the reply (Ctrl-C again to
+  leave)` on stderr and waits for the reply, the second leaves with exit 130. A temporary runner
+  class (the `runner_prefix` of the connection or `YCL_ABAPREACH_RUN_`) is never run. The plan binds
+  the class's main source, not its local class includes. `run PROG` and `run SNIPPET`
   parse their arguments (`--param`, `--variant`, `--alv`, `--alv-columns`, `--max-output`) and
   apply the name rule, the policy and the plan binding, then stop with `not implemented yet`.
 - Policy keys `run` (`off`, `plan`, `direct`; default `plan`), `mcp_run` (`off`, `confirm`; default
-  `off`), `mcp_run_allow` (exact names) and `mcp_run_snippet` (`off`, `on`; default `off`). `run:
+  `off`), `mcp_run_allow` (exact `TYPE:NAME` entries: `CLAS:`, `PROG:` or `FUGR:`; a plain name stops
+  the configuration load) and `mcp_run_snippet` (`off`, `on`; default `off`). `run:
   off` also refuses `run` and `aunit` on the CLI and in MCP. A 0.16 binary stops on a configuration that holds them.
 - MCP tool `abap_run` (class only), behind `mcp_run` and `mcp_run_allow`; it and `abap_aunit` are
   listed only for a connection with `mcp_run: confirm` and `run` not `off`. It always asks the
