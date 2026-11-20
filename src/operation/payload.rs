@@ -357,7 +357,7 @@ fn run_param(name: &str, value: &str) -> Result<String, String> {
         ));
     }
 
-    if value.chars().count() > MAX_PARAM_VALUE || value.chars().any(char::is_control) {
+    if value.encode_utf16().count() > MAX_PARAM_VALUE || value.chars().any(char::is_control) {
         return Err(format!(
             "parameter {name}: the value has more than {MAX_PARAM_VALUE} characters or a control character"
         ));

@@ -540,7 +540,14 @@ pub fn map_run(run: &RunnerRun, nonce: &Nonce, mode: RunMode, columns: AlvColumn
 
     stderr.extend(run.leftover_text());
 
-    let exit = run.exit_code(posted_exit);
+    // As for CLAS: a Ctrl-C turns only a successful reply into 130; a reply that failed keeps
+    // its own exit (RUN_FAILED, RUN_UNKNOWN, SNIPPET_ERROR, REJECTED).
+    let exit = match run.exit_code(posted_exit) {
+        INTERRUPT_EXIT_CODE if matches!(run.end, RunnerEnd::Posted(_)) && posted_exit != 0 => {
+            posted_exit
+        }
+        code => code,
+    };
 
     RunResult {
         failure,

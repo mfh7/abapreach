@@ -420,7 +420,16 @@ pub(super) fn run_summary(
         lines.push(format!("active source hash: {}", facts.hash));
     }
 
+    // A value the form cannot show as it is is not confirmed: an invisible character would
+    // reach the report unseen. A variant is ASCII already (`RunArgs::parse`).
     for (name, value) in &args.params {
+        if sanitize(value, usize::MAX) != *value {
+            return Err(format!(
+                "parameter {name}: the value has control or invisible characters, which the \
+                 confirmation form cannot show; remove them"
+            ));
+        }
+
         lines.push(format!(
             "parameter {name} = {}",
             sanitize(value, FIELD_LINE)
@@ -576,6 +585,49 @@ mod tests {
             hash: "abc".to_owned(),
             subc: None,
         }
+    }
+
+    #[test]
+    fn a_parameter_the_form_cannot_show_is_refused() {
+        let connection = Connection::test_insecure();
+        let prog = |params: &[String], variant: Option<&str>| {
+            RunArgs::parse(
+                &RawArgs {
+                    kind: RunKind::Prog,
+                    target: "ZREPORT",
+                    params,
+                    variant,
+                    alv: None,
+                    alv_columns: None,
+                    max_output: None,
+                },
+                None,
+            )
+            .unwrap()
+        };
+        let hidden = ["P_A=A\u{200b}B".to_owned()];
+        let error = run_summary(
+            &connection,
+            &prog(&hidden, None),
+            &facts(),
+            BackendKind::AdtHttp,
+            600,
+        )
+        .unwrap_err();
+
+        assert!(error.starts_with("parameter P_A:"), "{error}");
+        assert!(error.contains("control or invisible characters"), "{error}");
+
+        assert!(
+            run_summary(
+                &connection,
+                &prog(&["P_A=AB".to_owned()], Some("V1")),
+                &facts(),
+                BackendKind::AdtHttp,
+                600,
+            )
+            .is_ok()
+        );
     }
 
     fn snippet(text: &str) -> RunArgs {

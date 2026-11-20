@@ -1145,6 +1145,30 @@ fn the_first_ctrl_c_waits_and_the_second_leaves_the_class_with_its_cleanup_comma
     assert!(rig.factory.cancel.run_leftover().is_none());
 }
 
+/// As for CLAS, one Ctrl-C turns only a successful run into 130: a failed one keeps exit 1.
+#[test]
+fn a_ctrl_c_during_a_failed_report_keeps_exit_1() {
+    let mut rig = rig();
+
+    simulated_report(&mut rig);
+    rig.front().interrupts = 1;
+    rig.answer(
+        "RUN_PROG",
+        vec![msg("E", "runtime error COMPUTE_INT_ZERODIVIDE")],
+        "RUN_FAILED",
+    );
+
+    let plan = rig.plan();
+    let failed = rig.run(
+        "",
+        false,
+        &["PROG", "zreport", "--param", "p_a=7", "--plan", &plan],
+    );
+
+    assert_eq!(failed.code, 1, "{}", failed.stderr);
+    assert!(failed.stderr.contains("RUN_FAILED"), "{}", failed.stderr);
+}
+
 // ---- run SNIPPET ------------------------------------------------------------------------------------
 
 #[test]
@@ -1310,6 +1334,63 @@ fn a_syntax_error_in_the_snippet_names_its_own_line_and_nothing_runs() {
     );
     assert!(!frame.stderr.contains("SNIPPET_ERROR"), "{}", frame.stderr);
     assert_eq!(rig.classes(), 0);
+}
+
+/// SAP reports an unclosed block (live HD1: `Incorrect nesting: Before the statement
+/// "ENDMETHOD", the control structure introduced by "IF" must be closed`) at the ENDMETHOD right
+/// after the snippet; the row after that stays a template bug.
+#[test]
+fn an_unclosed_block_is_a_snippet_error_on_its_last_line() {
+    let mut rig = rig();
+    let file = rig.snippet_file(SNIPPET);
+    let plan = rig.plan();
+
+    rig.run(
+        "",
+        false,
+        &["SNIPPET", &file, "--simulate", "--plan", &plan],
+    );
+
+    let made = generate_snippet(
+        "YTEST_ABAPREACH_RUN_AAAAAAAA",
+        &["QUJD".to_owned()],
+        SNIPPET,
+        OutType::Internal,
+    )
+    .unwrap();
+    let endmethod = made.first_line + made.line_count;
+
+    rig.front().activation_error = Some((
+        u32::try_from(endmethod).unwrap(),
+        "Incorrect nesting: the control structure introduced by IF must be closed".to_owned(),
+    ));
+
+    let exit = rig.run("", false, &["SNIPPET", &file, "--plan", &plan]);
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .contains("SNIPPET_ERROR: line 3: Incorrect nesting"),
+        "{}",
+        exit.stderr
+    );
+    assert!(!exit.stderr.contains("please report"), "{}", exit.stderr);
+    assert_eq!(rig.posts(), 0);
+    assert_eq!(rig.classes(), 0);
+
+    rig.front().activation_error = Some((
+        u32::try_from(endmethod + 1).unwrap(),
+        "frame broken".to_owned(),
+    ));
+
+    let frame = rig.run("", false, &["SNIPPET", &file, "--plan", &plan]);
+
+    assert_eq!(frame.code, 1, "{}", frame.stderr);
+    assert!(
+        frame.stderr.contains("please report this as a bug"),
+        "{}",
+        frame.stderr
+    );
 }
 
 #[test]

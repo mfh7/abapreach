@@ -269,7 +269,7 @@ fn parameters(given: &[String]) -> Result<Vec<(String, String)>, String> {
             ));
         }
 
-        if value.chars().count() > PARAM_VALUE_MAX {
+        if value.encode_utf16().count() > PARAM_VALUE_MAX {
             return Err(format!(
                 "parameter {name}: the value has more than {PARAM_VALUE_MAX} characters"
             ));
@@ -606,6 +606,18 @@ mod tests {
         assert!(check("=1").contains("parameter name"));
         assert!(check("A-B=1").contains("parameter name"));
         assert!(check(&format!("A={}", "x".repeat(46))).contains("more than 45"));
+        // RSPARAMS-LOW counts UTF-16 units: 44 + a surrogate pair is 46.
+        assert!(check(&format!("A={}\u{1f600}", "x".repeat(44))).contains("more than 45"));
+        assert!(
+            RunArgs::parse(
+                &RawArgs {
+                    params: &[format!("A={}\u{1f600}", "x".repeat(43))],
+                    ..raw(RunKind::Prog, "ZREPORT")
+                },
+                None,
+            )
+            .is_ok()
+        );
         assert!(check("A=x\ny").contains("control character"));
 
         let twice = ["A=1".to_owned(), "a=2".to_owned()];

@@ -960,14 +960,16 @@ impl Cycle<'_> {
             return Err(RunnerEnd::Stop(self.needs_classrun()));
         }
 
+        // An unclosed block (IF, LOOP, TRY ...) is reported at the ENDMETHOD right after the
+        // snippet, row `first + count`: that error belongs to the last snippet line.
         if let Some((first, count)) = self.extras.snippet
             && let Some(message) = messages.iter().find(|message| {
                 let row = message.row as usize;
 
-                message.is_error() && row >= first && row < first + count
+                message.is_error() && row >= first && row <= first + count
             })
         {
-            let line = message.row as usize - first + 1;
+            let line = (message.row as usize - first + 1).min(count.max(1));
 
             return Err(RunnerEnd::Stop(format!(
                 "{SNIPPET_ERROR_PREFIX}line {line}: {}",

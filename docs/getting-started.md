@@ -801,7 +801,8 @@ messages of the runner and the runner name.
 Ctrl-C while the run is in flight: the first one prints `I: run in progress on the server; waiting
 for the reply (Ctrl-C again to leave)` for a class, and `I: run in progress on the server; waiting
 for the reply to clean up (Ctrl-C again to leave the runner class behind)` for a report or a
-snippet, and waits for the reply, which is printed; the exit code is then 130. A second Ctrl-C
+snippet, and waits for the reply, which is printed; the exit code is then 130 when the run
+succeeded, and the exit of the outcome otherwise (1 for `RUN_FAILED` and `RUN_UNKNOWN`). A second Ctrl-C
 leaves at once (exit 130); the code keeps running on the server, and for a report or snippet the
 `RUNNER_LEFTOVER` lines on the stderr name the runner class and the commands that delete it (it also
 shows in `doctor`).
