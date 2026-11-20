@@ -128,6 +128,18 @@ Deploy of `TRAN` does not exist: a transaction code is created and deleted, not 
 design, as for the write commands). The SQL path keeps the `read-table` policies (denied tables,
 row limit).
 
+### Outside the 1.0.0 scope, timing to be decided
+
+Features ABAP FS offers that are not part of 1.0.0. Whether each comes before or after 1.0.0 is
+decided later.
+
+| Feature | Note |
+| :--- | :--- |
+| ABAP debugger (breakpoints, stepping, variables) | ADT debugger API |
+| Transport view (browse, compare, release requests) | release stays a user action today |
+| Blame (who changed each line, when, under which request) | needs version history (`versions`, planned for 1.0.0) |
+| Compare one object between two systems | needs two connections in one command |
+
 ### Setup
 
 | Feature | Reference command | Path |
