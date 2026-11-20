@@ -21,35 +21,35 @@ const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 const PINNED: [(&str, &str); 8] = [
     (
         "CORE",
-        "915b36335d0300f85b763c1e4727ad05482d4d5c41d49a321b5982d479e4d160",
+        "c46de5889e8dad7a4270b711f64ef2329e32dee85f8ee2e352ffa9e8c076cd2b",
     ),
     (
         "TRAN",
-        "046cb898550184921f0768b429296155bc73b67d1ba05303f48e524adc8faaa5",
+        "c1bac263713b53f50ace5e500d4b0b4ecac0fc1c7e5f255bbf021d91888379f9",
     ),
     (
         "DTEL",
-        "a7142089b62147058b8c3bf7a9b3cc342462b61f5fba921f68a6d6b9c76820d0",
+        "3c7f649a2a679b37678f51005e117130da31617268f53072f184bbdaa55c2ae9",
     ),
     (
         "DOMA",
-        "a7142089b62147058b8c3bf7a9b3cc342462b61f5fba921f68a6d6b9c76820d0",
+        "3c7f649a2a679b37678f51005e117130da31617268f53072f184bbdaa55c2ae9",
     ),
     (
         "TABL",
-        "a7142089b62147058b8c3bf7a9b3cc342462b61f5fba921f68a6d6b9c76820d0",
+        "3c7f649a2a679b37678f51005e117130da31617268f53072f184bbdaa55c2ae9",
     ),
     (
         "TTYP",
-        "a7142089b62147058b8c3bf7a9b3cc342462b61f5fba921f68a6d6b9c76820d0",
+        "3c7f649a2a679b37678f51005e117130da31617268f53072f184bbdaa55c2ae9",
     ),
     (
         "RUN_PROG",
-        "40398d39d541afd3882a8c67ed9c48a07ec52a45b7110cb66f3ad7edc7cc4e55",
+        "7d8acaa3e1f9ce4872eb0dae019de921645f58e020e6b03495ca49939cb5b601",
     ),
     (
         "SNIPPET",
-        "2c0476a42b615fca1ca50e506e8d5bcb372fd8dfbd066502361efa72118e318b",
+        "fe6c7da81eaf2435d16d8a701fd7bfb79b8a3cc86a522cd3b237aa03fe4c6da9",
     ),
 ];
 
@@ -58,35 +58,35 @@ const PINNED: [(&str, &str); 8] = [
 const GENERATED: [(&str, &str); 8] = [
     (
         "CORE",
-        "16e4009e6c583a12ece5d555e41d704131e5bded8f9ede071fa68a452ae293ce",
+        "ef83dd89a1a1d9bdb231f285ac537bd5e3081900ac29fb576ab59df665432dd5",
     ),
     (
         "TRAN",
-        "4333f26447e3a49173681eb76e35c8fe72061c1e9d37e05cf4e91345ff6e9a7f",
+        "81e6fb90b96fdff13282b894fd95624712a08939102e6f74113fefb801797995",
     ),
     (
         "DTEL",
-        "4d28ac0d55f39a1aab54fe4127cc3079c2dc40e9cd1729434e75c8eb942a901e",
+        "691514f0848d7334a08d42f406f2a6570aabc4e6a0920b1a9be85a2be8c4fe93",
     ),
     (
         "DOMA",
-        "4d28ac0d55f39a1aab54fe4127cc3079c2dc40e9cd1729434e75c8eb942a901e",
+        "691514f0848d7334a08d42f406f2a6570aabc4e6a0920b1a9be85a2be8c4fe93",
     ),
     (
         "TABL",
-        "4d28ac0d55f39a1aab54fe4127cc3079c2dc40e9cd1729434e75c8eb942a901e",
+        "691514f0848d7334a08d42f406f2a6570aabc4e6a0920b1a9be85a2be8c4fe93",
     ),
     (
         "TTYP",
-        "4d28ac0d55f39a1aab54fe4127cc3079c2dc40e9cd1729434e75c8eb942a901e",
+        "691514f0848d7334a08d42f406f2a6570aabc4e6a0920b1a9be85a2be8c4fe93",
     ),
     (
         "RUN_PROG",
-        "569d4eeecc486d3055b153c29ee1e83abd13ef7149c4c380bc9d62a160993e28",
+        "4118a7015c1f041eccd463522dde72b2cb04a6ee95bbff58c1651c62b6088847",
     ),
     (
         "SNIPPET",
-        "5ec2a57ac7f401d4b73325915e830ddc967db0ecbbf920c4907ecbd1d1bd7ee9",
+        "e17b8c2eb438cffa84bafef955a31eb6744c35ff3778bfa2bc91f46b3e80d1cd",
     ),
 ];
 

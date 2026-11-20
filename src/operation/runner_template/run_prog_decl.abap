@@ -30,7 +30,9 @@
       IMPORTING
         it_source      TYPE string_table
       RETURNING
-        VALUE(rv_hash) TYPE string.
+        VALUE(rv_hash) TYPE string
+      RAISING
+        cx_abap_message_digest.
 
     METHODS selection_names
       RETURNING

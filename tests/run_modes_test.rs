@@ -88,8 +88,8 @@ fn the_run_prog_template_passes_with_exactly_the_added_names_and_no_other_mode_d
 }
 
 const SUBMIT: &str =
-    "SUBMIT (mv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.";
-const SUBMIT_VARIANT: &str = "SUBMIT (mv_report) USING SELECTION-SET mv_variant WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.";
+    "SUBMIT (lv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.";
+const SUBMIT_VARIANT: &str = "SUBMIT (lv_report) USING SELECTION-SET lv_variant WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.";
 
 #[test]
 fn every_mode_but_run_prog_refuses_submit_even_in_the_generated_shape() {
@@ -125,16 +125,19 @@ fn the_generated_shapes_pass_and_every_other_submit_is_refused_in_run_prog_mode(
         // a literal report, another variable, a missing or extra addition, a second statement
         "SUBMIT zreport WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.",
         "SUBMIT ('ZREPORT') WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.",
+        "SUBMIT (mv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.",
+        "SUBMIT (lv_report) USING SELECTION-SET mv_variant WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.",
+        "SUBMIT (lv_report) USING SELECTION-SET lv_other WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.",
         "SUBMIT (mv_name) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.",
-        "SUBMIT (mv_report) WITH SELECTION-TABLE lt_other EXPORTING LIST TO MEMORY AND RETURN.",
-        "SUBMIT (mv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY.",
-        "SUBMIT (mv_report) WITH SELECTION-TABLE mt_sel AND RETURN.",
-        "SUBMIT (mv_report) EXPORTING LIST TO MEMORY AND RETURN.",
-        "SUBMIT (mv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN VIA JOB lv_job NUMBER lv_n.",
-        "SUBMIT (mv_report) USING SELECTION-SET `V1` WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.",
-        "SUBMIT (mv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN",
-        "SUBMIT (mv_report) WITH p_a = 1 EXPORTING LIST TO MEMORY AND RETURN.",
-        "submit (mv_report) with selection-table mt_sel exporting list to memory and return via selection-screen.",
+        "SUBMIT (lv_report) WITH SELECTION-TABLE lt_other EXPORTING LIST TO MEMORY AND RETURN.",
+        "SUBMIT (lv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY.",
+        "SUBMIT (lv_report) WITH SELECTION-TABLE mt_sel AND RETURN.",
+        "SUBMIT (lv_report) EXPORTING LIST TO MEMORY AND RETURN.",
+        "SUBMIT (lv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN VIA JOB lv_job NUMBER lv_n.",
+        "SUBMIT (lv_report) USING SELECTION-SET `V1` WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.",
+        "SUBMIT (lv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN",
+        "SUBMIT (lv_report) WITH p_a = 1 EXPORTING LIST TO MEMORY AND RETURN.",
+        "submit (lv_report) with selection-table mt_sel exporting list to memory and return via selection-screen.",
     ] {
         let found = rejected(code, ScanMode::RunProg);
 
@@ -162,6 +165,7 @@ fn the_added_names_exist_in_run_prog_mode_only() {
         "CALL FUNCTION 'RS_REPORTSELECTIONS_INFO'.",
         "cl_salv_bs_runtime_info=>clear_all( ).",
         "CATCH cx_salv_bs_sc_runtime_info.",
+        "CATCH cx_abap_message_digest.",
     ] {
         scan_as(code, None, ScanMode::RunProg).unwrap();
         assert!(!rejected(code, ScanMode::Strict).is_empty(), "{code}");
@@ -271,18 +275,18 @@ fn run_prog_checks_the_report_in_the_order_of_sa38_and_submits_nothing_before_th
         last = at(step);
     }
 
-    assert!(at("IF check_report( ) = abap_false.") < at("SUBMIT (mv_report) WITH"));
-    assert!(at("IF build_selection( ) = abap_false.") < at("SUBMIT (mv_report) WITH"));
+    assert!(at("IF check_report( ) = abap_false.") < at("SUBMIT (lv_report) WITH"));
+    assert!(at("IF build_selection( ) = abap_false.") < at("SUBMIT (lv_report) WITH"));
     // The ALV capture is set before the report runs and cleared after it, also after an exception.
     assert!(
         at(
             "cl_salv_bs_runtime_info=>set( display = abap_false metadata = abap_true data = abap_true )."
-        ) < at("SUBMIT (mv_report) WITH")
+        ) < at("SUBMIT (lv_report) WITH")
     );
     assert!(run.contains("CLEANUP.\n            cl_salv_bs_runtime_info=>clear_all( )."));
     assert!(
         at("ENDTRY.\n        cl_salv_bs_runtime_info=>clear_all( ).")
-            > at("SUBMIT (mv_report) USING")
+            > at("SUBMIT (lv_report) USING")
     );
     // An amount and a quantity are written with their own reference, as SA38 does.
     assert!(

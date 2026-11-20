@@ -61,8 +61,13 @@ pub const RUN_PROG_FUNCTIONS: &[&str] = &[
     "RS_REPORTSELECTIONS_INFO",
 ];
 
-/// Classes only the `RUN_PROG` template may name: the capture of an ALV grid.
-pub const RUN_PROG_CLASSES: &[&str] = &["CL_SALV_BS_RUNTIME_INFO", "CX_SALV_BS_SC_RUNTIME_INFO"];
+/// Classes only the `RUN_PROG` template may name: the capture of an ALV grid, and the exception of
+/// the source hash.
+pub const RUN_PROG_CLASSES: &[&str] = &[
+    "CL_SALV_BS_RUNTIME_INFO",
+    "CX_ABAP_MESSAGE_DIGEST",
+    "CX_SALV_BS_SC_RUNTIME_INFO",
+];
 
 /// The two statements the `RUN_PROG` template may hold: the generated `SUBMIT`, with no variant
 /// and with one. Every token of the statement is fixed, so no value reaches it except through the
@@ -71,7 +76,7 @@ const SUBMIT_SHAPES: [&[&str]; 2] = [
     &[
         "submit",
         "(",
-        "mv_report",
+        "lv_report",
         ")",
         "with",
         "selection",
@@ -88,13 +93,13 @@ const SUBMIT_SHAPES: [&[&str]; 2] = [
     &[
         "submit",
         "(",
-        "mv_report",
+        "lv_report",
         ")",
         "using",
         "selection",
         "-",
         "set",
-        "mv_variant",
+        "lv_variant",
         "with",
         "selection",
         "-",

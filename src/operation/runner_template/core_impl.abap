@@ -357,7 +357,7 @@
       reject( `The run payload is not valid` ).
       RETURN.
     ENDIF.
-    mv_budget = CONV i( value_of( `MAXBYTES` ) ).
+    mv_budget = value_of( `MAXBYTES` ).
     IF mv_budget < 1 OR mv_budget > 7340032.
       reject( `The output limit is not valid` ).
       RETURN.

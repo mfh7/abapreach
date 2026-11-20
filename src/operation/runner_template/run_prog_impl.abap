@@ -22,11 +22,14 @@
         IF mv_alv = `on`.
           cl_salv_bs_runtime_info=>set( display = abap_false metadata = abap_true data = abap_true ).
         ENDIF.
+        " SUBMIT takes a character-like name, so the string values are converted first.
+        DATA(lv_report) = CONV progname( mv_report ).
+        DATA(lv_variant) = CONV raldb_vari( mv_variant ).
         TRY.
             IF mv_variant IS INITIAL.
-              SUBMIT (mv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.
+              SUBMIT (lv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.
             ELSE.
-              SUBMIT (mv_report) USING SELECTION-SET mv_variant WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.
+              SUBMIT (lv_report) USING SELECTION-SET lv_variant WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN.
             ENDIF.
             capture_alv( ).
           CLEANUP.
@@ -48,6 +51,9 @@
     " user may submit it, and its active source is the one the simulate bound.
     DATA:
       lt_source TYPE string_table.
+
+    DATA:
+      lv_hash TYPE string.
 
     DATA(lv_name) = CONV progname( mv_report ).
     SELECT SINGLE subc, secu FROM trdir WHERE name = @lv_name INTO @DATA(ls_dir).
@@ -71,7 +77,13 @@
       reject( |not authorized to submit report { mv_report } (S_PROGRAM)| ).
       RETURN.
     ENDIF.
-    IF source_hash( lt_source ) <> mv_base.
+    TRY.
+        lv_hash = source_hash( lt_source ).
+      CATCH cx_abap_message_digest.
+        reject( `report source hash could not be computed` ).
+        RETURN.
+    ENDTRY.
+    IF lv_hash <> mv_base.
       reject( `report changed since the simulate` ).
       RETURN.
     ENDIF.
@@ -419,8 +431,8 @@
   METHOD print_list.
     " The list the report wrote to memory, as text lines. The memory is always freed.
     DATA:
-      lt_list TYPE STANDARD TABLE OF abaplist WITH DEFAULT KEY,
-      lt_asci TYPE STANDARD TABLE OF listzeile WITH DEFAULT KEY.
+      lt_list  TYPE STANDARD TABLE OF abaplist WITH DEFAULT KEY,
+      lt_lines TYPE list_string_table.
 
     CALL FUNCTION 'LIST_FROM_MEMORY'
       TABLES
@@ -432,21 +444,17 @@
       RETURN.
     ENDIF.
     CALL FUNCTION 'LIST_TO_ASCI'
+      IMPORTING
+        list_string_ascii  = lt_lines
       TABLES
-        listasci           = lt_asci
         listobject         = lt_list
       EXCEPTIONS
         empty_list         = 1
         list_index_invalid = 2
         OTHERS             = 3.
     IF sy-subrc = 0.
-      LOOP AT lt_asci ASSIGNING FIELD-SYMBOL(<ls_line>).
-        IF cl_abap_typedescr=>describe_by_data( <ls_line> )->kind = cl_abap_typedescr=>kind_struct.
-          ASSIGN COMPONENT 1 OF STRUCTURE <ls_line> TO FIELD-SYMBOL(<lv_text>).
-          data_line( |{ <lv_text> }| ).
-        ELSE.
-          data_line( |{ <ls_line> }| ).
-        ENDIF.
+      LOOP AT lt_lines INTO DATA(lv_line).
+        data_line( lv_line ).
       ENDLOOP.
     ENDIF.
     CALL FUNCTION 'LIST_FREE_MEMORY'

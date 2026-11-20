@@ -578,7 +578,7 @@ fn a_report_simulates_then_runs_and_prints_its_grid_and_its_list() {
     let source = rig.sap.borrow().posted.last().unwrap().clone();
 
     assert!(source.contains(
-        "SUBMIT (mv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN."
+        "SUBMIT (lv_report) WITH SELECTION-TABLE mt_sel EXPORTING LIST TO MEMORY AND RETURN."
     ));
     assert!(
         !source.contains("zreport"),
