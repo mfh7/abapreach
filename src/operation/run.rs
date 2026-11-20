@@ -1,7 +1,7 @@
 //! `run CLAS`: executes an existing class that implements `IF_OO_ADT_CLASSRUN` with one classrun
 //! `POST`, from a new session, and prints the reply as is.
 //!
-//! A `run` is not a dry run: what the class writes stays written. The simulate reads the facts a
+//! A `run` is not a dry run: what the code writes stays written. The simulate reads the facts a
 //! plan binds (the class exists and is active, it implements the interface, its package, author
 //! and active source hash) and refuses a productive client; it executes nothing. The `POST` is
 //! sent once and never repeated, on any transport.
@@ -37,7 +37,7 @@ pub const WAIT_TEXT: &str =
     "I: run in progress on the server; waiting for the reply (Ctrl-C again to leave)";
 /// Printed with every outcome that is not a dry run.
 pub const NOT_A_DRY_RUN: &str =
-    "W: run is not a dry run: data the class writes stays written (--simulate executes nothing)";
+    "W: run is not a dry run: data the code writes stays written (--simulate executes nothing)";
 pub(crate) const RUN_FAILED: &str = "RUN_FAILED: runtime error; see ST22 (dumps)";
 pub(crate) const RUN_UNKNOWN: &str = "RUN_UNKNOWN: the reply was lost; the code may have run";
 const MESSAGE_LIMIT: usize = 200;
