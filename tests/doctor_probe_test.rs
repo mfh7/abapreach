@@ -157,8 +157,36 @@ fn preflight_replies(editflag: &str) -> Vec<Result<Response, TransportError>> {
     ]
 }
 
+fn out_type_reply(found: &str) -> Result<Response, TransportError> {
+    rows(&[
+        ("CLSNAME", &[Some("IF_OO_ADT_CLASSRUN")]),
+        ("CMPNAME", &[Some("MAIN")]),
+        ("SCONAME", &[Some("OUT")]),
+        ("TYPE", &[Some(found)]),
+    ])
+}
+
+fn directory_reply(names: &[&str]) -> Result<Response, TransportError> {
+    let pgmid: Vec<Option<&str>> = names.iter().map(|_| Some("R3TR")).collect();
+    let object: Vec<Option<&str>> = names.iter().map(|_| Some("CLAS")).collect();
+    let name: Vec<Option<&str>> = names.iter().map(|name| Some(*name)).collect();
+
+    rows(&[
+        ("PGMID", &pgmid[..]),
+        ("OBJECT", &object[..]),
+        ("OBJ_NAME", &name[..]),
+    ])
+}
+
+fn class_rows_reply(names: &[&str]) -> Result<Response, TransportError> {
+    let name: Vec<Option<&str>> = names.iter().map(|name| Some(*name)).collect();
+
+    rows(&[("CLSNAME", &name[..])])
+}
+
 /// The replies of the runner reads after the discovery: the interface preview, the leftover
-/// search, one metadata read per listed class, and the two preflight previews.
+/// search, one metadata read per listed class, the two preflight previews, and the preview of the
+/// type of the classrun `OUT` parameter.
 fn runner_replies(
     classrun: Result<Response, TransportError>,
     search: Result<Response, TransportError>,
@@ -168,6 +196,10 @@ fn runner_replies(
 
     replies.extend(metadata);
     replies.extend(preflight_replies("X"));
+    replies.push(out_type_reply("IF_OO_ADT_INTRNL_CLASSRUN"));
+    // The directory rows of the runner prefix, then its class rows.
+    replies.push(directory_reply(&[]));
+    replies.push(class_rows_reply(&[]));
 
     replies
 }
@@ -350,6 +382,7 @@ fn doctor_probes_both_backends_with_one_logon_each() {
             "RUNNER post transport: http",
             "RUNNER leftovers: none",
             PREFLIGHT_LINE,
+            "RUNNER out type: IF_OO_ADT_INTRNL_CLASSRUN",
             "RUNNER authorization: not probed",
             "capability read PROG: ADT HTTP, RFC SADT",
             "capability deploy PROG: ADT HTTP, RFC SADT",
@@ -371,9 +404,9 @@ fn doctor_probes_both_backends_with_one_logon_each() {
 
     let transport = cell.borrow();
 
-    // The discovery, then the interface preview, the leftover search and two preflight previews
-    // on the same session.
-    assert_eq!(transport.calls.len(), 5);
+    // The discovery, then the interface preview, the leftover search, two preflight previews, the
+    // `OUT` type preview and the two orphan previews on the same session.
+    assert_eq!(transport.calls.len(), 8);
     assert_eq!(transport.calls[0].method, "GET");
     assert_eq!(transport.calls[0].uri, DISCOVERY_URI);
     assert_eq!(transport.closes, 1);
@@ -461,6 +494,7 @@ fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
             "RUNNER post transport: sadt",
             "RUNNER leftovers: none",
             PREFLIGHT_LINE,
+            "RUNNER out type: IF_OO_ADT_INTRNL_CLASSRUN",
             "RUNNER authorization: not probed",
             "capability read PROG: RFC SADT",
             "capability deploy PROG: RFC SADT",
@@ -1445,6 +1479,141 @@ fn an_unavailable_classrun_handler_is_reported_with_its_reason() {
 }
 
 #[test]
+fn the_doctor_reports_the_type_of_the_classrun_out_parameter() {
+    for found in ["IF_OO_ADT_INTRNL_CLASSRUN", "IF_OO_ADT_CLASSRUN_OUT"] {
+        let mut replies = runner_replies(classrun_found(), search_reply(&[]), Vec::new());
+
+        replies[2 + 2] = out_type_reply(found);
+
+        let (exit, _) = adt_doctor(replies);
+
+        assert_eq!(
+            runner_line(&exit, "RUNNER out type"),
+            format!("RUNNER out type: {found}")
+        );
+    }
+}
+
+#[test]
+fn a_directory_row_without_a_class_is_an_orphan_and_a_row_with_a_class_is_not() {
+    let (live, orphan_a, orphan_b) = (
+        "YCL_ABAPREACH_RUN_AB12CD34",
+        "YCL_ABAPREACH_RUN_PJO2GANH",
+        "YCL_ABAPREACH_RUN_ZZ99YY88",
+    );
+    let mut replies = runner_replies(classrun_found(), search_reply(&[]), Vec::new());
+    let last = replies.len();
+
+    replies[last - 2] = directory_reply(&[live, orphan_a, orphan_b]);
+    replies[last - 1] = class_rows_reply(&[live]);
+
+    let (exit, cell) = adt_doctor(replies);
+    let orphans: Vec<&str> = exit
+        .stdout
+        .lines()
+        .filter(|line| line.starts_with("RUNNER orphan: "))
+        .collect();
+
+    assert_eq!(
+        orphans,
+        [
+            format!("RUNNER orphan: {orphan_a}"),
+            format!("RUNNER orphan: {orphan_b}")
+        ]
+    );
+    assert_eq!(exit.code, 0);
+
+    let transport = cell.borrow();
+    let bodies: Vec<String> = transport
+        .calls
+        .iter()
+        .filter(|call| call.uri.contains("datapreview"))
+        .map(|call| String::from_utf8_lossy(&call.body).into_owned())
+        .collect();
+
+    assert!(
+        bodies.iter().any(|body| body
+            == "SELECT PGMID, OBJECT, OBJ_NAME FROM TADIR WHERE OBJ_NAME LIKE 'YCL_ABAPREACH_RUN_%'"),
+        "{bodies:?}"
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body
+                == "SELECT CLSNAME FROM SEOCLASS WHERE CLSNAME LIKE 'YCL_ABAPREACH_RUN_%'"),
+        "{bodies:?}"
+    );
+}
+
+#[test]
+fn a_preview_that_returns_the_row_limit_makes_the_orphan_list_incomplete() {
+    let names: Vec<String> = (0..50)
+        .map(|n| format!("YCL_ABAPREACH_RUN_{n:08}"))
+        .collect();
+    let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+
+    // Either preview at the limit: a truncated class list would report live classes as orphans,
+    // a truncated directory list would hide orphans.
+    for (directory, classes) in [
+        (directory_reply(&borrowed), class_rows_reply(&[])),
+        (directory_reply(&[]), class_rows_reply(&borrowed)),
+    ] {
+        let mut replies = runner_replies(classrun_found(), search_reply(&[]), Vec::new());
+        let last = replies.len();
+
+        replies[last - 2] = directory;
+        replies[last - 1] = classes;
+
+        let (exit, _) = adt_doctor(replies);
+
+        assert_eq!(
+            runner_line(&exit, "RUNNER orphans"),
+            "RUNNER orphans: more than 50 rows, list incomplete"
+        );
+        assert!(!exit.stdout.contains("RUNNER orphan:"), "{}", exit.stdout);
+        assert_eq!(exit.code, 0);
+    }
+}
+
+#[test]
+fn no_orphan_gives_no_orphan_line_and_an_unreadable_directory_is_unknown() {
+    let (exit, _) = adt_doctor(runner_replies(
+        classrun_found(),
+        search_reply(&[]),
+        Vec::new(),
+    ));
+
+    assert!(!exit.stdout.contains("RUNNER orphan"), "{}", exit.stdout);
+
+    let mut replies = runner_replies(classrun_found(), search_reply(&[]), Vec::new());
+    let last = replies.len();
+
+    replies[last - 2] = Ok(Response::text(500, ""));
+
+    let (exit, _) = adt_doctor(replies);
+    let line = runner_line(&exit, "RUNNER orphans");
+
+    assert!(line.starts_with("RUNNER orphans: unknown ("), "{line}");
+    assert_eq!(exit.code, 0);
+}
+
+#[test]
+fn an_unknown_out_type_is_reported_and_does_not_fail_the_doctor() {
+    let mut replies = runner_replies(classrun_found(), search_reply(&[]), Vec::new());
+
+    replies[2 + 2] = out_type_reply("IF_SOMETHING_ELSE");
+
+    let (exit, _) = adt_doctor(replies);
+    let line = runner_line(&exit, "RUNNER out type");
+
+    assert!(
+        line.starts_with("RUNNER out type: unknown (") && line.contains("\"IF_SOMETHING_ELSE\""),
+        "{line}"
+    );
+    assert_eq!(exit.code, 0);
+}
+
+#[test]
 fn an_empty_discovery_document_still_detects_the_classrun_interface_by_preview() {
     // A 7.40 system answers the discovery with an empty service document, so the interface is
     // read from the repository table instead.
@@ -1510,6 +1679,9 @@ fn a_refusing_preflight_is_printed_with_its_reason() {
 
     replies.truncate(2);
     replies.extend(preflight_replies(""));
+    replies.push(out_type_reply("IF_OO_ADT_INTRNL_CLASSRUN"));
+    replies.push(directory_reply(&[]));
+    replies.push(class_rows_reply(&[]));
 
     let (exit, _) = adt_doctor(replies);
 
@@ -1586,6 +1758,10 @@ fn unreachable_backends_leave_the_runner_facts_unknown() {
         format!("RUNNER preflight: unknown ({reason})")
     );
     assert_eq!(
+        runner_line(&exit, "RUNNER out type"),
+        format!("RUNNER out type: unknown ({reason})")
+    );
+    assert_eq!(
         runner_line(&exit, "RUNNER authorization"),
         "RUNNER authorization: not probed"
     );
@@ -1617,7 +1793,7 @@ fn the_runner_lines_sit_between_the_sadt_probe_and_the_capability_lines() {
         "{}",
         exit.stdout
     );
-    assert_eq!(runner.len(), 6);
+    assert_eq!(runner.len(), 7);
 }
 
 #[test]
@@ -1645,6 +1821,7 @@ fn the_runner_probes_are_read_only_and_leak_neither_host_nor_secret() {
         );
     }
 
-    // Discovery, interface preview, search, one metadata read, two preflight previews.
-    assert_eq!(transport.calls.len(), 6);
+    // Discovery, interface preview, search, one metadata read, two preflight previews, the `OUT`
+    // type preview, the two orphan previews.
+    assert_eq!(transport.calls.len(), 9);
 }

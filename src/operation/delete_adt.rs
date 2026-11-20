@@ -17,10 +17,12 @@ use crate::operation::delete::{
     DeleteBackend, DeleteReply, InactiveFact, ObjectFacts, Reconcile, SourceFact, TrLock,
 };
 use crate::operation::deploy::{
-    CancelFlag, LOCK_ACCEPT, LockInfo, VERSIONS_ACCEPT, encode_lock_handle, leaf_texts, parse_lock,
+    CancelFlag, LOCK_ACCEPT, LockInfo, NO_REQUEST, VERSIONS_ACCEPT, encode_lock_handle, leaf_texts,
+    parse_lock,
 };
 use crate::operation::include::{ProgTarget, ResolveError, locate_properties};
 use crate::operation::read::resolve_group;
+use crate::operation::transport_request::check_open_request;
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use std::collections::HashMap;
 
@@ -685,6 +687,20 @@ impl DeleteBackend for AdtDelete<'_> {
         if cancel.as_ref().is_some_and(CancelFlag::is_set) {
             return self.refuse(&uri, &lock, "CANCELED: stopped after the lock".to_owned());
         }
+        // An object that no open request holds: the request of the plan must take it, so it is
+        // checked before the DELETE carries it.
+        if let (false, true, Some(wanted)) = (lock.is_local, lock.corrnr.is_empty(), tr) {
+            let user = self.user.clone();
+
+            if let Err(reason) = check_request(wanted) {
+                return self.refuse(&uri, &lock, reason);
+            }
+
+            if let Err(reason) = check_open_request(self.active(), wanted, &user) {
+                return self.refuse(&uri, &lock, reason);
+            }
+        }
+
         let request = match transport_request(&lock, tr, &self.user) {
             Ok(request) => request,
             Err(reason) => return self.refuse(&uri, &lock, reason),
@@ -794,7 +810,8 @@ fn group_uri(name: &str) -> String {
 }
 
 /// The request the DELETE carries: none for a local object, otherwise the request of the lock,
-/// which the plan's request must equal and which must not belong to another user. An owner the
+/// which the plan's request must equal and which must not belong to another user. A lock that
+/// names none takes the request of the plan. An owner the
 /// lock does not name cannot be checked here; SAP then decides at the DELETE.
 fn transport_request(
     lock: &LockInfo,
@@ -806,9 +823,13 @@ fn transport_request(
     match (lock.is_local, wanted) {
         (true, Some(_)) => Err("--tr is not allowed for a local object".to_owned()),
         (true, None) => Ok(None),
-        (false, _) if corrnr.is_empty() => {
-            Err("the object is not local but the lock returned no transport request".to_owned())
+        // The request of the plan takes the object; `check_open_request` ran before this.
+        (false, Some(tr)) if corrnr.is_empty() => {
+            check_request(tr).map_err(|reason| reason.to_string())?;
+
+            Ok(Some(tr.to_ascii_uppercase()))
         }
+        (false, None) if corrnr.is_empty() => Err(NO_REQUEST.to_owned()),
         (false, _) if !lock.corruser.is_empty() && !lock.corruser.eq_ignore_ascii_case(user) => {
             Err(format!(
                 "transport request {corrnr} of the lock belongs to another user"

@@ -14,7 +14,65 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
-Version metadata is `0.16.0`. This entry is finalized before the last release candidate.
+Version metadata is `0.16.1`. This entry is finalized before the last release candidate.
+
+
+### Added
+- `deploy`, `deploy --simulate` and `delete` over ADT: `--tr <request>` now adds a transportable
+  object that no open request holds (the lock answers no `CORRNR`) to that request. Before any
+  write ABAPReach reads the request from `E070` over the data preview and stops unless it exists,
+  is a workbench request and not a task, is modifiable, and is owned by the logon user or holds a
+  modifiable task of that user. `deploy` prints `transport request <request> (object added)`;
+  `deploy --simulate` prints `WILL ADD <TYPE> <NAME> to <request>`. Without `--tr` the STOP stays
+  and names the way out. The MCP `tr` argument follows the same rule.
+- `doctor` prints `RUNNER out type: <interface>`, the type of the classrun `OUT` parameter, and a
+  `RUNNER orphan: <class>` line for each runner class that has a `TADIR` row and no class. When
+  either orphan preview returns its limit of 50 rows, `doctor` prints `RUNNER orphans: more than 50
+  rows, list incomplete` instead of a list.
+
+### Changed
+- Classrun runner (issue #12): the runner class declares its output reference with the type of
+  parameter `OUT` of `IF_OO_ADT_CLASSRUN~MAIN`, read from `SEOSUBCODF` before the class is created.
+  `IF_OO_ADT_INTRNL_CLASSRUN` (7.40, 7.50; the generated class is unchanged) and
+  `IF_OO_ADT_CLASSRUN_OUT` (newer releases) are known; any other type stops the run (exit 2) and
+  names the type found. The new `SEOSUBCODF` read uses `IN` with one value per column, because a
+  single-value `=` in a data preview `WHERE` is reported unreliable on some releases (issue #13).
+- The source `PUT` of the runner class and of `deploy` (PROG, FUNC, CLAS, INTF and class includes)
+  sends `Accept: text/plain`; a release that refuses a source `PUT` without it answered
+  `HTTP 400: Accept header missing` (issue #12).
+- Runner cleanup proof: after the class `GET` answers 404, a new session reads `TADIR` for the
+  runner name. A row left there is a leftover (`RUNNER_LEFTOVER`); a failed read is
+  `W: runner cleanup proof failed: TADIR <reason>` and also counts as a leftover. The same check
+  runs when a lost create leaves the class state unknown and the class `GET` answers 404. When only
+  the `TADIR` row is left, `RUNNER_LEFTOVER` adds `hint: only the object directory entry (TADIR)
+  is left; remove it in SE03 (Change Object Directory Entries) or SE80` (issue #12).
+- MCP server (issue #15): `connections.json` and `connections.local.json` are re-read on every tool
+  call, so a connection added while the server runs resolves. Policies stay as the server started
+  with them; a call that finds other policies logs `W: policies changed in connections.json; restart
+  the MCP server to apply them` to stderr. A connection absent at start (new server or new client)
+  gets the start top-level policies with `mcp_write` off and the built-in tables added to the deny
+  list, until restart; a file that no longer parses stops the call with the parse error. A
+  connection that the file named at start keeps its start target and credentials: when the file now
+  resolves it differently, the call stops with `STOP: connection <ID> changed in connections.json
+  since the MCP server started; restart the MCP server to use it` and nothing is contacted. See [MCP
+  configuration](docs/mcp.md#configuration).
+
+### Fixed
+- `read` creates a missing parent directory of the output path (source, DDIC XML and `TRAN`
+  output); a parent that cannot be created is `cannot create directory <dir>: <error>` (issue #14).
+- Classrun runner (issue #12): the classrun `POST` now runs on a new session of the cycle backend
+  (a new HTTP session, or a new RFC connection posting over SADT), opened after the source check
+  and closed after the reply. The cycle session keeps the class lock, the delete and the proofs.
+  On some releases (SAP_BASIS 758) a `POST` from the session that created and activated the class
+  answered `Class does not implement if_oo_adt_classrun~main method!`, while a new connection ran
+  the same class. A new session that cannot be opened is `REJECTED: runner POST failed: cannot
+  open the POST session` before any `POST`, and the cleanup still runs.
+- RFC backends (rfc-gui, rfc-sdk): a request sent over `SADT_REST_RFC_ENDPOINT` without an `Accept`
+  header now carries `Accept: */*`; a request that names `Accept` is sent unchanged. On SAP_BASIS
+  758 the endpoint answered `HTTP 400` to such requests, so `doctor` printed `RUNNER leftovers:
+  unknown (search failed: HTTP 400)` (issue #12).
+
+## [0.16.0] - 2026-11-12
 
 ### Added
 - DDIC types `DTEL`, `DOMA`, `TTYP`, transparent tables and `INTTAB` structures (`TABL`), and

@@ -1033,11 +1033,12 @@ fn a_simulate_is_confirmed_by_a_new_session_and_leaves_no_class() {
 
     assert_eq!(done.exit.code, 0, "{}", done.exit.stderr);
     assert_eq!(creates.len(), 1);
-    // The two preflight previews run in the session of the class; the three of the evidence run
-    // in another one.
-    assert_eq!(previews.len(), 5, "{previews:?}");
+    // The three previews before the class (two of the preflight, the `OUT` type) run in the
+    // session of the class; the directory proof of the runner and the three of the evidence run
+    // in others.
+    assert_eq!(previews.len(), 7, "{previews:?}");
     assert_eq!(previews[0], creates[0]);
-    assert!(previews[2..].iter().all(|session| *session != creates[0]));
+    assert!(previews[3..].iter().all(|session| *session != creates[0]));
     assert!(sap.classes.is_empty());
 }
 

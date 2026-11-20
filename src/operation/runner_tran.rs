@@ -26,7 +26,7 @@ use crate::operation::runner_reconcile::{
     Clock, Intent, ReadFacts, ReadRun, Subject, SystemClock, read_facts, reconcile, settle,
 };
 use crate::operation::runner_route::{Routed, random_nonce, route};
-use crate::operation::runner_template::{TRAN_TEMPLATE, generate};
+use crate::operation::runner_template::{OutType, TRAN_TEMPLATE, generate_for};
 use crate::operation::simulate_ddic::{CHECK_NONCE, texts};
 use crate::runner_protocol::{Level, Nonce, Parsed, Report, RunMode, RunStatus, parse_post_reply};
 use std::path::Path;
@@ -257,7 +257,7 @@ impl Cycler<'_> {
         let text = (self.nonce)();
         let nonce = Nonce::parse(&text)?;
         let lines = payload(mode, spec, &text)?;
-        let build = |runner: &str| generate(&TRAN_TEMPLATE, runner, &lines);
+        let build = |runner: &str, out: OutType| generate_for(&TRAN_TEMPLATE, runner, &lines, out);
         let connection = self.connection;
         let input = CycleInput {
             operation,

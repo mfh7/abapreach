@@ -48,6 +48,7 @@ pub const ALLOWED_CLASSES: &[&str] = &[
     "CL_HTTP_UTILITY",
     "CX_ROOT",
     "IF_OO_ADT_CLASSRUN",
+    "IF_OO_ADT_CLASSRUN_OUT",
     "IF_OO_ADT_INTRNL_CLASSRUN",
 ];
 

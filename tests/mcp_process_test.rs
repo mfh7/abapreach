@@ -184,3 +184,105 @@ fn write_tools_are_listed_only_when_a_server_allows_mcp_write() {
     assert_eq!(count("{}"), 2);
     assert_eq!(count(r#"{"mcp_write":"token"}"#), 8);
 }
+
+/// Sends one frame and waits for the response with `id`; every wait is bounded.
+fn exchange(
+    stdin: &mut impl Write,
+    lines: &mpsc::Receiver<String>,
+    id: u64,
+    frame: &Value,
+) -> Value {
+    writeln!(stdin, "{frame}").unwrap();
+    stdin.flush().unwrap();
+
+    let start = Instant::now();
+
+    loop {
+        let line = lines
+            .recv_timeout(DEADLINE.saturating_sub(start.elapsed()))
+            .expect("the MCP process answered");
+        let reply: Value = serde_json::from_str(&line).expect("a JSON frame");
+
+        if reply["id"] == id {
+            return reply;
+        }
+    }
+}
+
+#[test]
+fn a_connection_added_to_the_file_after_the_start_resolves_through_the_real_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("connections.json");
+    let server = |id: &str| {
+        format!(
+            r#"{{"systemId":"{id}","host":"127.0.0.1","port":1,"clients":["100"],"adt":{{"insecure":true}}}}"#
+        )
+    };
+    let write = |servers: &[String]| {
+        std::fs::write(&path, format!(r#"{{"servers":[{}]}}"#, servers.join(","))).unwrap();
+    };
+
+    write(&[server("DEV")]);
+
+    let mut child = Reaper(
+        Command::new(env!("CARGO_BIN_EXE_abapreach"))
+            .arg("mcp")
+            .env("ABAP_CONNECTIONS", &path)
+            .env("DEV_100_USER", "user")
+            .env("DEV_100_PASS", PASSWORD)
+            .env("NEW_100_USER", "user")
+            .env("NEW_100_PASS", PASSWORD)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = child.0.stdout.take().unwrap();
+    let (sender, lines) = mpsc::channel();
+
+    thread::spawn(move || {
+        use std::io::BufRead;
+
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let _ = sender.send(line);
+        }
+    });
+
+    let mut stdin = child.0.stdin.take().unwrap();
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}});
+    let call = |id: u64| {
+        json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{
+            "name":"abap_read_source",
+            "arguments":{"conn":"NEW_100","type":"PROG","name":"YTEST"}}})
+    };
+
+    exchange(&mut stdin, &lines, 1, &initialize);
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .unwrap();
+
+    let before = exchange(&mut stdin, &lines, 2, &call(2));
+
+    assert!(
+        before.to_string().contains("unknown system NEW"),
+        "{before}"
+    );
+
+    write(&[server("DEV"), server("NEW")]);
+
+    let after = exchange(&mut stdin, &lines, 3, &call(3));
+
+    assert!(
+        !after.to_string().contains("unknown system"),
+        "the added connection resolves: {after}"
+    );
+
+    drop(stdin);
+}

@@ -16,6 +16,7 @@ use abapreach::operation::runner_reconcile::{
     ReadRun, Reconciled, Stable, Subject, Verdict, classify_create, classify_delete,
     classify_deploy, read_facts, reconcile, settle, stable_state, uncertainty,
 };
+use abapreach::operation::runner_template::OutType;
 use abapreach::runner_protocol::{Nonce, RunMode};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use common::runner_fake::{
@@ -1023,7 +1024,7 @@ enum Backend {
     Rfc,
 }
 
-fn build(name: &str) -> Result<String, String> {
+fn build(name: &str, _: OutType) -> Result<String, String> {
     Ok(format!("CLASS {name} DEFINITION.\nENDCLASS.\n"))
 }
 

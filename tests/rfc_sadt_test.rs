@@ -33,6 +33,32 @@ fn reuse() {
 }
 
 #[test]
+fn default_accept() {
+    let mut transport = RfcTransport::new(FakeRfcApi::ok());
+
+    transport
+        .request(Request::get("/sap/bc/adt/discovery"))
+        .unwrap();
+
+    assert_eq!(
+        transport.api().last_request().headers,
+        BTreeMap::from([("Accept".to_owned(), "*/*".to_owned())])
+    );
+
+    let mut named = Request::get("/sap/bc/adt/discovery");
+
+    named
+        .headers
+        .insert("accept".to_owned(), "application/xml".to_owned());
+    transport.request(named).unwrap();
+
+    assert_eq!(
+        transport.api().last_request().headers,
+        BTreeMap::from([("accept".to_owned(), "application/xml".to_owned())])
+    );
+}
+
+#[test]
 fn payload() {
     let mut transport = RfcTransport::new(FakeRfcApi::ok());
 
@@ -79,10 +105,13 @@ fn payload() {
     assert_eq!(fixture_request.uri, V1_PUT_URI);
     assert_eq!(
         fixture_request.headers,
-        BTreeMap::from([(
-            "Content-Type".to_owned(),
-            "text/plain; charset=utf-8".to_owned(),
-        )])
+        BTreeMap::from([
+            ("Accept".to_owned(), "text/plain".to_owned()),
+            (
+                "Content-Type".to_owned(),
+                "text/plain; charset=utf-8".to_owned(),
+            ),
+        ])
     );
     assert_eq!(
         fixture_request.body.as_slice(),

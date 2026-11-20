@@ -394,7 +394,8 @@ source has changed, `--base` stops the run. If `doctor` reports that ADT HTTP
 has no stateful session, add `--backend rfc` to both commands after checking
 the RFC probe; `--base` prevents automatic backend fallback. A transportable
 object may require `--tr <request>`; the request must agree with the SAP lock
-response. Deploy can leave an inactive version after failed activation. Read
+response, and for an object that no open request holds, `--tr` names the modifiable request of
+yours that takes it. Deploy can leave an inactive version after failed activation. Read
 [Deploy safety](deploy-safety.md) and [Behavior differences](behavior-differences.md)
 before the first write.
 
@@ -561,6 +562,11 @@ rerun for 0.16.0. The two systems:
 - a SAP 7.50 system with a stateful ADT HTTP session, a second developer user and transport
   requests;
 - a SAP 7.40 system with local objects only (`$TMP`), no stateful ADT HTTP session.
+
+The 0.16.1 release checks also used a third system, an S/4HANA system with SAP_BASIS 758 (the 758 system),
+on `v0.16.1-rc.2` and `v0.16.1-rc.4` (the release binaries). On 0.16.1 it was covered by the smoke set and
+group m7 only; the full matrix on it is planned after this release. The results are in
+[Behavior differences: 0.16.1 release checks](behavior-differences.md#0161-release-checks-0161-rc2-0161-rc4).
 
 Each cell has one of three results:
 

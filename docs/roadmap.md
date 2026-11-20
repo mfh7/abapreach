@@ -17,6 +17,7 @@ moves to the [changelog](../CHANGELOG.md).
 | 0.14.0 | MCP server (stdio), `read-table`, `delete` (released) |
 | 0.15.0 | Programs and includes: `create PROG` (program and include), include read, deploy and delete; ADT HTTP logoff fix; MCP additions (released) |
 | 0.16.0 | DDIC: data elements, domains, tables (transparent tables and structures), table types; transaction codes (`TRAN`): read, simulate, create and delete, through classrun on the 7.50 and 7.40 systems (released) |
+| 0.16.1 | `--tr` for objects no open request holds; classrun on newer releases (tested on a S/4HANA 758 system); classrun POST from a new session; runner cleanup proof against `TADIR`; MCP re-reads connections per call (released) |
 | later | The remaining features below, one milestone at a time |
 
 Platforms come before new features, so every feature after 0.12.0 is built and tested on

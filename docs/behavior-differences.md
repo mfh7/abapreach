@@ -235,6 +235,46 @@ structure read worked over them on the 7.50 system; a data element create or dep
 on the request the comparison sent (a missing `searchHelp` element), so it shows no limit of the endpoint
 itself; structure writes were not attempted. The 7.40 system has none of these endpoints.
 
+### 0.16.1 release checks (0.16.1-rc.2, 0.16.1-rc.4)
+
+The rc.2 runs are from 2026-11-19 and the rc.4 runs from 2026-11-20. rc.2 has the full feature set. rc.3 was
+never published (a test adapter failed in CI). rc.4 is rc.2 plus one transport fix: RFC SADT requests that
+name no `Accept` header now send `Accept: */*`. The 0.16.1 release binaries are the rc.4 binaries. The
+systems are the 7.50 system, the 7.40 system and the 758 system (S/4HANA).
+
+| System | Run | Result |
+| :--- | :--- | :--- |
+| 7.50 | rc.2, full matrix, macOS arm64 | 541 PASS, 3 FAIL |
+| 7.50 | rc.2, group m7 (0.16.1 cells) | 19 PASS, 0 FAIL |
+| 7.50 | rc.2, smoke | 48 PASS, 0 FAIL |
+| 7.50 | rc.4, smoke | 48 PASS, 1 UNSUPPORTED, 0 FAIL |
+| 7.40 | rc.2, full matrix, Linux x64 | 267 PASS, 3 FAIL |
+| 7.40 | rc.2, group m7 | 15 PASS, 0 FAIL |
+| 7.40 | rc.2, smoke | 35 PASS, 0 FAIL |
+| 7.40 | rc.4, smoke | 35 PASS, 16 UNSUPPORTED, 0 FAIL |
+| 758 | rc.2, group m7 | 24 PASS, 4 UNSUPPORTED, 0 FAIL |
+| 758 | rc.2, smoke | 46 PASS, 2 FAIL |
+| 758 | rc.4, group m7 | 21 PASS, 4 UNSUPPORTED, 3 FAIL |
+| 758 | rc.4, smoke | 48 PASS, 1 UNSUPPORTED, 0 FAIL |
+
+- The 3 FAIL cells of each full matrix are older cells whose expectations predate 0.16.1.
+  They are not product defects. On the 7.50 system, the m6-ddic group (67 PASS, 0 FAIL) and the MCP group on
+  the RFC SDK (8 PASS, 0 FAIL) were rerun after a network timeout and a hung run, and passed.
+- The 2 FAIL cells of the rc.2 smoke on the 758 system were the `doctor` runner leftover search over RFC
+  (RFC SAP GUI library and RFC SDK). It answered HTTP 400 because the request had no `Accept` header. rc.4
+  fixes this; the leftovers line passes on every path that runs classrun (all three paths on the 7.50
+  and 758 systems, the two RFC paths on the 7.40 system).
+- The 3 FAIL cells of rc.4 group m7 on the 758 system are the `doctor` orphan cell. Its fixture, a runner row
+  that exists only in `TADIR`, was deleted after the rc.2 check passed, as planned, so the cell has nothing to
+  find.
+- The 758 system was covered by the smoke set and group m7 only. The full matrix on it is planned after
+  this release.
+- No test object was left on any system after any run.
+- Known gaps. `--tr` adding an object that is not yet recorded has no live test: no `YTEST` object can reach
+  that state without releasing a test request. The 7.40 system has no stateful ADT HTTP session, so classrun
+  there runs over RFC only (unchanged). Issue #13 (a data preview with a single-value `=` condition reported
+  as unreliable on the 758 system) is out of scope: ABAPReach's own queries use `IN`.
+
 ## `create PROG` operation (0.15.0)
 
 The create operation covers the `create PROG` cases of the reference test suite
@@ -387,13 +427,24 @@ the program's inactive version (an entry in `DWINACTIV`), the active source
 is unchanged, and the status is `INACTIVE` with exit 1. Inspect the inactive
 version before attempting another deploy.
 
-### A transportable object whose lock reports no transport request is refused
+### A transportable object whose lock reports no transport request needs `--tr`
 
 When the lock of a transportable object (package not `$TMP`) answers 200
-without a `CORRNR`, `abapreach` stops with `STOP: the object is not local but
-the lock returned no transport request` (exit 2) after releasing the lock
-and before the syntax check and PUT. This holds even when `--tr` is given:
-an empty `CORRNR` is never replaced by `--tr`.
+without a `CORRNR`, no modifiable request holds the object. Without `--tr`,
+`abapreach` stops with `STOP: the object is not local but the lock returned no
+transport request; pass --tr <request> to add the object to a modifiable request
+of yours` (exit 2) after releasing the lock and before the syntax check and PUT.
+
+With `--tr <request>` (0.16.1), `abapreach` first reads the request from `E070`
+over the data preview (read-only) and stops, writing nothing, unless the
+request exists, is a workbench request and not a task, is modifiable, and is
+owned by the logon user or holds a modifiable task of that user. These are the
+rules the classrun runner applies to its `--tr`. The write then carries
+`corrNr=<request>` and SAP records the object in that request; `deploy` prints
+`transport request <request> (object added)`, and `deploy --simulate` prints
+`WILL ADD <TYPE> <NAME> to <request>`. `delete` over ADT follows the same rule at
+execute time and prints no `object added` line. A `CORRNR` that the lock does name must
+still equal `--tr`.
 
 The reference tooling would still write there. For a transportable object it
 requires `--tr`, checks that the request is a modifiable workbench request
@@ -403,12 +454,10 @@ locks with exactly that request (`set_lifecycle_corr`: `mo_lm->corrnr =
 mv_trkorr`). The request of the write is therefore chosen by the client,
 not read from the object lock.
 
-`abapreach` stays strict on purpose: on the ADT path, the `CORRNR` of the
-lock response is the only statement SAP makes about the request that owns
-the object lock. With an empty `CORRNR`, the tool cannot prove that the
-`--tr` request owns the object. It refuses before writing and releases the
-lock. Assign the object to a transport request on the SAP side, then retry
-only after verifying the lock response.
+`abapreach` does not read `TLOCK`: an object that another request already
+holds answers a `CORRNR` at the lock, so this path is reached only for an
+object that no open request holds. A write that SAP refuses for a wrong
+request is reported as the SAP answer.
 
 ### Related behavior and comparison limits
 

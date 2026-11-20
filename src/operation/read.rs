@@ -490,6 +490,18 @@ fn write_source(output: &Path, lines: &[String]) -> Result<(), ReadError> {
         written.push('\n');
     }
 
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|error| {
+            ReadError::validation(format!(
+                "cannot create directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+
     fs::write(output, written).map_err(|error| {
         ReadError::validation(format!("cannot write {}: {error}", output.display()))
     })

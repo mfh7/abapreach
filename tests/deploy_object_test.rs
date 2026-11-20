@@ -2,6 +2,8 @@
 //! ADT. Every request is matched by method and exact URI, so the URIs, the lock parent, the
 //! handle encoding and the `corrNr` rules are part of what the tests assert.
 
+mod common;
+
 use abapreach::adt::{ActivationBody, classify_activation, parse_object_refs};
 use abapreach::backend::Failure;
 use abapreach::cli::{IncludeKind, ObjectKind};
@@ -751,6 +753,14 @@ fn a_deploy_with_an_interface_change_and_a_failed_where_used_still_activates() {
     // The where-used request neither locks nor writes: lock, PUT and activation stay one each.
     assert_eq!(fake.count("POST", "_action=LOCK"), 1);
     assert_eq!(fake.count("PUT", ""), 1);
+    // The source PUT names the text it accepts: a release refuses it without the header.
+    assert_eq!(
+        fake.calls[fake.position("PUT", "")]
+            .headers
+            .get("Accept")
+            .map(String::as_str),
+        Some("text/plain")
+    );
     assert_eq!(fake.count("POST", "activation?"), 1);
     assert!(
         fake.position("POST", "usageReferences") < fake.position("POST", "_action=LOCK"),
@@ -1930,4 +1940,175 @@ fn flat_740_inactive_feed_warns_about_function_group_siblings() {
         "{}",
         result.outcome.stderr
     );
+}
+
+// ---------------------------------------------------------------- --tr for an unrecorded object
+
+const E070_URI: &str = "/sap/bc/adt/datapreview/ddic?rowNumber=1&ddicEntityName=E070";
+
+/// The `E070` row of the request `TR`.
+fn request_row(function: &str, status: &str, owner: &str) -> String {
+    common::preview(&[
+        ("TRKORR", &[Some(TR)]),
+        ("STRKORR", &[None]),
+        ("TRFUNCTION", &[Some(function)]),
+        ("TRSTATUS", &[Some(status)]),
+        ("AS4USER", &[Some(owner)]),
+    ])
+}
+
+/// A class main deploy to the lock that holds the object in no request: the lock answers an
+/// empty `CORRNR` for an object that is not local.
+fn unrecorded(request: &str) -> (Fake, String, Vec<String>) {
+    let source = format!("{CLAS_URI}/source/main");
+    let live = text_of(&main_source("v1"));
+    let file = main_source("v2");
+    let fake =
+        clas_through_check(&source, &live, "", false, &[&main_feed()]).post(E070_URI, 200, request);
+
+    (fake, source, file)
+}
+
+#[test]
+fn an_unrecorded_object_is_added_to_the_request_of_tr_and_the_put_carries_it() {
+    let (fake, source, file) = unrecorded(&request_row("K", "D", USER));
+    let fake = fake.put(&format!("{source}?{HANDLE_QUERY}&corrNr={TR}"), 200, "");
+    let mut fake = clas_activation_tail(fake, &source, &text_of(&file));
+    let result = run(
+        &mut fake,
+        CLAS,
+        clas_scope(None),
+        input(&file, false, Some(TR)),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(
+        result.outcome.status,
+        Some(Status::Active),
+        "{:?}",
+        result.outcome
+    );
+    assert!(
+        stdout_of(&result).contains(&format!("transport request {TR} (object added)").as_str()),
+        "{}",
+        result.outcome.stdout
+    );
+    // The request is read once, before the first write, and nothing but the PUT carries it.
+    assert_eq!(fake.count("POST", "datapreview"), 1);
+    assert!(fake.position("POST", "datapreview") < fake.position("PUT", ""));
+
+    for call in &fake.calls {
+        assert_eq!(
+            call.uri.contains("corrNr="),
+            call.method == "PUT",
+            "{} {}",
+            call.method,
+            call.uri
+        );
+    }
+
+    fake.assert_finished();
+}
+
+#[test]
+fn a_simulate_checks_the_request_and_prints_the_object_it_would_add() {
+    let (fake, _, file) = unrecorded(&request_row("K", "D", USER));
+    let mut fake = fake.post(
+        &format!("{CLAS_URI}?_action=UNLOCK&{HANDLE_QUERY}"),
+        200,
+        "",
+    );
+    let result = run(
+        &mut fake,
+        CLAS,
+        clas_scope(None),
+        input(&file, true, Some(TR)),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(
+        result.outcome.status,
+        Some(Status::SimulatedOk),
+        "{:?}",
+        result.outcome
+    );
+    assert!(
+        stdout_of(&result).contains(&format!("WILL ADD CLAS {CLAS} to {TR}").as_str()),
+        "{}",
+        result.outcome.stdout
+    );
+    assert!(!result.outcome.stdout.contains("(object added)"));
+    assert_eq!(fake.count("PUT", ""), 0);
+    assert_eq!(fake.unlocks(), 1);
+    fake.assert_finished();
+}
+
+#[test]
+fn a_request_that_breaks_a_rule_stops_the_deploy_before_any_write() {
+    let cases = [
+        (
+            request_row("K", "R", USER),
+            format!("request {TR} is not modifiable (TRSTATUS=R)"),
+        ),
+        (
+            request_row("W", "D", USER),
+            format!("{TR} is not a workbench request"),
+        ),
+    ];
+
+    for (row, reason) in cases {
+        let (fake, _, file) = unrecorded(&row);
+        let mut fake = fake.post(
+            &format!("{CLAS_URI}?_action=UNLOCK&{HANDLE_QUERY}"),
+            200,
+            "",
+        );
+        let result = run(
+            &mut fake,
+            CLAS,
+            clas_scope(None),
+            input(&file, false, Some(TR)),
+            ForeignInactive::Reject,
+        );
+
+        assert_eq!(result.outcome.exit, 2, "{reason}");
+        assert!(
+            result.outcome.stderr.contains(&reason),
+            "{}",
+            result.outcome.stderr
+        );
+        assert_eq!(fake.count("PUT", ""), 0);
+        assert_eq!(fake.unlocks(), 1);
+    }
+}
+
+#[test]
+fn without_tr_the_stop_stays_and_names_the_way_out() {
+    let source = format!("{CLAS_URI}/source/main");
+    let live = text_of(&main_source("v1"));
+    let fake = clas_through_check(&source, &live, "", false, &[&main_feed()]);
+    let mut fake = fake.post(
+        &format!("{CLAS_URI}?_action=UNLOCK&{HANDLE_QUERY}"),
+        200,
+        "",
+    );
+    let result = run(
+        &mut fake,
+        CLAS,
+        clas_scope(None),
+        input(&main_source("v2"), false, None),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(result.outcome.exit, 2);
+    assert!(
+        result.outcome.stderr.contains(
+            "the object is not local but the lock returned no transport request; pass --tr \
+             <request> to add the object to a modifiable request of yours"
+        ),
+        "{}",
+        result.outcome.stderr
+    );
+    assert_eq!(fake.count("POST", "datapreview"), 0);
+    assert_eq!(fake.count("PUT", ""), 0);
 }

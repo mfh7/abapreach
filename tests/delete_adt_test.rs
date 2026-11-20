@@ -2,6 +2,8 @@
 //! sequence, the fresh-session verification and the classification of every uncertain answer.
 //! Every request is matched by method and exact URI; an unscripted request is a failed test.
 
+mod common;
+
 use abapreach::cli::DeleteKind;
 use abapreach::operation::delete::{
     DeleteBackend, DeleteReply, InactiveFact, ObjectFacts, Reconcile, TrLock,
@@ -894,6 +896,91 @@ fn the_request_of_the_lock_is_used_when_the_plan_names_none_and_checked_when_it_
         assert_eq!(count(&calls, "DELETE"), 0, "{reason}");
         assert_eq!(count(&calls, "POST"), 2, "lock and unlock: {reason}");
     }
+}
+
+const E070_URI: &str = "/sap/bc/adt/datapreview/ddic?rowNumber=1&ddicEntityName=E070";
+
+fn request_row(function: &str, status: &str, owner: &str) -> String {
+    common::preview(&[
+        ("TRKORR", &[Some(TR)]),
+        ("STRKORR", &[None]),
+        ("TRFUNCTION", &[Some(function)]),
+        ("TRSTATUS", &[Some(status)]),
+        ("AS4USER", &[Some(owner)]),
+    ])
+}
+
+#[test]
+fn an_unrecorded_object_is_deleted_into_the_request_of_the_plan() {
+    let main = Fake::default()
+        .lock(PROG, false, "")
+        .post(E070_URI, 200, &request_row("K", "D", USER))
+        .delete(
+            &format!("{PROG}?lockHandle={ENCODED}&corrNr={TR}"),
+            Ok(Response::empty(200)),
+        );
+    let (reply, calls, _) = with_backend(main, vec![gone(PROG)], |backend| {
+        backend.delete(DeleteKind::Prog, "ZPROG", Some(TR))
+    });
+
+    assert_eq!(reply, DeleteReply::Deleted);
+    assert_eq!(count(&calls, "DELETE"), 1);
+    // The request is read once, after the lock and before the DELETE.
+    let order = uris(&calls);
+    let preview = order.iter().position(|uri| uri.contains("E070")).unwrap();
+    let delete = order
+        .iter()
+        .position(|uri| uri.starts_with("DELETE"))
+        .unwrap();
+
+    assert!(
+        order[0].contains("_action=LOCK") && preview < delete,
+        "{order:?}"
+    );
+}
+
+#[test]
+fn a_malformed_request_is_refused_by_the_format_check_before_any_preview() {
+    let main = Fake::default().lock(PROG, false, "").post(
+        &format!("{PROG}?_action=UNLOCK&lockHandle={ENCODED}"),
+        200,
+        "",
+    );
+    let (reply, calls, _) = with_backend(main, vec![], |backend| {
+        backend.delete(DeleteKind::Prog, "ZPROG", Some("DEVK 1"))
+    });
+
+    assert_eq!(
+        reply,
+        DeleteReply::Rejected("invalid --tr: DEVK 1".to_owned())
+    );
+    assert_eq!(count(&calls, "DELETE"), 0);
+    assert!(uris(&calls).iter().all(|uri| !uri.contains("datapreview")));
+}
+
+#[test]
+fn a_request_that_breaks_a_rule_unlocks_and_never_deletes() {
+    let main = Fake::default()
+        .lock(PROG, false, "")
+        .post(E070_URI, 200, &request_row("K", "R", USER))
+        .post(
+            &format!("{PROG}?_action=UNLOCK&lockHandle={ENCODED}"),
+            200,
+            "",
+        );
+    let (reply, calls, _) = with_backend(main, vec![], |backend| {
+        backend.delete(DeleteKind::Prog, "ZPROG", Some(TR))
+    });
+
+    let DeleteReply::Rejected(reason) = reply else {
+        panic!("{reply:?}");
+    };
+
+    assert!(
+        reason.contains(&format!("request {TR} is not modifiable (TRSTATUS=R)")),
+        "{reason}"
+    );
+    assert_eq!(count(&calls, "DELETE"), 0);
 }
 
 #[test]

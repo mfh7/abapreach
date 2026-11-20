@@ -13,6 +13,7 @@ use crate::operation::include::{
     Located, MainProgram, ProgKind, ProgTarget, ResolveError, locate, resolve_main,
 };
 use crate::operation::read::{ReadError, resolve_group};
+use crate::operation::transport_request::check_open_request;
 use crate::policy::{Confirmer, Decision, InactiveVersion, Policies, Prompt, Terminal};
 use crate::signature::{interface_diff, validate_signature};
 use crate::transport::{Request, Response, SadtTransport, TransportError};
@@ -30,6 +31,10 @@ pub use crate::adt::format_messages;
 pub(crate) const LOCK_ACCEPT: &str =
     "application/*,application/vnd.sap.as+xml;charset=UTF-8;dataname=com.sap.adt.lock.result";
 pub(crate) const VERSIONS_ACCEPT: &str = "application/atom+xml;type=feed";
+/// The STOP of an object that is not local and that no open request holds, when `--tr` is absent.
+pub(crate) const NO_REQUEST: &str = "the object is not local but the lock returned no transport request; \
+                          pass --tr <request> to add the object to a modifiable request of yours";
+
 const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET without a version returns it; restore only by deploying the base source again on your order";
 const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
 const INACTIVE_OBJECTS_ACCEPT: &str =
@@ -1439,10 +1444,11 @@ impl Run<'_> {
             return Locked::Finished(Finish::cancelled());
         }
 
-        let transport_request = match self.transport_request(lock, input.tr.as_deref()) {
-            Ok(transport_request) => transport_request,
-            Err(finish) => return Locked::Finished(finish),
-        };
+        let transport_request =
+            match self.transport_request(lock, input.tr.as_deref(), input.simulate) {
+                Ok(transport_request) => transport_request,
+                Err(finish) => return Locked::Finished(finish),
+            };
 
         let reread = match self.read_active("re-read live source after lock") {
             Ok(lines) => source_hash(&lines),
@@ -1495,11 +1501,14 @@ impl Run<'_> {
     }
 
     /// `IS_LOCAL = X` is `$TMP`: no request. Otherwise the lock's `CORRNR` is the request and
-    /// `--tr` must equal it; this runs right after the lock, before anything is checked or sent.
+    /// `--tr` must equal it. An object that no open request holds has an empty `CORRNR`; then
+    /// `--tr` names the request the write adds it to, after the request passed its checks. This
+    /// runs right after the lock, before anything is checked or sent.
     fn transport_request(
         &mut self,
         lock: &LockInfo,
         requested: Option<&str>,
+        simulate: bool,
     ) -> Result<Option<String>, Finish> {
         let corrnr = lock.corrnr.as_str();
 
@@ -1508,9 +1517,25 @@ impl Run<'_> {
                 "--tr is not allowed for a local ($TMP) object",
             )),
             (true, None) => Ok(None),
-            (false, _) if corrnr.is_empty() => Err(Finish::stop(
-                "the object is not local but the lock returned no transport request",
-            )),
+            (false, None) if corrnr.is_empty() => Err(Finish::stop(NO_REQUEST)),
+            (false, Some(tr)) if corrnr.is_empty() => {
+                check_request(tr).map_err(Finish::stop)?;
+                check_open_request(&mut *self.transport, tr, &self.user).map_err(Finish::stop)?;
+
+                let tr = tr.to_ascii_uppercase();
+
+                self.stdout.push(if simulate {
+                    format!(
+                        "WILL ADD {} {} to {tr}",
+                        self.kind.token(),
+                        self.name.to_ascii_uppercase()
+                    )
+                } else {
+                    format!("transport request {tr} (object added)")
+                });
+
+                Ok(Some(tr))
+            }
             (false, Some(tr)) if !tr.eq_ignore_ascii_case(corrnr) => Err(Finish::stop(format!(
                 "--tr {tr} does not match the transport request {corrnr} of the lock"
             ))),
@@ -1585,6 +1610,10 @@ impl Run<'_> {
             "Content-Type".to_owned(),
             "text/plain; charset=utf-8".to_owned(),
         );
+        // Some releases refuse a source PUT without an `Accept` header (HTTP 400).
+        request
+            .headers
+            .insert("Accept".to_owned(), "text/plain".to_owned());
 
         match self.call(request) {
             Ok(response) if (200..300).contains(&response.status) => {

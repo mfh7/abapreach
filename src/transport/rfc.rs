@@ -540,6 +540,20 @@ fn narrow_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
+/// The SADT endpoint on newer releases (SAP_BASIS 758) answers HTTP 400 `Accept header missing`
+/// to a request without `Accept`; a request that names none gets `Accept: */*`, which leaves the
+/// reply format to the server as the missing header did on older releases.
+fn with_default_accept(mut headers: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    if !headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case("accept"))
+    {
+        headers.insert("Accept".to_owned(), "*/*".to_owned());
+    }
+
+    headers
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RfcEndpointRequest {
     pub function: &'static str,
@@ -673,7 +687,7 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
             method: request.method,
             uri: request.uri,
             version: "HTTP/1.1".to_owned(),
-            headers: request.headers,
+            headers: with_default_accept(request.headers),
             body: request.body,
         }) {
             Ok(response) => response,

@@ -9,7 +9,10 @@ use crate::operation::deploy::{
     CancelFlag, INTERRUPT_EXIT_CODE, LOCK_ACCEPT, LockInfo, activation_request_xml,
     encode_lock_handle, known_lock_handles, leaf_texts, parse_lock,
 };
-use crate::operation::runner_evidence::preflight;
+use crate::operation::runner_evidence::{
+    OutTypeError, classrun_out_type, preflight, runner_directory_row,
+};
+use crate::operation::runner_template::OutType;
 use crate::transport::{
     Request, Response, RunnerArm, SadtTransport, TransportError, runner_verdict,
 };
@@ -171,6 +174,9 @@ pub const STATELESS: &str = "ADT HTTP session is stateless on this release; the 
 const TEMPLATE_BUG: &str =
     "W: the generated runner class did not activate; please report this as a bug";
 const MASK: &str = "<lock handle>";
+/// Added to the leftover text when only the object directory entry stays.
+const DIRECTORY_HINT: &str = "\nhint: only the object directory entry (TADIR) is left; remove it \
+                              in SE03 (Change Object Directory Entries) or SE80";
 /// The most of a SAP message that reaches a diagnostic.
 const MESSAGE_LIMIT: usize = 200;
 
@@ -199,9 +205,12 @@ pub fn post_transport(backend: BackendKind, sadt_post_works: bool) -> PostTransp
     }
 }
 
-/// Where the classrun POST goes. The class cycle never leaves its backend; only the POST may.
+/// Where the classrun POST goes. It never goes through the session of the class cycle: some
+/// releases answer a POST from the session that created and activated the class with `Class does
+/// not implement if_oo_adt_classrun~main method`, while a new connection runs the same class.
 pub enum PostRoute<'a> {
-    /// The session of the class cycle.
+    /// A new session of the cycle backend, opened by the opener of the cycle after the source
+    /// check and closed after the reply.
     Cycle,
     /// A new ADT HTTP session opened for the POST alone and logged off right after it.
     Http(&'a mut Opener<'a>),
@@ -223,8 +232,8 @@ pub struct CycleInput<'a> {
     pub backend: BackendKind,
     /// Whether the connection has an RFC route, which decides the text of a stateless HTTP stop.
     pub rfc_available: bool,
-    /// The full class source for a runner name.
-    pub build: &'a dyn Fn(&str) -> Result<String, String>,
+    /// The full class source for a runner name and the type of the classrun `OUT` parameter.
+    pub build: &'a dyn Fn(&str, OutType) -> Result<String, String>,
 }
 
 /// How a row ended, before the cleanup is taken into account.
@@ -262,6 +271,8 @@ pub struct RunnerRun {
     pub interrupted: bool,
     /// The status of the POST is unknown and is reconciled, never resent (the batch stops).
     pub uncertain: bool,
+    /// The leftover is the `TADIR` row alone: the class itself is proven gone.
+    directory_only: bool,
     conn: String,
 }
 
@@ -282,8 +293,13 @@ impl RunnerRun {
             format!(
                 "RUNNER_LEFTOVER: {name}\n\
                  abapreach delete --simulate CLAS:{name} --plan <FILE> --conn {conn}\n\
-                 abapreach delete CLAS:{name} --plan <FILE> --conn {conn}",
-                conn = self.conn
+                 abapreach delete CLAS:{name} --plan <FILE> --conn {conn}{hint}",
+                conn = self.conn,
+                hint = if self.directory_only {
+                    DIRECTORY_HINT
+                } else {
+                    ""
+                }
             )
         })
     }
@@ -376,6 +392,7 @@ pub fn run_cycle(
         preflight: None,
         interrupted: false,
         uncertain: false,
+        directory_only: false,
         conn: input.conn.to_owned(),
     };
 
@@ -408,8 +425,10 @@ pub fn run_cycle(
         fatal: None,
         source: None,
         expected: None,
+        out: OutType::default(),
+        directory_left: false,
     };
-    let end = match cycle.steps(post) {
+    let end = match cycle.steps(post, open) {
         Ok(end) | Err(end) => end,
     };
 
@@ -440,6 +459,7 @@ pub fn run_cycle(
     run.preflight = cycle.preflight.take();
     run.interrupted = cancel.is_set();
     run.uncertain = matches!(run.end, RunnerEnd::PostUncertain(_));
+    run.directory_only = run.leftover.is_some() && cycle.directory_left;
 
     run
 }
@@ -460,10 +480,18 @@ struct Cycle<'a> {
     /// The class source for the current name, and the hash the active source must have.
     source: Option<String>,
     expected: Option<String>,
+    /// The type of the classrun `OUT` parameter the preflight found.
+    out: OutType,
+    /// The last proof found the class gone and `TADIR` still holding its row.
+    directory_left: bool,
 }
 
 impl Cycle<'_> {
-    fn steps(&mut self, post: PostRoute<'_>) -> Result<RunnerEnd, RunnerEnd> {
+    fn steps(
+        &mut self,
+        post: PostRoute<'_>,
+        open: &mut Opener<'_>,
+    ) -> Result<RunnerEnd, RunnerEnd> {
         self.preflight()?;
         self.checkpoint()?;
         self.create()?;
@@ -481,7 +509,7 @@ impl Cycle<'_> {
         self.verify_source()?;
         self.checkpoint()?;
 
-        Ok(self.post(post))
+        Ok(self.post(post, open))
     }
 
     fn checkpoint(&self) -> Result<(), RunnerEnd> {
@@ -512,10 +540,33 @@ impl Cycle<'_> {
         )
     }
 
-    /// Everything checked before the class exists: the session, then the repository.
+    /// Everything checked before the class exists: the session, the repository, and the type of
+    /// the classrun `OUT` parameter.
     fn preflight(&mut self) -> Result<(), RunnerEnd> {
         self.session_probe()?;
-        self.repository_check()
+        self.repository_check()?;
+        self.out_type_check()
+    }
+
+    /// One preview on the cycle session: releases type the `OUT` parameter of the classrun
+    /// handler differently, and the class source declares its output reference with that type.
+    /// An unknown type stops the run before anything is written.
+    fn out_type_check(&mut self) -> Result<(), RunnerEnd> {
+        let found = if self.input.backend == BackendKind::AdtHttp {
+            classrun_out_type(&mut RunnerGated::new(&mut *self.session))
+        } else {
+            classrun_out_type(&mut *self.session)
+        };
+
+        self.out = found.map_err(|error| match error {
+            OutTypeError::Lost(error) => RunnerEnd::NotStarted(error),
+            OutTypeError::Stop(reason) => RunnerEnd::Stop(format!(
+                "{} cannot use the classrun runner: {reason}",
+                self.input.operation
+            )),
+        })?;
+
+        Ok(())
     }
 
     /// Two data previews on the cycle session. A system that forbids repository changes stops
@@ -637,7 +688,7 @@ impl Cycle<'_> {
     fn send_create(&mut self, name: &str) -> Result<(), TransportError> {
         self.name = Some(name.to_owned());
 
-        let source = match (self.input.build)(name) {
+        let source = match (self.input.build)(name, self.out) {
             Ok(source) => source,
             Err(message) => {
                 self.fatal = Some(RunnerEnd::Stop(message.clone()));
@@ -756,6 +807,10 @@ impl Cycle<'_> {
             "Content-Type".to_owned(),
             "text/plain; charset=utf-8".to_owned(),
         );
+        // Some releases refuse a source PUT without an `Accept` header (HTTP 400).
+        request
+            .headers
+            .insert("Accept".to_owned(), "text/plain".to_owned());
 
         match self.send(request) {
             Ok(response) if ok(&response) => Ok(()),
@@ -864,31 +919,38 @@ impl Cycle<'_> {
     }
 
     /// The single classrun POST. It is never repeated, on any transport.
-    fn post(&mut self, route: PostRoute<'_>) -> RunnerEnd {
+    fn post(&mut self, route: PostRoute<'_>, open: &mut Opener<'_>) -> RunnerEnd {
         let mut request = Request::post(format!("{CLASSRUN}/{}", self.name()), Vec::new());
 
         request
             .headers
             .insert("Accept".to_owned(), "text/plain".to_owned());
 
-        let result = match route {
-            PostRoute::Cycle => self.send(request),
-            PostRoute::Http(open) => match open() {
-                Ok(mut session) => {
-                    let result = RunnerGated::new(&mut *session).request(request);
+        // The POST session; ADT HTTP has no admission layer of its own, so the gate arms there
+        // and the RFC-SADT session applies its own admission.
+        let (opened, gated) = match route {
+            PostRoute::Cycle => (open(), self.input.backend == BackendKind::AdtHttp),
+            PostRoute::Http(open_post) => (open_post(), true),
+        };
+        let result = match opened {
+            Ok(mut session) => {
+                let result = if gated {
+                    RunnerGated::new(&mut *session).request(request)
+                } else {
+                    session.request(request)
+                };
 
-                    if let Err(error) = session.close() {
-                        self.notes.push(format!("W: session close failed: {error}"));
-                    }
+                if let Err(error) = session.close() {
+                    self.notes.push(format!("W: session close failed: {error}"));
+                }
 
-                    result
-                }
-                Err(error) => {
-                    return RunnerEnd::Rejected(format!(
-                        "runner POST failed: cannot open the POST session: {error}"
-                    ));
-                }
-            },
+                result
+            }
+            Err(error) => {
+                return RunnerEnd::Rejected(format!(
+                    "runner POST failed: cannot open the POST session: {error}"
+                ));
+            }
         };
 
         match result {
@@ -913,6 +975,8 @@ impl Cycle<'_> {
     fn cleanup(&mut self, open: &mut Opener<'_>) -> bool {
         if self.class == Class::Maybe {
             match self.exists(open) {
+                // A half-finished create can leave the directory row without the class.
+                Ok(false) if !self.directory_gone(open) => return true,
                 Ok(false) => self.class = Class::Absent,
                 Ok(true) => self.class = Class::Present,
                 Err(_) => return true,
@@ -953,14 +1017,52 @@ impl Cycle<'_> {
     /// One delete attempt on the current session and the proof from a new one; `true` when the
     /// proof finds the class gone. Every failure leaves its reason in the notes.
     fn delete_and_prove(&mut self, open: &mut Opener<'_>) -> bool {
+        self.directory_left = false;
         self.delete_class();
 
         match self.exists(open) {
-            Ok(false) => true,
+            Ok(false) => self.directory_gone(open),
             Ok(true) => {
                 self.notes.push(
                     "W: runner cleanup proof: the class still exists in a new session".to_owned(),
                 );
+
+                false
+            }
+            Err(reason) => {
+                self.notes
+                    .push(format!("W: runner cleanup proof failed: {reason}"));
+
+                false
+            }
+        }
+    }
+
+    /// Whether the repository directory no longer holds the class, read from a new session. A
+    /// row left behind and a read that fails both count as a leftover.
+    fn directory_gone(&mut self, open: &mut Opener<'_>) -> bool {
+        let mut fresh = match open() {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                self.notes.push(format!(
+                    "W: runner cleanup proof failed: TADIR cannot open a new session: {error}"
+                ));
+
+                return false;
+            }
+        };
+        let found = runner_directory_row(&mut *fresh, self.name());
+
+        if let Err(error) = fresh.close() {
+            self.notes.push(format!("W: session close failed: {error}"));
+        }
+
+        match found {
+            Ok(false) => true,
+            Ok(true) => {
+                self.directory_left = true;
+                self.notes
+                    .push("W: runner cleanup proof: TADIR still holds the class".to_owned());
 
                 false
             }

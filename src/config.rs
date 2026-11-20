@@ -1,5 +1,5 @@
 use crate::operation::runner::{DEFAULT_RUNNER_PREFIX, validate_runner_prefix};
-use crate::policy::{McpWrite, Policies, PolicyDocument};
+use crate::policy::{DEFAULT_READ_TABLE_DENIED, McpWrite, Policies, PolicyDocument};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -231,6 +231,9 @@ impl SaprouterSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct McpPolicies {
     by_system: BTreeMap<String, Policies>,
+    /// What a server absent at start gets: the top-level policies of the start with `mcp_write`
+    /// off and the deny list widened by the built-in tables.
+    absent: Policies,
 }
 
 impl McpPolicies {
@@ -244,6 +247,11 @@ impl McpPolicies {
     /// The policies of `system_id` (case-insensitive), `None` for an unknown system.
     pub fn get(&self, system_id: &str) -> Option<&Policies> {
         self.by_system.get(&system_id.to_ascii_uppercase())
+    }
+
+    /// The policies of a server that was not in the file at start: nothing it could loosen.
+    pub fn absent(&self) -> &Policies {
+        &self.absent
     }
 }
 
@@ -293,7 +301,18 @@ impl Config {
     /// The policies of every server as the MCP server starts with them: one immutable snapshot,
     /// so a later edit of `connections.json` changes nothing until the next start.
     pub fn mcp_policies(&self) -> McpPolicies {
+        let mut absent = self.policies.for_mcp();
+
+        absent.mcp_write = McpWrite::Off;
+
+        for table in DEFAULT_READ_TABLE_DENIED {
+            if !absent.is_read_table_denied(table) {
+                absent.read_table_denied.push(table.to_owned());
+            }
+        }
+
         McpPolicies {
+            absent,
             by_system: self
                 .servers
                 .iter()
@@ -318,6 +337,31 @@ impl Config {
                     .clients
                     .iter()
                     .map(|client| format!("{}_{client}", server.system_id))
+            })
+            .collect()
+    }
+
+    /// Every connection the file names, resolved as it stands now, keyed `<SID>_<client>`. The
+    /// MCP server keeps this snapshot of its start: a connection that is in it keeps its target
+    /// and credentials for the whole session. Keys are upper case. A connection whose resolution fails is kept with
+    /// its error.
+    pub fn start_connections(
+        &self,
+        env: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, Result<Connection, String>> {
+        self.servers
+            .iter()
+            .flat_map(|server| {
+                server
+                    .clients
+                    .iter()
+                    .map(|client| format!("{}_{client}", server.system_id))
+            })
+            .map(|id| {
+                let connection = self.resolve(&id, env);
+
+                // Keyed in upper case, like the id of a call after `parse_id`.
+                (id.to_ascii_uppercase(), connection)
             })
             .collect()
     }

@@ -28,7 +28,7 @@ use crate::operation::runner_evidence::{Expect, Proof, judge, read_evidence};
 use crate::operation::runner_reconcile::{Cause, uncertainty};
 use crate::operation::runner_route::{random_nonce, route};
 use crate::operation::runner_template::{
-    DOMA_TEMPLATE, DTEL_TEMPLATE, TABL_TEMPLATE, TTYP_TEMPLATE, TypeTemplate, generate,
+    DOMA_TEMPLATE, DTEL_TEMPLATE, OutType, TABL_TEMPLATE, TTYP_TEMPLATE, TypeTemplate, generate_for,
 };
 use crate::operation::simulate_ddic::{CHECK_NONCE, Done, refusal, texts};
 use crate::runner_protocol::{Level, Nonce, Parsed, Report, RunMode, RunStatus, parse_post_reply};
@@ -121,7 +121,7 @@ fn run_attempt(attempt: &Attempt<'_>, nonce: &mut dyn FnMut() -> String) -> Done
         Ok(lines) => lines,
         Err(message) => return refusal(&message),
     };
-    let build = |runner: &str| generate(attempt.template, runner, &lines);
+    let build = |runner: &str, out: OutType| generate_for(attempt.template, runner, &lines, out);
     let operation = format!("read {}", kind.token());
     let connection = attempt.connection;
     let input = CycleInput {

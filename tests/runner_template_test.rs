@@ -5,7 +5,8 @@
 use abapreach::operation::payload::{Kind, Mode, Request, encode};
 use abapreach::operation::runner_scan::{ALLOWED_CLASSES, ALLOWED_FUNCTIONS, scan};
 use abapreach::operation::runner_template::{
-    CORE_ONLY, NAME_PLACEHOLDER, TEMPLATES, TypeTemplate, generate, template_hash, template_lines,
+    CORE_ONLY, NAME_PLACEHOLDER, OutType, TEMPLATES, TypeTemplate, generate, generate_for,
+    template_hash, template_lines,
 };
 use abapreach::runner_protocol::{RunMode, RunStatus};
 
@@ -39,6 +40,34 @@ const PINNED: [(&str, &str); 6] = [
     (
         "TTYP",
         "10f40d5390759351e41d14c2b5242e09245bbf3928eab69bad278df58a1c2a35",
+    ),
+];
+
+/// Filled from the generated sources of 0.16.0 (commit 539f13a).
+const GENERATED: [(&str, &str); 6] = [
+    (
+        "CORE",
+        "dc63f6f2d12c1e69c4c45a78a351f4e83506435bf727af43d4d668ee7fcd0b08",
+    ),
+    (
+        "TRAN",
+        "5b99718f96dae2dd50931369433d3c67318d2d44df9d921de705ae0f48ada9fa",
+    ),
+    (
+        "DTEL",
+        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+    ),
+    (
+        "DOMA",
+        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+    ),
+    (
+        "TABL",
+        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+    ),
+    (
+        "TTYP",
+        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
     ),
 ];
 
@@ -870,4 +899,96 @@ fn a_name_right_after_an_arrow_is_scanned() {
 #[test]
 fn a_statement_may_start_with_a_bracket_inside_logic() {
     scan("[ lv_a AND lv_b ].", None).unwrap();
+}
+
+// ---- the type of the classrun OUT parameter (issue #12) -------------------------------------------
+
+#[test]
+fn only_the_two_known_out_types_are_accepted_and_each_names_its_interface() {
+    assert_eq!(
+        OutType::from_found("IF_OO_ADT_INTRNL_CLASSRUN"),
+        Ok(OutType::Internal)
+    );
+    assert_eq!(
+        OutType::from_found("IF_OO_ADT_CLASSRUN_OUT"),
+        Ok(OutType::Out)
+    );
+    assert_eq!(OutType::Internal.interface(), "IF_OO_ADT_INTRNL_CLASSRUN");
+    assert_eq!(OutType::Out.interface(), "IF_OO_ADT_CLASSRUN_OUT");
+
+    for other in [
+        "",
+        " ",
+        "IF_OO_ADT_CLASSRUN",
+        "if_oo_adt_classrun_out",
+        "ZIF_X",
+    ] {
+        let error = OutType::from_found(other).unwrap_err();
+
+        assert!(error.contains(&format!("{other:?}")), "{error}");
+    }
+}
+
+#[test]
+fn the_default_generation_is_the_internal_interface_and_stays_byte_identical() {
+    for template in TEMPLATES {
+        assert_eq!(
+            generate_for(template, NAME, &payload(), OutType::Internal).unwrap(),
+            source(template),
+            "{}",
+            template.name
+        );
+        assert!(
+            source(template).contains("mo_out     TYPE REF TO if_oo_adt_intrnl_classrun,"),
+            "{}",
+            template.name
+        );
+    }
+}
+
+/// The SHA-256 of the generated source of every template for `NAME` and `payload()`, as 0.16.0
+/// generated it: a change of the default path, not only of a template line, changes one of them.
+#[test]
+fn the_generated_source_of_the_default_path_is_pinned() {
+    use sha2::{Digest, Sha256};
+
+    for (name, hash) in GENERATED {
+        let template = TEMPLATES
+            .iter()
+            .find(|template| template.name == name)
+            .unwrap();
+        let digest = Sha256::digest(source(template).as_bytes());
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+
+        assert_eq!(hex, hash, "{name}");
+    }
+}
+
+#[test]
+fn the_out_type_changes_exactly_the_one_declaration_line_and_still_scans() {
+    for template in TEMPLATES {
+        let internal = source(template);
+        let out = generate_for(template, NAME, &payload(), OutType::Out).unwrap();
+        let (internal, out): (Vec<_>, Vec<_>) = (internal.lines().collect(), out.lines().collect());
+
+        assert_eq!(internal.len(), out.len());
+
+        let changed: Vec<usize> = (0..internal.len())
+            .filter(|&i| internal[i] != out[i])
+            .collect();
+
+        assert_eq!(changed.len(), 1, "{}: {changed:?}", template.name);
+        assert_eq!(
+            out[changed[0]],
+            "      mo_out     TYPE REF TO if_oo_adt_classrun_out,"
+        );
+        scan(&out.join("\n"), Some(NAME))
+            .unwrap_or_else(|found| panic!("{}: {found:?}", template.name));
+    }
+}
+
+#[test]
+fn the_scanner_allow_lists_both_out_interfaces() {
+    assert!(ALLOWED_CLASSES.contains(&"IF_OO_ADT_INTRNL_CLASSRUN"));
+    assert!(ALLOWED_CLASSES.contains(&"IF_OO_ADT_CLASSRUN_OUT"));
 }

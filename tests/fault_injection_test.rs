@@ -116,10 +116,18 @@ impl RfcApi for FixtureApi {
     ) -> Result<RfcEndpointResponse, TransportError> {
         assert_eq!(request.function, SADT_REST_RFC_ENDPOINT);
 
+        // The fixture holds the ADT requests; the RFC transport adds `Accept: */*` to one that
+        // names no `Accept`, so that default is removed before the fixture comparison.
+        let mut headers = request.headers;
+
+        if headers.get("Accept").map(String::as_str) == Some("*/*") {
+            headers.remove("Accept");
+        }
+
         let response = self.inner.request(Request {
             method: request.method,
             uri: request.uri,
-            headers: request.headers,
+            headers,
             body: request.body,
         })?;
 

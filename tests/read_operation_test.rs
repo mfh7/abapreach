@@ -684,3 +684,66 @@ fn a_non_class_kind_reports_its_http_status_with_the_kind_and_name() {
 
     assert_eq!(error.failure, Failure::Validation);
 }
+
+#[test]
+fn emit_lines_creates_a_missing_nested_parent_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("nodir/x/f.abap");
+    let xml = directory.path().join("other/deep/dtel.xml");
+    let lines = vec!["REPORT ytest.".to_owned(), "WRITE 'x'.".to_owned()];
+
+    let outcome = abapreach::operation::read::emit_lines(&lines, None, &source, None).unwrap();
+
+    assert_eq!(outcome.exit, 0);
+    assert_eq!(
+        fs::read_to_string(&source).unwrap(),
+        "REPORT ytest.\nWRITE 'x'.\n"
+    );
+
+    let xml_lines = vec!["<DD04V/>".to_owned()];
+    abapreach::operation::read::emit_lines(&xml_lines, None, &xml, None).unwrap();
+    assert_eq!(fs::read_to_string(&xml).unwrap(), "<DD04V/>\n");
+}
+
+#[test]
+fn emit_lines_leaves_an_existing_parent_directory_alone() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("keep.txt");
+    fs::write(&marker, "keep").unwrap();
+    let output = directory.path().join("f.abap");
+
+    abapreach::operation::read::emit_lines(&["A.".to_owned()], None, &output, None).unwrap();
+
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "keep");
+    assert_eq!(fs::read_to_string(&output).unwrap(), "A.\n");
+}
+
+#[test]
+fn emit_lines_reports_a_parent_that_is_a_regular_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let blocker = directory.path().join("blocker");
+    fs::write(&blocker, "file").unwrap();
+    let output = blocker.join("f.abap");
+
+    let error = abapreach::operation::read::emit_lines(&["A.".to_owned()], None, &output, None)
+        .unwrap_err();
+
+    assert!(
+        error
+            .message
+            .starts_with(&format!("cannot create directory {}: ", blocker.display())),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn emit_lines_with_a_line_interval_creates_no_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("nodir/f.abap");
+    let range = LineRange { start: 1, end: 1 };
+
+    abapreach::operation::read::emit_lines(&["A.".to_owned()], Some(range), &output, None).unwrap();
+
+    assert!(!directory.path().join("nodir").exists());
+}

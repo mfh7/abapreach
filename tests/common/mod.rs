@@ -175,7 +175,8 @@ pub fn preview(columns: &[(&str, &[Option<&str>])]) -> String {
 }
 
 /// The replies of the `doctor` runner reads on one session after the discovery: the interface
-/// preview (found), an empty leftover search, and the two preflight previews.
+/// preview (found), an empty leftover search, the two preflight previews, the type of the classrun
+/// `OUT` parameter, and the two orphan previews (no rows).
 pub fn doctor_runner_replies() -> Vec<Result<Response, TransportError>> {
     let found = preview(&[("CLSNAME", &[Some("IF_OO_ADT_CLASSRUN")])]);
     let t000 = preview(&[
@@ -184,13 +185,30 @@ pub fn doctor_runner_replies() -> Vec<Result<Response, TransportError>> {
         ("CCNOCLIIND", &[None]),
     ]);
     let space = preview(&[("EDITFLAG", &[Some("X")])]);
+    let out = preview(&[
+        ("CLSNAME", &[Some("IF_OO_ADT_CLASSRUN")]),
+        ("CMPNAME", &[Some("MAIN")]),
+        ("SCONAME", &[Some("OUT")]),
+        ("TYPE", &[Some("IF_OO_ADT_INTRNL_CLASSRUN")]),
+    ]);
+    let none: &[Option<&str>] = &[];
+    let directory = preview(&[("PGMID", none), ("OBJECT", none), ("OBJ_NAME", none)]);
+    let classes = preview(&[("CLSNAME", none)]);
     let search = concat!(
         r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">"#,
         r#"</adtcore:objectReferences>"#,
     );
 
-    [found.as_str(), search, t000.as_str(), space.as_str()]
-        .into_iter()
-        .map(|body| Ok(Response::text(200, body)))
-        .collect()
+    [
+        found.as_str(),
+        search,
+        t000.as_str(),
+        space.as_str(),
+        out.as_str(),
+        directory.as_str(),
+        classes.as_str(),
+    ]
+    .into_iter()
+    .map(|body| Ok(Response::text(200, body)))
+    .collect()
 }

@@ -663,3 +663,25 @@ fn every_spelling_that_reaches_the_classrun_resource_stays_refused() {
         }
     }
 }
+
+#[test]
+fn the_runner_source_put_with_an_accept_header_is_admitted_on_both_transports() {
+    let mut request = Request::put(
+        format!(
+            "{CLASSES}/{}/source/main?lockHandle=h%2B1%2F%3D",
+            RUNNER.to_ascii_lowercase()
+        ),
+        b"CLASS x DEFINITION.".to_vec(),
+    );
+
+    request.headers.insert(
+        "Content-Type".to_owned(),
+        "text/plain; charset=utf-8".to_owned(),
+    );
+    request
+        .headers
+        .insert("Accept".to_owned(), "text/plain".to_owned());
+
+    assert_both(Some(RUNNER), &request, true);
+    assert_both(None, &request, true);
+}

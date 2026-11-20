@@ -79,6 +79,7 @@
     "method": "PUT",
     "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
     "headers": {
+     "Accept": "text/plain",
      "Content-Type": "text/plain; charset=utf-8"
     },
     "body": "REPORT ytest_abapreach01.\n\nWRITE / 'v1'.\n"
@@ -488,6 +489,7 @@
     "method": "PUT",
     "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
     "headers": {
+     "Accept": "text/plain",
      "Content-Type": "text/plain; charset=utf-8"
     },
     "body": "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.\n"
@@ -623,6 +625,7 @@
     "method": "PUT",
     "uri": "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?lockHandle=kJkXjFlH3LV5QoEdkUVR3YqvXkA%3D",
     "headers": {
+     "Accept": "text/plain",
      "Content-Type": "text/plain; charset=utf-8"
     },
     "body": "REPORT ytest_abapreach01.\n\nWRITE / no_such_var.\n"

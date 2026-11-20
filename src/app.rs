@@ -389,18 +389,26 @@ fn connection_id(command: &Command) -> Option<&str> {
     }
 }
 
-/// `mcp` loads every policy once, then serves stdio until EOF; an invalid policy stops the start
-/// with exit 2 before anything is written to stdout.
+/// `mcp` loads every policy once, then serves stdio until EOF. Each tool call re-reads the
+/// connection files to resolve its connection, but runs with the policies of the start. An invalid
+/// policy stops the start with exit 2 before anything is written to stdout.
 fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories, registry: &Registry) -> Exit {
-    let loaded = ConfigPaths::from_env(&env).and_then(|paths| Config::load(paths, &env));
+    let loaded = ConfigPaths::from_env(&env).and_then(|paths| {
+        let config = Config::load(paths.clone(), &env)?;
+
+        Ok((config, paths))
+    });
 
     match loaded {
-        Ok(config) => {
+        Ok((config, paths)) => {
             let writable = config.mcp_writable();
             // The flag a signal handler sets: it ends the server once a write has settled.
             let cancel = factories.cancel();
-            let tools = McpTools::new(ReadTools::new(config, env, factories), TokenGate::new())
-                .with_registry(registry);
+            let tools = McpTools::new(
+                ReadTools::new(config, env, factories).with_reload(paths),
+                TokenGate::new(),
+            )
+            .with_registry(registry);
             let mut server = Server::new(tools, false)
                 .with_writable(writable)
                 .with_kinds(registry.kinds().collect())

@@ -33,7 +33,7 @@ use crate::operation::runner::{CycleInput, PostRoute, RunnerEnd, RunnerRun, run_
 use crate::operation::runner_evidence::{Expect, Proof, judge, read_evidence};
 use crate::operation::runner_reconcile::{Cause, uncertainty};
 use crate::operation::runner_route::{Routed, random_nonce, route};
-use crate::operation::runner_template::{TypeTemplate, generate};
+use crate::operation::runner_template::{OutType, TypeTemplate, generate_for};
 use crate::runner_protocol::{Level, Nonce, Parsed, Report, RunMode, RunStatus, parse_post_reply};
 use similar::TextDiff;
 
@@ -210,7 +210,7 @@ pub(crate) fn run_lines(
     lines: &[String],
     cancel: &CancelFlag,
 ) -> RunnerRun {
-    let build = |runner: &str| generate(attempt.template, runner, lines);
+    let build = |runner: &str, out: OutType| generate_for(attempt.template, runner, lines, out);
     let connection = attempt.connection;
     let input = CycleInput {
         operation,
