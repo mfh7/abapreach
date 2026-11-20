@@ -1,0 +1,23 @@
+Runs a class, a report or a snippet with the authorizations of the logon user
+
+Usage: abapreach run [OPTIONS] --conn <CONN> <KIND> <TARGET>
+
+Arguments:
+  <KIND>    [possible values: CLAS, PROG, SNIPPET]
+  <TARGET>  The class or report name; for SNIPPET the file with the ABAP statements
+
+Options:
+      --simulate                   Reads the facts the plan binds and writes the plan file; nothing is executed
+      --plan <PLAN>                The plan file: written by --simulate, required by the run unless the policy is direct
+      --param <NAME=VALUE>         PROG only: a parameter or single-value select-option of the report (repeatable)
+      --variant <VARIANT>          PROG only: the selection variant of the report
+      --alv <ALV>                  PROG only: capture an ALV grid the report shows (default on) [possible values: on, off]
+      --alv-columns <ALV_COLUMNS>  PROG only: print the columns the grid shows, or every column of its table [possible values: visible, all]
+      --allow-standard             Allow a standard class or report; without it only Z and Y names run
+      --timeout <TIMEOUT>          Seconds the run POST may take over ADT HTTP (default 600, at most 3600); refused on RFC
+      --max-output <MAX_OUTPUT>    PROG and SNIPPET: the most output bytes the run prints (default 6 MiB)
+      --backend <BACKEND>          [possible values: adt, rfc]
+      --conn <CONN>                
+  -h, --help                       Print help
+
+CLAS runs a class that implements IF_OO_ADT_CLASSRUN. run is not a dry run: data the code writes stays written. --simulate only reads and writes the plan file; it never executes anything. Without --simulate the run needs the plan file of its simulate unless the connection policy run is direct.

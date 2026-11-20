@@ -158,12 +158,121 @@ pub enum Command {
         #[arg(long)]
         conn: String,
     },
+    /// Runs a class, a report or a snippet with the authorizations of the logon user.
+    #[command(
+        after_help = "CLAS runs a class that implements IF_OO_ADT_CLASSRUN. run is not a dry run: data the code writes stays written. --simulate only \
+                      reads and writes the plan file; it never executes anything. Without \
+                      --simulate the run needs the plan file of its simulate unless the \
+                      connection policy run is direct."
+    )]
+    Run {
+        #[arg(value_enum)]
+        kind: RunKind,
+
+        /// The class or report name; for SNIPPET the file with the ABAP statements.
+        target: String,
+
+        /// Reads the facts the plan binds and writes the plan file; nothing is executed.
+        #[arg(long)]
+        simulate: bool,
+
+        /// The plan file: written by --simulate, required by the run unless the policy is direct.
+        #[arg(long)]
+        plan: Option<PathBuf>,
+
+        /// PROG only: a parameter or single-value select-option of the report (repeatable).
+        #[arg(long = "param", value_name = "NAME=VALUE")]
+        params: Vec<String>,
+
+        /// PROG only: the selection variant of the report.
+        #[arg(long)]
+        variant: Option<String>,
+
+        /// PROG only: capture an ALV grid the report shows (default on).
+        #[arg(long)]
+        alv: Option<AlvMode>,
+
+        /// PROG only: print the columns the grid shows, or every column of its table.
+        #[arg(long)]
+        alv_columns: Option<AlvColumns>,
+
+        /// Allow a standard class or report; without it only Z and Y names run.
+        #[arg(long)]
+        allow_standard: bool,
+
+        /// Seconds the run POST may take over ADT HTTP (default 600, at most 3600); refused on RFC.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=3600))]
+        timeout: Option<u32>,
+
+        /// PROG and SNIPPET: the most output bytes the run prints (default 6 MiB).
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=6_291_456))]
+        max_output: Option<u64>,
+
+        #[arg(long)]
+        backend: Option<Backend>,
+
+        #[arg(long)]
+        conn: String,
+    },
     /// Serves the MCP tools on stdio.
     Mcp,
     Doctor {
         #[arg(long)]
         conn: String,
     },
+}
+
+/// What `run` executes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum RunKind {
+    #[value(name = "CLAS")]
+    Clas,
+    #[value(name = "PROG")]
+    Prog,
+    #[value(name = "SNIPPET")]
+    Snippet,
+}
+
+impl RunKind {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Clas => "CLAS",
+            Self::Prog => "PROG",
+            Self::Snippet => "SNIPPET",
+        }
+    }
+}
+
+/// `--alv` of a `PROG` run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AlvMode {
+    On,
+    Off,
+}
+
+impl AlvMode {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// `--alv-columns` of a `PROG` run (CLI only, never MCP).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AlvColumns {
+    Visible,
+    All,
+}
+
+impl AlvColumns {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Visible => "visible",
+            Self::All => "all",
+        }
+    }
 }
 
 /// The DDIC and transaction types that run through the temporary class, in the order the help

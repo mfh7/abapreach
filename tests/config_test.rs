@@ -898,3 +898,113 @@ fn a_server_with_neither_backend_stops_at_resolve() {
 
     assert!(error.contains("neither"), "{error}");
 }
+
+#[test]
+fn the_run_keys_default_to_plan_with_mcp_closed() {
+    let policies = effective("", "").unwrap();
+
+    assert_eq!(policies.run.token(), "plan");
+    assert_eq!(policies.mcp_run.token(), "off");
+    assert_eq!(policies.mcp_run_snippet.token(), "off");
+    assert!(policies.mcp_run_allow.is_empty());
+}
+
+#[test]
+fn the_run_keys_read_their_values_and_a_server_overrides_single_keys() {
+    let top = r#","policies":{"run":"direct","mcp_run":"confirm","mcp_run_allow":[" zcl_a ","ZCL_B",""],"mcp_run_snippet":"on"}"#;
+    let policies = effective(top, "").unwrap();
+
+    assert_eq!(policies.run.token(), "direct");
+    assert_eq!(policies.mcp_run.token(), "confirm");
+    assert_eq!(policies.mcp_run_snippet.token(), "on");
+    assert_eq!(policies.mcp_run_allow, ["ZCL_A", "ZCL_B"]);
+    assert!(policies.is_run_allowed("zcl_b"));
+    assert!(!policies.is_run_allowed("ZCL_B2"));
+
+    let overridden = effective(
+        top,
+        r#","policies":{"run":"off","mcp_run_allow":[],"mcp_run_snippet":"off"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(overridden.run.token(), "off");
+    // Kept from the top level.
+    assert_eq!(overridden.mcp_run.token(), "confirm");
+    assert!(overridden.mcp_run_allow.is_empty());
+    assert_eq!(overridden.mcp_run_snippet.token(), "off");
+
+    let kept = effective(top, r#","policies":{"run":"plan"}"#).unwrap();
+
+    assert_eq!(kept.run.token(), "plan");
+    assert_eq!(kept.mcp_run_allow, ["ZCL_A", "ZCL_B"]);
+}
+
+#[test]
+fn an_unknown_run_value_stops_the_load_and_mcp_counts_direct_as_plan() {
+    for bad in [
+        r#","policies":{"run":"always"}"#,
+        r#","policies":{"mcp_run":"token"}"#,
+        r#","policies":{"mcp_run_snippet":"confirm"}"#,
+        r#","policies":{"mcp_run_allow":"ZCL_A"}"#,
+    ] {
+        assert!(effective(bad, "").is_err(), "{bad}");
+    }
+
+    let direct = effective(r#","policies":{"run":"direct"}"#, "").unwrap();
+
+    assert_eq!(direct.run.token(), "direct");
+    assert_eq!(direct.for_mcp().run.token(), "plan");
+}
+
+#[test]
+fn the_mcp_snapshot_offers_run_only_where_both_keys_allow_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let connections = directory.path().join("connections.json");
+    let env = BTreeMap::new();
+    let load = |text: &str| {
+        fs::write(&connections, text).unwrap();
+
+        Config::load(
+            ConfigPaths {
+                connections: connections.clone(),
+                local: directory.path().join("connections.local.json"),
+            },
+            &env,
+        )
+        .unwrap()
+    };
+    let server = |id: &str, policies: &str| {
+        format!(
+            r#"{{"systemId":"{id}","host":"example.com","port":443,"clients":["100"]{policies}}}"#
+        )
+    };
+
+    let closed = load(&format!(r#"{{"servers":[{}]}}"#, server("DEV", "")));
+
+    assert!(!closed.mcp_policies().run_offered());
+    assert!(closed.mcp_runnable().is_empty());
+
+    let confirm = r#","policies":{"mcp_run":"confirm"}"#;
+    let off = r#","policies":{"mcp_run":"confirm","run":"off"}"#;
+    let mixed = load(&format!(
+        r#"{{"servers":[{},{},{}]}}"#,
+        server("DEV", confirm),
+        server("QAS", off),
+        server("PRD", "")
+    ));
+
+    assert!(mixed.mcp_policies().run_offered());
+    assert_eq!(mixed.mcp_runnable(), ["DEV_100"]);
+
+    // A server that was absent at the start gets nothing.
+    let absent = mixed.mcp_policies();
+    let absent = absent.absent();
+
+    assert_eq!(absent.mcp_run.token(), "off");
+    assert!(absent.mcp_run_allow.is_empty());
+    assert_eq!(absent.mcp_run_snippet.token(), "off");
+
+    let only_off = load(&format!(r#"{{"servers":[{}]}}"#, server("QAS", off)));
+
+    assert!(!only_off.mcp_policies().run_offered());
+}

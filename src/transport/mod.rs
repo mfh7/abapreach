@@ -5,6 +5,7 @@ pub mod rfc;
 pub use admission::{RunnerArm, runner_verdict};
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -137,6 +138,24 @@ pub trait SadtTransport {
 
     /// Ends the session; a failure is reported, never turned into a different verdict.
     fn close(&mut self) -> Result<(), TransportError>;
+
+    /// Whether [`SadtTransport::request_within`] enforces its limit. Only ADT HTTP does: the RFC
+    /// library has no call timeout and no cancel.
+    fn supports_request_timeout(&self) -> bool {
+        false
+    }
+
+    /// Sends `request` with `limit` as the time the whole request may take, replacing the limit
+    /// of the transport for this one request. A transport that cannot enforce it
+    /// ([`SadtTransport::supports_request_timeout`] is false) sends the request without a limit,
+    /// so the caller refuses a limit it cannot honour before it gets here.
+    fn request_within(
+        &mut self,
+        request: Request,
+        _limit: Duration,
+    ) -> Result<Response, TransportError> {
+        self.request(request)
+    }
 
     /// Whether the backend keeps a stateful session; `None` when it cannot tell (RFC/SADT).
     fn stateful_supported(&self) -> Option<bool> {

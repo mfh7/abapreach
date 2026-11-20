@@ -196,3 +196,41 @@ fn a_deferred_interrupt_still_unlocks_and_never_reports_success() {
     assert!(!cancel.lock_held());
     transport.inner.assert_finished();
 }
+
+const WAIT: &str = "I: run in progress on the server; waiting for the reply";
+
+#[test]
+fn the_first_interrupt_during_a_run_waits_and_the_second_leaves() {
+    let cancel = CancelFlag::new();
+
+    // Outside a run an interrupt with nothing held leaves at once.
+    assert_eq!(cancel.on_interrupt(), InterruptAction::ExitNow);
+
+    {
+        let _running = cancel.hold_run(WAIT);
+
+        assert!(!cancel.run_interrupted());
+        assert_eq!(cancel.on_interrupt(), InterruptAction::Waiting(WAIT));
+        assert!(cancel.run_interrupted());
+        assert_eq!(cancel.on_interrupt(), InterruptAction::ExitNow);
+        assert_eq!(cancel.on_interrupt(), InterruptAction::ExitNow);
+    }
+
+    // The window ends with its scope, and a new run starts with a fresh count.
+    assert_eq!(cancel.on_interrupt(), InterruptAction::ExitNow);
+
+    let _again = cancel.hold_run(WAIT);
+
+    assert!(!cancel.run_interrupted());
+    assert_eq!(cancel.on_interrupt(), InterruptAction::Waiting(WAIT));
+}
+
+#[test]
+fn a_clone_of_the_flag_sees_the_run_window() {
+    let cancel = CancelFlag::new();
+    let handler = cancel.clone();
+    let _running = cancel.hold_run(WAIT);
+
+    assert_eq!(handler.on_interrupt(), InterruptAction::Waiting(WAIT));
+    assert!(cancel.run_interrupted());
+}

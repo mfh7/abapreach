@@ -250,6 +250,21 @@ impl RunnerArm {
             return Err("not a runner class name".to_owned());
         }
 
+        Self::arm_checked(name)
+    }
+
+    /// Arms `name`, an existing class `run CLAS` executes: any upper-case class name that is not
+    /// namespaced, at most 30 characters. Its one classrun POST is admitted like a runner's; no
+    /// other class can be run, and a create that mentions the name stays refused.
+    pub fn arm_class(name: &str) -> Result<Self, String> {
+        if !is_class_name(name) {
+            return Err("not a class name that can be run".to_owned());
+        }
+
+        Self::arm_checked(name)
+    }
+
+    fn arm_checked(name: &str) -> Result<Self, String> {
         ARMED.with(|armed| {
             let mut armed = armed.borrow_mut();
 
@@ -273,6 +288,16 @@ impl Drop for RunnerArm {
 /// An upper-case class name of at most 30 characters that starts with `Y` or `Z`.
 fn is_runner_name(name: &str) -> bool {
     name.starts_with(['Y', 'Z'])
+        && name.len() <= MAX_CLASS_NAME
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// An upper-case class name of at most 30 characters that starts with a letter. A namespaced name
+/// has no verified path form yet.
+fn is_class_name(name: &str) -> bool {
+    name.starts_with(|first: char| first.is_ascii_uppercase())
         && name.len() <= MAX_CLASS_NAME
         && name
             .bytes()

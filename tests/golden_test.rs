@@ -41,13 +41,14 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// File name, arguments, and whether the text is on stdout (help, version) or stderr (a STOP).
-const COMMANDS: [(&str, &[&str], bool); 14] = [
+const COMMANDS: [(&str, &[&str], bool); 15] = [
     ("help-top.txt", &["--help"], true),
     ("help-read.txt", &["read", "--help"], true),
     ("help-deploy.txt", &["deploy", "--help"], true),
     ("help-create.txt", &["create", "--help"], true),
     ("help-read-table.txt", &["read-table", "--help"], true),
     ("help-delete.txt", &["delete", "--help"], true),
+    ("help-run.txt", &["run", "--help"], true),
     ("help-mcp.txt", &["mcp", "--help"], true),
     ("help-doctor.txt", &["doctor", "--help"], true),
     ("version.txt", &["--version"], true),
@@ -133,11 +134,17 @@ fn the_cli_golden_texts_name_the_new_types_the_prog_option_and_the_footprint() {
     }
 
     assert!(golden("new", "help-read.txt").contains("temporary class"));
-    // The top level does not change: the footprint sits in the help of the subcommands.
-    assert_eq!(
-        minus_tran(&golden("old", "help-top.txt")),
-        golden("new", "help-top.txt")
-    );
+    // The top level lists `run` and otherwise does not change: the footprint sits in the help of
+    // the subcommands.
+    let top = golden("new", "help-top.txt");
+    let without_run: String = top
+        .lines()
+        .filter(|line| !line.starts_with("  run "))
+        .map(|line| format!("{line}\n"))
+        .collect();
+
+    assert!(top.lines().any(|line| line.starts_with("  run ")));
+    assert_eq!(minus_tran(&golden("old", "help-top.txt")), without_run);
 }
 
 // ---- the rule against the old branch (MCP schema) ------------------------------------------------

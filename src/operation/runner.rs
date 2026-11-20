@@ -17,6 +17,7 @@ use crate::transport::{
     Request, Response, RunnerArm, SadtTransport, TransportError, runner_verdict,
 };
 use std::cell::RefCell;
+use std::time::Duration;
 
 /// The product default; the live test harness selects its own prefix through `runner_prefix`.
 pub const DEFAULT_RUNNER_PREFIX: &str = "YCL_ABAPREACH_RUN_";
@@ -127,8 +128,14 @@ impl<'a> RunnerGated<'a> {
     }
 }
 
-impl SadtTransport for RunnerGated<'_> {
-    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+impl RunnerGated<'_> {
+    /// The one send: the runner rules judge the request, then it goes out with the limit of the
+    /// request (`None` is the limit of the transport).
+    fn gated(
+        &mut self,
+        request: Request,
+        limit: Option<Duration>,
+    ) -> Result<Response, TransportError> {
         if runner_verdict(&request) == Some(false) {
             return Err(TransportError::RequestNotAllowed(format!(
                 "{} {}",
@@ -142,7 +149,10 @@ impl SadtTransport for RunnerGated<'_> {
                 fault.drop_reply(crate::transport::rfc::is_fault_target(target, &request))
             })
         });
-        let response = self.inner.request(request)?;
+        let response = match limit {
+            Some(limit) => self.inner.request_within(request, limit)?,
+            None => self.inner.request(request)?,
+        };
 
         // The request has run and SAP executed it; only the reply is discarded.
         #[cfg(feature = "fault-injection")]
@@ -152,6 +162,12 @@ impl SadtTransport for RunnerGated<'_> {
 
         Ok(response)
     }
+}
+
+impl SadtTransport for RunnerGated<'_> {
+    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+        self.gated(request, None)
+    }
 
     fn close(&mut self) -> Result<(), TransportError> {
         self.inner.close()
@@ -159,6 +175,18 @@ impl SadtTransport for RunnerGated<'_> {
 
     fn stateful_supported(&self) -> Option<bool> {
         self.inner.stateful_supported()
+    }
+
+    fn supports_request_timeout(&self) -> bool {
+        self.inner.supports_request_timeout()
+    }
+
+    fn request_within(
+        &mut self,
+        request: Request,
+        limit: Duration,
+    ) -> Result<Response, TransportError> {
+        self.gated(request, Some(limit))
     }
 }
 

@@ -384,6 +384,7 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::Create { conn, .. }
         | Command::ReadTable { conn, .. }
         | Command::Delete { conn, .. }
+        | Command::Run { conn, .. }
         | Command::Doctor { conn } => Some(conn),
         Command::Mcp => None,
     }
@@ -665,6 +666,38 @@ fn execute(
                     None,
                 )
             },
+        ),
+        Command::Run {
+            kind,
+            target,
+            simulate,
+            plan,
+            params,
+            variant,
+            alv,
+            alv_columns,
+            allow_standard,
+            timeout,
+            max_output,
+            backend,
+            ..
+        } => crate::run_cli::execute(
+            &crate::run_cli::RunCommand {
+                kind,
+                target: &target,
+                simulate,
+                plan: plan.as_deref(),
+                params: &params,
+                variant: variant.as_deref(),
+                alv,
+                alv_columns,
+                allow_standard,
+                timeout,
+                max_output,
+                backend,
+            },
+            connection,
+            factories,
         ),
         Command::Mcp => stop("the MCP server needs no connection"),
         Command::Read {

@@ -65,6 +65,85 @@ impl Display for McpWrite {
     }
 }
 
+/// Whether the CLI may run code (`run`), and how: the setting of the `run` policy.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum RunPolicy {
+    /// `run` is refused on the CLI and in MCP, and so is `aunit`.
+    Off,
+    /// The two-step flow: `run --simulate ... --plan F`, then `run ... --plan F`.
+    #[default]
+    Plan,
+    /// The CLI may run without a plan file. MCP ignores this value.
+    Direct,
+}
+
+impl RunPolicy {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Plan => "plan",
+            Self::Direct => "direct",
+        }
+    }
+}
+
+impl Display for RunPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.token())
+    }
+}
+
+/// Whether the MCP server may run code, and how it is confirmed.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpRun {
+    /// No MCP run tool for this server.
+    #[default]
+    Off,
+    /// Every run is confirmed by the human through elicitation, whatever `mcp_write` says.
+    Confirm,
+}
+
+impl McpRun {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Confirm => "confirm",
+        }
+    }
+}
+
+impl Display for McpRun {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.token())
+    }
+}
+
+/// Whether MCP may run a code snippet (`mcp_run_snippet`).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpRunSnippet {
+    #[default]
+    Off,
+    On,
+}
+
+impl McpRunSnippet {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+}
+
+impl Display for McpRunSnippet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.token())
+    }
+}
+
 /// The tables `read_table_denied` holds when the key is absent: credential and crypto tables.
 pub const DEFAULT_READ_TABLE_DENIED: [&str; 8] = [
     "USR02",
@@ -84,6 +163,13 @@ pub struct Policies {
     /// Upper-case table names `read-table` refuses; an empty list denies nothing.
     pub read_table_denied: Vec<String>,
     pub mcp_write: McpWrite,
+    /// The `run` policy of the CLI; `off` also refuses `run` and `aunit` in MCP.
+    pub run: RunPolicy,
+    pub mcp_run: McpRun,
+    /// Upper-case class and report names MCP may run (exact names, no patterns); `aunit` batches
+    /// need every object on it. Empty allows none.
+    pub mcp_run_allow: Vec<String>,
+    pub mcp_run_snippet: McpRunSnippet,
 }
 
 impl Default for Policies {
@@ -95,11 +181,22 @@ impl Default for Policies {
                 .map(|table| (*table).to_owned())
                 .collect(),
             mcp_write: McpWrite::Off,
+            run: RunPolicy::Plan,
+            mcp_run: McpRun::Off,
+            mcp_run_allow: Vec::new(),
+            mcp_run_snippet: McpRunSnippet::Off,
         }
     }
 }
 
 impl Policies {
+    /// Whether `name` is on `mcp_run_allow` (exact name, ignoring case).
+    pub fn is_run_allowed(&self, name: &str) -> bool {
+        self.mcp_run_allow
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(name.trim()))
+    }
+
     /// Whether `table` is on the deny list, ignoring case.
     pub fn is_read_table_denied(&self, table: &str) -> bool {
         self.read_table_denied
@@ -116,12 +213,17 @@ impl Policies {
             .collect()
     }
 
-    /// The policies the MCP server runs with: `ask` has no terminal there, so it counts as `reject`.
+    /// The policies the MCP server runs with: `ask` has no terminal there, so it counts as
+    /// `reject`, and `run: direct` counts as `plan` (MCP always confirms with the human).
     pub fn for_mcp(&self) -> Self {
         let mut policies = self.clone();
 
         if policies.foreign_inactive == ForeignInactive::Ask {
             policies.foreign_inactive = ForeignInactive::Reject;
+        }
+
+        if policies.run == RunPolicy::Direct {
+            policies.run = RunPolicy::Plan;
         }
 
         policies
@@ -139,6 +241,15 @@ pub struct PolicyDocument {
     read_table_denied: Option<Vec<String>>,
     #[serde(default)]
     mcp_write: Option<McpWrite>,
+    #[serde(default)]
+    run: Option<RunPolicy>,
+    #[serde(default)]
+    mcp_run: Option<McpRun>,
+    /// `[]` is an explicit empty list; an absent key keeps the outer list.
+    #[serde(default)]
+    mcp_run_allow: Option<Vec<String>>,
+    #[serde(default)]
+    mcp_run_snippet: Option<McpRunSnippet>,
 }
 
 impl PolicyDocument {
@@ -156,6 +267,19 @@ impl PolicyDocument {
                 },
             ),
             mcp_write: self.mcp_write.unwrap_or(outer.mcp_write),
+            run: self.run.unwrap_or(outer.run),
+            mcp_run: self.mcp_run.unwrap_or(outer.mcp_run),
+            mcp_run_allow: self.mcp_run_allow.as_ref().map_or_else(
+                || outer.mcp_run_allow.clone(),
+                |names| {
+                    names
+                        .iter()
+                        .map(|name| name.trim().to_ascii_uppercase())
+                        .filter(|name| !name.is_empty())
+                        .collect()
+                },
+            ),
+            mcp_run_snippet: self.mcp_run_snippet.unwrap_or(outer.mcp_run_snippet),
         }
     }
 }

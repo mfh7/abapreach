@@ -12,6 +12,8 @@ pub mod payload;
 pub mod read;
 pub mod read_ddic;
 pub mod read_table;
+pub mod run;
+pub mod run_plan;
 pub mod runner;
 pub mod runner_evidence;
 pub mod runner_reconcile;
