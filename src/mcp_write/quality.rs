@@ -10,6 +10,7 @@ use super::{
 };
 use crate::app::end_session;
 use crate::backend::OperationKind;
+use crate::cli::RunKind;
 use crate::config::Connection;
 use crate::domain::{Outcome, Status};
 use crate::mcp::{Session, ToolHandler, ToolResult};
@@ -17,6 +18,7 @@ use crate::mcp_read::{optional, required};
 use crate::operation::activate::{self, ActivateInput, ActivateTarget};
 use crate::operation::aunit::{self, AunitKind, AunitTarget, Scope};
 use crate::operation::quality;
+use crate::operation::run_plan::{RunArgs, mcp_gate};
 use crate::policy::{McpRun, RunPolicy};
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
@@ -309,12 +311,44 @@ fn activate_targets(arguments: &Map<String, Value>) -> Result<Vec<ActivateTarget
         .collect()
 }
 
-/// The seam of the `mcp_run_allow` list: every object of a call must be on it. Fails closed until
-/// the list is wired: MCP `abap_aunit` is refused.
-fn run_allowed(_connection: &Connection, targets: &[AunitTarget]) -> Result<(), String> {
-    if targets.is_empty() {
+/// The `mcp_run_allow` gate of `abap_aunit`: every object of the call (also each object a
+/// package or a request resolved to) must be on the list, by the same exact-name rule and the same
+/// gate (`mcp_gate`) as `abap_run`. One object off the list refuses the whole call, naming every
+/// object that is missing; nothing runs.
+fn run_allowed(connection: &Connection, targets: &[AunitTarget]) -> Result<(), String> {
+    let policies = &connection.policies;
+    let mut missing: Vec<&str> = Vec::new();
+
+    for target in targets {
+        let args = RunArgs {
+            kind: RunKind::Clas,
+            name: target.name.clone(),
+            params: Vec::new(),
+            variant: None,
+            alv: None,
+            alv_columns: None,
+            snippet: None,
+        };
+
+        if let Err(message) = mcp_gate(policies, &connection.id, &args) {
+            // `run: off` and `mcp_run: off` refuse for every object alike.
+            if policies.run == RunPolicy::Off || policies.mcp_run == McpRun::Off {
+                return Err(message);
+            }
+
+            if !missing.contains(&target.name.as_str()) {
+                missing.push(&target.name);
+            }
+        }
+    }
+
+    if missing.is_empty() {
         return Ok(());
     }
 
-    Err("STOP: no object is on mcp_run_allow for this connection".to_owned())
+    Err(format!(
+        "not on mcp_run_allow of {}: {}; nothing was run",
+        connection.id,
+        missing.join(", ")
+    ))
 }

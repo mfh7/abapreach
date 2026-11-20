@@ -586,7 +586,6 @@ fn aunit_arguments_follow_the_cli_scope_rules() {
 }
 
 #[test]
-#[ignore = "needs mcp_run_allow wired in abap_aunit"]
 fn the_human_confirms_and_the_tests_run() {
     let mut rig = rig(ALLOW_TEST);
     let calls = rig.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
@@ -606,7 +605,6 @@ fn the_human_confirms_and_the_tests_run() {
 }
 
 #[test]
-#[ignore = "needs mcp_run_allow wired in abap_aunit"]
 fn a_wrong_answer_runs_no_test() {
     let mut rig = rig(ALLOW_TEST);
     let result = rig.call(&mut Typing("ZOTHER", 0), "abap_aunit", aunit_arguments());
@@ -618,7 +616,6 @@ fn a_wrong_answer_runs_no_test() {
 }
 
 #[test]
-#[ignore = "needs mcp_run_allow wired in abap_aunit"]
 fn failing_tests_are_an_error_result_with_the_alert_lines() {
     let mut rig = rig(ALLOW_TEST);
 
@@ -636,7 +633,6 @@ fn failing_tests_are_an_error_result_with_the_alert_lines() {
 }
 
 #[test]
-#[ignore = "needs mcp_run_allow wired in abap_aunit"]
 fn a_productive_client_runs_no_test_in_mcp() {
     let mut rig = rig(ALLOW_TEST);
     let calls = rig.session(vec![client("P")]);
@@ -648,7 +644,6 @@ fn a_productive_client_runs_no_test_in_mcp() {
 }
 
 #[test]
-#[ignore = "needs mcp_run_allow wired in abap_aunit"]
 fn a_package_batch_is_resolved_first_and_the_human_types_the_count() {
     let mut rig = rig(ALLOW_AB);
     let tadir = ok(&preview(&[
@@ -683,6 +678,108 @@ fn a_package_batch_is_resolved_first_and_the_human_types_the_count() {
             .count(),
         2
     );
+}
+
+#[test]
+fn an_object_missing_from_mcp_run_allow_refuses_the_call_before_any_request() {
+    let mut rig = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_OTHER"]}"#);
+    let calls = rig.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
+    let mut typing = Typing("ZCL_TEST", 0);
+    let result = rig.call(&mut typing, "abap_aunit", aunit_arguments());
+
+    assert!(result.is_error);
+    assert!(
+        result
+            .text
+            .contains("not on mcp_run_allow of DEV_100: ZCL_TEST"),
+        "{}",
+        result.text
+    );
+    // The human is not asked and no connection is opened.
+    assert_eq!(typing.1, 0);
+    assert_eq!(rig.opened(), 0);
+    assert!(calls.borrow().is_empty());
+}
+
+#[test]
+fn an_empty_or_absent_mcp_run_allow_refuses_every_object() {
+    for policies in [
+        r#"{"mcp_run":"confirm"}"#,
+        r#"{"mcp_run":"confirm","mcp_run_allow":[]}"#,
+    ] {
+        let mut rig = rig(policies);
+        let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+
+        assert!(result.is_error);
+        assert!(
+            result.text.contains("not on mcp_run_allow"),
+            "{}",
+            result.text
+        );
+        assert_eq!(rig.opened(), 0);
+    }
+}
+
+#[test]
+fn the_allow_list_matches_exact_names_without_regard_to_case() {
+    let mut lower = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["zcl_test"]}"#);
+
+    lower.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
+
+    let result = lower.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+
+    assert!(!result.is_error, "{}", result.text);
+
+    // A prefix of the name is not a match: there are no patterns.
+    let mut prefix = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_TES","ZCL_TEST*"]}"#);
+    let result = prefix.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+
+    assert!(result.is_error);
+    assert_eq!(prefix.opened(), 0);
+}
+
+#[test]
+fn a_batch_with_one_object_off_the_list_refuses_all_of_it() {
+    let mut rig = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_A"]}"#);
+    let tadir = ok(&preview(&[
+        ("OBJECT", &[Some("CLAS"), Some("CLAS")]),
+        ("OBJ_NAME", &[Some("ZCL_A"), Some("ZCL_B")]),
+    ]));
+
+    // Only the resolving session is scripted: no test session may open.
+    rig.session(vec![tadir]);
+
+    let mut typing = Typing("RUN 2", 0);
+    let result = rig.call(
+        &mut typing,
+        "abap_aunit",
+        json!({"conn": "DEV_100", "package": "ZPKG"}),
+    );
+
+    assert!(result.is_error);
+    assert!(
+        result
+            .text
+            .contains("not on mcp_run_allow of DEV_100: ZCL_B; nothing was run"),
+        "{}",
+        result.text
+    );
+    assert!(!result.text.contains("ZCL_A,"));
+    assert_eq!(typing.1, 0);
+}
+
+#[test]
+fn run_off_refuses_abap_aunit_before_the_allow_list_and_hides_the_tools() {
+    let mut rig = rig(r#"{"mcp_run":"confirm","run":"off","mcp_run_allow":["ZCL_TEST"]}"#);
+    let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
+
+    assert!(result.is_error);
+    assert!(result.text.contains("policy run"), "{}", result.text);
+    assert_eq!(rig.opened(), 0);
+
+    let config = Config::load(ConfigPaths::from_env(&rig.env).unwrap(), &rig.env).unwrap();
+
+    assert!(config.mcp_runnable().is_empty());
 }
 
 // ---- the policy keys -----------------------------------------------------------------------------
