@@ -524,6 +524,66 @@ path; see [Deploy safety: Delete](deploy-safety.md#delete).
 
 To use ABAPReach from an AI assistant, see [MCP server](mcp.md).
 
+## Inactive objects, activation and ABAP Unit
+
+`inactive` lists the inactive objects of the logon user, one line `<ADT type> <name> <user>` each
+(`PROG/P`, `PROG/I`, `CLAS/OC`, `INTF/OI`, `FUGR/F`, `FUGR/FF`, DDIC types, and so on). An include also
+names its main program. Methods and other parts of a class are not listed, only the class. A reply that
+names no user (the flat 7.40 feed) prints `?` as the user.
+
+```text
+abapreach inactive --conn A4H_001
+abapreach inactive --all --conn A4H_001
+```
+
+`--all` asks the system for every user's entries (`?USERNAME=*`). A release that does not offer the
+filter answers with an error and the command says so.
+
+`activate` activates inactive objects by the tokens `inactive` prints. It runs one `POST
+/sap/bc/adt/activation` per object, then reads the inactive list again: an object counts as active only
+when it is no longer listed. The exit code is 0 only when every object is active.
+
+```text
+abapreach activate --simulate PROG/P:ZEXAMPLE CLAS/OC:ZCL_EXAMPLE --conn A4H_001
+abapreach activate PROG/P:ZEXAMPLE CLAS/OC:ZCL_EXAMPLE --conn A4H_001
+```
+
+- Accepted types: `PROG/P`, `PROG/I` (activated under its main program), `CLAS/OC`, `INTF/OI`, `FUGR/FF`.
+  `FUGR/F` and every other type stop with the reason; DDIC objects go through the DDIC deploy.
+- Only Z and Y objects of the logon user. The user comes from the inactive list; when the list names none
+  (7.40), the author of the inactive version in the version feed decides. An object that is not listed,
+  belongs to someone else or has an unknown owner rejects the whole call before any activation.
+- ABAPReach reads `T000` first and refuses a productive client (`CCCATEGORY P`). A client that `T000`
+  does not list or that cannot be read is refused too.
+- `--simulate` runs every check above and prints `SIMULATED_OK <token> user <user>` per object.
+- A transportable class answers the first request with a worklist and activates nothing; ABAPReach sends
+  the second request with exactly that list, as the deploy does, and only when the list stays inside the
+  class.
+
+`aunit` runs ABAP Unit with harmless tests of every duration (no coverage):
+
+```text
+abapreach aunit CLAS ZCL_EXAMPLE --conn A4H_001
+abapreach aunit --package ZEXAMPLE --conn A4H_001
+abapreach aunit --tr A4HK900001 --conn A4H_001
+```
+
+Each alert prints `<kind> <level> <prog> <class>-><method>: <text>`, then `TESTS: <n> methods, <m> alerts`
+and `AUNIT: ACTIVE` (no alert) or `AUNIT: REJECTED`. The exit code is 0 only without alerts. A
+`--package` or `--tr` batch prints a block `== <TYPE> <NAME> ==` per object, `SUMMARY: <n> OK, <m> FAILED`
+and a `FAILED <TYPE> <NAME>: <reason>` line each; an error on one object counts as failed and the batch
+goes on. A batch without objects exits 1: an empty gate is not a pass.
+
+- Test code runs on the SAP system, so `aunit` counts as running code: the policy `run` (`off`, `plan`,
+  default `plan`, or `direct`) must not be `off`, and a productive client is refused. `aunit` needs no
+  plan file under `plan` or `direct`: it runs the test classes of the named objects only.
+- Types `PROG`, `CLAS` and `FUGR`; plain Z and Y names. An object that does not exist is rejected.
+- `--package` takes the programs, classes and function groups of the package (`TADIR`, not deleted);
+  program includes are skipped. `--tr` takes the request and its tasks: `R3TR` programs, classes and
+  function groups, and the parts of a class (`LIMU METH`, `CPUB`, `CPRO`, `CPRI`, `CLSD`, `CINC`,
+  `CDEF`, `CIMP`), which stand for the class. Other `LIMU` entries (`REPS`, `FUNC`) are not mapped and
+  are counted in a `W:` line. A batch holds at most 100 objects.
+
 ## DDIC objects and transaction codes
 
 Data elements (`DTEL`), domains (`DOMA`), tables (`TABL`: transparent tables and structures), table

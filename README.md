@@ -368,6 +368,9 @@ abapreach create PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN <NAME> [FILE]
     [--backend adt|rfc] --conn <SID>_<client>
 abapreach delete TYPE:NAME... [--simulate] [--tr <request>] --plan <FILE> --conn <SID>_<client>
 abapreach read-table <TABLE> [--fields <A,B>] [--where '<condition>'] [--rows 1-5000] --conn <SID>_<client>
+abapreach inactive [--all] --conn <SID>_<client>
+abapreach activate TYPE/SUBTYPE:NAME... [--simulate] --conn <SID>_<client>
+abapreach aunit PROG|CLAS|FUGR <NAME> | --package <PACKAGE> | --tr <request> --conn <SID>_<client>
 abapreach doctor --conn <SID>_<client>
 abapreach mcp
 ```
@@ -378,6 +381,8 @@ switches to the other one. `--include` and `--create-include` apply to `CLAS` on
 a `PROG` include only. `--subc` applies to `PROG` only. `--prog` is required for `TRAN` and applies to
 `TRAN` only. `--text` is required except for `DTEL`, `DOMA`, `TABL` and `TTYP`, whose description is in
 the XML file.
+`inactive`, `activate` and `aunit` are described in
+[Getting started](docs/getting-started.md#inactive-objects-activation-and-abap-unit).
 The grammar and the limits are in [Getting started](docs/getting-started.md#program-includes).
 [Getting started](docs/getting-started.md#other-source-objects) has examples.
 

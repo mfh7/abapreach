@@ -18,6 +18,23 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
 
 
 ### Added
+- `inactive [--all]` lists the inactive objects of the logon user (`<ADT type> <name> <user>`, an
+  include also names its main program); MCP tool `abap_inactive`. The reply shape of the list is
+  assumed from the ADT format and not yet probed live; `--all` sends `?USERNAME=*`.
+- `activate [--simulate] TYPE/SUBTYPE:NAME...` activates own inactive Z/Y objects (`PROG/P`,
+  `PROG/I`, `CLAS/OC`, `INTF/OI`, `FUGR/FF`), one activation request per object with the worklist
+  resend of a transportable class, and proves the result against the inactive list. It refuses a
+  productive client (`T000`), `FUGR/F` and every foreign or unlisted object before any request. MCP
+  tools `abap_activate_simulate` and `abap_activate` (plan token, `mcp_write`).
+- `aunit PROG|CLAS|FUGR NAME` and `aunit --package P` / `--tr TRKORR` run ABAP Unit (harmless
+  tests, every duration) and print `<kind> <level> <prog> <class>-><method>: <text>`; exit 0 only
+  without alerts. It refuses a productive client and a policy `run: off`. MCP tool `abap_aunit` sits
+  behind the new policy `mcp_run: confirm` (default `off`): the human confirms every call. The
+  reply shape of the run is assumed from the ADT format and not yet probed live.
+- Policies `run` (`off`, `plan`, `direct`; default `plan`) and `mcp_run` (`off`, `confirm`; default
+  `off`). A 0.16 binary stops on a configuration that holds them.
+- RFC admission: the ABAP Unit run configuration (harmless tests, one object) and
+  `inactiveobjects?USERNAME=`.
 - `deploy`, `deploy --simulate` and `delete` over ADT: `--tr <request>` now adds a transportable
   object that no open request holds (the lock answers no `CORRNR`) to that request. Before any
   write ABAPReach reads the request from `E070` over the data preview and stops unless it exists,
