@@ -519,10 +519,25 @@ pub fn run_main(registry: Registry) -> ! {
     // The trace environment goes first: `ctrlc` starts a thread, after which `set_var` is unsound.
     after_trace_environment(|| {
         let _ = ctrlc::set_handler(move || {
-            if on_interrupt.on_interrupt() == InterruptAction::ExitNow {
-                // No lock is held, but an open ADT session still keeps its context on SAP.
-                end_open_sessions();
-                std::process::exit(INTERRUPT_EXIT_CODE);
+            // The leftover is read first: the interrupt that ends the process is the second one,
+            // and the window that holds the text closes when the run is over.
+            let leftover = on_interrupt.run_leftover();
+
+            match on_interrupt.on_interrupt() {
+                InterruptAction::ExitNow => {
+                    // A run that is given up leaves its runner class: say which one and how to
+                    // remove it.
+                    if let Some(leftover) = leftover {
+                        eprintln!("{leftover}");
+                    }
+
+                    // No lock is held, but an open ADT session still keeps its context on SAP.
+                    end_open_sessions();
+                    std::process::exit(INTERRUPT_EXIT_CODE);
+                }
+                // The first Ctrl-C of a run in flight: the request goes on until its reply.
+                InterruptAction::Waiting(text) => eprintln!("{text}"),
+                InterruptAction::Deferred => {}
             }
         });
     });

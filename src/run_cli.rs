@@ -5,10 +5,12 @@ use crate::app::{Attempt, Exit, Factories, end_session, route, stop};
 use crate::backend::{BackendKind, OperationKind};
 use crate::cli::{AlvColumns, AlvMode, Backend, RunKind};
 use crate::config::Connection;
-use crate::operation::run::{ClassRun, DEFAULT_TIMEOUT_SECS, NO_RFC_TIMEOUT};
+use crate::operation::run::{DEFAULT_TIMEOUT_SECS, NO_RFC_TIMEOUT};
 use crate::operation::run_plan::{
     PlanFacts, RawArgs, RunArgs, RunPlan, cli_gate, plan_mismatch_text,
 };
+use crate::operation::run_runner::{DEFAULT_MAX_OUTPUT, RunCall, RunSettings, unix_now};
+use crate::operation::runner_route::random_nonce;
 use std::fs;
 use std::path::Path;
 
@@ -90,11 +92,16 @@ pub fn execute(
         Err(message) => return stop(message),
     };
 
-    if args.kind != RunKind::Clas {
-        return stop(format!("run {} is not implemented yet", args.kind.token()));
+    // The rules of a snippet run before any connection, like every other argument rule.
+    if let Some(snippet) = &args.snippet
+        && let Err(message) = crate::operation::run_snippet::check(&snippet.text)
+    {
+        return stop(message);
     }
 
     let timeout = command.timeout;
+    let nonce = random_nonce();
+    let now_unix = unix_now();
 
     route(
         OperationKind::Run,
@@ -117,13 +124,16 @@ pub fn execute(
                 };
             }
 
-            let call = ClassRun {
+            let call = RunCall::new(&RunSettings {
                 connection,
                 args: &args,
                 backend: selection.backend,
                 timeout: timeout.unwrap_or(DEFAULT_TIMEOUT_SECS),
                 cancel,
-            };
+                max_output: command.max_output.unwrap_or(DEFAULT_MAX_OUTPUT),
+                nonce: &nonce,
+                now_unix,
+            });
             let mut result = if command.simulate {
                 call.simulate(transport)
             } else {

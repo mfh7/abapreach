@@ -19,6 +19,7 @@ pub mod read_table;
 pub mod run;
 pub mod run_alv;
 pub mod run_plan;
+pub mod run_runner;
 pub mod run_snippet;
 pub mod runner;
 pub mod runner_evidence;
