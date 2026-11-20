@@ -65,6 +65,61 @@ impl Display for McpWrite {
     }
 }
 
+/// Whether the MCP server may run code (`abap_aunit`; `abap_run` follows).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpRun {
+    /// No MCP tool that runs code for this server.
+    #[default]
+    Off,
+    /// Every run is confirmed by the human through elicitation, whatever `mcp_write` says.
+    Confirm,
+}
+
+impl McpRun {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Confirm => "confirm",
+        }
+    }
+}
+
+impl Display for McpRun {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.token())
+    }
+}
+
+/// Whether the command line may run code (`aunit`; `run` follows), and how.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum RunMode {
+    /// The command line refuses every run.
+    Off,
+    /// The two-step flow (simulate, then run from a plan file).
+    #[default]
+    Plan,
+    /// A run needs no plan file on the command line.
+    Direct,
+}
+
+impl RunMode {
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Plan => "plan",
+            Self::Direct => "direct",
+        }
+    }
+}
+
+impl Display for RunMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.token())
+    }
+}
+
 /// The tables `read_table_denied` holds when the key is absent: credential and crypto tables.
 pub const DEFAULT_READ_TABLE_DENIED: [&str; 8] = [
     "USR02",
@@ -84,6 +139,10 @@ pub struct Policies {
     /// Upper-case table names `read-table` refuses; an empty list denies nothing.
     pub read_table_denied: Vec<String>,
     pub mcp_write: McpWrite,
+    /// Whether the MCP server may run code; `off` unless configured.
+    pub mcp_run: McpRun,
+    /// How the command line runs code; `plan` unless configured.
+    pub run: RunMode,
 }
 
 impl Default for Policies {
@@ -95,6 +154,8 @@ impl Default for Policies {
                 .map(|table| (*table).to_owned())
                 .collect(),
             mcp_write: McpWrite::Off,
+            mcp_run: McpRun::Off,
+            run: RunMode::Plan,
         }
     }
 }
@@ -139,6 +200,10 @@ pub struct PolicyDocument {
     read_table_denied: Option<Vec<String>>,
     #[serde(default)]
     mcp_write: Option<McpWrite>,
+    #[serde(default)]
+    mcp_run: Option<McpRun>,
+    #[serde(default)]
+    run: Option<RunMode>,
 }
 
 impl PolicyDocument {
@@ -156,6 +221,8 @@ impl PolicyDocument {
                 },
             ),
             mcp_write: self.mcp_write.unwrap_or(outer.mcp_write),
+            mcp_run: self.mcp_run.unwrap_or(outer.mcp_run),
+            run: self.run.unwrap_or(outer.run),
         }
     }
 }

@@ -36,11 +36,26 @@ in `servers[]`; a server value overrides the top-level value.
 The other keys of the file are omitted here. Add the server entries as described in
 [Getting started](getting-started.md#configure-a-connection).
 
+### `mcp_run`
+
+| Value | Meaning |
+| :--- | :--- |
+| `off` | Default when the key is absent. `abap_aunit` is not listed and a call is refused. |
+| `confirm` | `abap_aunit` is listed. Every call asks the human, whatever `mcp_write` says. |
+
+The command-line policy `run` (`off`, `plan`, `direct`; default `plan`) also gates the MCP tool: `run:
+off` refuses `abap_aunit` whatever `mcp_run` says. MCP ignores the difference between `plan` and
+`direct`. A 0.16 binary stops on a configuration that holds `mcp_run` or `run` (unknown policy key), so
+both keys need 0.17.
+
+`read_table_denied` cannot protect against test code that reads a denied table: the human
+confirmation is the control for `abap_aunit`.
+
 ### `mcp_write`
 
 | Value | Meaning |
 | :--- | :--- |
-| `off` | Default when the key is absent. Only the read tools are listed. Observed: the tool list shows `abap_read_source` and `abap_read_table`. `abap_read_source` refuses the DDIC and transaction types (see [DDIC and `TRAN`](#ddic-and-tran-types)). |
+| `off` | Default when the key is absent. Only the read tools are listed. Observed: the tool list shows `abap_read_source`, `abap_read_table` and `abap_inactive` (and `abap_aunit` where `mcp_run` allows it). `abap_read_source` refuses the DDIC and transaction types (see [DDIC and `TRAN`](#ddic-and-tran-types)). |
 | `token` | Write tools are listed. A simulate returns a `plan_token`; a write runs only with that token. |
 | `confirm` | Write tools are listed. Every write also needs a human answer through an elicitation form. |
 
@@ -78,6 +93,10 @@ Read tools (always listed):
 - `abap_read_table`: reads rows of one table through the ADT data preview, same as `read-table`.
   Arguments: `table`, `fields`, `where`, `rows` (default 100, maximum 1000).
 
+- `abap_inactive`: lists the inactive objects of the logon user, same as `inactive`. Argument `all`
+  (boolean) asks for every user's entries. The result carries `objects` (`type`, `name`, `user`, `main`)
+  and `count`.
+
 Write tools (listed only when `mcp_write` is `token` or `confirm`):
 
 - `abap_simulate`, `abap_deploy`: simulate and deploy source, as `deploy --simulate` and `deploy`.
@@ -88,6 +107,23 @@ Write tools (listed only when `mcp_write` is `token` or `confirm`):
 - `abap_delete_simulate`, `abap_delete`: simulate and delete objects, as `delete`. `objects` take
   `TYPE:NAME` with `TYPE` `PROG`, `FUGR`, `FUNC`, `CLAS`, `INTF`, `DTEL`, `DOMA`, `TABL`, `TTYP` or
   `TRAN`.
+
+- `abap_activate_simulate`, `abap_activate`: check and activate own inactive Z/Y objects, as
+  `activate --simulate` and `activate`. `objects` take `TYPE/SUBTYPE:NAME` as `abap_inactive` prints
+  them (`PROG/P`, `PROG/I`, `CLAS/OC`, `INTF/OI`, `FUGR/FF`). The flow is the one of `abap_deploy`: a
+  passed simulation returns a `plan_token`, `abap_activate` needs it with identical `objects`, and under
+  `mcp_write: confirm` the human types the object name (`ACTIVATE <n>` for a batch). A productive client
+  is refused.
+
+Run tool (listed only for a connection with `mcp_run: confirm`):
+
+- `abap_aunit`: runs ABAP Unit, as `aunit`. Arguments: `type` (`PROG`, `CLAS`, `FUGR`) with `name`, or
+  `package`, or `tr`. It runs test code on the SAP system, so it sits behind `mcp_run`, not
+  `mcp_write`: the human confirms every call whatever `mcp_write` says (the object name, or `RUN <n>` for
+  a batch; the form lists every object), there is no token, and a client that cannot answer a form is
+  refused. The policy `run: off` refuses it too. It takes the single in-flight slot until the run ends;
+  there is no 55 s answer. The list of objects names a `--package` or `--tr` batch before the human
+  answers.
 
 Input schemas are listed by the client through `tools/list`.
 

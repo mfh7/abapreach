@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<aunit:runResult xmlns:aunit="http://www.sap.com/adt/aunit" xmlns:adtcore="http://www.sap.com/adt/core">
+  <program adtcore:uri="/sap/bc/adt/oo/classes/zcl_test/includes/testclasses" adtcore:type="CLAS/OC" adtcore:name="ZCL_TEST" uriType="semantic">
+    <testClasses>
+      <testClass adtcore:uri="/sap/bc/adt/oo/classes/zcl_test/includes/testclasses#type=CLAS%2FOCL;name=LTCL_TEST" adtcore:type="CLAS/OCL" adtcore:name="LTCL_TEST" uriType="semantic" durationCategory="short" riskLevel="harmless">
+        <testMethods>
+          <testMethod adtcore:uri="/sap/bc/adt/oo/classes/zcl_test/includes/testclasses#type=CLAS%2FOLI;name=LTCL_TEST%2FADD" adtcore:type="CLAS/OLI" adtcore:name="ADD" executionTime="0" uriType="semantic" unit="s"/>
+          <testMethod adtcore:uri="/sap/bc/adt/oo/classes/zcl_test/includes/testclasses#type=CLAS%2FOLI;name=LTCL_TEST%2FDIVIDE" adtcore:type="CLAS/OLI" adtcore:name="DIVIDE" executionTime="0" uriType="semantic" unit="s">
+            <alerts>
+              <alert kind="failedAssertion" severity="critical">
+                <title>Critical Assertion Error: 'Divide by two'</title>
+                <details>
+                  <detail text="Expected [2]"/>
+                  <detail text="Actual   [3]"/>
+                </details>
+                <stack>
+                  <stackEntry adtcore:uri="/sap/bc/adt/oo/classes/zcl_test/includes/testclasses#start=12,4" adtcore:type="CLAS/OCL" adtcore:name="LTCL_TEST" adtcore:description="Include: &lt;ZCL_TEST===CCAU&gt; Line: 12"/>
+                </stack>
+              </alert>
+            </alerts>
+          </testMethod>
+          <testMethod adtcore:uri="/sap/bc/adt/oo/classes/zcl_test/includes/testclasses#type=CLAS%2FOLI;name=LTCL_TEST%2FRAISE" adtcore:type="CLAS/OLI" adtcore:name="RAISE" executionTime="0" uriType="semantic" unit="s">
+            <alerts>
+              <alert kind="exception" severity="fatal">
+                <title>Runtime Error</title>
+                <details>
+                  <detail>
+                    <text>CX_SY_ZERODIVIDE &amp; friends</text>
+                  </detail>
+                </details>
+              </alert>
+              <alert kind="warning" severity="noAlert">
+                <title>Informational only</title>
+              </alert>
+            </alerts>
+          </testMethod>
+        </testMethods>
+        <alerts>
+          <alert kind="warning" severity="tolerable">
+            <title>Test class without     assertion</title>
+          </alert>
+        </alerts>
+      </testClass>
+    </testClasses>
+  </program>
+</aunit:runResult>

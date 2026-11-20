@@ -1,4 +1,6 @@
 use crate::extension::{ExtensionKind, ExtensionOptions, Registry, Verbs};
+use crate::operation::activate::ActivateTarget;
+use crate::operation::aunit::AunitKind;
 use crate::operation::payload::Kind;
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -154,6 +156,53 @@ pub enum Command {
 
         #[arg(long)]
         plan: PathBuf,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Lists the inactive objects of the logon user, one `<ADT type> <name> <user>` line each.
+    Inactive {
+        /// Every user's entries instead of the logon user's own.
+        #[arg(long)]
+        all: bool,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Activates own inactive Z/Y objects, named as `inactive` prints them.
+    #[command(
+        after_help = "Accepted types: PROG/P, PROG/I (with its main program), CLAS/OC, INTF/OI, \
+                      FUGR/FF. --simulate checks every rule and activates nothing."
+    )]
+    Activate {
+        #[arg(required = true, value_name = "TYPE/SUBTYPE:NAME")]
+        objects: Vec<ActivateTarget>,
+
+        #[arg(long)]
+        simulate: bool,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Runs ABAP Unit (harmless tests, every duration) of an object, a package or a request.
+    #[command(
+        after_help = "Test code runs on the SAP system. Z and Y objects only. A productive client \
+                      is refused. Policy `run: off` refuses the command."
+    )]
+    Aunit {
+        #[arg(requires = "name")]
+        kind: Option<AunitKind>,
+
+        #[arg(requires = "kind")]
+        name: Option<String>,
+
+        /// Every program, class and function group of the package.
+        #[arg(long, conflicts_with_all = ["kind", "tr"])]
+        package: Option<String>,
+
+        /// Every program, class and function group of the request and its tasks.
+        #[arg(long, conflicts_with_all = ["kind", "package"])]
+        tr: Option<String>,
 
         #[arg(long)]
         conn: String,

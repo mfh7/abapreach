@@ -13,6 +13,8 @@ use crate::hash::source_hash;
 use crate::mcp::{ToolHandler, ToolResult, is_runner_type};
 use crate::object::check_read;
 use crate::operation::deploy::known_lock_handles;
+use crate::operation::inactive::{self, InactiveEntry};
+use crate::operation::quality;
 use crate::operation::read::{ReadProg, ReadTarget, project_lines};
 use crate::operation::read_table::{
     MAX_OUTPUT_BYTES, MCP_MAX_ROWS, Query, ReadTable, ReadTableError, ReadTableRequest, mcp_rows,
@@ -401,11 +403,87 @@ impl<'a> ReadTools<'a> {
     }
 }
 
+impl ReadTools<'_> {
+    fn inactive(&mut self, arguments: &Map<String, Value>) -> Result<ToolResult, String> {
+        let all = match arguments.get("all") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(all)) => *all,
+            Some(_) => return Err("all must be a boolean".to_owned()),
+        };
+        let connection = self.connection(arguments)?;
+        let mut found = None;
+        let exit = route(
+            OperationKind::Inactive,
+            None,
+            false,
+            &connection,
+            &mut *self.factories,
+            |transport, _, _, _| {
+                let listed = inactive::list(transport, all, &connection.user).map(|entries| {
+                    found = Some(entries);
+
+                    Outcome {
+                        status: Some(Status::Active),
+                        exit: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    }
+                });
+
+                // A read holds no lock, so a failed session end is only a note.
+                quality::attempt(listed, end_session(transport))
+            },
+        );
+        let notes = diagnostic(&connection, &exit.stderr);
+
+        let Some(entries) = found.filter(|_| exit.code == 0) else {
+            return Ok(ToolResult::error(notes));
+        };
+        let mut text = entries
+            .iter()
+            .map(InactiveEntry::line)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if holds_secret(&connection, &text) {
+            return Ok(ToolResult::error(SECRET_REJECTED.to_owned()));
+        }
+
+        if !text.is_empty() {
+            text.push('\n');
+        }
+
+        text.push_str(&format!("SUMMARY: {} inactive objects", entries.len()));
+
+        let objects: Vec<Value> = entries
+            .iter()
+            .map(|entry| {
+                json!({
+                    "type": entry.kind,
+                    "name": entry.name,
+                    "user": entry.user,
+                    "main": entry.main_program(),
+                })
+            })
+            .collect();
+        let mut structured = json!({"objects": objects, "count": entries.len()});
+
+        add_notes(&mut text, &mut structured, &notes);
+
+        Ok(ToolResult {
+            text,
+            structured,
+            is_error: false,
+        })
+    }
+}
+
 impl ToolHandler for ReadTools<'_> {
     fn call(&mut self, name: &str, arguments: &Map<String, Value>) -> ToolResult {
         let result = match name {
             "abap_read_source" => self.read_source(arguments),
             "abap_read_table" => self.read_table(arguments),
+            "abap_inactive" => self.inactive(arguments),
             _ => {
                 return ToolResult::error(format!(
                     "ERROR: {name} is not available in this build yet"

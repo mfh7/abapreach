@@ -16,6 +16,7 @@ use std::cell::RefCell;
 
 const DISCOVERY: &str = "/sap/bc/adt/discovery";
 const INACTIVE_OBJECTS: &str = "/sap/bc/adt/activation/inactiveobjects";
+const TESTRUNS: &str = "/sap/bc/adt/abapunit/testruns";
 const CHECKRUNS: &str = "/sap/bc/adt/checkruns?reporters=abapCheckRun";
 const ACTIVATION: &str = "/sap/bc/adt/activation?method=activate&preauditRequested=";
 const SEARCH: &str = "/sap/bc/adt/repository/informationsystem/search";
@@ -50,6 +51,8 @@ const LOCK: &str = "_action=LOCK&accessMode=MODIFY";
 const UNLOCK: &str = "_action=UNLOCK&lockHandle=";
 /// TRKORR is a CHAR 20 field.
 const MAX_REQUEST: usize = 20;
+/// An SAP user name is at most 12 characters; the encoded form of one may be longer.
+const MAX_USER: usize = 36;
 /// The class includes that have a source of their own; `main` only exists as a version feed.
 const INCLUDES: [&str; 4] = ["definitions", "implementations", "macros", "testclasses"];
 
@@ -675,6 +678,10 @@ fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
         return true;
     }
 
+    if path == INACTIVE_OBJECTS {
+        return query.is_some_and(is_inactive_user);
+    }
+
     if path == SEARCH {
         return query.is_some_and(|query| is_group_search(query) || is_class_search(query));
     }
@@ -692,6 +699,102 @@ fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
         (Part::Object, None) => true,
         _ => false,
     }
+}
+
+/// `USERNAME=<user>` or `USERNAME=*`, the user filter of the inactive-objects list.
+fn is_inactive_user(query: &str) -> bool {
+    query.strip_prefix("USERNAME=").is_some_and(|user| {
+        user == "*" || (!user.is_empty() && user.len() <= MAX_USER && is_encoded(user))
+    })
+}
+
+/// The ABAP Unit run configuration the `aunit` command sends: no other element, no text, no
+/// coverage, only harmless tests, and exactly one object of the kinds that have tests (a program,
+/// a class or a function group). The run executes test code on the server, so this is the one
+/// body of that endpoint that leaves the process.
+fn is_aunit_body(body: &[u8]) -> bool {
+    const ELEMENTS: [&str; 11] = [
+        "external",
+        "coverage",
+        "options",
+        "uriType",
+        "testDeterminationStrategy",
+        "testRiskLevels",
+        "testDurations",
+        "objectSets",
+        "objectSet",
+        "objectReferences",
+        "objectReference",
+    ];
+
+    let Ok(text) = std::str::from_utf8(body) else {
+        return false;
+    };
+    let mut reader = Reader::from_str(text);
+    let mut root_seen = false;
+    let mut references = 0;
+    let mut harmless = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                let local = element.local_name().into_inner();
+
+                if !root_seen {
+                    if local != "runConfiguration" {
+                        return false;
+                    }
+
+                    root_seen = true;
+
+                    continue;
+                }
+
+                match local {
+                    "coverage" if attribute_of(&element, "active").as_deref() != Some("false") => {
+                        return false;
+                    }
+                    "testRiskLevels" => {
+                        harmless = attribute_of(&element, "harmless").as_deref() == Some("true")
+                            && attribute_of(&element, "dangerous").as_deref() == Some("false")
+                            && attribute_of(&element, "critical").as_deref() == Some("false");
+
+                        if !harmless {
+                            return false;
+                        }
+                    }
+                    "objectReference" => {
+                        references += 1;
+
+                        let Some(uri) = attribute_of(&element, "uri") else {
+                            return false;
+                        };
+
+                        if has_query_marker(&uri) || !is_testable_object(&uri) {
+                            return false;
+                        }
+                    }
+                    other if ELEMENTS.contains(&other) => {}
+                    _ => return false,
+                }
+            }
+            Ok(Event::Text(text)) => {
+                if !text.as_ref().trim().is_empty() {
+                    return false;
+                }
+            }
+            Ok(Event::Decl(_) | Event::End(_)) => {}
+            Ok(Event::Eof) => return root_seen && harmless && references == 1,
+            Ok(_) | Err(_) => return false,
+        }
+    }
+}
+
+/// A program, a class or a function group as the object of an ABAP Unit run.
+fn is_testable_object(uri: &str) -> bool {
+    parse_path(uri).is_some_and(|parsed| {
+        parsed.part == Part::Object && matches!(parsed.kind, Kind::Prog | Kind::Clas | Kind::Group)
+    })
 }
 
 /// `search?operation=quickSearch&query=<NAME>&maxResults=10&objectType=FUGR%2FFF`, the typed
@@ -746,6 +849,10 @@ fn is_put(path: &str, query: Option<&str>) -> bool {
 fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> bool {
     if uri == CHECKRUNS {
         return has_content_type(request, "application/*") && is_checkrun_body(&request.body);
+    }
+
+    if uri == TESTRUNS {
+        return has_content_type(request, "application/xml") && is_aunit_body(&request.body);
     }
 
     if path == DATA_PREVIEW {

@@ -326,17 +326,20 @@ fn tools(write_offered: bool) -> Vec<Value> {
 }
 
 #[test]
-fn tools_list_offers_the_two_read_tools_when_no_server_allows_writes() {
+fn tools_list_offers_the_three_read_tools_when_no_server_allows_writes() {
     let names = tools(false)
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
         .collect::<Vec<_>>();
 
-    assert_eq!(names, ["abap_read_source", "abap_read_table"]);
+    assert_eq!(
+        names,
+        ["abap_read_source", "abap_read_table", "abap_inactive"]
+    );
 }
 
 #[test]
-fn tools_list_offers_all_eight_contract_tools_when_a_server_allows_writes() {
+fn tools_list_offers_all_eleven_contract_tools_when_a_server_allows_writes() {
     let names = tools(true)
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
@@ -345,11 +348,14 @@ fn tools_list_offers_all_eight_contract_tools_when_a_server_allows_writes() {
     assert_eq!(
         names,
         [
+            "abap_activate",
+            "abap_activate_simulate",
             "abap_create",
             "abap_create_simulate",
             "abap_delete",
             "abap_delete_simulate",
             "abap_deploy",
+            "abap_inactive",
             "abap_read_source",
             "abap_read_table",
             "abap_simulate",
@@ -391,14 +397,15 @@ fn every_tool_has_a_short_name_a_complete_schema_and_advisory_annotations() {
             "{name}"
         );
 
-        let read = name == "abap_read_source" || name == "abap_read_table";
+        let read =
+            name == "abap_read_source" || name == "abap_read_table" || name == "abap_inactive";
         let annotations = &tool["annotations"];
 
         // Reading a DDIC or transaction type creates a temporary class (M6): only the table read
         // is read-only, and no read tool is destructive.
         assert_eq!(
             annotations["readOnlyHint"],
-            name == "abap_read_table",
+            name == "abap_read_table" || name == "abap_inactive",
             "{name}"
         );
         assert_eq!(annotations["destructiveHint"], !read, "{name}");
@@ -406,7 +413,7 @@ fn every_tool_has_a_short_name_a_complete_schema_and_advisory_annotations() {
         // A write tool takes its plan token only where the contract says so.
         assert_eq!(
             properties.contains_key("plan_token"),
-            ["abap_deploy", "abap_create", "abap_delete"].contains(&name),
+            ["abap_deploy", "abap_create", "abap_delete", "abap_activate"].contains(&name),
             "{name}"
         );
     }

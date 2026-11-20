@@ -493,12 +493,12 @@ fn the_schemas_name_the_new_types_the_arguments_and_the_footprint() {
 
         assert_eq!(
             tool["annotations"]["readOnlyHint"],
-            name == "abap_read_table",
+            name == "abap_read_table" || name == "abap_inactive",
             "{name}"
         );
         assert_eq!(
             tool["annotations"]["destructiveHint"],
-            name != "abap_read_source" && name != "abap_read_table",
+            name != "abap_read_source" && name != "abap_read_table" && name != "abap_inactive",
             "{name}"
         );
     }
@@ -1269,12 +1269,15 @@ fn the_tools_name_no_new_write_tool() {
         [
             "abap_read_source",
             "abap_read_table",
+            "abap_inactive",
             "abap_simulate",
             "abap_deploy",
             "abap_create_simulate",
             "abap_create",
             "abap_delete_simulate",
-            "abap_delete"
+            "abap_delete",
+            "abap_activate_simulate",
+            "abap_activate"
         ]
     );
 }
