@@ -3,8 +3,8 @@
 Version 1.0.0 brings every feature of the earlier internal tooling into the Rust binary, plus
 one addition: running ABAP code (`run`). That scope is fixed: no other feature is added to match
 other tools, and no feature of the earlier tooling is dropped. Each milestone ships as a minor
-release (0.12.0, 0.13.0, ...); 1.0.0 follows when every feature below is released and the [release gate](#release-gate) passes. Shipped work
-moves to the [changelog](../CHANGELOG.md).
+release (0.12.0, 0.13.0, ...); 1.0.0 follows when every feature below is released and the
+[release gate](#release-gate) passes. Shipped work moves to the [changelog](../CHANGELOG.md).
 
 ## Milestones
 
