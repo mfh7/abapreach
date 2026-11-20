@@ -681,6 +681,74 @@ fn an_entry_without_a_user_is_proved_own_by_its_version_feed() {
 }
 
 #[test]
+fn the_person_responsible_of_a_flat_entry_is_not_the_owner_of_the_inactive_version() {
+    // `adtcore:responsible` names the person responsible for the object, which says nothing about
+    // who wrote the inactive version: the owner comes from the version feed alone.
+    let flat = r#"<adtcore:objectReferences xmlns:adtcore="a"><adtcore:objectReference adtcore:uri="/sap/bc/adt/programs/programs/zflat" adtcore:type="PROG/P" adtcore:name="ZFLAT" adtcore:responsible="DEVUSER"/></adtcore:objectReferences>"#;
+    let entries = parse_inactive_objects(flat).unwrap();
+
+    assert_eq!(entries[0].user, None);
+    assert_eq!(entries[0].line(), "PROG/P ZFLAT ?");
+
+    let feed = |author: &str| {
+        format!(
+            r#"<atom:feed xmlns:atom="a"><atom:entry><atom:id>99999</atom:id><atom:author><atom:name>{author}</atom:name></atom:author></atom:entry></atom:feed>"#
+        )
+    };
+    let targets = [target("PROG/P:ZFLAT")];
+    let mut sap = transport(vec![client("T"), ok(flat), ok(feed("OTHER"))]);
+    let error = activate_run(
+        &mut sap,
+        &activation_input(&targets, USER, false),
+        &CancelFlag::new(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&error, QualityError::Rejected(message) if message.contains("belongs to OTHER, not to DEVUSER")),
+        "{error:?}"
+    );
+    // The version feed was read, and nothing was activated.
+    assert_eq!(sap.calls.len(), 3);
+    assert_eq!(
+        sap.calls[2].uri,
+        "/sap/bc/adt/programs/programs/zflat/source/main/versions"
+    );
+}
+
+#[test]
+fn an_inactive_deletion_is_listed_with_a_mark_and_never_activated() {
+    let list_xml = r#"<ioc:inactiveObjects xmlns:ioc="i" xmlns:adtcore="a"><ioc:entry><ioc:object ioc:user="DEVUSER" ioc:deleted="true"><ioc:ref adtcore:uri="/sap/bc/adt/programs/programs/zgone" adtcore:type="PROG/P" adtcore:name="ZGONE"/></ioc:object></ioc:entry><ioc:entry><ioc:object ioc:user="DEVUSER" ioc:deleted="false"><ioc:ref adtcore:uri="/sap/bc/adt/programs/programs/zkept" adtcore:type="PROG/P" adtcore:name="ZKEPT"/></ioc:object></ioc:entry></ioc:inactiveObjects>"#;
+    let entries = parse_inactive_objects(list_xml).unwrap();
+
+    assert_eq!(
+        entries.iter().map(InactiveEntry::line).collect::<Vec<_>>(),
+        ["PROG/P ZGONE DEVUSER deleted", "PROG/P ZKEPT DEVUSER"]
+    );
+
+    let mut sap = transport(vec![ok(list_xml)]);
+    let outcome = inactive_run(&mut sap, false, USER).unwrap();
+
+    assert!(outcome.stdout.contains("PROG/P ZGONE DEVUSER deleted"));
+
+    // `activate` refuses it with the reason and activates nothing of the batch.
+    let targets = [target("PROG/P:ZKEPT"), target("PROG/P:ZGONE")];
+    let mut sap = transport(vec![client("T"), ok(list_xml)]);
+    let error = activate_run(
+        &mut sap,
+        &activation_input(&targets, USER, false),
+        &CancelFlag::new(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&error, QualityError::Rejected(message) if message.contains("ZGONE is marked deleted") && message.contains("complete the deletion") && message.contains("nothing was activated")),
+        "{error:?}"
+    );
+    assert_eq!(sap.calls.len(), 2);
+}
+
+#[test]
 fn the_function_group_entry_itself_is_never_a_target_of_the_flat_feed() {
     // FUGR/F is refused when the argument is parsed; the flat feed lists it only for `inactive`.
     assert!(

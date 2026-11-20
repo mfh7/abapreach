@@ -2,7 +2,9 @@
 //!
 //! The reply is read tolerantly: any element that is not listed here is ignored. Two shapes are
 //! known: the `ioc:inactiveObjects` document (an `ioc:object` carries the user, its `ioc:ref` the
-//! object) and the flat 7.40 feed of `adtcore:objectReference` elements, which names no user.
+//! object) and the flat 7.40 feed of `adtcore:objectReference` elements, which names no user: its
+//! `adtcore:responsible` is the person responsible for the object, not the owner of the inactive
+//! version, so it is never read as one.
 
 use crate::adt::{ObjectRef, parse_versions};
 use crate::domain::{Outcome, Status};
@@ -27,6 +29,8 @@ pub struct InactiveEntry {
     pub parent_uri: Option<String>,
     /// The user the entry belongs to; `None` when the reply names none.
     pub user: Option<String>,
+    /// The entry is an inactive deletion (`ioc:deleted`): activating it completes the deletion.
+    pub deleted: bool,
 }
 
 impl InactiveEntry {
@@ -43,7 +47,8 @@ impl InactiveEntry {
         })
     }
 
-    /// `<ADT type> <name> <user>`; an include also names its main program.
+    /// `<ADT type> <name> <user>`; an include also names its main program, and an inactive
+    /// deletion ends with ` deleted`.
     pub fn line(&self) -> String {
         let user = self.user.as_deref().unwrap_or("?");
         let mut line = format!("{} {} {}", self.kind, self.name, user);
@@ -52,6 +57,10 @@ impl InactiveEntry {
             && let Some(main) = self.main_program()
         {
             line.push_str(&format!(" main {main}"));
+        }
+
+        if self.deleted {
+            line.push_str(" deleted");
         }
 
         line
@@ -84,6 +93,7 @@ pub fn parse_inactive_objects(xml: &str) -> Result<Vec<InactiveEntry>, String> {
     let mut reader = Reader::from_str(xml);
     let mut entries: Vec<InactiveEntry> = Vec::new();
     let mut object_user: Option<String> = None;
+    let mut object_deleted = false;
     let mut in_object = false;
     let mut in_transport = false;
 
@@ -100,15 +110,20 @@ pub fn parse_inactive_objects(xml: &str) -> Result<Vec<InactiveEntry>, String> {
                 "object" => {
                     in_object = !empty;
                     object_user = attribute(element, "user")?.filter(|user| !user.is_empty());
+                    object_deleted = attribute(element, "deleted")?
+                        .is_some_and(|value| matches!(value.trim(), "true" | "1" | "X" | "x"));
                 }
                 "transport" => in_transport = !empty,
                 "ref" if in_object && !in_transport => {
-                    push(&mut entries, entry_of(element, object_user.clone())?);
+                    let mut entry = entry_of(element, object_user.clone())?;
+
+                    entry.deleted = object_deleted;
+                    push(&mut entries, entry);
                 }
                 "objectReference" if !in_object && !in_transport => {
-                    let user = attribute(element, "responsible")?.filter(|user| !user.is_empty());
-
-                    push(&mut entries, entry_of(element, user)?);
+                    // `adtcore:responsible` is not the owner of the inactive version: the owner
+                    // comes from the version feed.
+                    push(&mut entries, entry_of(element, None)?);
                 }
                 _ => {}
             }
@@ -119,6 +134,7 @@ pub fn parse_inactive_objects(xml: &str) -> Result<Vec<InactiveEntry>, String> {
                 "object" => {
                     in_object = false;
                     object_user = None;
+                    object_deleted = false;
                 }
                 "transport" => in_transport = false,
                 _ => {}
@@ -167,6 +183,7 @@ fn entry_of(element: &BytesStart<'_>, user: Option<String>) -> Result<InactiveEn
         uri: found.uri,
         parent_uri: found.parent_uri,
         user: user.map(|user| user.trim().to_owned()),
+        deleted: false,
     })
 }
 

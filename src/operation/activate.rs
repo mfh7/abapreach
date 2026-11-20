@@ -252,6 +252,16 @@ fn resolve(
 
             continue;
         };
+
+        if entry.deleted {
+            problems.push(format!(
+                "{target} is marked deleted in the inactive list; activating it would complete the \
+                 deletion"
+            ));
+
+            continue;
+        }
+
         let uri = match target.kind {
             ActivateKind::Program => Ok(prog_uri(&target.name)),
             ActivateKind::Class => ObjectKind::Clas.object_uri(&target.name, None),
