@@ -35,8 +35,9 @@
         cx_abap_message_digest.
 
     METHODS selection_names
-      RETURNING
-        VALUE(rt_known) TYPE ty_knowns.
+      EXPORTING
+        et_known TYPE ty_knowns
+        ev_ok    TYPE abap_bool.
 
     METHODS build_selection
       RETURNING

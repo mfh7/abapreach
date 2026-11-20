@@ -45,7 +45,7 @@ const PINNED: [(&str, &str); 8] = [
     ),
     (
         "RUN_PROG",
-        "7d8acaa3e1f9ce4872eb0dae019de921645f58e020e6b03495ca49939cb5b601",
+        "8f7d6b09910d8208d283a9e23510c609639b45f4a96247ba55035d26163e457f",
     ),
     (
         "SNIPPET",
@@ -82,7 +82,7 @@ const GENERATED: [(&str, &str); 8] = [
     ),
     (
         "RUN_PROG",
-        "4118a7015c1f041eccd463522dde72b2cb04a6ee95bbff58c1651c62b6088847",
+        "bf9414aa0f9730cbf908af096fd9d4e307c7a534be5200fe6e2965d10d05736a",
     ),
     (
         "SNIPPET",
@@ -583,6 +583,21 @@ fn the_shipped_templates_pass_the_scanner() {
         scan_as(&source(template), Some(NAME), mode)
             .unwrap_or_else(|found| panic!("{}: {found:?}", template.name));
     }
+}
+
+#[test]
+fn the_run_prog_template_reads_the_selection_screen_through_field_info() {
+    let template = TEMPLATES
+        .iter()
+        .find(|template| template.name == "RUN_PROG")
+        .unwrap();
+    let text = template_lines(template).join("\n").to_lowercase();
+
+    assert!(!text.contains("fupararef"));
+    assert!(text.contains("call function 'rs_reportselections_info'"));
+    assert!(text.contains("field_info          = lt_info"));
+    assert!(text.contains("no_selections       = 1"));
+    assert!(text.contains("type standard table of rsel_info"));
 }
 
 #[test]

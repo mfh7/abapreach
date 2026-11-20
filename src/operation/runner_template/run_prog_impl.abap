@@ -140,57 +140,38 @@
 
 
   METHOD selection_names.
-    " LIVE PROBE: RS_REPORTSELECTIONS_INFO is the proposed function module. Its table parameter is
-    " created from the type its own interface names, so no structure name is assumed. The probe
-    " confirms the parameter REPORT and the NAME and KIND columns. Fallback when the interface
-    " differs: no name is known, and a run with parameters stops with a reason.
+    " RS_REPORTSELECTIONS_INFO, interface verified live on 7.40, 7.50 and 758: importing REPORT,
+    " table FIELD_INFO (RSEL_INFO, mandatory), exceptions NO_SELECTIONS, REPORT_NOT_EXISTENT and
+    " SUBROUTINE_POOL. NO_SELECTIONS means the report has no selection screen: the name list is
+    " empty and the read counts as done. Any other failure is a read that did not work.
     DATA:
-      lt_ptab TYPE abap_func_parmbind_tab,
-      lt_etab TYPE abap_func_excpbind_tab.
-
-    DATA:
-      lr_info TYPE REF TO data.
+      lt_info TYPE STANDARD TABLE OF rsel_info WITH EMPTY KEY.
 
     DATA:
       lv_report TYPE c LENGTH 40.
 
-    FIELD-SYMBOLS:
-      <lt_info> TYPE STANDARD TABLE.
-
-    SELECT SINGLE parameter, structure FROM fupararef
-      WHERE funcname = 'RS_REPORTSELECTIONS_INFO' AND paramtype = 'T' AND r3state = 'A'
-      INTO @DATA(ls_interface).
-    IF sy-subrc <> 0 OR ls_interface-structure IS INITIAL.
-      RETURN.
-    ENDIF.
+    CLEAR: et_known, ev_ok.
     lv_report = mv_report.
-    TRY.
-        CREATE DATA lr_info TYPE STANDARD TABLE OF (ls_interface-structure).
-        lt_ptab = VALUE #( ( name = 'REPORT' kind = abap_func_exporting value = REF #( lv_report ) )
-                           ( name = ls_interface-parameter kind = abap_func_tables value = lr_info ) ).
-        lt_etab = VALUE #( ( name = 'OTHERS' value = 1 ) ).
-        CALL FUNCTION 'RS_REPORTSELECTIONS_INFO'
-          PARAMETER-TABLE lt_ptab
-          EXCEPTION-TABLE lt_etab.
-        IF sy-subrc <> 0.
-          RETURN.
-        ENDIF.
-        ASSIGN lr_info->* TO <lt_info>.
-        LOOP AT <lt_info> ASSIGNING FIELD-SYMBOL(<ls_info>).
-          ASSIGN COMPONENT `NAME` OF STRUCTURE <ls_info> TO FIELD-SYMBOL(<lv_name>).
-          IF sy-subrc <> 0.
-            CONTINUE.
-          ENDIF.
-          DATA(lv_kind) = `P`.
-          ASSIGN COMPONENT `KIND` OF STRUCTURE <ls_info> TO FIELD-SYMBOL(<lv_kind>).
-          IF sy-subrc = 0.
-            lv_kind = |{ <lv_kind> }|.
-          ENDIF.
-          APPEND VALUE #( name = to_upper( |{ <lv_name> }| ) kind = lv_kind ) TO rt_known.
+    CALL FUNCTION 'RS_REPORTSELECTIONS_INFO'
+      EXPORTING
+        report              = lv_report
+      TABLES
+        field_info          = lt_info
+      EXCEPTIONS
+        no_selections       = 1
+        report_not_existent = 2
+        subroutine_pool     = 3
+        OTHERS              = 4.
+    CASE sy-subrc.
+      WHEN 0.
+        LOOP AT lt_info ASSIGNING FIELD-SYMBOL(<ls_info>).
+          DATA(lv_kind) = COND string( WHEN <ls_info>-kind IS INITIAL THEN `P` ELSE |{ <ls_info>-kind }| ).
+          APPEND VALUE #( name = to_upper( |{ <ls_info>-name }| ) kind = lv_kind ) TO et_known.
         ENDLOOP.
-      CATCH cx_root.
-        CLEAR rt_known.
-    ENDTRY.
+        ev_ok = abap_true.
+      WHEN 1.
+        ev_ok = abap_true.
+    ENDCASE.
   ENDMETHOD.
 
 
@@ -200,8 +181,8 @@
       rv_ok = abap_true.
       RETURN.
     ENDIF.
-    DATA(lt_known) = selection_names( ).
-    IF lt_known IS INITIAL.
+    selection_names( IMPORTING et_known = DATA(lt_known) ev_ok = DATA(lv_read) ).
+    IF lv_read = abap_false.
       reject( |the selection screen of report { mv_report } cannot be read| ).
       RETURN.
     ENDIF.

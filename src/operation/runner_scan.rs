@@ -53,7 +53,7 @@ pub const ALLOWED_CLASSES: &[&str] = &[
 ];
 
 /// Function modules only the `RUN_PROG` template may call: the list the submitted report writes to
-/// memory, and the selection screen of the report (a live probe confirms its interface).
+/// memory, and the selection screen of the report (interface verified live).
 pub const RUN_PROG_FUNCTIONS: &[&str] = &[
     "LIST_FREE_MEMORY",
     "LIST_FROM_MEMORY",

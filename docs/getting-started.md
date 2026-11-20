@@ -797,10 +797,12 @@ leaves at once (exit 130); the code keeps running on the server, and for a repor
 shows in `doctor`).
 
 This build of `run` is covered by offline tests only. The live checks on the 7.50, 7.40 and 758
-systems, over each path, belong to the 0.17.0 release checks. Three things need the live probe: the
-interface of the function module that lists the selection screen (`RS_REPORTSELECTIONS_INFO` is
-used; when its interface differs, a run with `--param` stops with `REJECTED: the selection screen of
-report <REPORT> cannot be read` and a run without parameters is not affected), the interface of
+systems, over each path, belong to the 0.17.0 release checks. The selection screen is read through
+`RS_REPORTSELECTIONS_INFO` (table `FIELD_INFO`; interface verified on 7.40, 7.50 and 758). A report
+without a selection screen gives `REJECTED: parameter <NAME> is not on the selection screen of
+report <REPORT>` for every `--param`; a screen that cannot be read gives `REJECTED: the selection
+screen of report <REPORT> cannot be read`, and a run without parameters is not affected. Two things
+still need the live probe: the interface of
 `CL_SALV_BS_RUNTIME_INFO` and which grid is captured when a report shows more than one, and the
 wording of the HTTP 500 body that marks a runtime error (`RUN_FAILED`), which is matched by the text
 `runtime error`, `short dump` or `ST22`; any other 500 counts as `RUN_UNKNOWN`.
