@@ -17,7 +17,7 @@ use crate::mcp_read::{optional, required};
 use crate::operation::activate::{self, ActivateInput, ActivateTarget};
 use crate::operation::aunit::{self, AunitKind, AunitTarget, Scope};
 use crate::operation::quality;
-use crate::policy::{McpRun, RunMode};
+use crate::policy::{McpRun, RunPolicy};
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 
@@ -34,8 +34,8 @@ impl<G: WriteGate> McpTools<'_, G> {
             ));
         }
 
-        if connection.policies.run == RunMode::Off {
-            return Err(format!("runs are off for {} (policy run)", connection.id));
+        if connection.policies.run == RunPolicy::Off {
+            return Err(format!("run is off for {} (policy run)", connection.id));
         }
 
         connection.policies = connection.policies.for_mcp();
@@ -309,11 +309,8 @@ fn activate_targets(arguments: &Map<String, Value>) -> Result<Vec<ActivateTarget
         .collect()
 }
 
-/// The seam of the `mcp_run_allow` list: every object of a call must be on it. The key itself
-/// belongs to the `run` work of this release; until it exists the human confirmation, which lists
-/// every object, is the only gate.
-/// Fails closed until the `mcp_run_allow` list exists: no object is on an allow-list that the
-/// configuration cannot express yet, so MCP `abap_aunit` is refused.
+/// The seam of the `mcp_run_allow` list: every object of a call must be on it. Fails closed until
+/// the list is wired: MCP `abap_aunit` is refused.
 fn run_allowed(_connection: &Connection, targets: &[AunitTarget]) -> Result<(), String> {
     if targets.is_empty() {
         return Ok(());

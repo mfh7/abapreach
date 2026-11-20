@@ -47,6 +47,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod quality;
+mod run;
 mod runner;
 
 /// How long a plan token stays valid.
@@ -1217,11 +1218,30 @@ fn ask(
 ) -> Result<(), String> {
     let summary = confirmation_summary_with(connection, ticket, registry);
 
-    if holds_secret(connection, &summary) {
+    ask_form(
+        connection,
+        &summary,
+        &typed_text(ticket),
+        timeout,
+        session,
+        read,
+    )
+}
+
+/// Shows the human `summary` and takes the typed `expected` text: `Ok` only when it matches. A
+/// summary that holds a configured secret is refused without asking.
+fn ask_form(
+    connection: &Connection,
+    summary: &str,
+    expected: &str,
+    timeout: Duration,
+    session: &mut dyn Session,
+    read: &mut dyn FnMut(&str, &Map<String, Value>) -> ToolResult,
+) -> Result<(), String> {
+    if holds_secret(connection, summary) {
         return Err(SECRET_REJECTED.to_owned());
     }
 
-    let expected = typed_text(ticket);
     let form = Form {
         message: format!("{summary}\nType {expected} to confirm."),
         label: format!("Type {expected} to confirm"),
@@ -1900,6 +1920,7 @@ impl<G: WriteGate> McpTools<'_, G> {
             "abap_activate_simulate" => self.activate(arguments, false, session),
             "abap_activate" => self.activate(arguments, true, session),
             "abap_aunit" => self.aunit(arguments, session),
+            "abap_run" => self.run(arguments, session),
             "abap_read_source" if runner::runner_type_of(arguments).is_some() => {
                 self.runner_read(arguments, session)
             }

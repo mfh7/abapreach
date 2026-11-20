@@ -367,6 +367,9 @@ abapreach create PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN <NAME> [FILE]
     [--package <PACKAGE>] [--subc 1|I] [--fugr <GROUP>] [--prog <REPORT>] [--tr <request>] [--simulate]
     [--backend adt|rfc] --conn <SID>_<client>
 abapreach delete TYPE:NAME... [--simulate] [--tr <request>] --plan <FILE> --conn <SID>_<client>
+abapreach run CLAS|PROG|SNIPPET <NAME|FILE> [--simulate] [--plan <FILE>] [--param NAME=VALUE]...
+    [--variant <V>] [--alv on|off] [--alv-columns visible|all] [--allow-standard] [--timeout <s>]
+    [--max-output <bytes>] [--backend adt|rfc] --conn <SID>_<client>
 abapreach read-table <TABLE> [--fields <A,B>] [--where '<condition>'] [--rows 1-5000] --conn <SID>_<client>
 abapreach inactive [--all] --conn <SID>_<client>
 abapreach activate TYPE/SUBTYPE:NAME... [--simulate] --conn <SID>_<client>
@@ -380,9 +383,10 @@ must be `-` (stdout). `--base` and `--backend` both pin the backend, so a failed
 switches to the other one. `--include` and `--create-include` apply to `CLAS` only. `--main` applies to
 a `PROG` include only. `--subc` applies to `PROG` only. `--prog` is required for `TRAN` and applies to
 `TRAN` only. `--text` is required except for `DTEL`, `DOMA`, `TABL` and `TTYP`, whose description is in
-the XML file.
-`inactive`, `activate` and `aunit` are described in
-[Getting started](docs/getting-started.md#inactive-objects-activation-and-abap-unit).
+the XML file. `inactive`, `activate` and `aunit` are described in
+[Getting started](docs/getting-started.md#inactive-objects-activation-and-abap-unit). `run` is not a
+dry run: see [Getting started](docs/getting-started.md#run-a-class); `run PROG` and `run SNIPPET`
+check their arguments and stop with `not implemented yet` in this release.
 The grammar and the limits are in [Getting started](docs/getting-started.md#program-includes).
 [Getting started](docs/getting-started.md#other-source-objects) has examples.
 

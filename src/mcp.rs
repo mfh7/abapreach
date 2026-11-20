@@ -33,8 +33,8 @@ const UNTRUSTED: &str =
 
 pub const READ_TOOLS: [&str; 3] = ["abap_read_source", "abap_read_table", "abap_inactive"];
 
-/// The tools that take a lock, write or run code: at most one of them runs at a time.
-pub const WRITE_TOOLS: [&str; 9] = [
+/// The tools that take a lock or write: at most one of them runs at a time.
+pub const WRITE_TOOLS: [&str; 8] = [
     "abap_simulate",
     "abap_deploy",
     "abap_create_simulate",
@@ -43,8 +43,11 @@ pub const WRITE_TOOLS: [&str; 9] = [
     "abap_delete",
     "abap_activate_simulate",
     "abap_activate",
-    "abap_aunit",
 ];
+
+/// The tools that run code: each takes the single in-flight slot like a write tool, and is
+/// offered on its own opt-in (`mcp_run`), not on `mcp_write`.
+pub const RUN_TOOLS: [&str; 2] = ["abap_run", "abap_aunit"];
 
 /// Whether `token` names a DDIC or transaction type: the types that run through a temporary class.
 pub fn is_runner_type(token: &str) -> bool {
@@ -55,6 +58,7 @@ pub fn is_runner_type(token: &str) -> bool {
 /// transaction type, which creates and deletes a temporary class.
 pub fn holds_slot(name: &str, arguments: Option<&Map<String, Value>>) -> bool {
     WRITE_TOOLS.contains(&name)
+        || RUN_TOOLS.contains(&name)
         || (name == "abap_read_source"
             && arguments
                 .and_then(|arguments| arguments.get("type"))
@@ -202,7 +206,7 @@ pub struct Server<H> {
     write_offered: bool,
     /// The connections that may write; the write tool descriptions name them.
     writable: Vec<String>,
-    /// The connections that may run code (`mcp_run`); `abap_aunit` exists only for them.
+    /// The connections that may run code; `abap_run` exists exactly when there is one.
     runnable: Vec<String>,
     /// Whether the client that initialized can answer a form.
     elicitation: bool,
@@ -247,8 +251,7 @@ impl<H: ToolHandler> Server<H> {
         self
     }
 
-    /// Offers the tools that run code exactly when `runnable` is not empty, and names those
-    /// connections.
+    /// Offers `abap_run` exactly when `runnable` is not empty, and names those connections.
     pub fn with_runnable(mut self, runnable: Vec<String>) -> Self {
         self.runnable = runnable;
 
@@ -901,6 +904,54 @@ pub fn tool_list_running(
     build_tools(!writable.is_empty(), writable, runnable, kinds)
 }
 
+/// The `abap_run` tool; `runnable` are the connections whose server opted in with `mcp_run`.
+pub fn run_tool(runnable: &[String]) -> Value {
+    let types = json!({
+        "type": "string",
+        "description": "What to run",
+        "enum": ["CLAS", "PROG", "SNIPPET"],
+    });
+
+    tool(
+        "abap_run",
+        &format!(
+            "Run ABAP code with the authorizations of the logon user (NOT a dry run: data the \
+             code writes stays written). CLAS runs an existing class that implements \
+             IF_OO_ADT_CLASSRUN and returns its output; PROG and SNIPPET are not available yet. \
+             Only names on the connection's mcp_run_allow list run. The user always confirms in a \
+             form that shows what runs, and the call takes the single in-flight slot until the run \
+             returns or its timeout ends it. simulate reads and checks only. Runnable \
+             connections: {}.",
+            runnable.join(", ")
+        ),
+        json!({
+            "conn": property("string", "Connection id, e.g. DEV_100"),
+            "type": types,
+            "name": property("string", "Class name (CLAS) or report name (PROG)"),
+            "source": property("string", "ABAP statements (SNIPPET only), sent as is"),
+            "params": {
+                "type": "array",
+                "description": "NAME=VALUE parameters of the report (PROG only)",
+                "items": {"type": "string"},
+            },
+            "variant": property("string", "Selection variant of the report (PROG only)"),
+            "alv": {
+                "type": "string",
+                "description": "Capture an ALV grid (PROG only, default on)",
+                "enum": ["on", "off"],
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Seconds the run may take over ADT HTTP (default 600; refused on RFC)",
+                "minimum": 1,
+                "maximum": 3600,
+            },
+            "simulate": property("boolean", "Only read and check; execute nothing and ask nobody"),
+        }),
+        &["conn", "type"],
+    )
+}
+
 fn build_tools(
     write_offered: bool,
     writable: &[String],
@@ -1090,6 +1141,7 @@ fn build_tools(
     }
 
     if !runnable.is_empty() {
+        tools.push(run_tool(runnable));
         tools.push(tool(
             "abap_aunit",
             &format!(

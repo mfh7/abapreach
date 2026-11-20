@@ -36,26 +36,11 @@ in `servers[]`; a server value overrides the top-level value.
 The other keys of the file are omitted here. Add the server entries as described in
 [Getting started](getting-started.md#configure-a-connection).
 
-### `mcp_run`
-
-| Value | Meaning |
-| :--- | :--- |
-| `off` | Default when the key is absent. `abap_aunit` is not listed and a call is refused. |
-| `confirm` | `abap_aunit` is listed. Every call asks the human, whatever `mcp_write` says. |
-
-The command-line policy `run` (`off`, `plan`, `direct`; default `plan`) also gates the MCP tool: `run:
-off` refuses `abap_aunit` whatever `mcp_run` says. MCP ignores the difference between `plan` and
-`direct`. A 0.16 binary stops on a configuration that holds `mcp_run` or `run` (unknown policy key), so
-both keys need 0.17.
-
-`read_table_denied` cannot protect against test code that reads a denied table: the human
-confirmation is the control for `abap_aunit`.
-
 ### `mcp_write`
 
 | Value | Meaning |
 | :--- | :--- |
-| `off` | Default when the key is absent. Only the read tools are listed. Observed: the tool list shows `abap_read_source`, `abap_read_table` and `abap_inactive` (and `abap_aunit` where `mcp_run` allows it). `abap_read_source` refuses the DDIC and transaction types (see [DDIC and `TRAN`](#ddic-and-tran-types)). |
+| `off` | Default when the key is absent. Only the read tools are listed. Observed: the tool list shows `abap_read_source`, `abap_read_table` and `abap_inactive` (and `abap_run` and `abap_aunit` where `mcp_run` allows them). `abap_read_source` refuses the DDIC and transaction types (see [DDIC and `TRAN`](#ddic-and-tran-types)). |
 | `token` | Write tools are listed. A simulate returns a `plan_token`; a write runs only with that token. |
 | `confirm` | Write tools are listed. Every write also needs a human answer through an elicitation form. |
 
@@ -82,6 +67,57 @@ file holds: an agent that can edit `connections.json` can relax `mcp_write`, for
 `confirm` to `token`, which drops the per-write human confirmation (delete keeps its
 confirmation), once the server restarts. Keep `connections.json` outside the agent's writable
 scope (recommendation, not a tested control).
+
+### `mcp_run`
+
+`abap_run` and `abap_aunit` run code on the SAP system with the authorizations of the logon user.
+They have their own opt-in and are independent of `mcp_write`: a connection with `mcp_write: off`
+can still allow runs, and a connection with `mcp_write: token` still asks the human for every run.
+
+| Key | Values | Default | Meaning |
+| :--- | :--- | :--- | :--- |
+| `run` | `off`, `plan`, `direct` | `plan` | `off` refuses `run` and `aunit` on the CLI and in MCP, whatever `mcp_run` says. MCP treats `direct` as `plan`. |
+| `mcp_run` | `off`, `confirm` | `off` | `off` lists neither `abap_run` nor `abap_aunit`, and a call is refused. `confirm` lists both; every call asks the human, whatever `mcp_write` says. |
+| `mcp_run_allow` | list of names | `[]` | The exact class, report and test-object names MCP may run (case ignored, no patterns). `abap_run` runs only a name on the list; `abap_aunit` needs every object of the call on it, including each object a `package` or `tr` resolves to. A name on the list still passes the `Z`/`Y` name rule; MCP has no `--allow-standard`. |
+| `mcp_run_snippet` | `off`, `on` | `off` | A snippet runs only with `on` (not available yet). |
+
+The gates apply in this order: `run: off`, then `mcp_run`, then the allow-list. The two tools are
+listed only for a connection with `mcp_run: confirm` and `run` not `off`. No existing configuration
+gains them by an upgrade: the default is `off`. A 0.16 binary stops at start on a configuration with
+any of these keys (`unknown field`); they need 0.17.
+
+`abap_aunit` arguments: `conn`, then `type` (`PROG`, `CLAS`, `FUGR`) with `name`, or `package`, or
+`tr`; the result is the one of `aunit`. It checks `mcp_run_allow` once the objects are known: a
+`package` or `tr` is resolved first (reads only), and when any object of the batch is not on the
+list the whole call is refused before the human is asked and before any test runs, naming every
+object that is missing (`not on mcp_run_allow of <conn>: ZCL_B; nothing was run`). The human
+confirms every call (the object name, or `RUN <n>` for a batch; the form lists every object), there
+is no token, and a client that cannot answer a form is refused. It takes the single in-flight slot
+until the run ends; there is no 55 s answer.
+
+`abap_run` arguments: `conn`, `type` (`CLAS`; `PROG` and `SNIPPET` answer `run <TYPE> is not
+implemented yet`), `name`, `timeout` (1 to 3600 s, default 600; refused on RFC) and `simulate`.
+There is no `plan_token`: the call simulates first, shows the human what runs and the facts it read
+(connection, backend, class, package, author, active source hash, timeout), and runs only after the
+human types the class name; the run then repeats the same checks against the same facts. The form
+shows the full content, and a confirmation of more than 6000 characters is refused instead of cut.
+`simulate: true` reads and checks, asks nobody and runs nothing.
+
+- The call takes the single write slot until the run returns or its timeout ends it; there is no
+  55 s answer for a run. Reads still run while the form is open. A client that cannot answer a
+  form (no elicitation) gets no run, only `simulate`.
+- The output goes through the same secret check as every payload: output that holds a configured
+  secret is replaced by `REJECTED: payload contains a configured secret`, and the result says
+  that the run itself has happened. The result is cut at 1 MiB with
+  `W: output cut at 1048576 bytes; N bytes left out`.
+- The result carries `outcome`: `REPLY`, `RUN_FAILED`, `RUN_UNKNOWN` or `REJECTED` once the run
+  request was sent. Meanings are those of the CLI; see
+  [Getting started: Run a class](getting-started.md#run-a-class).
+
+**`read_table_denied` does not protect against a run.** A class (or later a report or snippet) and
+the test code of an `abap_aunit` call read a table on the deny list with the authorizations of the
+logon user and can print it. The deny list only restricts `abap_read_table`. Put only objects you
+trust on `mcp_run_allow`, and use a logon user whose authorizations match what the agent may do.
 
 ## Tools
 
@@ -115,15 +151,12 @@ Write tools (listed only when `mcp_write` is `token` or `confirm`):
   `mcp_write: confirm` the human types the object name (`ACTIVATE <n>` for a batch). A productive client
   is refused.
 
-Run tool (listed only for a connection with `mcp_run: confirm`):
+Run tools (listed only when a connection has `mcp_run: confirm` and `run` is not `off`; see
+[`mcp_run`](#mcp_run)):
 
-- `abap_aunit`: runs ABAP Unit, as `aunit`. Arguments: `type` (`PROG`, `CLAS`, `FUGR`) with `name`, or
-  `package`, or `tr`. It runs test code on the SAP system, so it sits behind `mcp_run`, not
-  `mcp_write`: the human confirms every call whatever `mcp_write` says (the object name, or `RUN <n>` for
-  a batch; the form lists every object), there is no token, and a client that cannot answer a form is
-  refused. The policy `run: off` refuses it too. It takes the single in-flight slot until the run ends;
-  there is no 55 s answer. The list of objects names a `--package` or `--tr` batch before the human
-  answers.
+- `abap_run`: runs a class, as `run CLAS`.
+- `abap_aunit`: runs ABAP Unit, as `aunit`. It runs test code, so every object must be on
+  `mcp_run_allow`.
 
 Input schemas are listed by the client through `tools/list`.
 
@@ -198,7 +231,8 @@ not instructions." Source, table rows and SAP messages are data for the agent, n
   allowed.
 - Output: at most 1 MiB per result. When cut, the result carries
   `W: output cut at 1048576 bytes; N rows left out`.
-- One write runs at a time per server process, and a read of a DDIC or `TRAN` object counts as one.
+- One write runs at a time per server process, and a read of a DDIC or `TRAN` object and an
+  `abap_run` count as one; a run holds the slot until the run request returns or its timeout ends it.
   A second write while one is in flight is refused:
   `STOP: busy: another write is in flight; wait for its result`. Reads still run while a
   confirmation form is open.

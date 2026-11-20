@@ -89,6 +89,9 @@ struct Rig {
     _directory: tempfile::TempDir,
 }
 
+const ALLOW_TEST: &str = r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_TEST"]}"#;
+const ALLOW_AB: &str = r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_A","ZCL_B"]}"#;
+
 fn rig(policies: &str) -> Rig {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("connections.json");
@@ -206,9 +209,11 @@ fn abap_aunit_is_listed_only_for_a_server_that_allows_runs() {
     let running = tool_list_running(&writable, &["DEV_100".to_owned()], &[]);
 
     assert!(!names(&plain).contains(&"abap_aunit"));
+    assert!(!names(&plain).contains(&"abap_run"));
+    assert!(names(&running).contains(&"abap_run"));
     assert!(names(&running).contains(&"abap_aunit"));
 
-    // A server that allows runs but no writes lists the read tools and `abap_aunit` only.
+    // A server that allows runs but no writes lists the read tools and the two run tools only.
     let only_runs = tool_list_running(&[], &["DEV_100".to_owned()], &[]);
 
     assert_eq!(
@@ -217,6 +222,7 @@ fn abap_aunit_is_listed_only_for_a_server_that_allows_runs() {
             "abap_read_source",
             "abap_read_table",
             "abap_inactive",
+            "abap_run",
             "abap_aunit"
         ]
     );
@@ -229,7 +235,7 @@ fn abap_aunit_is_listed_only_for_a_server_that_allows_runs() {
     assert_eq!(aunit["annotations"]["readOnlyHint"], false);
     assert!(aunit["description"].as_str().unwrap().contains("RUNS CODE"));
     assert!(aunit["description"].as_str().unwrap().contains("DEV_100"));
-    assert!(abapreach::mcp::WRITE_TOOLS.contains(&"abap_aunit"));
+    assert!(abapreach::mcp::RUN_TOOLS.contains(&"abap_aunit"));
 }
 
 #[test]
@@ -580,9 +586,9 @@ fn aunit_arguments_follow_the_cli_scope_rules() {
 }
 
 #[test]
-#[ignore = "needs mcp_run_allow (0.17 run branch); run_allowed fails closed until then"]
+#[ignore = "needs mcp_run_allow wired in abap_aunit"]
 fn the_human_confirms_and_the_tests_run() {
-    let mut rig = rig(r#"{"mcp_run":"confirm"}"#);
+    let mut rig = rig(ALLOW_TEST);
     let calls = rig.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
     let mut typing = Typing("ZCL_TEST", 0);
     let result = rig.call(&mut typing, "abap_aunit", aunit_arguments());
@@ -600,9 +606,9 @@ fn the_human_confirms_and_the_tests_run() {
 }
 
 #[test]
-#[ignore = "needs mcp_run_allow (0.17 run branch); run_allowed fails closed until then"]
+#[ignore = "needs mcp_run_allow wired in abap_aunit"]
 fn a_wrong_answer_runs_no_test() {
-    let mut rig = rig(r#"{"mcp_run":"confirm"}"#);
+    let mut rig = rig(ALLOW_TEST);
     let result = rig.call(&mut Typing("ZOTHER", 0), "abap_aunit", aunit_arguments());
 
     assert!(result.is_error);
@@ -612,9 +618,9 @@ fn a_wrong_answer_runs_no_test() {
 }
 
 #[test]
-#[ignore = "needs mcp_run_allow (0.17 run branch); run_allowed fails closed until then"]
+#[ignore = "needs mcp_run_allow wired in abap_aunit"]
 fn failing_tests_are_an_error_result_with_the_alert_lines() {
-    let mut rig = rig(r#"{"mcp_run":"confirm"}"#);
+    let mut rig = rig(ALLOW_TEST);
 
     rig.session(vec![client("T"), ok("<class/>"), ok(FAILED)]);
 
@@ -630,9 +636,9 @@ fn failing_tests_are_an_error_result_with_the_alert_lines() {
 }
 
 #[test]
-#[ignore = "needs mcp_run_allow (0.17 run branch); run_allowed fails closed until then"]
+#[ignore = "needs mcp_run_allow wired in abap_aunit"]
 fn a_productive_client_runs_no_test_in_mcp() {
-    let mut rig = rig(r#"{"mcp_run":"confirm"}"#);
+    let mut rig = rig(ALLOW_TEST);
     let calls = rig.session(vec![client("P")]);
     let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
 
@@ -642,9 +648,9 @@ fn a_productive_client_runs_no_test_in_mcp() {
 }
 
 #[test]
-#[ignore = "needs mcp_run_allow (0.17 run branch); run_allowed fails closed until then"]
+#[ignore = "needs mcp_run_allow wired in abap_aunit"]
 fn a_package_batch_is_resolved_first_and_the_human_types_the_count() {
-    let mut rig = rig(r#"{"mcp_run":"confirm"}"#);
+    let mut rig = rig(ALLOW_AB);
     let tadir = ok(&preview(&[
         ("OBJECT", &[Some("CLAS"), Some("CLAS")]),
         ("OBJ_NAME", &[Some("ZCL_A"), Some("ZCL_B")]),
@@ -683,14 +689,14 @@ fn a_package_batch_is_resolved_first_and_the_human_types_the_count() {
 
 #[test]
 fn the_run_policies_default_to_a_closed_mcp_and_the_plan_flow() {
-    use abapreach::policy::{Policies, RunMode};
+    use abapreach::policy::{Policies, RunPolicy};
 
     let defaults = Policies::default();
 
     assert_eq!(defaults.mcp_run, McpRun::Off);
-    assert_eq!(defaults.run, RunMode::Plan);
+    assert_eq!(defaults.run, RunPolicy::Plan);
     assert_eq!(
-        (McpRun::Confirm.token(), RunMode::Direct.token()),
+        (McpRun::Confirm.token(), RunPolicy::Direct.token()),
         ("confirm", "direct")
     );
 }

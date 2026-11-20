@@ -37,7 +37,7 @@ use crate::operation::read_table::{
 };
 use crate::operation::runner_tran::{self, TranCreate, TranRead};
 use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
-use crate::policy::{RunMode, Terminal};
+use crate::policy::{RunPolicy, Terminal};
 use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
@@ -391,6 +391,7 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::Inactive { conn, .. }
         | Command::Activate { conn, .. }
         | Command::Aunit { conn, .. }
+        | Command::Run { conn, .. }
         | Command::Doctor { conn } => Some(conn),
         Command::Mcp => None,
     }
@@ -721,7 +722,7 @@ fn execute(
             tr,
             ..
         } => {
-            if connection.policies.run == RunMode::Off {
+            if connection.policies.run == RunPolicy::Off {
                 return stop(format!("aunit is off for {} (policy run)", connection.id));
             }
 
@@ -744,6 +745,38 @@ fn execute(
                 },
             )
         }
+        Command::Run {
+            kind,
+            target,
+            simulate,
+            plan,
+            params,
+            variant,
+            alv,
+            alv_columns,
+            allow_standard,
+            timeout,
+            max_output,
+            backend,
+            ..
+        } => crate::run_cli::execute(
+            &crate::run_cli::RunCommand {
+                kind,
+                target: &target,
+                simulate,
+                plan: plan.as_deref(),
+                params: &params,
+                variant: variant.as_deref(),
+                alv,
+                alv_columns,
+                allow_standard,
+                timeout,
+                max_output,
+                backend,
+            },
+            connection,
+            factories,
+        ),
         Command::Mcp => stop("the MCP server needs no connection"),
         Command::Read {
             kind,

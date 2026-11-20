@@ -841,6 +841,18 @@ pub fn classify_rfc_error(phase: RfcPhase, code: i32, message: &str) -> Transpor
     }
 }
 
+/// Whether `error` is the ABAP runtime failure (a short dump) of a request that SAP was
+/// executing: the RFC library reports it as `RFC_ABAP_RUNTIME_FAILURE` after the call was sent.
+pub fn is_abap_runtime_failure(error: &TransportError) -> bool {
+    match error {
+        TransportError::Sent(inner) => is_abap_runtime_failure(inner),
+        TransportError::Protocol(text) => {
+            text.ends_with(&format!("(RFC code {RFC_ABAP_RUNTIME_FAILURE})"))
+        }
+        _ => false,
+    }
+}
+
 /// Logon parameters in SDK naming; the password is only ever passed to `RfcOpenConnection`.
 /// A connection without an `rfc` block has no parameters and can never be opened.
 pub fn connection_parameters(connection: &Connection) -> Result<Vec<(String, String)>, String> {

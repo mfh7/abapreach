@@ -1,5 +1,7 @@
 use crate::operation::runner::{DEFAULT_RUNNER_PREFIX, validate_runner_prefix};
-use crate::policy::{DEFAULT_READ_TABLE_DENIED, McpRun, McpWrite, Policies, PolicyDocument};
+use crate::policy::{
+    DEFAULT_READ_TABLE_DENIED, McpRun, McpRunSnippet, McpWrite, Policies, PolicyDocument, RunPolicy,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -244,11 +246,11 @@ impl McpPolicies {
             .any(|policies| policies.mcp_write != McpWrite::Off)
     }
 
-    /// Whether any server allows MCP runs; only then does `tools/list` offer `abap_aunit`.
+    /// Whether any server allows MCP runs; only then does `tools/list` offer `abap_run`.
     pub fn run_offered(&self) -> bool {
         self.by_system
             .values()
-            .any(|policies| policies.mcp_run != McpRun::Off)
+            .any(|policies| policies.mcp_run != McpRun::Off && policies.run != RunPolicy::Off)
     }
 
     /// The policies of `system_id` (case-insensitive), `None` for an unknown system.
@@ -312,6 +314,8 @@ impl Config {
 
         absent.mcp_write = McpWrite::Off;
         absent.mcp_run = McpRun::Off;
+        absent.mcp_run_allow.clear();
+        absent.mcp_run_snippet = McpRunSnippet::Off;
 
         for table in DEFAULT_READ_TABLE_DENIED {
             if !absent.is_read_table_denied(table) {
@@ -350,11 +354,15 @@ impl Config {
     }
 
     /// The ids (`SID_client`) of the connections whose server allows MCP runs, in configuration
-    /// order; the `abap_aunit` description names them.
+    /// order; the `abap_run` description names them.
     pub fn mcp_runnable(&self) -> Vec<String> {
         self.servers
             .iter()
-            .filter(|server| self.effective_policies(server).mcp_run != McpRun::Off)
+            .filter(|server| {
+                let policies = self.effective_policies(server);
+
+                policies.mcp_run != McpRun::Off && policies.run != RunPolicy::Off
+            })
             .flat_map(|server| {
                 server
                     .clients

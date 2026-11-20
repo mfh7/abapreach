@@ -24,7 +24,7 @@ use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 pub use crate::adt::format_messages;
 
@@ -137,6 +137,9 @@ pub const INTERRUPT_EXIT_CODE: i32 = 130;
 pub enum InterruptAction {
     ExitNow,
     Deferred,
+    /// A run is in flight and this is the first interrupt: the handler prints the text to stderr
+    /// and the run goes on until its reply arrives.
+    Waiting(&'static str),
 }
 
 /// Set from the Ctrl-C handler; checked once the lock is held.
@@ -151,6 +154,10 @@ pub struct CancelFlag {
     shutdown: Arc<AtomicBool>,
     /// How many interrupts the handler saw while something was held; two skip a reconciliation.
     interrupts: Arc<AtomicUsize>,
+    /// The text of the first Ctrl-C while a `run` request is in flight; `None` outside one.
+    run_wait: Arc<Mutex<Option<&'static str>>>,
+    /// How many interrupts the handler saw during the `run` request in flight.
+    run_interrupts: Arc<AtomicUsize>,
 }
 
 impl CancelFlag {
@@ -203,6 +210,21 @@ impl CancelFlag {
         WriteScope(self)
     }
 
+    /// Marks the one `run` request in flight. The first Ctrl-C in this window prints `wait` and
+    /// leaves the request alone, the second leaves the process (exit 130). The guard ends the
+    /// window.
+    pub fn hold_run(&self, wait: &'static str) -> RunScope<'_> {
+        self.run_interrupts.store(0, Ordering::SeqCst);
+        *self.run_wait.lock().unwrap_or_else(PoisonError::into_inner) = Some(wait);
+
+        RunScope(self)
+    }
+
+    /// Whether a Ctrl-C arrived during the `run` request that has just ended.
+    pub fn run_interrupted(&self) -> bool {
+        self.run_interrupts.load(Ordering::SeqCst) > 0
+    }
+
     /// Whether a second interrupt arrived while the first was deferred.
     pub fn is_second_interrupt(&self) -> bool {
         self.interrupts.load(Ordering::SeqCst) >= 2
@@ -211,6 +233,21 @@ impl CancelFlag {
     /// A SIGINT must not end the process while a lock is held or a create write is unresolved.
     /// The flag then makes the operation settle safely before it reports.
     pub fn on_interrupt(&self) -> InterruptAction {
+        let waiting = *self.run_wait.lock().unwrap_or_else(PoisonError::into_inner);
+
+        if let Some(text) = waiting {
+            // A `run` request cannot be taken back: the first interrupt waits for its reply, the
+            // second gives it up.
+            return if self.run_interrupts.fetch_add(1, Ordering::SeqCst) == 0 {
+                // A server that was told to end does so once the run has settled.
+                self.request_shutdown();
+
+                InterruptAction::Waiting(text)
+            } else {
+                InterruptAction::ExitNow
+            };
+        }
+
         if !self.lock_held() && self.write_in_flight.load(Ordering::SeqCst) == 0 {
             return InterruptAction::ExitNow;
         }
@@ -228,6 +265,19 @@ pub struct LockScope<'a>(&'a CancelFlag);
 impl Drop for LockScope<'_> {
     fn drop(&mut self) {
         self.0.lock_held.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Ends the `run` request window when the holding scope ends, however it ends.
+pub struct RunScope<'a>(&'a CancelFlag);
+
+impl Drop for RunScope<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .run_wait
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
 }
 

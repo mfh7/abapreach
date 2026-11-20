@@ -605,6 +605,59 @@ authorizations are in [Deploy safety: DDIC and TRAN](deploy-safety.md#ddic-and-t
 type takes on the 7.50 and 7.40 systems is in
 [Behavior differences: Access path comparison](behavior-differences.md#access-path-comparison-0160-rc6).
 
+## Run a class
+
+`run CLAS` executes an existing class that implements `IF_OO_ADT_CLASSRUN` and prints its output as
+the server returns it. It is **not a dry run**: whatever the class writes to the database or
+elsewhere stays written. `--simulate` reads and checks and never executes anything.
+
+```sh
+abapreach run CLAS ZCL_EXAMPLE --simulate --plan run.plan --conn A4H_001
+abapreach run CLAS ZCL_EXAMPLE --plan run.plan --conn A4H_001
+```
+
+The simulate checks that the class exists, is active and implements `IF_OO_ADT_CLASSRUN` (the class
+itself or a superclass), reads its package, author and active source hash, and checks that the
+client is not productive (`T000-CCCATEGORY` is not `P`; a client whose role cannot be read is
+refused too). The plan file holds the connection, client, backend, class name, source hash and
+package. The run executes only when its arguments match the plan file (a mismatch is a `STOP`,
+exit 2, before any connection) and the live facts still match (otherwise `REJECTED: plan changed
+since simulate (source hash); simulate again`, exit 1). A plan pins the backend it was written on.
+
+Rules before anything is sent:
+
+- Only `Z` and `Y` names run. `--allow-standard` allows a standard class. A namespaced class name
+  is refused: its classrun path is not verified.
+- The connection policy `run` decides how: `plan` (the default) needs the two steps above;
+  `direct` lets the CLI run without `--plan`; `off` refuses `run` (and `aunit`) on the CLI and in
+  MCP. See [MCP server: `mcp_run`](mcp.md#mcp_run) for the MCP opt-in.
+- `--timeout <seconds>` (default 600, at most 3600) bounds the run request over ADT HTTP. The
+  connect timeout stays at 45 s. The RFC library has no call timeout and no cancel, so `--timeout`
+  on RFC is `STOP: --timeout is not supported over RFC` and an RFC run waits until SAP answers,
+  bounded by the dialog work process limit.
+- `--param`, `--variant`, `--alv`, `--alv-columns` and `--max-output` belong to `run PROG` and
+  `run SNIPPET`. In this release `run PROG` and `run SNIPPET` check their arguments, the name rule,
+  the policy and the plan, then stop with `STOP: run <TYPE> is not implemented yet`.
+
+The run is sent once, from a new session, and never repeated:
+
+| Result | Exit | Meaning |
+| :--- | :---: | :--- |
+| reply printed as is | 0 | the server answered (HTTP 2xx) |
+| `RUN_FAILED: runtime error; see ST22 (dumps)` | 1 | the class ended in an ABAP runtime error; the server rolled back to its last commit |
+| `RUN_UNKNOWN: the reply was lost; the code may have run` | 1 | any other HTTP 5xx, a timeout, or a lost connection after the request was sent; look at the effects in SAP before running again |
+| `REJECTED: ...` | 1 | a check or the server refused; the class did not run |
+| `STOP: ...` | 2 | input, configuration or policy; or the system has no classrun (HTTP 404) |
+
+The first Ctrl-C during the run prints `I: run in progress on the server; waiting for the reply
+(Ctrl-C again to leave)` and waits for the reply, which is printed; the exit code is then 130. A
+second Ctrl-C leaves at once (exit 130); the class keeps running on the server.
+
+This build of `run CLAS` is covered by offline tests only. The live checks on the 7.50, 7.40 and
+758 systems, over each path, belong to the 0.17.0 release checks. In particular the wording of the
+HTTP 500 body that marks a runtime error (`RUN_FAILED`) is matched by the text `runtime error`,
+`short dump` or `ST22`; any other 500 counts as `RUN_UNKNOWN`.
+
 ## Tested environment
 
 The 0.16.0 release matrix ran on `v0.16.0-rc.6` (the release binaries of 0.16.0), with the release and
