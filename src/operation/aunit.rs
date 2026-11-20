@@ -20,6 +20,9 @@ use std::fmt;
 
 const TESTRUNS_URI: &str = "/sap/bc/adt/abapunit/testruns";
 const GROUPS_URI: &str = "/sap/bc/adt/functions/groups/";
+/// The existence read only needs the status. SAP_BASIS 758 answers 406 to `application/xml` on an
+/// object resource, so the server picks its own representation.
+const EXISTS_ACCEPT: &str = "*/*";
 /// The most objects a `--package` or `--tr` batch runs.
 pub const MAX_BATCH: usize = 100;
 const TADIR_ROWS: u32 = 5000;
@@ -391,7 +394,7 @@ pub fn probe_session(
 
     exists
         .headers
-        .insert("Accept".to_owned(), "application/xml".to_owned());
+        .insert("Accept".to_owned(), EXISTS_ACCEPT.to_owned());
 
     let response = transport
         .request(exists)
@@ -422,7 +425,7 @@ fn run_object(
 
     exists
         .headers
-        .insert("Accept".to_owned(), "application/xml".to_owned());
+        .insert("Accept".to_owned(), EXISTS_ACCEPT.to_owned());
 
     let response = transport
         .request(exists)

@@ -935,6 +935,8 @@ fn a_class_with_passing_tests_exits_0_and_sends_the_pinned_requests() {
     assert_eq!(outcome.stdout, "TESTS: 2 methods, 0 alerts\nAUNIT: ACTIVE");
     assert_eq!(sap.calls[1].method, "GET");
     assert_eq!(sap.calls[1].uri, "/sap/bc/adt/oo/classes/zcl_test");
+    // SAP_BASIS 758 answers 406 to `application/xml` on the object resource.
+    assert_eq!(sap.calls[1].headers["Accept"], "*/*");
     assert_eq!(sap.calls[2].uri, "/sap/bc/adt/abapunit/testruns");
     assert!(body(&sap.calls[2]).contains(r#"adtcore:uri="/sap/bc/adt/oo/classes/zcl_test""#));
     assert!(
