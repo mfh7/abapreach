@@ -14,6 +14,7 @@ const DROP_REPLY: &str = "drop-reply";
 const FAIL_READ: &str = "fail-read";
 const RECONCILE: &str = "RECONCILE";
 const HOLD_LOCK: &str = "hold-lock";
+const SKIP_ACTIVATE: &str = "skip-activate";
 /// Upper bound of a `hold-lock` pause, so a forgotten variable cannot stall a run for long.
 const HOLD_LOCK_MAX_MS: u64 = 60_000;
 const UNKNOWN: &str = "unknown ABAPREACH_FAULT value";
@@ -140,10 +141,17 @@ pub enum Fault {
     FailReconcileRead,
     /// The deploy pauses this many milliseconds right after its LOCK succeeded.
     HoldLock(u64),
+    /// The deploy stops after the source PUT and the UNLOCK, before the activation: the object
+    /// is left with an inactive version, on every path (ADT HTTP has no reply to drop).
+    SkipActivate,
 }
 
 impl Fault {
     fn parse(value: &str, extra: &[&'static str], lenient: bool) -> Option<Self> {
+        if value == SKIP_ACTIVATE {
+            return Some(Self::SkipActivate);
+        }
+
         let (action, target) = value.split_once(':')?;
 
         match (action, target) {
@@ -215,7 +223,7 @@ impl Fault {
     pub fn target(self) -> Option<Target> {
         match self {
             Self::DropReply(target) => Some(target),
-            Self::FailReconcileRead | Self::HoldLock(_) => None,
+            Self::FailReconcileRead | Self::HoldLock(_) | Self::SkipActivate => None,
         }
     }
 
@@ -224,6 +232,7 @@ impl Fault {
             Self::DropReply(target) => format!("{DROP_REPLY}:{}", target.name()),
             Self::FailReconcileRead => format!("{FAIL_READ}:{RECONCILE}"),
             Self::HoldLock(ms) => format!("{HOLD_LOCK}:{ms}"),
+            Self::SkipActivate => SKIP_ACTIVATE.to_owned(),
         }
     }
 
@@ -257,6 +266,11 @@ impl Fault {
     }
 }
 
+/// Whether `skip-activate` is set: the deploy ends after the PUT and the UNLOCK.
+pub fn skip_activate() -> bool {
+    Fault::from_env().contains(&Fault::SkipActivate)
+}
+
 /// Runs right after a successful LOCK when `hold-lock:<ms>` is set: prints a marker on stderr,
 /// then waits until the time is up or Ctrl-C set the flag. The cancel checks that follow decide.
 pub fn hold_lock(cancel: &crate::operation::deploy::CancelFlag) {
@@ -281,7 +295,7 @@ fn pause(ms: u64, cancel: &crate::operation::deploy::CancelFlag) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fault, pause};
+    use super::{Fault, pause, scoped, skip_activate};
     use crate::operation::deploy::CancelFlag;
     use std::time::{Duration, Instant};
 
@@ -410,6 +424,27 @@ mod tests {
                 "{value:?}"
             );
         }
+    }
+
+    #[test]
+    fn skip_activate_is_a_bare_switch_and_drops_no_reply() {
+        let faults = Fault::from_lookup(Some("skip-activate")).unwrap();
+
+        assert_eq!(faults, vec![Fault::SkipActivate]);
+        assert_eq!(faults[0].target(), None);
+        assert_eq!(faults[0].drop_reply(true), None);
+        assert_eq!(
+            Fault::warning(&faults).unwrap(),
+            "WARNING: fault injection active (skip-activate)"
+        );
+
+        for value in ["skip-activate:PUT", "SKIP-ACTIVATE", "skip-activate "] {
+            assert!(Fault::from_lookup(Some(value)).is_err(), "{value:?}");
+        }
+
+        let _scope = scoped(vec![Fault::SkipActivate]);
+
+        assert!(skip_activate());
     }
 
     #[test]

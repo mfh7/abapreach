@@ -1037,6 +1037,16 @@ impl Run<'_> {
                     });
                 }
 
+                #[cfg(feature = "fault-injection")]
+                if crate::fault::skip_activate() {
+                    return Ok(Finish::status(
+                        Status::Partial,
+                        "PARTIAL: the new source is saved inactive and nothing was activated \
+                         (fault skip-activate)",
+                    )
+                    .lock_released());
+                }
+
                 Ok(self
                     .activate(&input.name, &live_hash, &file)
                     .lock_released())

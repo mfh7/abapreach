@@ -15,3 +15,20 @@ fn the_hold_lock_call_is_compiled_only_with_the_fault_injection_feature() {
     let lib = include_str!("../src/lib.rs").replace("\r\n", "\n");
     assert!(lib.contains("#[cfg(feature = \"fault-injection\")]\npub mod fault;"));
 }
+
+#[test]
+fn the_skip_activate_stop_is_compiled_only_with_the_fault_injection_feature() {
+    let deploy = include_str!("../src/operation/deploy.rs").replace("\r\n", "\n");
+    let call = deploy
+        .find("if crate::fault::skip_activate() {")
+        .expect("call site");
+
+    assert!(
+        deploy[..call]
+            .trim_end()
+            .ends_with("#[cfg(feature = \"fault-injection\")]")
+    );
+    // The stop comes after the UNLOCK and before the activation.
+    assert!(deploy[..call].rfind("self.unlock(&lock)").is_some());
+    assert!(deploy[call..].find(".activate(&input.name").is_some());
+}
