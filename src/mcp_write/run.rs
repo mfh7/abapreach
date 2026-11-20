@@ -16,9 +16,11 @@ use crate::config::Connection;
 use crate::mcp::{Session, ToolHandler, ToolResult};
 use crate::mcp_read::{optional, required};
 use crate::operation::run::{
-    ClassFacts, ClassRun, DEFAULT_TIMEOUT_SECS, NO_RFC_TIMEOUT, NOT_A_DRY_RUN, RunResult, Verdict,
+    ClassFacts, DEFAULT_TIMEOUT_SECS, NO_RFC_TIMEOUT, NOT_A_DRY_RUN, RunResult, Verdict,
 };
 use crate::operation::run_plan::{RawArgs, RunArgs, RunPlan, mcp_gate};
+use crate::operation::run_runner::{RunCall, RunSettings, unix_now};
+use crate::operation::runner_route::random_nonce;
 use serde_json::{Map, Value, json};
 
 /// The most characters of the confirmation of a run: the same bound as every other confirmation,
@@ -52,9 +54,13 @@ impl<G: WriteGate> McpTools<'_, G> {
         let simulate = flag(arguments, "simulate")?;
         let timeout = timeout_of(arguments)?;
 
-        if args.kind != RunKind::Clas {
-            return Err(format!("run {} is not implemented yet", args.kind.token()));
+        // The rules of a snippet run before anything is sent, like every other argument rule.
+        if let Some(snippet) = &args.snippet {
+            crate::operation::run_snippet::check(&snippet.text)?;
         }
+
+        let nonce = random_nonce();
+        let now_unix = unix_now();
 
         // Nobody to ask is a refusal before anything is sent; a simulate asks nobody.
         if !simulate && !session.can_elicit() {
@@ -84,13 +90,16 @@ impl<G: WriteGate> McpTools<'_, G> {
                     return stop_attempt(NO_RFC_TIMEOUT);
                 }
 
-                let call = ClassRun {
+                let call = RunCall::new(&RunSettings {
                     connection: &connection,
                     args: &args,
                     backend: selection.backend,
                     timeout: timeout.unwrap_or(DEFAULT_TIMEOUT_SECS),
                     cancel,
-                };
+                    max_output: MCP_MAX_OUTPUT as u64,
+                    nonce: &nonce,
+                    now_unix,
+                });
                 let result = call.simulate(transport);
                 let note = end_session(transport);
 
@@ -153,13 +162,16 @@ impl<G: WriteGate> McpTools<'_, G> {
             &connection,
             &mut factories,
             |transport, selection, cancel, fresh| {
-                let call = ClassRun {
+                let call = RunCall::new(&RunSettings {
                     connection: &connection,
                     args: &args,
                     backend: selection.backend,
                     timeout: effective,
                     cancel,
-                };
+                    max_output: MCP_MAX_OUTPUT as u64,
+                    nonce: &nonce,
+                    now_unix,
+                });
                 let result = call.execute(transport, Some(&plan), fresh);
                 let note = end_session(transport);
 
@@ -374,6 +386,10 @@ pub(super) fn run_summary(
         lines.push(format!("variant: {}", sanitize(variant, FIELD_LINE)));
     }
 
+    if let Some(alv) = args.alv {
+        lines.push(format!("alv capture: {}", alv.token()));
+    }
+
     if let Some(snippet) = &args.snippet {
         lines.push("snippet:".to_owned());
 
@@ -451,6 +467,7 @@ mod tests {
             package: "ZPKG".to_owned(),
             author: "DEVUSER".to_owned(),
             hash: "abc".to_owned(),
+            subc: None,
         }
     }
 

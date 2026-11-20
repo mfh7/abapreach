@@ -38,8 +38,8 @@ pub const WAIT_TEXT: &str =
 /// Printed with every outcome that is not a dry run.
 pub const NOT_A_DRY_RUN: &str =
     "W: run is not a dry run: data the class writes stays written (--simulate executes nothing)";
-const RUN_FAILED: &str = "RUN_FAILED: runtime error; see ST22 (dumps)";
-const RUN_UNKNOWN: &str = "RUN_UNKNOWN: the reply was lost; the code may have run";
+pub(crate) const RUN_FAILED: &str = "RUN_FAILED: runtime error; see ST22 (dumps)";
+pub(crate) const RUN_UNKNOWN: &str = "RUN_UNKNOWN: the reply was lost; the code may have run";
 const MESSAGE_LIMIT: usize = 200;
 
 /// Why `--timeout` is refused on the RFC path.
@@ -52,14 +52,18 @@ pub struct ClassFacts {
     pub package: String,
     pub author: String,
     pub hash: String,
+    /// The program type of a report (`TRDIR-SUBC`); `None` for a class and a snippet.
+    pub subc: Option<String>,
 }
 
 impl ClassFacts {
+    /// What the plan binds. A snippet has no object, so its facts are empty and bind nothing; its
+    /// own hash is bound by the arguments.
     pub fn plan_facts(&self) -> PlanFacts {
         PlanFacts {
-            hash: Some(self.hash.clone()),
-            package: Some(self.package.clone()),
-            subc: None,
+            hash: Some(self.hash.clone()).filter(|hash| !hash.is_empty()),
+            package: Some(self.package.clone()).filter(|package| !package.is_empty()),
+            subc: self.subc.clone(),
         }
     }
 }
@@ -90,7 +94,7 @@ pub struct RunResult {
 }
 
 impl RunResult {
-    fn refused(message: String) -> Self {
+    pub(crate) fn refused(message: String) -> Self {
         Self::finished(
             Outcome {
                 status: None,
@@ -102,7 +106,7 @@ impl RunResult {
         )
     }
 
-    fn failed(failure: Failure, message: String) -> Self {
+    pub(crate) fn failed(failure: Failure, message: String) -> Self {
         Self {
             fallback_allowed: failure == Failure::PreSendConnectivity,
             failure: Some(failure),
@@ -119,7 +123,7 @@ impl RunResult {
         }
     }
 
-    fn finished(outcome: Outcome, verdict: Option<Verdict>) -> Self {
+    pub(crate) fn finished(outcome: Outcome, verdict: Option<Verdict>) -> Self {
         Self {
             outcome,
             failure: None,
@@ -131,7 +135,7 @@ impl RunResult {
         }
     }
 
-    fn stopped(message: impl std::fmt::Display) -> Self {
+    pub(crate) fn stopped(message: impl std::fmt::Display) -> Self {
         Self::finished(
             Outcome {
                 status: None,
@@ -143,7 +147,7 @@ impl RunResult {
         )
     }
 
-    fn from_stop(stop: Stop) -> Self {
+    pub(crate) fn from_stop(stop: Stop) -> Self {
         match stop {
             Stop::Rejected(message) => Self::refused(message),
             Stop::Failed { failure, message } => Self::failed(failure, message),
@@ -156,6 +160,8 @@ impl RunResult {
 pub enum Verdict {
     /// The class answered; the reply is the output.
     Replied,
+    /// A report or snippet ran to its end (`RAN`).
+    Ran,
     /// The server refused the `POST`: the class did not run.
     Refused,
     /// A runtime error ended the class: rolled back by the server since its last commit.
@@ -168,6 +174,7 @@ impl Verdict {
     pub fn token(self) -> &'static str {
         match self {
             Self::Replied => "REPLY",
+            Self::Ran => "RAN",
             Self::Refused => "REJECTED",
             Self::Failed => "RUN_FAILED",
             Self::Unknown => "RUN_UNKNOWN",
@@ -412,11 +419,12 @@ impl ClassRun<'_> {
             package,
             author,
             hash,
+            subc: None,
         })
     }
 }
 
-fn join_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
+pub(crate) fn join_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
     lines
         .into_iter()
         .filter(|line| !line.is_empty())
@@ -424,7 +432,11 @@ fn join_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
         .join("\n")
 }
 
-fn get(transport: &mut dyn SadtTransport, uri: &str, accept: &str) -> Result<Response, Stop> {
+pub(crate) fn get(
+    transport: &mut dyn SadtTransport,
+    uri: &str,
+    accept: &str,
+) -> Result<Response, Stop> {
     let mut request = Request::get(uri);
 
     request
@@ -446,7 +458,7 @@ fn get(transport: &mut dyn SadtTransport, uri: &str, accept: &str) -> Result<Res
 }
 
 /// The `adtcore:version` of the root element of an object's metadata, when it names one.
-fn object_version(xml: &str) -> Option<String> {
+pub(crate) fn object_version(xml: &str) -> Option<String> {
     let mut reader = Reader::from_str(xml);
 
     loop {
@@ -465,7 +477,7 @@ fn object_version(xml: &str) -> Option<String> {
 
 /// Refuses a productive client or one whose role cannot be read: the one fail-closed T000 check
 /// of `quality`, mapped to what a run reports.
-fn check_client(transport: &mut dyn SadtTransport, client: &str) -> Result<(), Stop> {
+pub(crate) fn check_client(transport: &mut dyn SadtTransport, client: &str) -> Result<(), Stop> {
     quality::check_client(transport, client).map_err(|error| match error {
         QualityError::Rejected(message) => Stop::Rejected(message),
         QualityError::Failed { failure, message } => Stop::Failed { failure, message },
@@ -520,13 +532,17 @@ fn implements_classrun(transport: &mut dyn SadtTransport, name: &str) -> Result<
     Ok(false)
 }
 
-fn column(data: &TableData, name: &str) -> Option<usize> {
+pub(crate) fn column(data: &TableData, name: &str) -> Option<usize> {
     data.columns.iter().position(|column| column == name)
 }
 
 /// One data preview of a table this module names; a failure to connect or log on is a failed
 /// attempt, anything else a refusal with the table named.
-fn preview(transport: &mut dyn SadtTransport, table: &str, body: &str) -> Result<TableData, Stop> {
+pub(crate) fn preview(
+    transport: &mut dyn SadtTransport,
+    table: &str,
+    body: &str,
+) -> Result<TableData, Stop> {
     fetch(transport, table, body, 5).map_err(|error| match error {
         ReadTableError::Failed {
             failure: failure @ (Failure::PreSendConnectivity | Failure::Authorization),
@@ -634,7 +650,7 @@ fn reply_text(response: &Response) -> String {
     }
 }
 
-fn cut(text: &str) -> String {
+pub(crate) fn cut(text: &str) -> String {
     let clean: String = text
         .chars()
         .map(|character| {

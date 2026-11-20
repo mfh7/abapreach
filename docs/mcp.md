@@ -79,7 +79,7 @@ can still allow runs, and a connection with `mcp_write: token` still asks the hu
 | `run` | `off`, `plan`, `direct` | `plan` | `off` refuses `run` and `aunit` on the CLI and in MCP, whatever `mcp_run` says. MCP treats `direct` as `plan`. |
 | `mcp_run` | `off`, `confirm` | `off` | `off` lists neither `abap_run` nor `abap_aunit`, and a call is refused. `confirm` lists both; every call asks the human, whatever `mcp_write` says. |
 | `mcp_run_allow` | list of `TYPE:NAME` | `[]` | The exact objects MCP may run, each as `CLAS:NAME`, `PROG:NAME` or `FUGR:NAME` (case ignored, no patterns). An entry covers one type: `CLAS:ZX` does not allow `PROG ZX`. A plain name without a type stops the configuration load with the form to write. `abap_run` runs only an entry of its type and name; `abap_aunit` needs every object of the call on it, including each object a `package` or `tr` resolves to. A name on the list still passes the `Z`/`Y` name rule; MCP has no `--allow-standard`. A temporary runner class (the `runner_prefix` of the connection or `YCL_ABAPREACH_RUN_`) is never run, even when listed. |
-| `mcp_run_snippet` | `off`, `on` | `off` | A snippet runs only with `on` (not available yet). |
+| `mcp_run_snippet` | `off`, `on` | `off` | A snippet runs only with `on`; the allow-list does not replace it, because a snippet has no name. |
 
 The gates apply in this order: `run: off`, then `mcp_run`, then the allow-list. The two tools are
 listed only for a connection with `mcp_run: confirm` and `run` not `off`. No existing configuration
@@ -97,13 +97,24 @@ confirms every call (the object name, or `RUN <n>` for a batch; the form lists e
 is no token, and a client that cannot answer a form is refused. It takes the single in-flight slot
 until the run ends; there is no 55 s answer.
 
-`abap_run` arguments: `conn`, `type` (`CLAS`; `PROG` and `SNIPPET` answer `run <TYPE> is not
-implemented yet`), `name`, `timeout` (1 to 3600 s, default 600; refused on RFC) and `simulate`.
-There is no `plan_token`: the call simulates first, shows the human what runs and the facts it read
-(connection, backend, class, package, author, active source hash, timeout), and runs only after the
-human types the class name; the run then repeats the same checks against the same facts. The form
-shows the full content, and a confirmation of more than 6000 characters is refused instead of cut.
-`simulate: true` reads and checks, asks nobody and runs nothing.
+`abap_run` arguments: `conn`, `type` (`CLAS`, `PROG` or `SNIPPET`), `name` (class or report),
+`source` (the ABAP statements of a snippet), `params` (`NAME=VALUE` strings, `PROG`), `variant`
+(`PROG`), `alv` (`on` or `off`, `PROG`; there is no `alv_columns`, MCP prints the visible columns),
+`timeout` (1 to 3600 s, default 600; refused on RFC) and `simulate`. There is no `plan_token`: the
+call simulates first, shows the human what runs and the facts it read (connection, backend, name,
+package, author, active source hash, every parameter, the variant, the whole snippet, the ALV
+setting, timeout), and runs only after the human types the class or report name (`RUN` for a
+snippet); the run then repeats the same checks against the same facts. The form shows the full
+content, and a confirmation of more than 6000 characters is refused instead of cut: a snippet that
+is too long to show is never run. A snippet with a control character or an invisible character is
+refused too, because the form could not show it. `simulate: true` reads and checks, asks nobody and
+runs nothing.
+
+`PROG` and `SNIPPET` need a development system: they create and delete a temporary class in `$TMP`
+(see [Getting started: Run a class, a report or a snippet](getting-started.md#run-a-class-a-report-or-a-snippet)).
+A report runs only when `PROG:NAME` is on `mcp_run_allow`, a snippet only with `mcp_run_snippet:
+on`. MCP output is limited to 1 MiB by the runner itself (`W: output cut after <n> lines`, outcome
+`RAN`).
 
 - The call takes the single write slot until the run returns or its timeout ends it; there is no
   55 s answer for a run. Reads still run while the form is open. A client that cannot answer a
@@ -112,11 +123,11 @@ shows the full content, and a confirmation of more than 6000 characters is refus
   secret is replaced by `REJECTED: payload contains a configured secret`, and the result says
   that the run itself has happened. The result is cut at 1 MiB with
   `W: output cut at 1048576 bytes; N bytes left out`.
-- The result carries `outcome`: `REPLY`, `RUN_FAILED`, `RUN_UNKNOWN` or `REJECTED` once the run
-  request was sent. Meanings are those of the CLI; see
-  [Getting started: Run a class](getting-started.md#run-a-class).
+- The result carries `outcome`: `REPLY` (class), `RAN` (report, snippet), `RUN_FAILED`,
+  `RUN_UNKNOWN` or `REJECTED` once the run request was sent. Meanings are those of the CLI; see
+  [Getting started: Results](getting-started.md#results).
 
-**`read_table_denied` does not protect against a run.** A class (or later a report or snippet) and
+**`read_table_denied` does not protect against a run.** A class, a report or a snippet and
 the test code of an `abap_aunit` call read a table on the deny list with the authorizations of the
 logon user and can print it. The deny list only restricts `abap_read_table`. Put only objects you
 trust on `mcp_run_allow`, and use a logon user whose authorizations match what the agent may do.

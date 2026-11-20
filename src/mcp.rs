@@ -917,21 +917,28 @@ pub fn run_tool(runnable: &[String]) -> Value {
         &format!(
             "Run ABAP code with the authorizations of the logon user (NOT a dry run: data the \
              code writes stays written). CLAS runs an existing class that implements \
-             IF_OO_ADT_CLASSRUN and returns its output; PROG and SNIPPET are not available yet. \
-             Only objects on the connection's mcp_run_allow list (TYPE:NAME) run. The user always confirms in a \
-             form that shows what runs, and the call takes the single in-flight slot until the run \
-             returns or its timeout ends it. simulate reads and checks only. Runnable \
-             connections: {}.",
+             IF_OO_ADT_CLASSRUN and returns its output; PROG runs an active report (parameters \
+             and a variant allowed; an ALV grid it shows is captured as tab-separated lines) and \
+             SNIPPET runs ABAP statements you send (print( |text| ) is the only output), both \
+             through a temporary runner class that exists for a moment in $TMP and so only work \
+             on a development system. Only names on the connection's mcp_run_allow list run, and \
+             a snippet only when the connection allows it (mcp_run_snippet). Output is cut at \
+             1 MiB. The user always confirms in a form that shows what runs, and the call takes \
+             the single in-flight slot until the run returns or its timeout ends it. simulate \
+             reads and checks only. Runnable connections: {}.",
             runnable.join(", ")
         ),
         json!({
             "conn": property("string", "Connection id, e.g. DEV_100"),
             "type": types,
             "name": property("string", "Class name (CLAS) or report name (PROG)"),
-            "source": property("string", "ABAP statements (SNIPPET only), sent as is"),
+            "source": property(
+                "string",
+                "ABAP statements (SNIPPET only): the body of one method, every statement ended by a period, output with print( |text| )"
+            ),
             "params": {
                 "type": "array",
-                "description": "NAME=VALUE parameters of the report (PROG only)",
+                "description": "NAME=VALUE parameters or single-value select-options of the report (PROG only; values up to 45 characters, internal format)",
                 "items": {"type": "string"},
             },
             "variant": property("string", "Selection variant of the report (PROG only)"),

@@ -158,6 +158,9 @@ pub struct CancelFlag {
     run_wait: Arc<Mutex<Option<&'static str>>>,
     /// How many interrupts the handler saw during the `run` request in flight.
     run_interrupts: Arc<AtomicUsize>,
+    /// What the second Ctrl-C prints on stderr before it ends the process: the runner class that
+    /// stays behind, with the commands that remove it. `None` outside such a request.
+    run_leftover: Arc<Mutex<Option<String>>>,
 }
 
 impl CancelFlag {
@@ -220,6 +223,27 @@ impl CancelFlag {
         RunScope(self)
     }
 
+    /// [`hold_run`](Self::hold_run) for a request whose abandoned run leaves a runner class: the
+    /// second Ctrl-C prints `leftover` before the process ends (exit 130).
+    pub fn hold_run_leaving(&self, wait: &'static str, leftover: String) -> RunScope<'_> {
+        let scope = self.hold_run(wait);
+
+        *self
+            .run_leftover
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(leftover);
+
+        scope
+    }
+
+    /// The text the second Ctrl-C prints while a runner `run` request is in flight.
+    pub fn run_leftover(&self) -> Option<String> {
+        self.run_leftover
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Whether a Ctrl-C arrived during the `run` request that has just ended.
     pub fn run_interrupted(&self) -> bool {
         self.run_interrupts.load(Ordering::SeqCst) > 0
@@ -276,6 +300,11 @@ impl Drop for RunScope<'_> {
         *self
             .0
             .run_wait
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .0
+            .run_leftover
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
     }

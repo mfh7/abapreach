@@ -26,8 +26,38 @@
 
 
   METHOD emit.
+    " The size of a line as the caller reads it: the marker, the nonce, the body, and four bytes
+    " for the framing of the classrun reply. The run modes cut their output by this count.
     mv_count = mv_count + 1.
+    mv_bytes = mv_bytes + strlen( |ABAPREACH:{ mv_nonce }:{ iv_body }| ) + 4.
     mo_out->write( |ABAPREACH:{ mv_nonce }:{ iv_body }| ).
+  ENDMETHOD.
+
+
+  METHOD emit_budgeted.
+    " A data line of a run mode. Once one line does not fit the limit of the caller, this and every
+    " later data line is dropped, so the reply stays under the parse limit of the caller.
+    IF mv_cut = abap_true OR mv_bytes + strlen( |ABAPREACH:{ mv_nonce }:{ iv_body }| ) + 4 > mv_budget.
+      mv_cut = abap_true.
+      RETURN.
+    ENDIF.
+    mv_lines = mv_lines + 1.
+    emit( iv_body ).
+  ENDMETHOD.
+
+
+  METHOD cut_note.
+    IF mv_cut = abap_true.
+      msg( iv_level = `W` iv_text = |output cut after { mv_lines } lines| ).
+    ENDIF.
+  ENDMETHOD.
+
+
+  METHOD run_failed.
+    " A catchable exception reached the runner: the work since the last commit is rolled back.
+    msg( iv_level = `E`
+         iv_text  = |exception { cl_abap_typedescr=>describe_by_object_ref( ix_error )->get_relative_name( ) }: { ix_error->get_text( ) }| ).
+    finish( `RUN_FAILED` ).
   ENDMETHOD.
 
 
@@ -51,6 +81,10 @@
 
 
   METHOD data_line.
+    IF mv_budget > 0.
+      emit_budgeted( |LINE:{ hex_of( iv_text ) }| ).
+      RETURN.
+    ENDIF.
     emit( |LINE:{ hex_of( iv_text ) }| ).
   ENDMETHOD.
 
@@ -80,6 +114,9 @@
     CASE iv_status.
       WHEN `ACTIVE` OR `INACTIVE` OR `DELETED` OR `PARTIAL`.
         COMMIT WORK.
+      WHEN `RAN`.
+        " No ABAPReach commit and no rollback: the dialog step ends with the database commit, as
+        " when the user starts the report in SA38.
       WHEN OTHERS.
         ROLLBACK WORK.
     ENDCASE.
@@ -138,7 +175,8 @@
       RETURN.
     ENDIF.
     CASE mv_mode.
-      WHEN `READ` OR `SIMULATE` OR `DEPLOY` OR `CREATE_SIM` OR `CREATE` OR `DELETE_SIM` OR `DELETE`.
+      WHEN `READ` OR `SIMULATE` OR `DEPLOY` OR `CREATE_SIM` OR `CREATE` OR `DELETE_SIM` OR `DELETE`
+        OR `RUN_PROG` OR `RUN_SNIPPET`.
         rv_ok = abap_true.
       WHEN OTHERS.
         mo_out->write( |The payload has no valid mode| ).
@@ -172,10 +210,13 @@
       CASE ls_pair-pname.
         WHEN `BATCH`.
           APPEND ls_pair-pvalue TO mt_batch.
+        WHEN `PARAM`.
+          APPEND ls_pair-pvalue TO mt_params.
         WHEN `XML`.
           APPEND ls_pair-pvalue TO mt_xml.
         WHEN `FORMAT` OR `NONCE` OR `MODE` OR `TYPE` OR `NAME` OR `PACKAGE` OR `TR` OR `BASE`
-          OR `PLAN` OR `REPORT` OR `TEXT` OR `XMLROWS`.
+          OR `PLAN` OR `REPORT` OR `TEXT` OR `XMLROWS` OR `USER` OR `EXPIRES` OR `MAXBYTES`
+          OR `VARIANT` OR `ALV` OR `ALVCOLS`.
           IF line_exists( lt_seen[ table_line = ls_pair-pname ] ).
             reject( `A payload value is repeated` ).
             RETURN.
@@ -189,6 +230,10 @@
 
     IF value_of( `FORMAT` ) <> `1`.
       reject( `The payload format is not supported` ).
+      RETURN.
+    ENDIF.
+    IF mv_mode = `RUN_PROG` OR mv_mode = `RUN_SNIPPET`.
+      rv_ok = check_run_values( ).
       RETURN.
     ENDIF.
     mv_type = value_of( `TYPE` ).
@@ -287,6 +332,77 @@
       reject( `The payload lacks the XML rows` ).
       RETURN.
     ENDIF.
+    rv_ok = abap_true.
+  ENDMETHOD.
+
+
+  METHOD check_run_values.
+    " The run modes carry the logon user and an expiry, so a leftover runner class cannot run again:
+    " a later classrun POST from another user, or after the expiry, does nothing.
+    DATA:
+      lv_now   TYPE timestamp,
+      lv_limit TYPE timestamp,
+      lv_split TYPE i.
+
+    mv_user = value_of( `USER` ).
+    mv_expires = value_of( `EXPIRES` ).
+    mv_report = value_of( `REPORT` ).
+    mv_base = value_of( `BASE` ).
+    mv_variant = value_of( `VARIANT` ).
+    mv_alv = value_of( `ALV` ).
+    mv_alvcols = value_of( `ALVCOLS` ).
+    IF NOT matches( val = mv_user regex = `[_#$&@./0-9A-Z-]{1,12}` )
+       OR NOT matches( val = mv_expires regex = `[0-9]{14}` )
+       OR NOT matches( val = value_of( `MAXBYTES` ) regex = `[0-9]{1,8}` ).
+      reject( `The run payload is not valid` ).
+      RETURN.
+    ENDIF.
+    mv_budget = CONV i( value_of( `MAXBYTES` ) ).
+    IF mv_budget < 1 OR mv_budget > 7340032.
+      reject( `The output limit is not valid` ).
+      RETURN.
+    ENDIF.
+    GET TIME STAMP FIELD lv_now.
+    lv_limit = CONV timestamp( mv_expires ).
+    IF mv_user <> to_upper( CONV string( sy-uname ) ) OR lv_now > lv_limit.
+      reject( `run payload expired or foreign user` ).
+      RETURN.
+    ENDIF.
+    IF mv_mode = `RUN_SNIPPET`.
+      IF mv_report IS NOT INITIAL OR mv_base IS NOT INITIAL OR mt_params IS NOT INITIAL
+         OR mv_variant IS NOT INITIAL OR mv_alv IS NOT INITIAL OR mv_alvcols IS NOT INITIAL.
+        reject( `A snippet run takes no report value` ).
+        RETURN.
+      ENDIF.
+      rv_ok = abap_true.
+      RETURN.
+    ENDIF.
+    IF NOT matches( val = mv_report regex = `[0-9A-Z/_]{1,40}` )
+       OR NOT matches( val = mv_base regex = `[0-9a-f]{64}` )
+       OR ( mv_alv <> `on` AND mv_alv <> `off` )
+       OR ( mv_alvcols <> `visible` AND mv_alvcols <> `all` ).
+      reject( `The report values are not valid` ).
+      RETURN.
+    ENDIF.
+    IF mv_variant IS NOT INITIAL AND NOT matches( val = mv_variant regex = `[_&%0-9A-Z]{1,14}` ).
+      reject( `The variant is not valid` ).
+      RETURN.
+    ENDIF.
+    LOOP AT mt_params INTO DATA(lv_param).
+      lv_split = find( val = lv_param sub = `=` ).
+      IF lv_split < 1.
+        reject( `A parameter is not valid` ).
+        RETURN.
+      ENDIF.
+      " The name is cut only after the test that the equal sign exists: a function that fails on
+      " a negative length must not be part of the same condition.
+      IF NOT matches( val = substring( val = lv_param len = lv_split ) regex = `[_0-9A-Z]{1,8}` )
+         OR strlen( lv_param ) - lv_split - 1 > 45
+         OR find( val = lv_param regex = `[[:cntrl:]]` ) >= 0.
+        reject( `A parameter is not valid` ).
+        RETURN.
+      ENDIF.
+    ENDLOOP.
     rv_ok = abap_true.
   ENDMETHOD.
 

@@ -967,46 +967,10 @@ fn options_of_other_run_types_are_refused_on_a_class() {
 }
 
 #[test]
-fn a_report_and_a_snippet_stop_as_not_implemented_after_their_gates() {
+fn the_rules_of_a_report_and_a_snippet_come_before_any_connection() {
     let directory = tempfile::tempdir().unwrap();
     let plan = plan_file(directory.path());
-    let snippet = directory.path().join("s.abap");
-
-    fs::write(&snippet, "WRITE 1.").unwrap();
-
-    let snippet = snippet.display().to_string();
     let mut sap = Sap::new();
-    let report = run_with(
-        &mut sap,
-        directory.path(),
-        "",
-        false,
-        &[
-            "PROG",
-            "zreport",
-            "--param",
-            "P_A=1",
-            "--simulate",
-            "--plan",
-            &plan,
-        ],
-    );
-    let file = run_with(
-        &mut sap,
-        directory.path(),
-        "",
-        false,
-        &["SNIPPET", &snippet, "--simulate", "--plan", &plan],
-    );
-
-    for exit in [report, file] {
-        assert_eq!(exit.code, 2);
-        assert!(
-            exit.stderr.ends_with("is not implemented yet"),
-            "{}",
-            exit.stderr
-        );
-    }
 
     // The rules still come first: a standard report, a bad parameter, an off policy.
     for (args, policies, text) in [

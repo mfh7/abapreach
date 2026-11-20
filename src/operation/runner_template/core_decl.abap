@@ -36,7 +36,17 @@
       mv_text    TYPE string,
       mv_count   TYPE i,
       mv_done    TYPE abap_bool,
-      mv_locked  TYPE abap_bool.
+      mv_locked  TYPE abap_bool,
+      mt_params  TYPE string_table,
+      mv_variant TYPE string,
+      mv_user    TYPE string,
+      mv_expires TYPE string,
+      mv_alv     TYPE string,
+      mv_alvcols TYPE string,
+      mv_budget  TYPE i,
+      mv_bytes   TYPE i,
+      mv_lines   TYPE i,
+      mv_cut     TYPE abap_bool.
 
     METHODS emit
       IMPORTING
@@ -47,6 +57,16 @@
         iv_text       TYPE string
       RETURNING
         VALUE(rv_hex) TYPE string.
+
+    METHODS emit_budgeted
+      IMPORTING
+        iv_body TYPE string.
+
+    METHODS cut_note.
+
+    METHODS run_failed
+      IMPORTING
+        ix_error TYPE REF TO cx_root.
 
     METHODS msg
       IMPORTING
@@ -93,6 +113,10 @@
         VALUE(rv_value) TYPE string.
 
     METHODS check_values
+      RETURNING
+        VALUE(rv_ok) TYPE abap_bool.
+
+    METHODS check_run_values
       RETURNING
         VALUE(rv_ok) TYPE abap_bool.
 

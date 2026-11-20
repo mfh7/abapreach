@@ -505,11 +505,22 @@ pub fn run_with(
 }
 
 /// What one interrupt does: the first one during a `run` request has no exit, it prints the
-/// waiting line on `err` so the user knows a second one gives the run up. Returns whether the
-/// process must exit now.
+/// waiting line on `err` so the user knows a second one gives the run up. The second one prints
+/// the runner class that its abandoned run leaves behind (when the run has one) and ends the
+/// process. Returns whether the process must exit now.
 fn handle_interrupt(cancel: &CancelFlag, err: &mut dyn std::io::Write) -> bool {
+    // The leftover is read first: the interrupt that ends the process is the second one, and the
+    // window that holds the text closes when the run is over.
+    let leftover = cancel.run_leftover();
+
     match cancel.on_interrupt() {
-        InterruptAction::ExitNow => true,
+        InterruptAction::ExitNow => {
+            if let Some(leftover) = leftover {
+                let _ = writeln!(err, "{leftover}");
+            }
+
+            true
+        }
         InterruptAction::Waiting(text) => {
             // A failed write to stderr must not stop the wait.
             let _ = writeln!(err, "{text}");
@@ -614,6 +625,42 @@ mod tests {
         );
 
         // The second interrupt gives the run up and prints nothing more.
+        assert!(handle_interrupt(&cancel, &mut written));
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            format!("{WAIT_TEXT}\n")
+        );
+    }
+
+    #[test]
+    fn the_second_interrupt_of_a_runner_run_prints_the_leftover_lines() {
+        let cancel = CancelFlag::new();
+        let _running =
+            cancel.hold_run_leaving(WAIT_TEXT, "RUNNER_LEFTOVER: ZX\nremove it".to_owned());
+        let mut written = Vec::new();
+
+        // The first interrupt prints the waiting line only, not the leftover.
+        assert!(!handle_interrupt(&cancel, &mut written));
+        assert_eq!(
+            String::from_utf8(written.clone()).unwrap(),
+            format!("{WAIT_TEXT}\n")
+        );
+
+        // The second one prints the leftover and ends the process.
+        assert!(handle_interrupt(&cancel, &mut written));
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            format!("{WAIT_TEXT}\nRUNNER_LEFTOVER: ZX\nremove it\n")
+        );
+    }
+
+    #[test]
+    fn a_class_run_has_no_leftover_to_print() {
+        let cancel = CancelFlag::new();
+        let _running = cancel.hold_run(WAIT_TEXT);
+        let mut written = Vec::new();
+
+        assert!(!handle_interrupt(&cancel, &mut written));
         assert!(handle_interrupt(&cancel, &mut written));
         assert_eq!(
             String::from_utf8(written).unwrap(),

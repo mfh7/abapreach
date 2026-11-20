@@ -41,6 +41,8 @@ pub enum PostReply {
     Lost,
     /// HTTP status and body; the run executed.
     Status(u16, String),
+    /// The run executed, then the call ends with this error (an ABAP runtime failure over RFC).
+    Error(TransportError),
 }
 
 /// What the world may depend on.
@@ -195,6 +197,7 @@ impl Sap {
                     Some(PostReply::Lost) => {
                         return Err(TransportError::PostSendUncertain("reply lost".to_owned()));
                     }
+                    Some(PostReply::Error(error)) => return Err(error),
                     None => {
                         let text = match (&self.reply_with, self.posted.last()) {
                             (Some(build), Some(source)) => build(source),

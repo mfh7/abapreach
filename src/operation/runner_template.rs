@@ -101,14 +101,46 @@ const fn ddic_template(name: &'static str) -> TypeTemplate {
     }
 }
 
-pub static TEMPLATES: [&TypeTemplate; 6] = [
+/// The `RUN_PROG` template: `run PROG` submits a report inside the runner and prints its list and
+/// the ALV grid it showed. Only this template may hold the generated `SUBMIT` (see `runner_scan`).
+pub static RUN_PROG_TEMPLATE: TypeTemplate = TypeTemplate {
+    name: "RUN_PROG",
+    declarations: include_str!("runner_template/run_prog_decl.abap"),
+    methods: include_str!("runner_template/run_prog_impl.abap"),
+};
+
+/// The `SNIPPET` template: `run SNIPPET` puts the user's statements into the body of the method
+/// `run_snippet`, at [`SNIPPET_MARKER`].
+pub static SNIPPET_TEMPLATE: TypeTemplate = TypeTemplate {
+    name: "SNIPPET",
+    declarations: include_str!("runner_template/snippet_decl.abap"),
+    methods: include_str!("runner_template/snippet_impl.abap"),
+};
+
+pub static TEMPLATES: [&TypeTemplate; 8] = [
     &CORE_ONLY,
     &TRAN_TEMPLATE,
     &DTEL_TEMPLATE,
     &DOMA_TEMPLATE,
     &TABL_TEMPLATE,
     &TTYP_TEMPLATE,
+    &RUN_PROG_TEMPLATE,
+    &SNIPPET_TEMPLATE,
 ];
+
+/// The one line of the `SNIPPET` template that the snippet replaces. It is a comment, so the
+/// constant part stays valid ABAP and keeps its hash.
+pub const SNIPPET_MARKER: &str = "    \" ABAPREACH SNIPPET BODY";
+
+/// A class source made for a snippet, and where the snippet stands in it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnippetSource {
+    pub source: String,
+    /// The line of the class source (from 1) where the first snippet line stands.
+    pub first_line: usize,
+    /// How many lines the snippet has.
+    pub line_count: usize,
+}
 
 /// The constant lines of a template, with the placeholder where the class name goes and without
 /// payload lines.
@@ -163,6 +195,60 @@ pub fn generate_for(
     source.push('\n');
 
     Ok(source)
+}
+
+/// [`generate_for`] for the `SNIPPET` template: the snippet lines go in place of the marker. The
+/// snippet is the user's own code and the one place where user text reaches the class source, so
+/// it is checked here against `run_snippet::check` and nothing else can enter.
+pub fn generate_snippet(
+    name: &str,
+    payload: &[String],
+    snippet: &str,
+    out: OutType,
+) -> Result<SnippetSource, String> {
+    let lines = crate::operation::run_snippet::check(snippet)?;
+
+    if lines.is_empty() {
+        return Err("the snippet is empty".to_owned());
+    }
+
+    check_name(name)?;
+
+    if payload.is_empty() {
+        return Err("the runner payload is empty".to_owned());
+    }
+
+    for line in payload {
+        if payload_literal(&payload_line(line)).is_none() {
+            return Err(format!(
+                "a runner payload line must be 1 to {MAX_PAYLOAD_LITERAL} base64 characters: {line:?}"
+            ));
+        }
+    }
+
+    let frame = assemble(&SNIPPET_TEMPLATE, name, payload);
+    let at = frame
+        .iter()
+        .position(|line| line == SNIPPET_MARKER)
+        .ok_or("the snippet template has no snippet marker")?;
+    let mut all: Vec<String> = frame[..at].to_vec();
+
+    all.extend(lines.iter().cloned());
+    all.extend_from_slice(&frame[at + 1..]);
+
+    let mut source = all.join("\n");
+
+    if out != OutType::Internal {
+        source = source.replacen(TEMPLATE_OUT_TYPE, &out.interface().to_ascii_lowercase(), 1);
+    }
+
+    source.push('\n');
+
+    Ok(SnippetSource {
+        source,
+        first_line: at + 1,
+        line_count: lines.len(),
+    })
 }
 
 /// The source line that carries one payload literal.

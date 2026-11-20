@@ -385,8 +385,8 @@ a `PROG` include only. `--subc` applies to `PROG` only. `--prog` is required for
 `TRAN` only. `--text` is required except for `DTEL`, `DOMA`, `TABL` and `TTYP`, whose description is in
 the XML file. `inactive`, `activate` and `aunit` are described in
 [Getting started](docs/getting-started.md#inactive-objects-activation-and-abap-unit). `run` is not a
-dry run: see [Getting started](docs/getting-started.md#run-a-class); `run PROG` and `run SNIPPET`
-check their arguments and stop with `not implemented yet` in this release.
+dry run: see [Getting started](docs/getting-started.md#run-a-class-a-report-or-a-snippet). `run PROG`
+and `run SNIPPET` use a temporary runner class and so work on development systems only.
 The grammar and the limits are in [Getting started](docs/getting-started.md#program-includes).
 [Getting started](docs/getting-started.md#other-source-objects) has examples.
 

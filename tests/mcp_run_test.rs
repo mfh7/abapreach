@@ -366,28 +366,6 @@ fn the_policy_matrix_refuses_before_any_sap_activity() {
 }
 
 #[test]
-fn report_and_snippet_stop_as_not_implemented_after_their_gates() {
-    let policies =
-        r#"{"mcp_run":"confirm","mcp_run_allow":["PROG:ZREPORT"],"mcp_run_snippet":"on"}"#;
-
-    for arguments in [
-        json!({"conn": "DEV_100", "type": "PROG", "name": "zreport", "params": ["P_A=1"]}),
-        json!({"conn": "DEV_100", "type": "SNIPPET", "source": "WRITE 1."}),
-    ] {
-        let mut rig = rig(policies);
-        let result = rig.call(&mut Human::typing("x"), arguments);
-
-        assert!(result.is_error);
-        assert!(
-            result.text.ends_with("is not implemented yet"),
-            "{}",
-            result.text
-        );
-        assert_eq!(rig.sap.opened, 0);
-    }
-}
-
-#[test]
 fn a_bad_argument_is_a_refusal_not_a_run() {
     for arguments in [
         json!({"conn": "DEV_100", "type": "BOGUS", "name": "ZCL_A"}),

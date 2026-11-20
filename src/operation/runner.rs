@@ -276,6 +276,24 @@ pub struct CycleInput<'a> {
     pub build: &'a dyn Fn(&str, OutType) -> Result<String, String>,
 }
 
+/// What a run mode (`run PROG`, `run SNIPPET`) adds to the cycle of the runner. The default is the
+/// cycle of every other operation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CycleExtras {
+    /// The time the classrun `POST` may take over ADT HTTP. `None` is the limit of the transport.
+    pub post_limit: Option<Duration>,
+    /// The text of the first Ctrl-C while the `POST` is in flight. With it the second Ctrl-C ends
+    /// the process (exit 130) and prints the `RUNNER_LEFTOVER` lines of the runner class.
+    pub wait_text: Option<&'static str>,
+    /// Where a snippet stands in the class source: its first line (from 1) and its line count. An
+    /// activation error inside it is the snippet's own error, not a bug of the template.
+    pub snippet: Option<(usize, usize)>,
+}
+
+/// The start of the `STOP` text that is no stop but the error of a snippet: the operation prints
+/// it as it is, without the `STOP: ` prefix, and the exit is 2.
+pub const SNIPPET_ERROR_PREFIX: &str = "SNIPPET_ERROR: ";
+
 /// How a row ended, before the cleanup is taken into account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunnerEnd {
@@ -329,19 +347,9 @@ impl RunnerRun {
 
     /// `RUNNER_LEFTOVER` and the two exact cleanup commands, for the stderr.
     pub fn leftover_text(&self) -> Option<String> {
-        self.leftover.as_ref().map(|name| {
-            format!(
-                "RUNNER_LEFTOVER: {name}\n\
-                 abapreach delete --simulate CLAS:{name} --plan <FILE> --conn {conn}\n\
-                 abapreach delete CLAS:{name} --plan <FILE> --conn {conn}{hint}",
-                conn = self.conn,
-                hint = if self.directory_only {
-                    DIRECTORY_HINT
-                } else {
-                    ""
-                }
-            )
-        })
+        self.leftover
+            .as_ref()
+            .map(|name| leftover_lines(name, &self.conn, self.directory_only))
     }
 
     /// Whether the later rows of a batch are skipped: a class that stays, a signal, or a stop.
@@ -370,6 +378,16 @@ impl RunnerRun {
             RunnerEnd::Interrupted => INTERRUPT_EXIT_CODE,
         }
     }
+}
+
+/// `RUNNER_LEFTOVER` and the two exact cleanup commands for a runner class that stays.
+pub fn leftover_lines(name: &str, conn: &str, directory_only: bool) -> String {
+    format!(
+        "RUNNER_LEFTOVER: {name}\n\
+         abapreach delete --simulate CLAS:{name} --plan <FILE> --conn {conn}\n\
+         abapreach delete CLAS:{name} --plan <FILE> --conn {conn}{hint}",
+        hint = if directory_only { DIRECTORY_HINT } else { "" }
+    )
 }
 
 /// A row of a batch: it ran, or an earlier row stopped the batch.
@@ -419,6 +437,17 @@ pub fn run_cycle(
     post: PostRoute<'_>,
     cancel: &CancelFlag,
 ) -> RunnerRun {
+    run_cycle_with(input, open, post, cancel, &CycleExtras::default())
+}
+
+/// [`run_cycle`] with the additions of a run mode.
+pub fn run_cycle_with(
+    input: &CycleInput<'_>,
+    open: &mut Opener<'_>,
+    post: PostRoute<'_>,
+    cancel: &CancelFlag,
+    extras: &CycleExtras,
+) -> RunnerRun {
     let post_via = match post {
         PostRoute::Http(_) => PostTransport::Http,
         PostRoute::Cycle => post_transport(input.backend, true),
@@ -467,6 +496,7 @@ pub fn run_cycle(
         expected: None,
         out: OutType::default(),
         directory_left: false,
+        extras: *extras,
     };
     let end = match cycle.steps(post, open) {
         Ok(end) | Err(end) => end,
@@ -524,6 +554,7 @@ struct Cycle<'a> {
     out: OutType,
     /// The last proof found the class gone and `TADIR` still holding its row.
     directory_left: bool,
+    extras: CycleExtras,
 }
 
 impl Cycle<'_> {
@@ -919,6 +950,21 @@ impl Cycle<'_> {
             return Err(RunnerEnd::Stop(self.needs_classrun()));
         }
 
+        if let Some((first, count)) = self.extras.snippet
+            && let Some(message) = messages.iter().find(|message| {
+                let row = message.row as usize;
+
+                message.is_error() && row >= first && row < first + count
+            })
+        {
+            let line = message.row as usize - first + 1;
+
+            return Err(RunnerEnd::Stop(format!(
+                "{SNIPPET_ERROR_PREFIX}line {line}: {}",
+                cut(&self.mask(message.text.trim()))
+            )));
+        }
+
         match messages.iter().find(|message| message.is_error()) {
             Some(message) => {
                 self.notes.push(TEMPLATE_BUG.to_owned());
@@ -972,12 +1018,22 @@ impl Cycle<'_> {
             PostRoute::Cycle => (open(), self.input.backend == BackendKind::AdtHttp),
             PostRoute::Http(open_post) => (open_post(), true),
         };
+        // A run mode waits for its reply: the first Ctrl-C is told so, the second leaves the
+        // runner class behind and says which one.
+        let _running = self.extras.wait_text.map(|wait| {
+            self.cancel
+                .hold_run_leaving(wait, leftover_lines(self.name(), self.input.conn, false))
+        });
+        let limit = self.extras.post_limit;
         let result = match opened {
             Ok(mut session) => {
-                let result = if gated {
-                    RunnerGated::new(&mut *session).request(request)
-                } else {
-                    session.request(request)
+                let result = match (gated, limit) {
+                    (true, Some(limit)) => {
+                        RunnerGated::new(&mut *session).request_within(request, limit)
+                    }
+                    (true, None) => RunnerGated::new(&mut *session).request(request),
+                    (false, Some(limit)) => session.request_within(request, limit),
+                    (false, None) => session.request(request),
                 };
 
                 if let Err(error) = session.close() {

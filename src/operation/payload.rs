@@ -8,6 +8,7 @@
 //! `KEY=VALUE` lines.
 
 use crate::adt::reference_text;
+use crate::cli::{AlvColumns, AlvMode};
 use crate::hash::{MAX_LINE, local_source_lines, normalize, validate_name_within};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
@@ -232,6 +233,143 @@ pub fn encode(request: &Request<'_>) -> Result<Vec<String>, String> {
     document.push('\n');
 
     Ok(wrap(&base64(document.as_bytes())))
+}
+
+/// The longest logon user name (`SY-UNAME`).
+const MAX_USER: usize = 12;
+/// The most `PARAM` lines of a `RUN_PROG` payload.
+pub const MAX_RUN_PARAMS: usize = 50;
+/// The widest value of a `PARAM`: the length of `RSPARAMS-LOW`.
+const MAX_PARAM_VALUE: usize = 45;
+/// The most output bytes a run may ask the runner to emit: the parse cap of the protocol less
+/// one MiB of headroom for the closing lines and the framing of the classrun reply.
+pub const MAX_RUN_OUTPUT: u64 = 7 << 20;
+
+/// What a run mode (`run PROG`, `run SNIPPET`) carries. A snippet is code, so it is not here: it
+/// stands in the class source itself and its payload has no object.
+#[derive(Clone, Debug)]
+pub struct RunRequest<'a> {
+    pub nonce: &'a str,
+    /// The logon user; the class refuses a run by another user.
+    pub user: &'a str,
+    /// UTC `YYYYMMDDHHMMSS` after which the class refuses to run.
+    pub expires: &'a str,
+    /// The most bytes the class emits (the runner's own cut line comes before this).
+    pub max_bytes: u64,
+    /// `Some` for `RUN_PROG`, `None` for `RUN_SNIPPET`.
+    pub prog: Option<RunProg<'a>>,
+}
+
+/// The `RUN_PROG` part of a run payload.
+#[derive(Clone, Debug)]
+pub struct RunProg<'a> {
+    pub report: &'a str,
+    /// The active source hash of the simulate; the class compares it right before `SUBMIT`.
+    pub base: &'a str,
+    pub params: &'a [(String, String)],
+    pub variant: Option<&'a str>,
+    pub alv: AlvMode,
+    pub alv_columns: AlvColumns,
+}
+
+/// Validates a run request and returns the encoded payload lines, like [`encode`]. An `Err` is a
+/// STOP with exit 2 and means no connection was made.
+pub fn encode_run(request: &RunRequest<'_>) -> Result<Vec<String>, String> {
+    let nonce = nonce(request.nonce)?;
+    let user = token(
+        "logon user",
+        request.user,
+        MAX_USER,
+        "A-Z 0-9 _ # $ & @ . / -",
+        |c| c.is_ascii_uppercase() || c.is_ascii_digit() || "_#$&@./-".contains(c),
+    )?;
+
+    if request.expires.len() != 14 || !request.expires.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "the run expiry must be 14 digits YYYYMMDDHHMMSS: {:?}",
+            request.expires
+        ));
+    }
+
+    if request.max_bytes == 0 || request.max_bytes > MAX_RUN_OUTPUT {
+        return Err(format!(
+            "the output limit must be 1 to {MAX_RUN_OUTPUT} bytes: {}",
+            request.max_bytes
+        ));
+    }
+
+    let mode = if request.prog.is_some() {
+        "RUN_PROG"
+    } else {
+        "RUN_SNIPPET"
+    };
+    let mut lines = vec![
+        "FORMAT=1".to_owned(),
+        format!("NONCE={nonce}"),
+        format!("MODE={mode}"),
+        format!("USER={user}"),
+        format!("EXPIRES={}", request.expires),
+        format!("MAXBYTES={}", request.max_bytes),
+    ];
+
+    if let Some(prog) = &request.prog {
+        let report = object_name(prog.report, MAX_REPORT, false)?;
+        let base = hash("--base", prog.base)?;
+
+        if prog.params.len() > MAX_RUN_PARAMS {
+            return Err(format!("at most {MAX_RUN_PARAMS} parameters are allowed"));
+        }
+
+        lines.push(format!("REPORT={report}"));
+        lines.push(format!("BASE={base}"));
+
+        for (name, value) in prog.params {
+            lines.push(format!("PARAM={}", run_param(name, value)?));
+        }
+
+        if let Some(variant) = prog.variant {
+            lines.push(format!("VARIANT={}", run_variant(variant)?));
+        }
+
+        lines.push(format!("ALV={}", prog.alv.token()));
+        lines.push(format!("ALVCOLS={}", prog.alv_columns.token()));
+    }
+
+    let mut document = lines.join("\n");
+    document.push('\n');
+
+    Ok(wrap(&base64(document.as_bytes())))
+}
+
+/// `NAME=VALUE` of one parameter: the name is a selection-screen name, the value fits
+/// `RSPARAMS-LOW` and holds no control character.
+fn run_param(name: &str, value: &str) -> Result<String, String> {
+    let name = name.to_ascii_uppercase();
+
+    if name.is_empty()
+        || name.len() > 8
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err(format!(
+            "parameter name must be 1 to 8 characters of A-Z 0-9 _: {name:?}"
+        ));
+    }
+
+    if value.chars().count() > MAX_PARAM_VALUE || value.chars().any(char::is_control) {
+        return Err(format!(
+            "parameter {name}: the value has more than {MAX_PARAM_VALUE} characters or a control character"
+        ));
+    }
+
+    Ok(format!("{name}={value}"))
+}
+
+fn run_variant(variant: &str) -> Result<String, String> {
+    token("--variant", variant, 14, "A-Z 0-9 _ & %", |c| {
+        c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '_' | '&' | '%')
+    })
 }
 
 /// A field must be present exactly where the operation takes it.
