@@ -235,6 +235,46 @@ structure read worked over them on the 7.50 system; a data element create or dep
 on the request the comparison sent (a missing `searchHelp` element), so it shows no limit of the endpoint
 itself; structure writes were not attempted. The 7.40 system has none of these endpoints.
 
+### 0.16.1 release checks (0.16.1-rc.2, 0.16.1-rc.4)
+
+The rc.2 runs are from 2026-11-19 and the rc.4 runs from 2026-11-20. rc.2 has the full feature set. rc.3 was
+never published (a test adapter failed in CI). rc.4 is rc.2 plus one transport fix: RFC SADT requests that
+name no `Accept` header now send `Accept: */*`. The 0.16.1 release binaries are the rc.4 binaries. The
+systems are the 7.50 system, the 7.40 system and the 758 system (S/4HANA).
+
+| System | Run | Result |
+| :--- | :--- | :--- |
+| 7.50 | rc.2, full matrix, macOS arm64 | 541 PASS, 3 FAIL |
+| 7.50 | rc.2, group m7 (0.16.1 cells) | 19 PASS, 0 FAIL |
+| 7.50 | rc.2, smoke | 48 PASS, 0 FAIL |
+| 7.50 | rc.4, smoke | 48 PASS, 1 UNSUPPORTED, 0 FAIL |
+| 7.40 | rc.2, full matrix, Linux x64 | 267 PASS, 3 FAIL |
+| 7.40 | rc.2, group m7 | 15 PASS, 0 FAIL |
+| 7.40 | rc.2, smoke | 35 PASS, 0 FAIL |
+| 7.40 | rc.4, smoke | 35 PASS, 16 UNSUPPORTED, 0 FAIL |
+| 758 | rc.2, group m7 | 24 PASS, 4 UNSUPPORTED, 0 FAIL |
+| 758 | rc.2, smoke | 46 PASS, 2 FAIL |
+| 758 | rc.4, group m7 | 21 PASS, 4 UNSUPPORTED, 3 FAIL |
+| 758 | rc.4, smoke | 48 PASS, 1 UNSUPPORTED, 0 FAIL |
+
+- The 3 FAIL cells of each full matrix are older cells whose expectations predate 0.16.1.
+  They are not product defects. On the 7.50 system, the m6-ddic group (67 PASS, 0 FAIL) and the MCP group on
+  the RFC SDK (8 PASS, 0 FAIL) were rerun after a network timeout and a hung run, and passed.
+- The 2 FAIL cells of the rc.2 smoke on the 758 system were the `doctor` runner leftover search over RFC
+  (RFC SAP GUI library and RFC SDK). It answered HTTP 400 because the request had no `Accept` header. rc.4
+  fixes this; the leftovers line passes on every path that runs classrun (all three paths on the 7.50
+  and 758 systems, the two RFC paths on the 7.40 system).
+- The 3 FAIL cells of rc.4 group m7 on the 758 system are the `doctor` orphan cell. Its fixture, a runner row
+  that exists only in `TADIR`, was deleted after the rc.2 check passed, as planned, so the cell has nothing to
+  find.
+- The 758 system was covered by the smoke set and group m7 only. The full matrix on it is planned after
+  this release.
+- No test object was left on any system after any run.
+- Known gaps. `--tr` adding an object that is not yet recorded has no live test: no `YTEST` object can reach
+  that state without releasing a test request. The 7.40 system has no stateful ADT HTTP session, so classrun
+  there runs over RFC only (unchanged). Issue #13 (a data preview with a single-value `=` condition reported
+  as unreliable on the 758 system) is out of scope: ABAPReach's own queries use `IN`.
+
 ## `create PROG` operation (0.15.0)
 
 The create operation covers the `create PROG` cases of the reference test suite

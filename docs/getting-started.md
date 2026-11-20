@@ -563,6 +563,11 @@ rerun for 0.16.0. The two systems:
   requests;
 - a SAP 7.40 system with local objects only (`$TMP`), no stateful ADT HTTP session.
 
+The 0.16.1 release checks also used a third system, an S/4HANA system with SAP_BASIS 758 (the 758 system),
+on `v0.16.1-rc.2` and `v0.16.1-rc.4` (the release binaries). On 0.16.1 it was covered by the smoke set and
+group m7 only; the full matrix on it is planned after this release. The results are in
+[Behavior differences: 0.16.1 release checks](behavior-differences.md#0161-release-checks-0161-rc2-0161-rc4).
+
 Each cell has one of three results:
 
 - **PASS**: the scenario ran on that platform and path and its checks held.
