@@ -190,7 +190,7 @@ fn rig(policies: &str) -> Rig {
     }
 }
 
-const OPEN: &str = r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_A"]}"#;
+const OPEN: &str = r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_A"]}"#;
 
 impl Rig {
     fn config(&self) -> Config {
@@ -304,13 +304,13 @@ fn the_policy_matrix_refuses_before_any_sap_activity() {
         // The default: mcp_run is off.
         ("{}", args(), "policy mcp_run"),
         (
-            r#"{"mcp_run":"off","mcp_run_allow":["ZCL_A"]}"#,
+            r#"{"mcp_run":"off","mcp_run_allow":["CLAS:ZCL_A"]}"#,
             args(),
             "policy mcp_run",
         ),
         // run: off wins over mcp_run: confirm.
         (
-            r#"{"run":"off","mcp_run":"confirm","mcp_run_allow":["ZCL_A"]}"#,
+            r#"{"run":"off","mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_A"]}"#,
             args(),
             "policy run",
         ),
@@ -325,6 +325,24 @@ fn the_policy_matrix_refuses_before_any_sap_activity() {
             OPEN,
             json!({"conn": "DEV_100", "type": "CLAS", "name": "ZCL_A2"}),
             "not on mcp_run_allow",
+        ),
+        // An entry names one object type: the class entry does not allow the report of that
+        // name, and the report or group entries do not allow the class.
+        (
+            r#"{"mcp_run":"confirm","mcp_run_allow":["PROG:ZCL_A","FUGR:ZCL_A"]}"#,
+            args(),
+            "CLAS:ZCL_A is not on mcp_run_allow",
+        ),
+        (
+            OPEN,
+            json!({"conn": "DEV_100", "type": "PROG", "name": "ZCL_A"}),
+            "PROG:ZCL_A is not on mcp_run_allow",
+        ),
+        // A temporary runner class is not run, even with its exact name on the list.
+        (
+            r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:YCL_ABAPREACH_RUN_AB12CD34"]}"#,
+            json!({"conn": "DEV_100", "type": "CLAS", "name": "ycl_abapreach_run_ab12cd34"}),
+            "a temporary runner class is not run; delete it (doctor)",
         ),
         // A snippet needs its own opt-in, which the allow-list does not replace.
         (
@@ -349,7 +367,8 @@ fn the_policy_matrix_refuses_before_any_sap_activity() {
 
 #[test]
 fn report_and_snippet_stop_as_not_implemented_after_their_gates() {
-    let policies = r#"{"mcp_run":"confirm","mcp_run_allow":["ZREPORT"],"mcp_run_snippet":"on"}"#;
+    let policies =
+        r#"{"mcp_run":"confirm","mcp_run_allow":["PROG:ZREPORT"],"mcp_run_snippet":"on"}"#;
 
     for arguments in [
         json!({"conn": "DEV_100", "type": "PROG", "name": "zreport", "params": ["P_A=1"]}),
@@ -466,8 +485,8 @@ fn the_human_confirms_what_runs_and_only_then_the_class_posts_once() {
 #[test]
 fn mcp_write_does_not_waive_the_human_and_run_direct_counts_as_plan() {
     for policies in [
-        r#"{"mcp_write":"token","run":"direct","mcp_run":"confirm","mcp_run_allow":["ZCL_A"]}"#,
-        r#"{"mcp_write":"confirm","mcp_run":"confirm","mcp_run_allow":["zcl_a"]}"#,
+        r#"{"mcp_write":"token","run":"direct","mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_A"]}"#,
+        r#"{"mcp_write":"confirm","mcp_run":"confirm","mcp_run_allow":["CLAS:zcl_a"]}"#,
     ] {
         let mut rig = rig(policies);
 

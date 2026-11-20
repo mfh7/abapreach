@@ -6,11 +6,11 @@
 //! the operations of the command line; this module adapts arguments and results.
 
 use super::{
-    Deadline, McpTools, Operation, Seen, Settled, Ticket, WithCancel, WriteGate, ask, bind,
+    Deadline, McpTools, Operation, SUMMARY_OBJECT_LINES, Seen, Settled, Ticket, WithCancel,
+    WriteGate, ask, bind,
 };
 use crate::app::end_session;
 use crate::backend::OperationKind;
-use crate::cli::RunKind;
 use crate::config::Connection;
 use crate::domain::{Outcome, Status};
 use crate::mcp::{Session, ToolHandler, ToolResult};
@@ -18,7 +18,7 @@ use crate::mcp_read::{optional, required};
 use crate::operation::activate::{self, ActivateInput, ActivateTarget};
 use crate::operation::aunit::{self, AunitKind, AunitTarget, Scope};
 use crate::operation::quality;
-use crate::operation::run_plan::{RunArgs, mcp_gate};
+use crate::operation::run_plan::mcp_object_gate;
 use crate::policy::{McpRun, RunPolicy};
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
@@ -234,6 +234,7 @@ impl<G: WriteGate> McpTools<'_, G> {
 
         ticket.listing = tokens.clone();
 
+        batch_listed(&targets)?;
         run_allowed(&connection, &targets)?;
 
         let registry = self.registry;
@@ -312,32 +313,26 @@ fn activate_targets(arguments: &Map<String, Value>) -> Result<Vec<ActivateTarget
 }
 
 /// The `mcp_run_allow` gate of `abap_aunit`: every object of the call (also each object a
-/// package or a request resolved to) must be on the list, by the same exact-name rule and the same
-/// gate (`mcp_gate`) as `abap_run`. One object off the list refuses the whole call, naming every
-/// object that is missing; nothing runs.
+/// package or a request resolved to) must be on the list as `TYPE:NAME`, by the same exact rule
+/// and the same gate (`mcp_object_gate`) as `abap_run`. One object off the list refuses the whole
+/// call, naming every object that is missing; nothing runs.
 fn run_allowed(connection: &Connection, targets: &[AunitTarget]) -> Result<(), String> {
     let policies = &connection.policies;
-    let mut missing: Vec<&str> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
 
     for target in targets {
-        let args = RunArgs {
-            kind: RunKind::Clas,
-            name: target.name.clone(),
-            params: Vec::new(),
-            variant: None,
-            alv: None,
-            alv_columns: None,
-            snippet: None,
-        };
-
-        if let Err(message) = mcp_gate(policies, &connection.id, &args) {
+        if let Err(message) =
+            mcp_object_gate(policies, &connection.id, target.kind.token(), &target.name)
+        {
             // `run: off` and `mcp_run: off` refuse for every object alike.
             if policies.run == RunPolicy::Off || policies.mcp_run == McpRun::Off {
                 return Err(message);
             }
 
-            if !missing.contains(&target.name.as_str()) {
-                missing.push(&target.name);
+            let entry = format!("{}:{}", target.kind.token(), target.name);
+
+            if !missing.contains(&entry) {
+                missing.push(entry);
             }
         }
     }
@@ -351,4 +346,19 @@ fn run_allowed(connection: &Connection, targets: &[AunitTarget]) -> Result<(), S
         connection.id,
         missing.join(", ")
     ))
+}
+
+/// The batch bound of `abap_aunit`: the confirmation form lists at most [`SUMMARY_OBJECT_LINES`]
+/// objects, and the human never confirms a run from a list that was cut. The command line keeps
+/// its own bound.
+fn batch_listed(targets: &[AunitTarget]) -> Result<(), String> {
+    if targets.len() > SUMMARY_OBJECT_LINES {
+        return Err(format!(
+            "{} objects found; the confirmation form lists at most {SUMMARY_OBJECT_LINES} and a \
+             run is never confirmed from a cut list: narrow the package or request",
+            targets.len()
+        ));
+    }
+
+    Ok(())
 }

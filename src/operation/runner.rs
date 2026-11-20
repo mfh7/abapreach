@@ -29,6 +29,18 @@ const SUFFIX_ALPHABET: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 /// alphabet character is equally likely.
 const BIAS_LIMIT: u8 = 252;
 
+/// The reason `run CLAS` gives for a temporary runner class.
+pub const RUNNER_CLASS_REFUSED: &str = "a temporary runner class is not run; delete it (doctor)";
+
+/// Whether `name` is a temporary runner class of a connection with `runner_prefix`: it starts
+/// with that prefix or with the product default. Such a class carries a payload of its own (a
+/// leftover of a crash), so `run CLAS` never runs one.
+pub fn is_runner_class(name: &str, runner_prefix: &str) -> bool {
+    let name = name.trim().to_ascii_uppercase();
+
+    name.starts_with(&runner_prefix.to_ascii_uppercase()) || name.starts_with(DEFAULT_RUNNER_PREFIX)
+}
+
 /// The `runner_prefix` rule: upper-case letters, digits, and underscore, starting with `Y` or
 /// `Z`, at most 22 characters, so the name stays within the 30 characters of a class name.
 pub fn validate_runner_prefix(prefix: &str) -> Result<(), String> {

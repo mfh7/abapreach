@@ -918,7 +918,7 @@ pub fn run_tool(runnable: &[String]) -> Value {
             "Run ABAP code with the authorizations of the logon user (NOT a dry run: data the \
              code writes stays written). CLAS runs an existing class that implements \
              IF_OO_ADT_CLASSRUN and returns its output; PROG and SNIPPET are not available yet. \
-             Only names on the connection's mcp_run_allow list run. The user always confirms in a \
+             Only objects on the connection's mcp_run_allow list (TYPE:NAME) run. The user always confirms in a \
              form that shows what runs, and the call takes the single in-flight slot until the run \
              returns or its timeout ends it. simulate reads and checks only. Runnable \
              connections: {}.",

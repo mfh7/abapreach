@@ -911,15 +911,19 @@ fn the_run_keys_default_to_plan_with_mcp_closed() {
 
 #[test]
 fn the_run_keys_read_their_values_and_a_server_overrides_single_keys() {
-    let top = r#","policies":{"run":"direct","mcp_run":"confirm","mcp_run_allow":[" zcl_a ","ZCL_B",""],"mcp_run_snippet":"on"}"#;
+    let top = r#","policies":{"run":"direct","mcp_run":"confirm","mcp_run_allow":[" clas:zcl_a ","PROG:ZCL_B",""],"mcp_run_snippet":"on"}"#;
     let policies = effective(top, "").unwrap();
 
     assert_eq!(policies.run.token(), "direct");
     assert_eq!(policies.mcp_run.token(), "confirm");
     assert_eq!(policies.mcp_run_snippet.token(), "on");
-    assert_eq!(policies.mcp_run_allow, ["ZCL_A", "ZCL_B"]);
-    assert!(policies.is_run_allowed("zcl_b"));
-    assert!(!policies.is_run_allowed("ZCL_B2"));
+    assert_eq!(policies.mcp_run_allow, ["CLAS:ZCL_A", "PROG:ZCL_B"]);
+    assert!(policies.is_run_allowed("prog", "zcl_b"));
+    assert!(!policies.is_run_allowed("PROG", "ZCL_B2"));
+    // An entry names one type: `CLAS:ZCL_A` does not allow the report or the group of that name.
+    assert!(policies.is_run_allowed("CLAS", "ZCL_A"));
+    assert!(!policies.is_run_allowed("PROG", "ZCL_A"));
+    assert!(!policies.is_run_allowed("FUGR", "ZCL_A"));
 
     let overridden = effective(
         top,
@@ -936,7 +940,48 @@ fn the_run_keys_read_their_values_and_a_server_overrides_single_keys() {
     let kept = effective(top, r#","policies":{"run":"plan"}"#).unwrap();
 
     assert_eq!(kept.run.token(), "plan");
-    assert_eq!(kept.mcp_run_allow, ["ZCL_A", "ZCL_B"]);
+    assert_eq!(kept.mcp_run_allow, ["CLAS:ZCL_A", "PROG:ZCL_B"]);
+}
+
+#[test]
+fn an_mcp_run_allow_entry_without_a_type_stops_the_load_with_the_form_to_write() {
+    for (bad, needle) in [
+        (
+            r#","policies":{"mcp_run_allow":["ZCL_A"]}"#,
+            "has no object type",
+        ),
+        (
+            r#","policies":{"mcp_run_allow":["CLAS:ZCL_A","ZREPORT"]}"#,
+            "ZREPORT",
+        ),
+        (
+            r#","policies":{"mcp_run_allow":["DTEL:ZX"]}"#,
+            "CLAS, PROG or FUGR",
+        ),
+        (r#","policies":{"mcp_run_allow":["CLAS:"]}"#, "has no name"),
+        (
+            r#","policies":{"mcp_run_allow":[":ZCL_A"]}"#,
+            "CLAS, PROG or FUGR",
+        ),
+    ] {
+        let top = effective(bad, "").unwrap_err();
+        let server = effective("", bad).unwrap_err();
+
+        assert!(top.contains("policies") && top.contains(needle), "{top}");
+        assert!(top.contains("CLAS:ZCL_TEST"), "{top}");
+        assert!(
+            server.contains("servers[0].policies") && server.contains(needle),
+            "{server}"
+        );
+    }
+
+    let good = effective(
+        r#","policies":{"mcp_run_allow":["fugr:zgroup","Prog:ZREP"]}"#,
+        "",
+    )
+    .unwrap();
+
+    assert_eq!(good.mcp_run_allow, ["FUGR:ZGROUP", "PROG:ZREP"]);
 }
 
 #[test]

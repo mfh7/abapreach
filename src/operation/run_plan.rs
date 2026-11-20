@@ -4,6 +4,7 @@
 
 use crate::cli::{AlvColumns, AlvMode, RunKind};
 use crate::operation::delete::sha256_hex;
+use crate::operation::runner::{RUNNER_CLASS_REFUSED, is_runner_class};
 use crate::policy::{McpRun, McpRunSnippet, Policies, RunPolicy};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -155,6 +156,16 @@ impl RunArgs {
             "{what} {} is outside the Z/Y scope; --allow-standard allows a standard {what}",
             self.name
         ))
+    }
+
+    /// A `CLAS` run refuses a temporary runner class of the connection (its `runner_prefix` or the
+    /// default one): a leftover carries its own payload, which is not what `run CLAS` is for.
+    pub fn check_not_runner(&self, runner_prefix: &str) -> Result<(), String> {
+        if self.kind == RunKind::Clas && is_runner_class(&self.name, runner_prefix) {
+            return Err(format!("{}: {RUNNER_CLASS_REFUSED}", self.name));
+        }
+
+        Ok(())
     }
 
     /// The identity the plan file binds: everything the arguments say, and the connection.
@@ -412,17 +423,11 @@ pub fn cli_gate(
 }
 
 /// The MCP gate: `run: off` refuses first, whatever `mcp_run` says; then `mcp_run`, the snippet
-/// opt-in, and the exact name on `mcp_run_allow`. MCP ignores `run: direct`.
+/// opt-in, and the exact `TYPE:NAME` on `mcp_run_allow`. MCP ignores `run: direct`.
 pub fn mcp_gate(policies: &Policies, conn: &str, args: &RunArgs) -> Result<(), String> {
-    if policies.run == RunPolicy::Off {
-        return Err(format!("run is off for {conn} (policy run)"));
-    }
-
-    if policies.mcp_run == McpRun::Off {
-        return Err(format!("MCP runs are off for {conn} (policy mcp_run)"));
-    }
-
     if args.kind == RunKind::Snippet {
+        mcp_switches(policies, conn)?;
+
         return match policies.mcp_run_snippet {
             McpRunSnippet::On => Ok(()),
             McpRunSnippet::Off => Err(format!(
@@ -431,11 +436,41 @@ pub fn mcp_gate(policies: &Policies, conn: &str, args: &RunArgs) -> Result<(), S
         };
     }
 
-    if policies.is_run_allowed(&args.name) {
+    mcp_object_gate(policies, conn, args.kind.token(), &args.name)
+}
+
+/// The MCP gate of one named object of `object_type` (`CLAS`, `PROG` or `FUGR`): the switches of
+/// [`mcp_gate`], then the exact `TYPE:NAME` on `mcp_run_allow`. `abap_aunit` uses it for every
+/// object of a call.
+pub fn mcp_object_gate(
+    policies: &Policies,
+    conn: &str,
+    object_type: &str,
+    name: &str,
+) -> Result<(), String> {
+    mcp_switches(policies, conn)?;
+
+    if policies.is_run_allowed(object_type, name) {
         return Ok(());
     }
 
-    Err(format!("{} is not on mcp_run_allow of {conn}", args.name))
+    Err(format!(
+        "{object_type}:{} is not on mcp_run_allow of {conn}",
+        name.trim().to_ascii_uppercase()
+    ))
+}
+
+/// `run: off` refuses first, whatever `mcp_run` says; then `mcp_run`.
+pub fn mcp_switches(policies: &Policies, conn: &str) -> Result<(), String> {
+    if policies.run == RunPolicy::Off {
+        return Err(format!("run is off for {conn} (policy run)"));
+    }
+
+    if policies.mcp_run == McpRun::Off {
+        return Err(format!("MCP runs are off for {conn} (policy mcp_run)"));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -458,7 +493,7 @@ mod tests {
         Policies {
             run,
             mcp_run: mcp,
-            mcp_run_allow: vec!["ZCL_OK".to_owned()],
+            mcp_run_allow: vec!["CLAS:ZCL_OK".to_owned()],
             ..Policies::default()
         }
     }
@@ -693,6 +728,54 @@ mod tests {
         let snippet = RunArgs::parse(&raw(RunKind::Snippet, "f"), Some("WRITE 1.")).unwrap();
 
         assert!(snippet.check_scope(false).is_ok());
+    }
+
+    #[test]
+    fn a_class_run_refuses_the_runner_prefix_of_the_connection_and_the_default() {
+        let class = |name: &str| RunArgs::parse(&raw(RunKind::Clas, name), None).unwrap();
+
+        assert!(class("zcl_a").check_not_runner("ZCL_RUNX_").is_ok());
+        assert!(class("zcl_run_a").check_not_runner("ZCL_RUNX_").is_ok());
+
+        for name in ["zcl_runx_ab12cd34", "ycl_abapreach_run_ab12cd34"] {
+            let refused = class(name).check_not_runner("ZCL_RUNX_").unwrap_err();
+
+            assert!(
+                refused.contains("a temporary runner class is not run; delete it (doctor)"),
+                "{refused}"
+            );
+        }
+
+        // A report is not a class: its name is not judged here.
+        let report = RunArgs::parse(&raw(RunKind::Prog, "zcl_runx_a"), None).unwrap();
+
+        assert!(report.check_not_runner("ZCL_RUNX_").is_ok());
+    }
+
+    #[test]
+    fn the_object_gate_matches_the_type_and_the_name() {
+        let open = Policies {
+            mcp_run_allow: vec!["CLAS:ZX".to_owned(), "FUGR:ZG".to_owned()],
+            ..policies(RunPolicy::Plan, McpRun::Confirm)
+        };
+
+        assert!(mcp_object_gate(&open, "DEV_100", "CLAS", "zx").is_ok());
+        assert!(mcp_object_gate(&open, "DEV_100", "FUGR", "ZG").is_ok());
+
+        let refused = mcp_object_gate(&open, "DEV_100", "PROG", "ZX").unwrap_err();
+
+        assert_eq!(refused, "PROG:ZX is not on mcp_run_allow of DEV_100");
+        assert!(mcp_object_gate(&open, "DEV_100", "CLAS", "ZG").is_err());
+        assert!(
+            mcp_object_gate(
+                &policies(RunPolicy::Off, McpRun::Confirm),
+                "D",
+                "CLAS",
+                "ZX"
+            )
+            .unwrap_err()
+            .contains("policy run")
+        );
     }
 
     #[test]

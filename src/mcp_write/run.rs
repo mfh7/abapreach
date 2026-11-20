@@ -47,6 +47,7 @@ impl<G: WriteGate> McpTools<'_, G> {
         let args = parse_arguments(arguments)?;
 
         mcp_gate(&connection.policies, &connection.id, &args)?;
+        args.check_not_runner(&connection.runner_prefix)?;
 
         let simulate = flag(arguments, "simulate")?;
         let timeout = timeout_of(arguments)?;

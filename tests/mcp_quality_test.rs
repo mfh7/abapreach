@@ -89,8 +89,8 @@ struct Rig {
     _directory: tempfile::TempDir,
 }
 
-const ALLOW_TEST: &str = r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_TEST"]}"#;
-const ALLOW_AB: &str = r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_A","ZCL_B"]}"#;
+const ALLOW_TEST: &str = r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_TEST"]}"#;
+const ALLOW_AB: &str = r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_A","CLAS:ZCL_B"]}"#;
 
 fn rig(policies: &str) -> Rig {
     let directory = tempfile::tempdir().unwrap();
@@ -682,7 +682,7 @@ fn a_package_batch_is_resolved_first_and_the_human_types_the_count() {
 
 #[test]
 fn an_object_missing_from_mcp_run_allow_refuses_the_call_before_any_request() {
-    let mut rig = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_OTHER"]}"#);
+    let mut rig = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_OTHER"]}"#);
     let calls = rig.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
     let mut typing = Typing("ZCL_TEST", 0);
     let result = rig.call(&mut typing, "abap_aunit", aunit_arguments());
@@ -691,7 +691,7 @@ fn an_object_missing_from_mcp_run_allow_refuses_the_call_before_any_request() {
     assert!(
         result
             .text
-            .contains("not on mcp_run_allow of DEV_100: ZCL_TEST"),
+            .contains("not on mcp_run_allow of DEV_100: CLAS:ZCL_TEST"),
         "{}",
         result.text
     );
@@ -722,7 +722,7 @@ fn an_empty_or_absent_mcp_run_allow_refuses_every_object() {
 
 #[test]
 fn the_allow_list_matches_exact_names_without_regard_to_case() {
-    let mut lower = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["zcl_test"]}"#);
+    let mut lower = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:zcl_test"]}"#);
 
     lower.session(vec![client("T"), ok("<class/>"), ok(CLEAN)]);
 
@@ -731,7 +731,8 @@ fn the_allow_list_matches_exact_names_without_regard_to_case() {
     assert!(!result.is_error, "{}", result.text);
 
     // A prefix of the name is not a match: there are no patterns.
-    let mut prefix = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_TES","ZCL_TEST*"]}"#);
+    let mut prefix =
+        rig(r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_TES","CLAS:ZCL_TEST*"]}"#);
     let result = prefix.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
 
     assert!(result.is_error);
@@ -740,7 +741,7 @@ fn the_allow_list_matches_exact_names_without_regard_to_case() {
 
 #[test]
 fn a_batch_with_one_object_off_the_list_refuses_all_of_it() {
-    let mut rig = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["ZCL_A"]}"#);
+    let mut rig = rig(r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_A"]}"#);
     let tadir = ok(&preview(&[
         ("OBJECT", &[Some("CLAS"), Some("CLAS")]),
         ("OBJ_NAME", &[Some("ZCL_A"), Some("ZCL_B")]),
@@ -760,17 +761,95 @@ fn a_batch_with_one_object_off_the_list_refuses_all_of_it() {
     assert!(
         result
             .text
-            .contains("not on mcp_run_allow of DEV_100: ZCL_B; nothing was run"),
+            .contains("not on mcp_run_allow of DEV_100: CLAS:ZCL_B; nothing was run"),
         "{}",
         result.text
     );
-    assert!(!result.text.contains("ZCL_A,"));
+    assert!(!result.text.contains("CLAS:ZCL_A"));
     assert_eq!(typing.1, 0);
 }
 
 #[test]
+fn an_allow_entry_covers_its_own_object_type_only() {
+    // `CLAS:ZCL_TEST` does not allow the report or the function group of that name, and the
+    // entries of the other types do not allow the class.
+    for (policies, kind) in [
+        (
+            r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_TEST"]}"#,
+            "PROG",
+        ),
+        (
+            r#"{"mcp_run":"confirm","mcp_run_allow":["CLAS:ZCL_TEST"]}"#,
+            "FUGR",
+        ),
+        (
+            r#"{"mcp_run":"confirm","mcp_run_allow":["PROG:ZCL_TEST","FUGR:ZCL_TEST"]}"#,
+            "CLAS",
+        ),
+    ] {
+        let mut rig = rig(policies);
+        let mut typing = Typing("ZCL_TEST", 0);
+        let result = rig.call(
+            &mut typing,
+            "abap_aunit",
+            json!({"conn": "DEV_100", "type": kind, "name": "ZCL_TEST"}),
+        );
+
+        assert!(result.is_error, "{kind}");
+        assert!(
+            result
+                .text
+                .contains(&format!("not on mcp_run_allow of DEV_100: {kind}:ZCL_TEST")),
+            "{}",
+            result.text
+        );
+        assert_eq!(typing.1, 0);
+        assert_eq!(rig.opened(), 0);
+    }
+}
+
+#[test]
+fn a_batch_the_confirmation_form_cannot_list_is_refused() {
+    let names: Vec<String> = (0..61).map(|number| format!("ZCL_{number:02}")).collect();
+    let allow: Vec<String> = names
+        .iter()
+        .map(|name| format!("\"CLAS:{name}\""))
+        .collect();
+    let mut rig = rig(&format!(
+        r#"{{"mcp_run":"confirm","mcp_run_allow":[{}]}}"#,
+        allow.join(",")
+    ));
+    let kinds = vec![Some("CLAS"); names.len()];
+    let objects: Vec<Option<&str>> = names.iter().map(|name| Some(name.as_str())).collect();
+
+    // Only the resolving session is scripted: no test session may open.
+    rig.session(vec![ok(&preview(&[
+        ("OBJECT", &kinds),
+        ("OBJ_NAME", &objects),
+    ]))]);
+
+    let mut typing = Typing("RUN 61", 0);
+    let result = rig.call(
+        &mut typing,
+        "abap_aunit",
+        json!({"conn": "DEV_100", "package": "ZPKG"}),
+    );
+
+    assert!(result.is_error);
+    assert!(
+        result.text.contains("61 objects found")
+            && result.text.contains("lists at most 60")
+            && result.text.contains("narrow the package or request"),
+        "{}",
+        result.text
+    );
+    assert_eq!(typing.1, 0);
+    assert_eq!(rig.opened(), 1);
+}
+
+#[test]
 fn run_off_refuses_abap_aunit_before_the_allow_list_and_hides_the_tools() {
-    let mut rig = rig(r#"{"mcp_run":"confirm","run":"off","mcp_run_allow":["ZCL_TEST"]}"#);
+    let mut rig = rig(r#"{"mcp_run":"confirm","run":"off","mcp_run_allow":["CLAS:ZCL_TEST"]}"#);
     let result = rig.call(&mut Typing("ZCL_TEST", 0), "abap_aunit", aunit_arguments());
 
     assert!(result.is_error);

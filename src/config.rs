@@ -291,6 +291,21 @@ impl Config {
                 })?;
             }
         }
+        if let Some(document) = &connections.policies {
+            document
+                .validate()
+                .map_err(|reason| format!("{}: policies: {reason}", paths.connections.display()))?;
+        }
+        for (index, server) in connections.servers.iter().enumerate() {
+            if let Some(document) = &server.policies {
+                document.validate().map_err(|reason| {
+                    format!(
+                        "{}: servers[{index}].policies: {reason}",
+                        paths.connections.display()
+                    )
+                })?;
+            }
+        }
         let local = match fs::read_to_string(&paths.local) {
             Ok(text) => serde_json::from_str(&text)
                 .map_err(|error| format!("cannot parse {}: {error}", paths.local.display()))?,

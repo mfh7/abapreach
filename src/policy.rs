@@ -166,8 +166,8 @@ pub struct Policies {
     /// The `run` policy of the CLI; `off` also refuses `run` and `aunit` in MCP.
     pub run: RunPolicy,
     pub mcp_run: McpRun,
-    /// Upper-case class and report names MCP may run (exact names, no patterns); `aunit` batches
-    /// need every object on it. Empty allows none.
+    /// Upper-case `TYPE:NAME` entries (`CLAS`, `PROG`, `FUGR`) MCP may run: exact, no patterns;
+    /// `aunit` batches need every object on it. Empty allows none.
     pub mcp_run_allow: Vec<String>,
     pub mcp_run_snippet: McpRunSnippet,
 }
@@ -190,11 +190,14 @@ impl Default for Policies {
 }
 
 impl Policies {
-    /// Whether `name` is on `mcp_run_allow` (exact name, ignoring case).
-    pub fn is_run_allowed(&self, name: &str) -> bool {
+    /// Whether `TYPE:NAME` is on `mcp_run_allow` (exact type and name, ignoring case). An entry
+    /// names one object type: `CLAS:ZX` does not allow `PROG ZX`.
+    pub fn is_run_allowed(&self, object_type: &str, name: &str) -> bool {
+        let wanted = format!("{}:{}", object_type.trim(), name.trim());
+
         self.mcp_run_allow
             .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(name.trim()))
+            .any(|allowed| allowed.eq_ignore_ascii_case(&wanted))
     }
 
     /// Whether `table` is on the deny list, ignoring case.
@@ -252,7 +255,48 @@ pub struct PolicyDocument {
     mcp_run_snippet: Option<McpRunSnippet>,
 }
 
+/// The object types an `mcp_run_allow` entry may name.
+const RUN_ALLOW_TYPES: [&str; 3] = ["CLAS", "PROG", "FUGR"];
+
+/// One `mcp_run_allow` entry in its stored form: `TYPE:NAME` in upper case. A name without a
+/// type, an unknown type or an empty name is an error; the text says what to write.
+pub fn parse_run_allow_entry(entry: &str) -> Result<String, String> {
+    let entry = entry.trim();
+    let form = "write TYPE:NAME with TYPE CLAS, PROG or FUGR, for example CLAS:ZCL_TEST";
+    let Some((object_type, name)) = entry.split_once(':') else {
+        return Err(format!(
+            "mcp_run_allow entry {entry:?} has no object type; {form}"
+        ));
+    };
+    let object_type = object_type.trim().to_ascii_uppercase();
+    let name = name.trim().to_ascii_uppercase();
+
+    if !RUN_ALLOW_TYPES.contains(&object_type.as_str()) {
+        return Err(format!(
+            "mcp_run_allow entry {entry:?} has the object type {object_type:?}; {form}"
+        ));
+    }
+
+    if name.is_empty() {
+        return Err(format!("mcp_run_allow entry {entry:?} has no name; {form}"));
+    }
+
+    Ok(format!("{object_type}:{name}"))
+}
+
 impl PolicyDocument {
+    /// The first entry of `mcp_run_allow` that is not `TYPE:NAME`, as the load error. An empty
+    /// string stays ignored.
+    pub fn validate(&self) -> Result<(), String> {
+        for entry in self.mcp_run_allow.iter().flatten() {
+            if !entry.trim().is_empty() {
+                parse_run_allow_entry(entry)?;
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn apply(&self, outer: &Policies) -> Policies {
         Policies {
             foreign_inactive: self.foreign_inactive.unwrap_or(outer.foreign_inactive),
@@ -272,10 +316,11 @@ impl PolicyDocument {
             mcp_run_allow: self.mcp_run_allow.as_ref().map_or_else(
                 || outer.mcp_run_allow.clone(),
                 |names| {
+                    // `validate` refused a malformed entry at load; one that gets here anyway
+                    // matches nothing.
                     names
                         .iter()
-                        .map(|name| name.trim().to_ascii_uppercase())
-                        .filter(|name| !name.is_empty())
+                        .filter_map(|name| parse_run_allow_entry(name).ok())
                         .collect()
                 },
             ),
