@@ -6,6 +6,8 @@
 //! ABAPREACH:<nonce>:BEGIN:<MODE>
 //! ABAPREACH:<nonce>:MSG:<I|W|E>:<text>
 //! ABAPREACH:<nonce>:LINE:<text>
+//! ABAPREACH:<nonce>:ALVCOL:<0|1>:<name>:<text>
+//! ABAPREACH:<nonce>:ALVROW:<cell>,<cell>,...
 //! ABAPREACH:<nonce>:FACT:<KEY>:<text>
 //! ABAPREACH:<nonce>:PARTIAL_DELETE:<text>
 //! ABAPREACH:<nonce>:OBJECT_STILL_EXISTS:<text>
@@ -20,6 +22,10 @@
 //! `STATUS` included. Lines that do not start with the nonce are ignored with a `W:` line; a line
 //! that starts with the nonce but breaks the grammar makes the run uncertain. The classrun
 //! framing (blank lines between lines, CR before LF) is not part of the grammar.
+//!
+//! `ALVCOL` and `ALVROW` exist in mode `RUN_PROG` only: the columns of a captured ALV grid in
+//! field-catalog order (`1` when the catalog shows the column), then its rows, one hex cell per
+//! column joined by commas. `<name>`, `<text>`, and every cell are hex like any other text.
 //!
 //! A run that is not complete and well formed is never a success: the caller treats it as an
 //! uncertain status and reconciles from a new session.
@@ -40,6 +46,78 @@ const MARKER: &str = "ABAPREACH:";
 const KEY_MAX: usize = 24;
 const COUNT_DIGITS_MAX: usize = 9;
 const CUT_MARK: &str = "...";
+
+/// The bytes the classrun reply spends on the framing of one line (a line feed, a blank line, and
+/// a carriage return, with one to spare). The runner adds them to the size of every line it counts.
+pub const FRAMING_BYTES: usize = 4;
+
+/// The size of one output line as the runner counts it for its output limit: the marker, the
+/// nonce, the body (`LINE:<hex>`, `ALVROW:<hex cells>`), and the framing.
+pub fn line_cost(nonce: &Nonce, body: &str) -> usize {
+    MARKER.len() + nonce.as_str().len() + 1 + body.len() + FRAMING_BYTES
+}
+
+/// The text of a data line as the runner writes it: upper-case hex of the UTF-8 bytes.
+pub fn hex_text(text: &str) -> String {
+    text.bytes().map(|byte| format!("{byte:02X}")).collect()
+}
+
+/// The count of the output limit of a run mode, as the runner class keeps it (`emit` counts every
+/// line, `emit_budgeted` drops a data line that does not fit and every one after it). It is the
+/// reference of the ABAP and what the tests use to size a reply.
+#[derive(Clone, Debug)]
+pub struct Budget {
+    limit: usize,
+    used: usize,
+    emitted: usize,
+    cut: bool,
+}
+
+impl Budget {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            used: 0,
+            emitted: 0,
+            cut: false,
+        }
+    }
+
+    /// A line that is never cut (`BEGIN`, a message, a column of a grid, the status): it only
+    /// counts.
+    pub fn spend(&mut self, nonce: &Nonce, body: &str) {
+        self.used += line_cost(nonce, body);
+    }
+
+    /// A data line. `false` when it was dropped: it does not fit, or an earlier one did not.
+    pub fn offer(&mut self, nonce: &Nonce, body: &str) -> bool {
+        let cost = line_cost(nonce, body);
+
+        if self.cut || self.used + cost > self.limit {
+            self.cut = true;
+
+            return false;
+        }
+
+        self.used += cost;
+        self.emitted += 1;
+
+        true
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.used
+    }
+
+    /// How many data lines were emitted.
+    pub fn lines(&self) -> usize {
+        self.emitted
+    }
+
+    pub fn is_cut(&self) -> bool {
+        self.cut
+    }
+}
 
 /// The 128-bit nonce that binds output lines to one run.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,6 +149,10 @@ pub enum RunMode {
     Create,
     DeleteSim,
     Delete,
+    /// `run PROG`: a report submitted inside the runner.
+    RunProg,
+    /// `run SNIPPET`: the user's own statements inside the runner.
+    RunSnippet,
 }
 
 impl RunMode {
@@ -83,6 +165,8 @@ impl RunMode {
             Self::Create => "CREATE",
             Self::DeleteSim => "DELETE_SIM",
             Self::Delete => "DELETE",
+            Self::RunProg => "RUN_PROG",
+            Self::RunSnippet => "RUN_SNIPPET",
         }
     }
 
@@ -95,6 +179,8 @@ impl RunMode {
             Self::Create,
             Self::DeleteSim,
             Self::Delete,
+            Self::RunProg,
+            Self::RunSnippet,
         ]
         .into_iter()
         .find(|mode| mode.token() == token)
@@ -124,6 +210,10 @@ impl RunMode {
                 status,
                 RunStatus::Deleted | RunStatus::NotFound | RunStatus::Rejected | RunStatus::Partial
             ),
+            Self::RunProg | Self::RunSnippet => matches!(
+                status,
+                RunStatus::Ran | RunStatus::RunFailed | RunStatus::Rejected
+            ),
         }
     }
 }
@@ -140,6 +230,10 @@ pub enum RunStatus {
     Partial,
     NotFound,
     Deleted,
+    /// A run mode: the code ran to its end.
+    Ran,
+    /// A run mode: a catchable exception reached the runner; the work was rolled back.
+    RunFailed,
 }
 
 impl RunStatus {
@@ -154,6 +248,8 @@ impl RunStatus {
             Self::Partial => "PARTIAL",
             Self::NotFound => "NOT_FOUND",
             Self::Deleted => "DELETED",
+            Self::Ran => "RAN",
+            Self::RunFailed => "RUN_FAILED",
         }
     }
 
@@ -168,6 +264,8 @@ impl RunStatus {
             Self::Partial,
             Self::NotFound,
             Self::Deleted,
+            Self::Ran,
+            Self::RunFailed,
         ]
         .into_iter()
         .find(|status| status.token() == token)
@@ -214,6 +312,23 @@ pub enum Stop {
     ObjectStillExists(String),
 }
 
+/// One column of a captured ALV grid.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlvColumn {
+    /// The catalog shows the column (not `TECH`, not `NO_OUT`).
+    pub visible: bool,
+    pub name: String,
+    pub text: String,
+}
+
+/// A captured ALV grid: the columns in field-catalog order and the rows, one cell per column.
+/// Cells are data from a remote system; the formatter is the only place that prints them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Alv {
+    pub columns: Vec<AlvColumn>,
+    pub rows: Vec<Vec<String>>,
+}
+
 /// One complete, well formed run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Report {
@@ -221,6 +336,8 @@ pub struct Report {
     pub status: RunStatus,
     pub messages: Vec<Message>,
     pub lines: Vec<UntrustedLine>,
+    /// The ALV grid a `RUN_PROG` run captured, when it captured one.
+    pub alv: Option<Alv>,
     pub facts: Vec<Fact>,
     pub stops: Vec<Stop>,
     /// The batch must not continue with the next row.
@@ -467,6 +584,8 @@ enum Line {
     Begin(RunMode),
     Msg(Level, String),
     Data(String),
+    AlvCol(AlvColumn),
+    AlvRow(Vec<String>),
     Fact(String, String),
     Stop(Stop),
     Status(RunStatus),
@@ -493,6 +612,24 @@ fn read_line(rest: &str, number: usize) -> Result<Line, Reason> {
             Ok(Line::Msg(level, scrub_text(&text(field)?)))
         }
         ["LINE", field] => Ok(Line::Data(text(field)?)),
+        ["ALVCOL", visible, name, field] => {
+            let visible = match *visible {
+                "1" => true,
+                "0" => false,
+                _ => return Err(malformed()),
+            };
+
+            Ok(Line::AlvCol(AlvColumn {
+                visible,
+                name: text(name)?,
+                text: text(field)?,
+            }))
+        }
+        ["ALVROW", cells] => cells
+            .split(',')
+            .map(|cell| decode_hex(cell).ok_or(Reason::BrokenEncoding(number)))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Line::AlvRow),
         ["FACT", key, field] if valid_key(key) => {
             Ok(Line::Fact((*key).to_owned(), scrub_text(&text(field)?)))
         }
@@ -554,6 +691,7 @@ struct Run {
     status: Option<RunStatus>,
     messages: Vec<Message>,
     lines: Vec<UntrustedLine>,
+    alv: Option<Alv>,
     facts: Vec<Fact>,
     stops: Vec<Stop>,
     warnings: Warnings,
@@ -568,6 +706,7 @@ impl Run {
             status: None,
             messages: Vec::new(),
             lines: Vec::new(),
+            alv: None,
             facts: Vec::new(),
             stops: Vec::new(),
             warnings: Warnings {
@@ -640,6 +779,25 @@ impl Run {
         match line {
             Line::Msg(level, text) => self.messages.push(Message { level, text }),
             Line::Data(text) => self.lines.push(UntrustedLine(text)),
+            Line::AlvCol(_) | Line::AlvRow(_) if self.mode != RunMode::RunProg => {
+                return Err(Reason::MarkerNotForMode);
+            }
+            // The columns come first: a column after a row is an order the runner never writes.
+            Line::AlvCol(column) => match self.alv.as_mut() {
+                Some(alv) if !alv.rows.is_empty() => return Err(Reason::BadOrder),
+                Some(alv) => alv.columns.push(column),
+                None => {
+                    self.alv = Some(Alv {
+                        columns: vec![column],
+                        rows: Vec::new(),
+                    });
+                }
+            },
+            Line::AlvRow(cells) => match self.alv.as_mut() {
+                Some(alv) if alv.columns.len() == cells.len() => alv.rows.push(cells),
+                Some(_) => return Err(Reason::Malformed(self.count + 1)),
+                None => return Err(Reason::BadOrder),
+            },
             Line::Fact(key, value) => self.facts.push(Fact { key, value }),
             Line::Stop(_) if self.mode != RunMode::Delete => return Err(Reason::MarkerNotForMode),
             Line::Stop(stop) => self.stops.push(stop),
@@ -675,6 +833,7 @@ impl Run {
             status,
             messages: self.messages,
             lines: self.lines,
+            alv: self.alv,
             facts: self.facts,
             stops: self.stops,
             stop_batch: status == RunStatus::Partial,
