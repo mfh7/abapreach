@@ -1410,7 +1410,7 @@ fn mcp(rig: &mut Rig, policies: &str, human: &mut Human, arguments: Value) -> To
 }
 
 const MCP_POLICIES: &str =
-    r#"{"mcp_run":"confirm","mcp_run_allow":["ZREPORT"],"mcp_run_snippet":"on"}"#;
+    r#"{"mcp_run":"confirm","mcp_run_allow":["PROG:ZREPORT"],"mcp_run_snippet":"on"}"#;
 
 #[test]
 fn mcp_runs_a_report_after_the_human_saw_every_parameter_and_cuts_at_one_mib() {
@@ -1482,7 +1482,7 @@ fn mcp_runs_a_snippet_only_with_its_opt_in_and_shows_all_of_it() {
     // The default refuses a snippet; the opt-in lets it through.
     let refused = mcp(
         &mut rig,
-        r#"{"mcp_run":"confirm","mcp_run_allow":["ZREPORT"]}"#,
+        r#"{"mcp_run":"confirm","mcp_run_allow":["PROG:ZREPORT"]}"#,
         &mut human,
         arguments.clone(),
     );
