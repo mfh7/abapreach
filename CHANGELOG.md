@@ -44,13 +44,43 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
   sent once from a new session; `--timeout` (default 600, at most 3600) bounds it over ADT HTTP
   and is refused on RFC. Outcomes: reply and exit 0, `RUN_FAILED: runtime error; see ST22
   (dumps)`, `RUN_UNKNOWN: the reply was lost; the code may have run`, `REJECTED`, `STOP`. The
-  first Ctrl-C waits for the reply, the second leaves with exit 130. `run PROG` and `run SNIPPET`
-  parse their arguments (`--param`, `--variant`, `--alv`, `--alv-columns`, `--max-output`) and
-  apply the name rule, the policy and the plan binding, then stop with `not implemented yet`.
+  first Ctrl-C waits for the reply, the second leaves with exit 130.
+- `run PROG <report>` (0.17.0): submits an active executable report inside the temporary runner
+  class (`SUBMIT ... EXPORTING LIST TO MEMORY AND RETURN`, new runner mode `RUN_PROG`) and prints
+  its list. `--param NAME=VALUE` (parameters and single-value select-options, values up to 45
+  characters) and `--variant` are checked against the selection screen; the plan binds the report
+  name, its source hash, `SUBC`, package and every option, and the class compares the active source
+  hash again right before `SUBMIT` (`REJECTED: report changed since the simulate`). The class
+  checks `S_PROGRAM` (`SUBMIT`) and `TRDIR-SUBC = 1`. `run PROG` and `run SNIPPET` work on
+  development systems only: they stop before any change on a system or client that forbids
+  repository changes.
+- ALV capture for `run PROG`: a grid the report shows (`CL_SALV_TABLE`,
+  `REUSE_ALV_GRID_DISPLAY`) is captured with `CL_SALV_BS_RUNTIME_INFO` and printed as tab-separated
+  lines (a header of the column texts, then one line per row); only the visible columns of the field
+  catalog by default, `--alv-columns all` for every column (CLI only); amounts and quantities are
+  written with their currency and unit decimals; `--alv off` keeps the plain list. One grid per run
+  is captured.
+- `run SNIPPET <file>` (0.17.0): the statements of the file become the body of a method of the
+  runner class; the only output is `print( iv_text )`. A snippet that could leave its method
+  (`METHOD`, `ENDMETHOD`, `METHODS`, `CLASS`, `ENDCLASS`, `INTERFACE`, `ENDINTERFACE`, `FORM`,
+  `ENDFORM`, `DEFINE`, `END-OF-DEFINITION`, `INCLUDE`, judged per statement, colon chains
+  included), a statement left open, a control character or a line over 255 characters is refused
+  before any connection. A compile error is `SNIPPET_ERROR: line <n>: <text>` (exit 2) with the
+  line of the file; the snippet text and its hash are part of the plan.
+- Outcomes of a report or snippet: `RAN` (exit 0, no rollback by ABAPReach, as in SA38),
+  `RUN_FAILED: exception <class>: <text>` (a catchable exception; rolled back),
+  `RUN_FAILED: runtime error; see ST22 (dumps)`, `RUN_UNKNOWN: the reply was lost; the code may have
+  run`, `SNIPPET_ERROR`. `--max-output <bytes>` (default 6 MiB; MCP 1 MiB) is counted by the runner
+  in bytes of the reply and ends in `W: output cut after <n> lines` with the outcome `RAN`. The
+  payload names the logon user and an expiry (generation time plus `--timeout` plus 20 minutes; RFC:
+  75 minutes): a runner class left behind by a second Ctrl-C refuses to run again. The second
+  Ctrl-C leaves with exit 130 and prints the `RUNNER_LEFTOVER` lines. The first Ctrl-C prints its
+  waiting text (it was not printed before).
 - Policy keys `run` (`off`, `plan`, `direct`; default `plan`), `mcp_run` (`off`, `confirm`; default
   `off`), `mcp_run_allow` (exact names) and `mcp_run_snippet` (`off`, `on`; default `off`). `run:
   off` also refuses `run` and `aunit` on the CLI and in MCP. A 0.16 binary stops on a configuration that holds them.
-- MCP tool `abap_run` (class only), behind `mcp_run` and `mcp_run_allow`; it and `abap_aunit` are
+- MCP tool `abap_run` (class, report and snippet), behind `mcp_run` and `mcp_run_allow` (a snippet also
+  behind `mcp_run_snippet: on`); it and `abap_aunit` are
   listed only for a connection with `mcp_run: confirm` and `run` not `off`. It always asks the
   human in a form that shows the full content, whatever `mcp_write` says, refuses a confirmation
   longer than 6000 characters, takes the single write slot, and passes its output through the
