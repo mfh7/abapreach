@@ -18,6 +18,25 @@ Version metadata is `0.16.1`. This entry is finalized before the last release ca
 
 
 ### Added
+- `run CLAS <class>` (0.17.0): executes an existing class that implements `IF_OO_ADT_CLASSRUN`
+  and prints its reply as is. `run` is not a dry run. `run --simulate --plan <FILE>` reads the
+  class (exists, active, interface, package, author, active source hash) and the client role and
+  writes the plan file; the run needs that file under the default policy and stops when the
+  arguments or the live facts differ. Only `Z` and `Y` names run, `--allow-standard` allows a
+  standard class; a productive client (`T000-CCCATEGORY = P`) refuses every run. The request is
+  sent once from a new session; `--timeout` (default 600, at most 3600) bounds it over ADT HTTP
+  and is refused on RFC. Outcomes: reply and exit 0, `RUN_FAILED: runtime error; see ST22
+  (dumps)`, `RUN_UNKNOWN: the reply was lost; the code may have run`, `REJECTED`, `STOP`. The
+  first Ctrl-C waits for the reply, the second leaves with exit 130. `run PROG` and `run SNIPPET`
+  parse their arguments (`--param`, `--variant`, `--alv`, `--alv-columns`, `--max-output`) and
+  apply the name rule, the policy and the plan binding, then stop with `not implemented yet`.
+- Policy keys `run` (`off`, `plan`, `direct`; default `plan`), `mcp_run` (`off`, `confirm`; default
+  `off`), `mcp_run_allow` (exact names) and `mcp_run_snippet` (`off`, `on`; default `off`). `run:
+  off` also refuses `run` in MCP. A 0.16 binary stops on a configuration that holds them.
+- MCP tool `abap_run` (class only), behind `mcp_run` and `mcp_run_allow`: it always asks the human
+  in a form that shows the full content, whatever `mcp_write` says, refuses a confirmation longer
+  than 6000 characters, takes the single write slot, and passes its output through the secret
+  check. `read_table_denied` does not protect against what a run reads.
 - `deploy`, `deploy --simulate` and `delete` over ADT: `--tr <request>` now adds a transportable
   object that no open request holds (the lock answers no `CORRNR`) to that request. Before any
   write ABAPReach reads the request from `E070` over the data preview and stops unless it exists,

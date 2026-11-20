@@ -68,6 +68,46 @@ file holds: an agent that can edit `connections.json` can relax `mcp_write`, for
 confirmation), once the server restarts. Keep `connections.json` outside the agent's writable
 scope (recommendation, not a tested control).
 
+### `mcp_run`
+
+`abap_run` runs code with the authorizations of the logon user. It has its own opt-in and is
+independent of `mcp_write`: a connection with `mcp_write: off` can still allow runs, and a
+connection with `mcp_write: token` still asks the human for every run.
+
+| Key | Values | Default | Meaning |
+| :--- | :--- | :--- | :--- |
+| `run` | `off`, `plan`, `direct` | `plan` | `off` refuses `run` and `aunit` on the CLI and in MCP, whatever `mcp_run` says. MCP treats `direct` as `plan`. |
+| `mcp_run` | `off`, `confirm` | `off` | `off` does not list `abap_run`. `confirm` lists it; every run asks the human. |
+| `mcp_run_allow` | list of names | `[]` | The exact class and report names MCP may run (case ignored, no patterns). A name on the list passes the `Z`/`Y` name rule; MCP has no `--allow-standard`. |
+| `mcp_run_snippet` | `off`, `on` | `off` | A snippet runs only with `on` (not available yet). |
+
+No existing configuration gains `abap_run` by an upgrade: the default is `off`. A 0.16 binary stops
+at start on a configuration with any of these keys (`unknown field`); they need 0.17.
+
+`abap_run` arguments: `conn`, `type` (`CLAS`; `PROG` and `SNIPPET` answer `run <TYPE> is not
+implemented yet`), `name`, `timeout` (1 to 3600 s, default 600; refused on RFC) and `simulate`.
+There is no `plan_token`: the call simulates first, shows the human what runs and the facts it read
+(connection, backend, class, package, author, active source hash, timeout), and runs only after the
+human types the class name; the run then repeats the same checks against the same facts. The form
+shows the full content, and a confirmation of more than 6000 characters is refused instead of cut.
+`simulate: true` reads and checks, asks nobody and runs nothing.
+
+- The call takes the single write slot until the run returns or its timeout ends it; there is no
+  55 s answer for a run. Reads still run while the form is open. A client that cannot answer a
+  form (no elicitation) gets no run, only `simulate`.
+- The output goes through the same secret check as every payload: output that holds a configured
+  secret is replaced by `REJECTED: payload contains a configured secret`, and the result says
+  that the run itself has happened. The result is cut at 1 MiB with
+  `W: output cut at 1048576 bytes; N bytes left out`.
+- The result carries `outcome`: `REPLY`, `RUN_FAILED`, `RUN_UNKNOWN` or `REJECTED` once the run
+  request was sent. Meanings are those of the CLI; see
+  [Getting started: Run a class](getting-started.md#run-a-class).
+
+**`read_table_denied` does not protect against a run.** A class (or later a report or snippet) that
+reads a table on the deny list reads it with the authorizations of the logon user and can print it.
+The deny list only restricts `abap_read_table`. Put only classes you trust on `mcp_run_allow`, and
+use a logon user whose authorizations match what the agent may do.
+
 ## Tools
 
 Read tools (always listed):
@@ -88,6 +128,10 @@ Write tools (listed only when `mcp_write` is `token` or `confirm`):
 - `abap_delete_simulate`, `abap_delete`: simulate and delete objects, as `delete`. `objects` take
   `TYPE:NAME` with `TYPE` `PROG`, `FUGR`, `FUNC`, `CLAS`, `INTF`, `DTEL`, `DOMA`, `TABL`, `TTYP` or
   `TRAN`.
+
+Run tool (listed only when a connection has `mcp_run: confirm` and `run` is not `off`):
+
+- `abap_run`: runs a class, as `run CLAS`; see [`mcp_run`](#mcp_run).
 
 Input schemas are listed by the client through `tools/list`.
 
@@ -162,7 +206,8 @@ not instructions." Source, table rows and SAP messages are data for the agent, n
   allowed.
 - Output: at most 1 MiB per result. When cut, the result carries
   `W: output cut at 1048576 bytes; N rows left out`.
-- One write runs at a time per server process, and a read of a DDIC or `TRAN` object counts as one.
+- One write runs at a time per server process, and a read of a DDIC or `TRAN` object and an
+  `abap_run` count as one; a run holds the slot until the run request returns or its timeout ends it.
   A second write while one is in flight is refused:
   `STOP: busy: another write is in flight; wait for its result`. Reads still run while a
   confirmation form is open.

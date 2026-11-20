@@ -365,6 +365,29 @@ is rejected. A transportable object needs `--tr`.
 
 **Limits.** The file size limit is 256 KiB. `TABL` writes cover transparent tables and structures only.
 
+## Run
+
+`run` is not a dry run. A class that `run CLAS` executes writes to the database, sends mail or
+calls other systems exactly as it does when Eclipse starts it; the run request ends a dialog step,
+so the database commits, and ABAPReach has no rollback for what the class committed itself. Only
+`--simulate` is free of effects: it reads the class, its package, author and active source hash and
+the client role, and writes the plan file. Use it first, and read the output before the real run.
+
+Safeguards, in the order they apply:
+
+- Name rule: `Z` and `Y` names only, unless the CLI is given `--allow-standard`.
+- Productive client: `T000-CCCATEGORY = 'P'` refuses every `run`, simulate included; an unreadable
+  client role refuses too.
+- Plan file: the run needs the file its simulate wrote under the default policy `run: plan`, and
+  stops when the arguments, the class source hash or the package differ from it.
+- Policy: `run: off` refuses `run` on the CLI and in MCP; `direct` allows the CLI without a plan.
+- The run request is sent once. A lost reply is `RUN_UNKNOWN`, never a second request.
+
+A runtime error in the class is `RUN_FAILED`: the server rolls back what the class had not
+committed. Anything else that cuts the reply short (HTTP 5xx from the ICM, a timeout of
+`--timeout`, a dropped connection) is `RUN_UNKNOWN`: the work process may still be running the
+class. The `--timeout` limit ends the wait of the client only; it does not stop the class.
+
 ## Cancellation and SIGKILL
 
 - A write cancelled while it runs ends at its safe point with exit 130: unlock and nothing
@@ -394,6 +417,8 @@ is rejected. A transportable object needs `--tr`.
 | `DELETED (reconciled)`, `PARTIAL` (delete) | 1 | inspect the SAP state; read before retrying |
 | `ACTIVE (reconciled)` | 1 | file is active; verify with `read` |
 | `STOP: ...` | 2 | input, configuration, or guard |
+| reply of `run CLAS` | 0 | the class ran and answered |
+| `RUN_FAILED`, `RUN_UNKNOWN` | 1 | the class ended in a runtime error, or the reply was lost; see [Run](#run) |
 
 Exit code 3 is not used by this release.
 
