@@ -1,3 +1,5 @@
+pub mod activate;
+pub mod aunit;
 pub mod create;
 pub mod create_ddic;
 pub mod delete;
@@ -7,8 +9,10 @@ pub mod deploy;
 pub mod deploy_ddic;
 pub mod doctor;
 pub mod doctor_runner;
+pub mod inactive;
 pub mod include;
 pub mod payload;
+pub mod quality;
 pub mod read;
 pub mod read_ddic;
 pub mod read_table;

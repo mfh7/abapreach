@@ -37,7 +37,7 @@ pub(crate) const NO_REQUEST: &str = "the object is not local but the lock return
 
 const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET without a version returns it; restore only by deploying the base source again on your order";
 const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
-const INACTIVE_OBJECTS_ACCEPT: &str =
+pub(crate) const INACTIVE_OBJECTS_ACCEPT: &str =
     "application/vnd.sap.adt.inactivectsobjects.v1+xml, application/xml;q=0.8";
 const WHERE_USED_LIMIT: usize = 50;
 const RUNTIME_WARNING: &str = "W: callers' syntax check does not catch missing CALL FUNCTION parameters; they dump at runtime";
@@ -2150,7 +2150,7 @@ pub fn activation_request_xml(name: &str, uri: &str) -> String {
 
 /// The second activation request of a class: every object of the worklist as listed, member
 /// entries with their `#type=` fragment included.
-fn worklist_request_xml(references: &[ObjectRef]) -> String {
+pub(crate) fn worklist_request_xml(references: &[ObjectRef]) -> String {
     let mut body = String::from(concat!(
         r#"<?xml version="1.0" encoding="UTF-8"?>"#,
         r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">"#,
@@ -2176,7 +2176,7 @@ fn worklist_request_xml(references: &[ObjectRef]) -> String {
 }
 
 /// Whether `uri` is the object or lies below it (`/includes/...`, `/source/main#...`).
-fn under(object_uri: &str, uri: &str) -> bool {
+pub(crate) fn under(object_uri: &str, uri: &str) -> bool {
     let (object, uri) = (object_uri.to_ascii_lowercase(), uri.to_ascii_lowercase());
 
     uri == object || uri.starts_with(&format!("{object}/"))

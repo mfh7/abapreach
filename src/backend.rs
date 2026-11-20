@@ -73,6 +73,9 @@ pub enum OperationKind {
     ReadTable,
     Delete,
     Doctor,
+    Inactive,
+    Activate,
+    Aunit,
 }
 
 impl fmt::Display for OperationKind {
@@ -84,6 +87,9 @@ impl fmt::Display for OperationKind {
             Self::ReadTable => write!(formatter, "read-table"),
             Self::Delete => write!(formatter, "delete"),
             Self::Doctor => write!(formatter, "doctor"),
+            Self::Inactive => write!(formatter, "inactive"),
+            Self::Activate => write!(formatter, "activate"),
+            Self::Aunit => write!(formatter, "aunit"),
         }
     }
 }

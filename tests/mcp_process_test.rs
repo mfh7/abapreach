@@ -133,7 +133,7 @@ fn stdout_holds_only_valid_frames_and_the_process_exits_0_on_eof() {
     );
     assert_eq!(out[0]["error"]["code"], -32601);
     assert_eq!(out[1]["result"]["protocolVersion"], "2025-11-25");
-    assert_eq!(out[2]["result"]["tools"].as_array().unwrap().len(), 2);
+    assert_eq!(out[2]["result"]["tools"].as_array().unwrap().len(), 3);
     assert_eq!(out[3]["error"]["code"], -32700);
     assert_eq!(out[4]["result"], serde_json::json!({}));
 }
@@ -181,8 +181,8 @@ fn write_tools_are_listed_only_when_a_server_allows_mcp_write() {
             .len()
     };
 
-    assert_eq!(count("{}"), 2);
-    assert_eq!(count(r#"{"mcp_write":"token"}"#), 8);
+    assert_eq!(count("{}"), 3);
+    assert_eq!(count(r#"{"mcp_write":"token"}"#), 11);
 }
 
 /// Sends one frame and waits for the response with `id`; every wait is bounded.

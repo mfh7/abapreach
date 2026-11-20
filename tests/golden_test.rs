@@ -133,11 +133,24 @@ fn the_cli_golden_texts_name_the_new_types_the_prog_option_and_the_footprint() {
     }
 
     assert!(golden("new", "help-read.txt").contains("temporary class"));
-    // The top level does not change: the footprint sits in the help of the subcommands.
-    assert_eq!(
-        minus_tran(&golden("old", "help-top.txt")),
-        golden("new", "help-top.txt")
-    );
+    // The top level grew by the quality commands of 0.17 and is otherwise the old text.
+    let quality = ["inactive", "activate", "aunit"];
+    let top = golden("new", "help-top.txt");
+    let without: String = top
+        .lines()
+        .filter(|line| {
+            !quality
+                .iter()
+                .any(|name| line.trim_start().starts_with(&format!("{name} ")))
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+
+    assert_eq!(minus_tran(&golden("old", "help-top.txt")), without);
+
+    for name in quality {
+        assert!(top.contains(&format!("  {name} ")), "{name}");
+    }
 }
 
 // ---- the rule against the old branch (MCP schema) ------------------------------------------------
@@ -230,7 +243,7 @@ fn the_mcp_tool_list_is_the_golden_schema_of_the_m6_contract() {
 
         assert_eq!(
             tool["annotations"]["readOnlyHint"],
-            name == "abap_read_table",
+            name == "abap_read_table" || name == "abap_inactive",
             "{name}"
         );
     }

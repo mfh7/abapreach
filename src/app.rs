@@ -17,6 +17,8 @@ use crate::object::{
     check_create, check_create_extension, check_deploy_options, check_deploy_source, check_read,
     check_read_extension,
 };
+use crate::operation::activate::{self, ActivateInput};
+use crate::operation::aunit::{self, Scope};
 use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::create_ddic::{self, DdicCreate};
 use crate::operation::delete::{self, Context};
@@ -25,7 +27,9 @@ use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch, batch_unse
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::deploy_ddic::{self, DdicDeploy};
 use crate::operation::doctor::Doctor;
+use crate::operation::inactive;
 use crate::operation::payload::Kind;
+use crate::operation::quality;
 use crate::operation::read::{ReadProg, ReadTarget};
 use crate::operation::read_ddic::{self, DdicRead};
 use crate::operation::read_table::{
@@ -33,7 +37,7 @@ use crate::operation::read_table::{
 };
 use crate::operation::runner_tran::{self, TranCreate, TranRead};
 use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
-use crate::policy::Terminal;
+use crate::policy::{RunMode, Terminal};
 use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
@@ -384,6 +388,9 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::Create { conn, .. }
         | Command::ReadTable { conn, .. }
         | Command::Delete { conn, .. }
+        | Command::Inactive { conn, .. }
+        | Command::Activate { conn, .. }
+        | Command::Aunit { conn, .. }
         | Command::Doctor { conn } => Some(conn),
         Command::Mcp => None,
     }
@@ -402,6 +409,7 @@ fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories, registry: &
     match loaded {
         Ok((config, paths)) => {
             let writable = config.mcp_writable();
+            let runnable = config.mcp_runnable();
             // The flag a signal handler sets: it ends the server once a write has settled.
             let cancel = factories.cancel();
             let tools = McpTools::new(
@@ -411,6 +419,7 @@ fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories, registry: &
             .with_registry(registry);
             let mut server = Server::new(tools, false)
                 .with_writable(writable)
+                .with_runnable(runnable)
                 .with_kinds(registry.kinds().collect())
                 .with_version(registry.version_text());
             // Not the locked handles: the reader thread owns stdin, and stdout is shared.
@@ -666,6 +675,75 @@ fn execute(
                 )
             },
         ),
+        Command::Inactive { all, .. } => route(
+            OperationKind::Inactive,
+            None,
+            false,
+            connection,
+            factories,
+            |transport, _, _, _| {
+                let result = inactive::run(transport, all, &connection.user);
+
+                // A read holds no lock, so a failed session end is only a note.
+                quality::attempt(result, end_session(transport))
+            },
+        ),
+        Command::Activate {
+            objects, simulate, ..
+        } => {
+            if let Err(message) = activate::check_targets(&objects) {
+                return stop(message);
+            }
+
+            route(
+                OperationKind::Activate,
+                None,
+                false,
+                connection,
+                factories,
+                |transport, _, cancel, _| {
+                    let input = ActivateInput {
+                        targets: &objects,
+                        client: &connection.client,
+                        user: &connection.user,
+                        simulate,
+                    };
+                    let result = activate::run(transport, &input, cancel);
+
+                    quality::attempt(result, end_session(transport))
+                },
+            )
+        }
+        Command::Aunit {
+            kind,
+            name,
+            package,
+            tr,
+            ..
+        } => {
+            if connection.policies.run == RunMode::Off {
+                return stop(format!("aunit is off for {} (policy run)", connection.id));
+            }
+
+            let scope =
+                match Scope::parse(kind.zip(name.as_deref()), package.as_deref(), tr.as_deref()) {
+                    Ok(scope) => scope,
+                    Err(message) => return stop(message),
+                };
+
+            route(
+                OperationKind::Aunit,
+                None,
+                false,
+                connection,
+                factories,
+                |transport, _, _, _| {
+                    let result = aunit::run(transport, &scope, &connection.client);
+
+                    quality::attempt(result, end_session(transport))
+                },
+            )
+        }
         Command::Mcp => stop("the MCP server needs no connection"),
         Command::Read {
             kind,

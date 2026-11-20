@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ioc:inactiveObjects xmlns:ioc="http://www.sap.com/abapxml/inactiveCtsObjects" xmlns:adtcore="http://www.sap.com/adt/core">
+  <ioc:entry>
+    <ioc:object ioc:user="DEVUSER" ioc:deleted="false">
+      <ioc:ref adtcore:uri="/sap/bc/adt/programs/programs/ztest_main" adtcore:type="PROG/P" adtcore:name="ZTEST_MAIN"/>
+    </ioc:object>
+    <ioc:transport>
+      <ioc:ref adtcore:uri="/sap/bc/adt/cts/transportrequests/DEVK900001" adtcore:type="RQ" adtcore:name="DEVK900001"/>
+    </ioc:transport>
+  </ioc:entry>
+  <ioc:entry>
+    <ioc:object ioc:user="DEVUSER" ioc:deleted="false">
+      <ioc:ref adtcore:uri="/sap/bc/adt/programs/includes/ztest_inc" adtcore:type="PROG/I" adtcore:name="ZTEST_INC" adtcore:parentUri="/sap/bc/adt/programs/programs/ztest_main"/>
+    </ioc:object>
+  </ioc:entry>
+  <ioc:entry>
+    <ioc:object ioc:user="DEVUSER" ioc:deleted="false">
+      <ioc:ref adtcore:uri="/sap/bc/adt/oo/classes/zcl_test" adtcore:type="CLAS/OC" adtcore:name="ZCL_TEST"/>
+    </ioc:object>
+  </ioc:entry>
+  <ioc:entry>
+    <ioc:object ioc:user="DEVUSER" ioc:deleted="false">
+      <ioc:ref adtcore:uri="/sap/bc/adt/oo/classes/zcl_test/source/main#type=CLAS%2FOM;name=RUN" adtcore:type="CLAS/OM/public" adtcore:name="ZCL_TEST           RUN" adtcore:parentUri="/sap/bc/adt/oo/classes/zcl_test"/>
+    </ioc:object>
+  </ioc:entry>
+  <ioc:entry>
+    <ioc:object ioc:user="DEVUSER" ioc:deleted="false">
+      <ioc:ref adtcore:uri="/sap/bc/adt/oo/interfaces/zif_test" adtcore:type="INTF/OI" adtcore:name="ZIF_TEST"/>
+    </ioc:object>
+  </ioc:entry>
+  <ioc:entry>
+    <ioc:object ioc:user="DEVUSER" ioc:deleted="false">
+      <ioc:ref adtcore:uri="/sap/bc/adt/functions/groups/zfg_test" adtcore:type="FUGR/F" adtcore:name="ZFG_TEST"/>
+    </ioc:object>
+  </ioc:entry>
+  <ioc:entry>
+    <ioc:object ioc:user="DEVUSER" ioc:deleted="false">
+      <ioc:ref adtcore:uri="/sap/bc/adt/functions/groups/zfg_test/fmodules/zfm_test" adtcore:type="FUGR/FF" adtcore:name="ZFM_TEST" adtcore:parentUri="/sap/bc/adt/functions/groups/zfg_test"/>
+    </ioc:object>
+  </ioc:entry>
+  <ioc:entry>
+    <ioc:object ioc:user="DEVUSER" ioc:deleted="false">
+      <ioc:ref adtcore:uri="/sap/bc/adt/ddic/tables/ztest_tab" adtcore:type="TABL/DT" adtcore:name="ZTEST_TAB"/>
+    </ioc:object>
+  </ioc:entry>
+  <ioc:entry>
+    <ioc:object ioc:user="OTHERUSER" ioc:deleted="false">
+      <ioc:ref adtcore:uri="/sap/bc/adt/programs/programs/zother" adtcore:type="PROG/P" adtcore:name="ZOTHER"/>
+    </ioc:object>
+  </ioc:entry>
+</ioc:inactiveObjects>
