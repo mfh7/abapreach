@@ -29,19 +29,19 @@ const PINNED: [(&str, &str); 8] = [
     ),
     (
         "DTEL",
-        "3c7f649a2a679b37678f51005e117130da31617268f53072f184bbdaa55c2ae9",
+        "25b111de2bc2f48566d256176d2e69423f426e6977b767fe834d9923764f6a55",
     ),
     (
         "DOMA",
-        "3c7f649a2a679b37678f51005e117130da31617268f53072f184bbdaa55c2ae9",
+        "25b111de2bc2f48566d256176d2e69423f426e6977b767fe834d9923764f6a55",
     ),
     (
         "TABL",
-        "3c7f649a2a679b37678f51005e117130da31617268f53072f184bbdaa55c2ae9",
+        "25b111de2bc2f48566d256176d2e69423f426e6977b767fe834d9923764f6a55",
     ),
     (
         "TTYP",
-        "3c7f649a2a679b37678f51005e117130da31617268f53072f184bbdaa55c2ae9",
+        "25b111de2bc2f48566d256176d2e69423f426e6977b767fe834d9923764f6a55",
     ),
     (
         "RUN_PROG",
@@ -66,19 +66,19 @@ const GENERATED: [(&str, &str); 8] = [
     ),
     (
         "DTEL",
-        "691514f0848d7334a08d42f406f2a6570aabc4e6a0920b1a9be85a2be8c4fe93",
+        "5955a3240f7f2243d637f175b1d32e3d6a1d1dbd6b08f3f05ff81b3b44955156",
     ),
     (
         "DOMA",
-        "691514f0848d7334a08d42f406f2a6570aabc4e6a0920b1a9be85a2be8c4fe93",
+        "5955a3240f7f2243d637f175b1d32e3d6a1d1dbd6b08f3f05ff81b3b44955156",
     ),
     (
         "TABL",
-        "691514f0848d7334a08d42f406f2a6570aabc4e6a0920b1a9be85a2be8c4fe93",
+        "5955a3240f7f2243d637f175b1d32e3d6a1d1dbd6b08f3f05ff81b3b44955156",
     ),
     (
         "TTYP",
-        "691514f0848d7334a08d42f406f2a6570aabc4e6a0920b1a9be85a2be8c4fe93",
+        "5955a3240f7f2243d637f175b1d32e3d6a1d1dbd6b08f3f05ff81b3b44955156",
     ),
     (
         "RUN_PROG",
