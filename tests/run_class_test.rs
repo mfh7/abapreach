@@ -1205,3 +1205,35 @@ fn an_interrupt_before_the_post_sends_nothing() {
     assert_eq!(exit.code, 130);
     assert!(sap.sent().is_empty());
 }
+
+/// The reply of the classrun POST is dropped after SAP ran the class: the outcome is unknown and
+/// the request is never sent again (built only with the fault-injection feature).
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_dropped_reply_of_the_run_is_unknown_and_never_resent() {
+    use abapreach::fault::{self, Fault};
+
+    let directory = tempfile::tempdir().unwrap();
+    let plan = simulated(directory.path());
+    let mut sap = Sap::new()
+        .adt_session(reads())
+        .adt_session(vec![ok("ran, reply lost")]);
+    let _scope = fault::scoped(Fault::from_lookup(Some("drop-reply:CLASSRUN")).unwrap());
+    let exit = run_with(
+        &mut sap,
+        directory.path(),
+        "",
+        false,
+        &["CLAS", "ZCL_A", "--plan", &plan],
+    );
+
+    assert_eq!(exit.code, 1, "{exit:?}");
+    assert_eq!(exit.stdout, "");
+    assert!(
+        exit.stderr
+            .starts_with("RUN_UNKNOWN: the reply was lost; the code may have run"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(sap.posts().len(), 1);
+}

@@ -239,6 +239,9 @@ impl CancelFlag {
             // A `run` request cannot be taken back: the first interrupt waits for its reply, the
             // second gives it up.
             return if self.run_interrupts.fetch_add(1, Ordering::SeqCst) == 0 {
+                // A server that was told to end does so once the run has settled.
+                self.request_shutdown();
+
                 InterruptAction::Waiting(text)
             } else {
                 InterruptAction::ExitNow

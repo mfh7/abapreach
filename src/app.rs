@@ -403,6 +403,7 @@ fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories, registry: &
     match loaded {
         Ok((config, paths)) => {
             let writable = config.mcp_writable();
+            let runnable = config.mcp_runnable();
             // The flag a signal handler sets: it ends the server once a write has settled.
             let cancel = factories.cancel();
             let tools = McpTools::new(
@@ -412,6 +413,7 @@ fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories, registry: &
             .with_registry(registry);
             let mut server = Server::new(tools, false)
                 .with_writable(writable)
+                .with_runnable(runnable)
                 .with_kinds(registry.kinds().collect())
                 .with_version(registry.version_text());
             // Not the locked handles: the reader thread owns stdin, and stdout is shared.
