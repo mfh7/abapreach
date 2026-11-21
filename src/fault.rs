@@ -448,6 +448,19 @@ mod tests {
     }
 
     #[test]
+    fn skip_activate_is_off_when_the_switch_is_not_among_the_faults() {
+        for faults in [
+            Vec::new(),
+            vec![Fault::HoldLock(5)],
+            vec![Fault::FailReconcileRead],
+        ] {
+            let _scope = scoped(faults);
+
+            assert!(!skip_activate());
+        }
+    }
+
+    #[test]
     fn every_other_value_is_refused() {
         for value in [
             "",

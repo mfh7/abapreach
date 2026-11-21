@@ -247,9 +247,17 @@ fn ok(body: &str) -> Reply {
 }
 
 fn without(entry: &str) -> String {
+    without_all(&[entry])
+}
+
+fn without_all(entries: &[&str]) -> String {
     INACTIVE
         .split("<ioc:entry>")
-        .filter(|chunk| !chunk.contains(&format!("name=\"{entry}\"")))
+        .filter(|chunk| {
+            !entries
+                .iter()
+                .any(|entry| chunk.contains(&format!("name=\"{entry}\"")))
+        })
         .collect::<Vec<_>>()
         .join("<ioc:entry>")
 }
@@ -344,6 +352,32 @@ fn abap_inactive_returns_the_own_entries_as_text_and_data() {
     assert_eq!(result.structured["count"], 7);
     assert_eq!(result.structured["objects"][1]["main"], "ZTEST_MAIN");
     assert_eq!(calls.borrow().len(), 1);
+
+    // The summary is a line of its own after the entries.
+    let lines: Vec<&str> = result.text.lines().collect();
+
+    assert_eq!(lines.len(), 8, "{}", result.text);
+    assert_eq!(lines[7], "SUMMARY: 7 inactive objects");
+    assert_eq!(lines[6], "TABL/DT ZTEST_TAB DEVUSER");
+}
+
+#[test]
+fn abap_inactive_without_entries_is_the_summary_alone() {
+    let mut rig = rig("{}");
+
+    rig.session(vec![ok(
+        r#"<ioc:inactiveObjects xmlns:ioc="http://www.sap.com/abapxml/inactiveCtsObjects"/>"#,
+    )]);
+
+    let result = rig.call(
+        &mut NoSession::new(),
+        "abap_inactive",
+        json!({"conn": "DEV_100"}),
+    );
+
+    assert!(!result.is_error, "{}", result.text);
+    assert_eq!(result.text, "SUMMARY: 0 inactive objects");
+    assert_eq!(result.structured["count"], 0);
 }
 
 #[test]
@@ -431,6 +465,44 @@ fn a_simulation_issues_a_token_and_the_token_activates_once() {
 
     assert!(again.is_error);
     assert!(again.text.contains("unknown or already used"));
+}
+
+#[test]
+fn the_token_pins_the_backend_the_simulation_ran_on() {
+    let mut rig = rig_with_rfc(r#"{"mcp_write":"token"}"#);
+
+    rig.session(vec![client("T"), ok(INACTIVE)]);
+
+    let simulated = rig.call(
+        &mut NoSession::new(),
+        "abap_activate_simulate",
+        activate_arguments(),
+    );
+
+    assert!(!simulated.is_error, "{}", simulated.text);
+
+    // The simulation ran on ADT HTTP. The execution is pinned there, so it does not probe the
+    // session for state and does not leave for RFC (no RFC session is scripted).
+    let execute = rig.stateless_session(vec![
+        client("T"),
+        ok(INACTIVE),
+        Ok(Response::empty(200)),
+        ok(&without("ZTEST_MAIN")),
+    ]);
+    let mut arguments = activate_arguments();
+
+    arguments["plan_token"] = simulated.structured["plan_token"].clone();
+
+    let result = rig.call(&mut NoSession::new(), "abap_activate", arguments);
+
+    assert!(!result.is_error, "{}", result.text);
+    assert_eq!(result.structured["status"], "ACTIVE");
+    assert!(
+        execute
+            .borrow()
+            .iter()
+            .any(|call| call.uri.contains("activation?"))
+    );
 }
 
 #[test]
@@ -545,6 +617,63 @@ fn under_confirm_the_human_types_the_object_name_before_the_activation() {
 
     assert!(!result.is_error, "{}", result.text);
     assert_eq!(typing.1, 1);
+}
+
+#[test]
+fn a_batch_activation_is_confirmed_by_typing_activate_and_its_count() {
+    let mut rig = rig(r#"{"mcp_write":"confirm"}"#);
+    let mut arguments = json!({
+        "conn": "DEV_100",
+        "objects": ["PROG/P:ZTEST_MAIN", "INTF/OI:ZIF_TEST"],
+    });
+
+    rig.session(vec![client("T"), ok(INACTIVE)]);
+
+    let simulated = rig.call(
+        &mut NoSession::new(),
+        "abap_activate_simulate",
+        arguments.clone(),
+    );
+
+    assert!(!simulated.is_error, "{}", simulated.text);
+
+    arguments["plan_token"] = simulated.structured["plan_token"].clone();
+
+    // The count of a batch is typed with the verb of the operation, not the one of a test run.
+    let mut wrong = Typing::new("RUN 2");
+    let refused = rig.call(&mut wrong, "abap_activate", arguments.clone());
+
+    assert!(refused.is_error);
+    assert!(refused.text.contains("did not match"), "{}", refused.text);
+    assert!(
+        wrong.2.contains("Type ACTIVATE 2 to confirm."),
+        "{}",
+        wrong.2
+    );
+
+    rig.session(vec![client("T"), ok(INACTIVE)]);
+
+    let simulated = rig.call(
+        &mut NoSession::new(),
+        "abap_activate_simulate",
+        arguments.clone(),
+    );
+
+    arguments["plan_token"] = simulated.structured["plan_token"].clone();
+    rig.session(vec![
+        client("T"),
+        ok(INACTIVE),
+        Ok(Response::empty(200)),
+        Ok(Response::empty(200)),
+        ok(&without_all(&["ZTEST_MAIN", "ZIF_TEST"])),
+    ]);
+
+    let mut typing = Typing::new("ACTIVATE 2");
+    let result = rig.call(&mut typing, "abap_activate", arguments);
+
+    assert!(!result.is_error, "{}", result.text);
+    assert_eq!(typing.1, 1);
+    assert_eq!(result.structured["status"], "ACTIVE");
 }
 
 #[test]
@@ -903,6 +1032,50 @@ fn an_allow_entry_covers_its_own_object_type_only() {
         assert_eq!(typing.1, 0);
         assert_eq!(rig.opened(), 0);
     }
+}
+
+#[test]
+fn a_batch_of_exactly_the_listed_maximum_is_confirmed_and_run() {
+    let names: Vec<String> = (0..60).map(|number| format!("ZCL_{number:02}")).collect();
+    let allow: Vec<String> = names
+        .iter()
+        .map(|name| format!("\"CLAS:{name}\""))
+        .collect();
+    let mut rig = rig(&format!(
+        r#"{{"mcp_run":"confirm","mcp_run_allow":[{}]}}"#,
+        allow.join(",")
+    ));
+    let kinds = vec![Some("CLAS"); names.len()];
+    let objects: Vec<Option<&str>> = names.iter().map(|name| Some(name.as_str())).collect();
+
+    rig.session(vec![ok(&preview(&[
+        ("OBJECT", &kinds),
+        ("OBJ_NAME", &objects),
+    ]))]);
+
+    let mut replies = vec![client("T")];
+
+    for _ in 0..60 {
+        replies.push(ok("<class/>"));
+        replies.push(ok(CLEAN));
+    }
+
+    rig.session(replies);
+
+    let mut typing = Typing::new("RUN 60");
+    let result = rig.call(
+        &mut typing,
+        "abap_aunit",
+        json!({"conn": "DEV_100", "package": "ZPKG"}),
+    );
+
+    assert!(!result.is_error, "{}", result.text);
+    assert_eq!(typing.1, 1);
+    assert!(
+        result.text.contains("SUMMARY: 60 OK, 0 FAILED"),
+        "{}",
+        result.text
+    );
 }
 
 #[test]

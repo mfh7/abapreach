@@ -14,8 +14,8 @@ use abapreach::operation::runner_template::{
     template_lines,
 };
 use abapreach::runner_protocol::{
-    Alv, AlvColumn, Budget, FRAMING_BYTES, MAX_OUTPUT_BYTES, Nonce, Parsed, RunMode, RunStatus,
-    hex_text, line_cost, parse_output,
+    Alv, AlvColumn, Budget, FRAMING_BYTES, MAX_OUTPUT_BYTES, Nonce, Parsed, Reason, RunMode,
+    RunStatus, hex_text, line_cost, parse_output,
 };
 
 const NAME: &str = "YCL_ABAPREACH_RUN_AB12CD34";
@@ -566,6 +566,66 @@ fn a_payload_value_that_breaks_a_rule_is_refused_before_a_connection() {
     assert!(encode_run(&edge).is_ok());
 }
 
+#[test]
+fn the_logon_user_and_the_output_limit_keep_their_exact_bounds() {
+    // Digits and every listed special character are part of a logon user.
+    for user in ["DEVUSER1", "A_B#C$D&E@F", "G.H/I-J", "9"] {
+        let mut accepted = request(None);
+
+        accepted.user = user;
+
+        assert!(encode_run(&accepted).is_ok(), "{user:?}");
+    }
+
+    for max in [1, 2, MAX_RUN_OUTPUT - 1, MAX_RUN_OUTPUT] {
+        let mut accepted = request(None);
+
+        accepted.max_bytes = max;
+
+        assert!(encode_run(&accepted).is_ok(), "{max}");
+    }
+
+    let mut refused = request(None);
+
+    refused.max_bytes = 0;
+
+    assert_eq!(
+        encode_run(&refused),
+        Err(format!(
+            "the output limit must be 1 to {MAX_RUN_OUTPUT} bytes: 0"
+        ))
+    );
+}
+
+#[test]
+fn a_parameter_name_is_one_to_eight_characters_of_the_selection_screen_set() {
+    let encoded = |name: &str| {
+        let params = [(name.to_owned(), "1".to_owned())];
+
+        encode_run(&request(Some(RunProg {
+            report: "ZREPORT",
+            base: HASH,
+            params: &params,
+            variant: None,
+            alv: AlvMode::On,
+            alv_columns: AlvColumns::Visible,
+        })))
+    };
+
+    assert!(encoded("P").is_ok());
+    assert!(encoded("P_ABCDEF").is_ok());
+    assert!(encoded("p_abcdef").is_ok());
+
+    for name in ["", "P_ABCDEFG", "P-A", "P A"] {
+        let error = encoded(name).unwrap_err();
+
+        assert!(
+            error.starts_with("parameter name must be 1 to 8 characters of A-Z 0-9 _: "),
+            "{name:?}: {error}"
+        );
+    }
+}
+
 // ---- the protocol lines of a grid -----------------------------------------------------------------
 
 fn nonce() -> Nonce {
@@ -671,6 +731,29 @@ fn a_grid_arrives_as_columns_then_rows_and_a_run_is_ran_or_failed() {
     ));
 
     assert!(plain.alv.is_none());
+}
+
+#[test]
+fn a_grid_that_breaks_the_grammar_names_the_reason_and_the_line() {
+    let reason = |body: Vec<String>| match parse_output(
+        &nonce(),
+        RunMode::RunProg,
+        &output("RUN_PROG", &body, "RAN"),
+    ) {
+        Parsed::Uncertain { reason, .. } => reason,
+        other => panic!("{other:?}"),
+    };
+
+    // BEGIN is line 1 and the column line 2: the row of the wrong width is line 3.
+    assert_eq!(
+        reason(vec![col(true, "A", "A"), row(&["a", "b"])]),
+        Reason::Malformed(3)
+    );
+    assert_eq!(
+        reason(vec![col(true, "A", "A"), row(&["a"]), col(true, "B", "B"),]),
+        Reason::BadOrder
+    );
+    assert_eq!(reason(vec![row(&["a"])]), Reason::BadOrder);
 }
 
 #[test]
@@ -885,6 +968,31 @@ fn non_ascii_text_costs_its_hex_and_stays_under_the_cap_too() {
 
     assert_eq!(report.status, RunStatus::Ran);
     assert!(report.lines.iter().all(|line| line.as_str() == text));
+}
+
+#[test]
+fn the_budget_adds_up_every_line_it_keeps_and_cuts_at_the_sum() {
+    let nonce = nonce();
+    let begin = "BEGIN:RUN_SNIPPET";
+    let data = "LINE:41";
+    let begin_cost = line_cost(&nonce, begin);
+    let data_cost = line_cost(&nonce, data);
+    let mut budget = Budget::new(begin_cost + 2 * data_cost);
+
+    assert_eq!(budget.bytes(), 0);
+
+    budget.spend(&nonce, begin);
+
+    assert_eq!(budget.bytes(), begin_cost);
+    assert!(budget.offer(&nonce, data));
+    assert_eq!(budget.bytes(), begin_cost + data_cost);
+    assert!(budget.offer(&nonce, data));
+    // The limit is exact: a line that fills it is kept, the next one is not.
+    assert_eq!(budget.bytes(), begin_cost + 2 * data_cost);
+    assert!(!budget.offer(&nonce, data));
+    assert_eq!(budget.bytes(), begin_cost + 2 * data_cost);
+    assert_eq!(budget.lines(), 2);
+    assert!(budget.is_cut());
 }
 
 #[test]

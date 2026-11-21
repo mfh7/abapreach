@@ -736,6 +736,30 @@ mod tests {
         assert!(!is_runtime_error_body(b""));
     }
 
+    #[test]
+    fn join_lines_drops_the_empty_lines_and_joins_the_rest_with_line_feeds() {
+        assert_eq!(join_lines(["a", "", "b", ""]), "a\nb");
+        assert_eq!(join_lines(["only"]), "only");
+        assert_eq!(join_lines(["", ""]), "");
+        assert_eq!(join_lines([]), "");
+    }
+
+    #[test]
+    fn a_failed_attempt_keeps_its_message_as_the_detail_and_falls_back_only_before_a_send() {
+        let result = RunResult::failed(Failure::PreSendConnectivity, "no route to host".to_owned());
+
+        assert_eq!(result.detail.as_deref(), Some("no route to host"));
+        assert_eq!(result.failure, Some(Failure::PreSendConnectivity));
+        assert!(result.fallback_allowed);
+        assert_eq!(result.outcome.exit, 1);
+        assert_eq!(result.outcome.stderr, "ERROR: no route to host");
+
+        let sent = RunResult::failed(Failure::Initial, "reset".to_owned());
+
+        assert_eq!(sent.detail.as_deref(), Some("reset"));
+        assert!(!sent.fallback_allowed);
+    }
+
     fn reply(status: u16, body: &str) -> RunResult {
         reply_result(Ok(Response::text(status, body)), "ZCL_A", "DEV")
     }

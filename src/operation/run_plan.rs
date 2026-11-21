@@ -601,6 +601,19 @@ mod tests {
             .unwrap_err()
         };
 
+        // Eight characters are the longest selection-screen name; nine are refused.
+        let eight = ["p_abcdef=1".to_owned()];
+        let accepted = RunArgs::parse(
+            &RawArgs {
+                params: &eight,
+                ..raw(RunKind::Prog, "ZREPORT")
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(accepted.params, [("P_ABCDEF".to_owned(), "1".to_owned())]);
+        assert!(check("P_ABCDEFG=1").contains("parameter name"));
         assert!(check("NOVALUE").contains("NAME=VALUE"));
         assert!(check("TOOLONGNAME=1").contains("parameter name"));
         assert!(check("=1").contains("parameter name"));

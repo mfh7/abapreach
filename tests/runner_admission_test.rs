@@ -514,6 +514,7 @@ fn a_create_that_names_the_runner_is_admitted_only_when_root_name_and_type_all_m
 struct Spy {
     closes: usize,
     stateful: Option<bool>,
+    timeout: bool,
 }
 
 impl SadtTransport for Spy {
@@ -530,6 +531,23 @@ impl SadtTransport for Spy {
     fn stateful_supported(&self) -> Option<bool> {
         self.stateful
     }
+
+    fn supports_request_timeout(&self) -> bool {
+        self.timeout
+    }
+}
+
+/// A session that keeps every default of the trait.
+struct Bare;
+
+impl SadtTransport for Bare {
+    fn request(&mut self, _request: Request) -> Result<Response, TransportError> {
+        Ok(Response::empty(200))
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -538,6 +556,7 @@ fn the_http_gate_leaves_close_and_the_stateful_verdict_to_the_session_it_wraps()
         let mut spy = Spy {
             closes: 0,
             stateful,
+            timeout: false,
         };
         let mut gated = RunnerGated::new(&mut spy);
 
@@ -548,6 +567,27 @@ fn the_http_gate_leaves_close_and_the_stateful_verdict_to_the_session_it_wraps()
         );
         assert_eq!(spy.closes, 1);
     }
+}
+
+#[test]
+fn the_http_gate_reports_whether_the_session_it_wraps_enforces_a_request_limit() {
+    for timeout in [true, false] {
+        let mut spy = Spy {
+            closes: 0,
+            stateful: None,
+            timeout,
+        };
+
+        assert_eq!(
+            RunnerGated::new(&mut spy).supports_request_timeout(),
+            timeout
+        );
+    }
+
+    // A session that says nothing enforces no limit, and has no known session state.
+    assert!(!Bare.supports_request_timeout());
+    assert_eq!(Bare.stateful_supported(), None);
+    assert!(!RunnerGated::new(&mut Bare).supports_request_timeout());
 }
 
 // ---- Task 32A: the word `classrun` inside an object name is not the classrun resource ----------

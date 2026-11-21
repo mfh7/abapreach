@@ -89,6 +89,46 @@ fn the_inactive_list_keeps_objects_users_and_main_programs_and_drops_class_membe
 }
 
 #[test]
+fn a_reference_counts_only_where_its_container_makes_it_an_object() {
+    let ns = r#"xmlns:ioc="i" xmlns:adtcore="a""#;
+    let lines = |xml: &str| -> Vec<String> {
+        parse_inactive_objects(xml)
+            .unwrap()
+            .iter()
+            .map(InactiveEntry::line)
+            .collect()
+    };
+
+    // A transport inside an object, and a transport outside one, hold no object.
+    assert_eq!(
+        lines(&format!(
+            r#"<ioc:r {ns}><ioc:entry><ioc:object ioc:user="U"><ioc:ref adtcore:uri="/p" adtcore:type="PROG/P" adtcore:name="ZP"/><ioc:transport><ioc:ref adtcore:uri="/t" adtcore:type="RQ" adtcore:name="DEVK1"/></ioc:transport></ioc:object></ioc:entry></ioc:r>"#
+        )),
+        ["PROG/P ZP U"]
+    );
+    assert_eq!(
+        lines(&format!(
+            r#"<ioc:r {ns}><ioc:entry><ioc:transport><adtcore:objectReference adtcore:uri="/t" adtcore:type="RQ" adtcore:name="DEVK1"/></ioc:transport></ioc:entry></ioc:r>"#
+        )),
+        Vec::<String>::new()
+    );
+    // A reference outside an object and a transport is not an entry either.
+    assert_eq!(
+        lines(&format!(
+            r#"<ioc:r {ns}><ioc:entry><ioc:ref adtcore:uri="/p" adtcore:type="PROG/P" adtcore:name="ZSTRAY"/></ioc:entry></ioc:r>"#
+        )),
+        Vec::<String>::new()
+    );
+    // After an object has ended, a plain object reference is an entry again, without its user.
+    assert_eq!(
+        lines(&format!(
+            r#"<ioc:r {ns}><ioc:entry><ioc:object ioc:user="U"><ioc:ref adtcore:uri="/p" adtcore:type="PROG/P" adtcore:name="ZP"/></ioc:object></ioc:entry><adtcore:objectReference adtcore:uri="/q" adtcore:type="PROG/P" adtcore:name="ZQ"/></ioc:r>"#
+        )),
+        ["PROG/P ZP U", "PROG/P ZQ ?"]
+    );
+}
+
+#[test]
 fn the_flat_740_feed_names_no_user() {
     let entries = parse_inactive_objects(FLAT_740).unwrap();
 
@@ -582,7 +622,11 @@ fn an_unreadable_proof_list_is_not_a_proof() {
     .unwrap();
 
     assert_eq!(outcome.exit, 1);
-    assert!(outcome.stdout.contains("cannot be read to prove it"));
+    assert_eq!(
+        outcome.stdout,
+        "INACTIVE PROG/P:ZTEST_MAIN: activated, but the inactive list cannot be read to prove it \
+         (the inactive objects list answered HTTP 500)\nSUMMARY: 0 ACTIVE, 1 INACTIVE"
+    );
 }
 
 #[test]
@@ -878,6 +922,32 @@ fn the_scope_is_exactly_one_of_an_object_a_package_and_a_request() {
 }
 
 #[test]
+fn a_package_is_one_to_thirty_characters_of_the_allowed_set() {
+    let longest = "Z".repeat(30);
+
+    assert_eq!(
+        Scope::parse(None, Some(&longest), None),
+        Ok(Scope::Package(longest))
+    );
+    assert_eq!(
+        Scope::parse(None, Some("/ns/z_pkg$1"), None),
+        Ok(Scope::Package("/NS/Z_PKG$1".to_owned()))
+    );
+    assert_eq!(
+        Scope::parse(None, Some(&"Z".repeat(31)), None),
+        Err(format!("invalid --package: {}", "Z".repeat(31)))
+    );
+    assert_eq!(
+        Scope::parse(None, Some(""), None),
+        Err("invalid --package: ".to_owned())
+    );
+    assert_eq!(
+        Scope::parse(None, Some("Z-PKG"), None),
+        Err("invalid --package: Z-PKG".to_owned())
+    );
+}
+
+#[test]
 fn a_failed_run_lists_every_alert_with_its_place_and_drops_no_alert_entries() {
     let result = parse_run_result(FAILED).unwrap();
     let lines: Vec<String> = result.alerts.iter().map(|alert| alert.line()).collect();
@@ -917,6 +987,65 @@ line two</title></alert></alerts></testClass></testClasses></program></runResult
     assert!(text.ends_with("..."));
     assert!(text.chars().count() <= 403);
     assert!(!text.contains('\n'));
+}
+
+#[test]
+fn an_empty_program_or_class_element_scopes_no_alert() {
+    let xml = r#"<runResult><program name="P1"/><testClass name="C1"/><alert kind="k" severity="s"><title>t</title></alert></runResult>"#;
+    let result = parse_run_result(xml).unwrap();
+
+    assert_eq!(
+        result.alerts,
+        [abapreach::operation::aunit::Alert {
+            kind: "k".to_owned(),
+            severity: "s".to_owned(),
+            program: String::new(),
+            class: String::new(),
+            method: String::new(),
+            text: "t".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn text_that_is_no_alert_title_or_detail_is_never_read() {
+    // `&bogus;` is an unknown entity: the parser refuses it only where it reads the text.
+    for xml in [
+        r#"<runResult><program name="P">x &bogus; y</program></runResult>"#,
+        r#"<runResult><program name="P"><title>a &bogus; b</title></program></runResult>"#,
+        r#"<runResult><detail>a &bogus; b</detail></runResult>"#,
+    ] {
+        let result = parse_run_result(xml).unwrap();
+
+        assert!(result.alerts.is_empty(), "{xml}");
+    }
+
+    // An empty title is no title: the text after it belongs to nothing.
+    let result = parse_run_result(
+        r#"<runResult><alert kind="k" severity="s"><title/>&bogus;<detail text="d"/></alert></runResult>"#,
+    )
+    .unwrap();
+
+    assert_eq!(result.alerts[0].text, "d");
+
+    for xml in [
+        r#"<runResult><alert kind="k" severity="s"><title>a &bogus; b</title></alert></runResult>"#,
+        r#"<runResult><alert kind="k" severity="s"><title>t</title><detail>a &bogus; b</detail></alert></runResult>"#,
+    ] {
+        assert_eq!(
+            parse_run_result(xml),
+            Err("unknown entity &bogus;".to_owned()),
+            "{xml}"
+        );
+    }
+}
+
+#[test]
+fn a_detail_with_an_attribute_inside_a_title_does_not_end_the_title() {
+    let xml = r#"<runResult><alert kind="k" severity="s"><title>abc<detail text="x">def</detail>ghi</title></alert></runResult>"#;
+    let result = parse_run_result(xml).unwrap();
+
+    assert_eq!(result.alerts[0].text, "abcdefghi x");
 }
 
 // ---- aunit: the run ------------------------------------------------------------------------------
@@ -1002,6 +1131,22 @@ fn a_productive_client_runs_no_test() {
 }
 
 #[test]
+fn a_package_batch_runs_the_function_groups_of_the_package() {
+    let tadir = ok(preview(&[
+        ("OBJECT", &[Some("FUGR"), Some("FUGR"), Some("TABL")]),
+        ("OBJ_NAME", &[Some("ZFG_TEST"), Some("SAPFG"), Some("ZTAB")]),
+    ]));
+    let mut sap = transport(vec![client("T"), tadir, ok("<fugr/>"), ok(CLEAN)]);
+    let outcome = aunit_run(&mut sap, &Scope::Package("ZPKG".to_owned()), "100").unwrap();
+
+    assert_eq!(outcome.exit, 0, "{}", outcome.stdout);
+    assert!(outcome.stdout.contains("== FUGR ZFG_TEST =="));
+    assert!(outcome.stdout.contains("SUMMARY: 1 OK, 0 FAILED"));
+    assert!(!outcome.stdout.contains("SAPFG"));
+    assert_eq!(sap.calls[2].uri, "/sap/bc/adt/functions/groups/zfg_test");
+}
+
+#[test]
 fn a_package_batch_reads_tadir_skips_includes_and_prints_a_summary() {
     let tadir = ok(preview(&[
         (
@@ -1082,6 +1227,13 @@ fn an_exception_on_one_object_of_a_batch_counts_as_failed_and_the_batch_goes_on(
     assert_eq!(outcome.exit, 1);
     assert!(outcome.stdout.contains("SUMMARY: 1 OK, 1 FAILED"));
     assert!(outcome.stdout.contains("FAILED CLAS ZCL_A"));
+    assert!(
+        outcome
+            .stdout
+            .ends_with("FAILED CLAS ZCL_A: post-send outcome uncertain: reset"),
+        "{}",
+        outcome.stdout
+    );
 }
 
 #[test]
@@ -1156,11 +1308,128 @@ fn a_request_batch_maps_class_parts_and_reports_what_it_cannot_map() {
         body(&sap.calls[2]),
         "SELECT PGMID, OBJECT, OBJ_NAME FROM E071 WHERE TRKORR IN ( 'DEVK900001', 'DEVK900002' )"
     );
+    assert!(
+        sap.calls[1].uri.contains("rowNumber=51&"),
+        "one row more than the task limit, to tell a request that has too many: {}",
+        sap.calls[1].uri
+    );
     assert_eq!(outcome.exit, 0, "{}", outcome.stdout);
     assert!(outcome.stdout.starts_with("W: 1 request entries"));
     assert!(outcome.stdout.contains("== CLAS ZCL_TEST =="));
     assert!(outcome.stdout.contains("== PROG ZTEST_MAIN =="));
     assert!(outcome.stdout.contains("SUMMARY: 2 OK, 0 FAILED"));
+}
+
+/// The reply of E070 for the request and `tasks` more numbers.
+fn task_numbers(request: &str, tasks: usize) -> Reply {
+    let mut numbers = vec![request.to_owned()];
+
+    numbers.extend((1..=tasks).map(|number| format!("DEVK9{number:05}")));
+
+    let cells: Vec<Option<&str>> = numbers.iter().map(|number| Some(number.as_str())).collect();
+
+    ok(preview(&[("TRKORR", &cells)]))
+}
+
+fn no_entries() -> Reply {
+    ok(preview(&[
+        ("PGMID", &[]),
+        ("OBJECT", &[]),
+        ("OBJ_NAME", &[]),
+    ]))
+}
+
+#[test]
+fn a_request_may_have_fifty_tasks_and_not_one_more() {
+    let mut sap = transport(vec![
+        client("T"),
+        task_numbers("DEVK900001", 49),
+        no_entries(),
+    ]);
+    let outcome = aunit_run(&mut sap, &Scope::Request("DEVK900001".to_owned()), "100").unwrap();
+
+    assert!(outcome.stdout.contains("SUMMARY: 0 OK, 0 FAILED"));
+
+    for tasks in [50, 51] {
+        let mut sap = transport(vec![client("T"), task_numbers("DEVK900001", tasks)]);
+        let error =
+            aunit_run(&mut sap, &Scope::Request("DEVK900001".to_owned()), "100").unwrap_err();
+
+        assert!(
+            matches!(&error, QualityError::Rejected(message) if message == "transport request DEVK900001 has more than 50 tasks"),
+            "{tasks}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_request_is_known_by_its_own_number_in_the_task_list() {
+    // The request alone: it exists, it has no task.
+    let mut sap = transport(vec![
+        client("T"),
+        task_numbers("DEVK900001", 0),
+        no_entries(),
+    ]);
+
+    assert!(aunit_run(&mut sap, &Scope::Request("DEVK900001".to_owned()), "100").is_ok());
+
+    // Other numbers only: the request itself is not among them.
+    let others = ok(preview(&[(
+        "TRKORR",
+        &[Some("DEVK900002"), Some("DEVK900003")],
+    )]));
+    let mut sap = transport(vec![client("T"), others]);
+    let error = aunit_run(&mut sap, &Scope::Request("DEVK900001".to_owned()), "100").unwrap_err();
+
+    assert!(
+        matches!(&error, QualityError::Rejected(message) if message == "transport request DEVK900001 does not exist"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_class_part_of_a_request_names_its_class_up_to_the_padding() {
+    let rows = ok(preview(&[
+        ("PGMID", &[Some("LIMU"), Some("LIMU"), Some("LIMU")]),
+        ("OBJECT", &[Some("CLSD"), Some("METH"), Some("CINC")]),
+        (
+            "OBJ_NAME",
+            &[
+                Some("ZCL_PAD========CCAU"),
+                Some("ZCL_SPACE RUN"),
+                Some("ZCL_FULL"),
+            ],
+        ),
+    ]));
+    let mut sap = transport(vec![
+        client("T"),
+        task_numbers("DEVK900001", 0),
+        rows,
+        ok("<class/>"),
+        ok(CLEAN),
+        ok("<class/>"),
+        ok(CLEAN),
+        ok("<class/>"),
+        ok(CLEAN),
+    ]);
+    let outcome = aunit_run(&mut sap, &Scope::Request("DEVK900001".to_owned()), "100").unwrap();
+
+    assert_eq!(outcome.exit, 0, "{}", outcome.stdout);
+
+    let headers: Vec<&str> = outcome
+        .stdout
+        .lines()
+        .filter(|line| line.starts_with("== "))
+        .collect();
+
+    assert_eq!(
+        headers,
+        [
+            "== CLAS ZCL_FULL ==",
+            "== CLAS ZCL_PAD ==",
+            "== CLAS ZCL_SPACE =="
+        ]
+    );
 }
 
 #[test]

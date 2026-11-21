@@ -2,6 +2,7 @@ use abapreach::config::{
     Config, ConfigPaths, Connection, LocalCredentialsPermission, RfcConfig, SaprouterSource,
     classify_credentials_mode, local_credentials_permission, scrub, tls_warning,
 };
+use abapreach::policy::{McpRun, McpRunSnippet};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -907,6 +908,14 @@ fn the_run_keys_default_to_plan_with_mcp_closed() {
     assert_eq!(policies.mcp_run.token(), "off");
     assert_eq!(policies.mcp_run_snippet.token(), "off");
     assert!(policies.mcp_run_allow.is_empty());
+}
+
+#[test]
+fn the_run_policies_display_as_their_tokens() {
+    assert_eq!(McpRun::Off.to_string(), "off");
+    assert_eq!(McpRun::Confirm.to_string(), "confirm");
+    assert_eq!(McpRunSnippet::Off.to_string(), "off");
+    assert_eq!(McpRunSnippet::On.to_string(), "on");
 }
 
 #[test]

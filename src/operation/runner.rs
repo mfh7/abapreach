@@ -1343,3 +1343,130 @@ fn ok(response: &Response) -> bool {
 fn cut(text: &str) -> String {
     text.chars().take(MESSAGE_LIMIT).collect()
 }
+
+/// The outcome mapping of a run (`run_runner::map_run`) on cycles that ended in a given way. It
+/// lives here because only this module can build a `RunnerRun` without running a whole cycle.
+#[cfg(test)]
+mod run_mapping_tests {
+    use super::{PostTransport, RunnerEnd, RunnerRun};
+    use crate::backend::Failure;
+    use crate::cli::AlvColumns;
+    use crate::operation::run_runner::map_run;
+    use crate::runner_protocol::{Nonce, RunMode, hex_text};
+    use crate::transport::{Response, TransportError};
+
+    const NONCE: &str = "0123456789ABCDEF0123456789ABCDEF";
+    const INTERRUPTED: &str = "I: interrupted; the run had finished before the reply was read";
+
+    fn run(end: RunnerEnd) -> RunnerRun {
+        RunnerRun {
+            name: None,
+            post: PostTransport::Http,
+            end,
+            leftover: None,
+            notes: Vec::new(),
+            preflight: None,
+            interrupted: false,
+            uncertain: false,
+            directory_only: false,
+            conn: "DEV_100".to_owned(),
+        }
+    }
+
+    fn mapped(run: &RunnerRun) -> crate::operation::run::RunResult {
+        map_run(
+            run,
+            &Nonce::parse(NONCE).unwrap(),
+            RunMode::RunSnippet,
+            AlvColumns::Visible,
+        )
+    }
+
+    /// The reply of a snippet run that printed one line and ended with `RAN`.
+    fn ran() -> Response {
+        let body = [
+            "BEGIN:RUN_SNIPPET".to_owned(),
+            format!("LINE:{}", hex_text("done")),
+            "STATUS:RAN".to_owned(),
+            "END:3".to_owned(),
+        ];
+
+        Response::text(
+            200,
+            body.iter()
+                .map(|rest| format!("ABAPREACH:{NONCE}:{rest}\n\n"))
+                .collect::<String>(),
+        )
+    }
+
+    #[test]
+    fn a_run_that_did_not_start_may_fall_back_only_when_nothing_was_sent_or_left() {
+        let lost = || TransportError::PreSendConnectivity("no route to host".to_owned());
+        let result = mapped(&run(RunnerEnd::NotStarted(lost())));
+
+        assert!(result.fallback_allowed);
+        assert_eq!(result.failure, Some(Failure::PreSendConnectivity));
+        assert_eq!(result.detail.as_deref(), Some(&*lost().to_string()));
+        assert_eq!(result.outcome.exit, 1);
+        assert_eq!(
+            result.outcome.stderr,
+            "ERROR: pre-send connectivity failure: no route to host"
+        );
+
+        // A refused logon is no reason to try the other backend.
+        let refused = mapped(&run(RunnerEnd::NotStarted(TransportError::Authorization(
+            "HTTP 401".to_owned(),
+        ))));
+
+        assert!(!refused.fallback_allowed);
+        assert_eq!(refused.failure, Some(Failure::Authorization));
+        assert_eq!(
+            refused.detail.as_deref(),
+            Some("authorization failed: HTTP 401")
+        );
+
+        // A class that stays, or a signal, ends the fallback.
+        let mut left = run(RunnerEnd::NotStarted(lost()));
+
+        left.leftover = Some("YCL_X".to_owned());
+
+        assert!(!mapped(&left).fallback_allowed);
+
+        let mut signalled = run(RunnerEnd::NotStarted(lost()));
+
+        signalled.interrupted = true;
+
+        let result = mapped(&signalled);
+
+        assert!(!result.fallback_allowed);
+        assert_eq!(result.outcome.exit, 130);
+    }
+
+    #[test]
+    fn a_signal_after_a_finished_run_says_so_and_after_a_failed_one_it_does_not() {
+        let mut finished = run(RunnerEnd::Posted(ran()));
+
+        finished.interrupted = true;
+
+        let result = mapped(&finished);
+
+        assert_eq!(result.outcome.exit, 130);
+        assert!(result.outcome.stderr.contains(INTERRUPTED));
+        assert_eq!(result.outcome.stdout, "done");
+
+        let mut failed = run(RunnerEnd::Posted(Response::empty(503)));
+
+        failed.interrupted = true;
+
+        let result = mapped(&failed);
+
+        assert_eq!(result.outcome.exit, 1);
+        assert!(!result.outcome.stderr.contains(INTERRUPTED));
+
+        // Without a signal there is nothing to say either way.
+        let result = mapped(&run(RunnerEnd::Posted(ran())));
+
+        assert_eq!(result.outcome.exit, 0);
+        assert!(!result.outcome.stderr.contains(INTERRUPTED));
+    }
+}

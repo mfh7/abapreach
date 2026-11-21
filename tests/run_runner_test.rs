@@ -447,6 +447,17 @@ fn the_payload_expires_after_the_timeout_plus_a_grace_over_http_and_a_fixed_span
     assert_eq!(utc_stamp(951_782_400), "20000229000000");
     assert_eq!(utc_stamp(1_767_225_600), "20260101000000");
     assert_eq!(utc_stamp(1_798_761_599), "20261231235959");
+    // The first day of a 400-year era, the century that is no leap year, and the last second of
+    // year 9999.
+    assert_eq!(utc_stamp(951_868_800), "20000301000000");
+    assert_eq!(utc_stamp(4_107_542_399), "21000228235959");
+    assert_eq!(utc_stamp(4_107_542_400), "21000301000000");
+    assert_eq!(utc_stamp(7_263_216_000), "22000301000000");
+    assert_eq!(utc_stamp(13_574_606_400), "24000229120000");
+    assert_eq!(utc_stamp(13_574_649_600), "24000301000000");
+    assert_eq!(utc_stamp(253_402_300_799), "99991231235959");
+    // The clock is the real one: after the date this test was written.
+    assert!(unix_now() > 1_790_000_000, "{}", unix_now());
 
     let start = 1_700_000_000;
 

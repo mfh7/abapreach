@@ -601,6 +601,12 @@ fn a_failed_run_is_an_error_with_its_token() {
 
         assert!(result.is_error);
         assert!(result.text.contains(text), "{}", result.text);
+        // Only a withheld output carries the note that the run happened.
+        assert!(
+            !result.text.contains("the run itself has happened"),
+            "{}",
+            result.text
+        );
         assert_eq!(result.structured["outcome"], token);
         assert_eq!(result.structured["exit"], 1);
         assert_eq!(rig.posts().len(), 1);
@@ -623,6 +629,7 @@ fn output_that_holds_a_configured_secret_is_withheld_but_the_run_is_reported() {
     assert!(!result.text.contains(PASSWORD), "{}", result.text);
     assert!(result.text.contains("payload contains a configured secret"));
     assert!(result.text.contains("the run itself has happened"));
+    assert_eq!(result.structured["message"], result.text);
     assert!(!result.structured.to_string().contains(PASSWORD));
 }
 

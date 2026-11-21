@@ -289,6 +289,49 @@ mod tests {
         assert!(refused("a = |abc { x.|").contains("not closed"));
     }
 
+    fn chars(text: &str) -> Vec<char> {
+        text.chars().collect()
+    }
+
+    #[test]
+    fn a_literal_ends_after_its_closing_quote_and_a_doubled_quote_stays_inside() {
+        assert_eq!(skip_literal(&chars("'abc' x"), 0, 1), Ok(5));
+        assert_eq!(skip_literal(&chars("'abc''d' x"), 0, 1), Ok(8));
+        assert_eq!(skip_literal(&chars("x `a``b` y"), 2, 1), Ok(8));
+        assert_eq!(
+            skip_literal(&chars("'abc''d x"), 0, 4),
+            Err("snippet line 4: a text literal is not closed".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_template_ends_after_its_closing_bar_and_a_backslash_escapes_the_next_character() {
+        assert_eq!(skip_template(&chars("|abc| x"), 0, 1), Ok(5));
+        assert_eq!(skip_template(&chars("|abc\\|d| x"), 0, 1), Ok(8));
+        assert_eq!(skip_template(&chars("|a{b}c| x"), 0, 1), Ok(7));
+        assert_eq!(skip_template(&chars("|{a}| x"), 0, 1), Ok(5));
+        assert_eq!(
+            skip_template(&chars("|abc\\|"), 0, 2),
+            Err("snippet line 2: a string template is not closed".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_embedded_expression_ends_after_its_brace_and_holds_literals_and_templates() {
+        assert_eq!(skip_expression(&chars("{a}x"), 0, 1), Ok(3));
+        assert_eq!(skip_expression(&chars("{'}' x}"), 0, 1), Ok(7));
+        assert_eq!(skip_expression(&chars("{`}` x}"), 0, 1), Ok(7));
+        assert_eq!(skip_expression(&chars("{|}| x}"), 0, 1), Ok(7));
+        assert_eq!(
+            skip_expression(&chars("{a"), 0, 3),
+            Err("snippet line 3: an embedded expression is not closed".to_owned())
+        );
+        // The text a literal or a template of an expression holds is no statement end.
+        check("a = |{ 'x.ENDMETHOD.}' }|.").unwrap();
+        check("a = |{ |y}.ENDMETHOD.| }|.").unwrap();
+        check("a = |x\\|ENDMETHOD.|.").unwrap();
+    }
+
     #[test]
     fn control_characters_and_wide_lines_are_refused() {
         assert!(refused("a\t= 1.").contains("control character"));

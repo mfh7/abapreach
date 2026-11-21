@@ -1968,7 +1968,148 @@ fn as_note(block: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::runner_exit;
+    use super::{StatelessGate, runner_exit};
+    use crate::operation::quality;
+    use crate::transport::{Request, Response, SadtTransport, TransportError};
+    use std::time::Duration;
+
+    /// A transport that answers 200, counts its requests and reports a fixed session state.
+    struct Probe {
+        stateful: Option<bool>,
+        timeout: bool,
+        sent: usize,
+        limits: Vec<Duration>,
+    }
+
+    impl Probe {
+        fn new(stateful: Option<bool>, timeout: bool) -> Self {
+            Self {
+                stateful,
+                timeout,
+                sent: 0,
+                limits: Vec::new(),
+            }
+        }
+    }
+
+    impl SadtTransport for Probe {
+        fn request(&mut self, _request: Request) -> Result<Response, TransportError> {
+            self.sent += 1;
+
+            Ok(Response::empty(200))
+        }
+
+        fn close(&mut self) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn supports_request_timeout(&self) -> bool {
+            self.timeout
+        }
+
+        fn request_within(
+            &mut self,
+            request: Request,
+            limit: Duration,
+        ) -> Result<Response, TransportError> {
+            self.limits.push(limit);
+
+            self.request(request)
+        }
+
+        fn stateful_supported(&self) -> Option<bool> {
+            self.stateful
+        }
+    }
+
+    /// Like `Probe`, but it keeps the defaults of the trait for the timeout and the session state.
+    struct Plain;
+
+    impl SadtTransport for Plain {
+        fn request(&mut self, _request: Request) -> Result<Response, TransportError> {
+            Ok(Response::empty(200))
+        }
+
+        fn close(&mut self) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    fn refused() -> TransportError {
+        TransportError::PreSendConnectivity(quality::STATELESS_HTTP.to_owned())
+    }
+
+    #[test]
+    fn the_gate_reports_the_timeout_support_and_session_state_of_its_transport() {
+        for (timeout, stateful) in [(true, Some(true)), (false, Some(false)), (true, None)] {
+            let mut probe = Probe::new(stateful, timeout);
+            let gate = StatelessGate::new(&mut probe);
+
+            assert_eq!(gate.supports_request_timeout(), timeout);
+            assert_eq!(gate.stateful_supported(), stateful);
+        }
+
+        let mut plain = Plain;
+        let gate = StatelessGate::new(&mut plain);
+
+        assert!(!gate.supports_request_timeout());
+        assert_eq!(gate.stateful_supported(), None);
+    }
+
+    #[test]
+    fn a_stateful_session_passes_every_request_and_the_limit_of_a_timed_one() {
+        let mut probe = Probe::new(Some(true), true);
+        let mut gate = StatelessGate::new(&mut probe);
+
+        assert_eq!(gate.request(Request::get("/a")), Ok(Response::empty(200)));
+        assert_eq!(
+            gate.request_within(Request::get("/b"), Duration::from_secs(7)),
+            Ok(Response::empty(200))
+        );
+        assert!(!gate.tripped);
+        assert_eq!(probe.sent, 2);
+        assert_eq!(probe.limits, vec![Duration::from_secs(7)]);
+    }
+
+    #[test]
+    fn an_unknown_session_state_trips_nothing() {
+        let mut probe = Probe::new(None, true);
+        let mut gate = StatelessGate::new(&mut probe);
+
+        assert_eq!(
+            gate.request_within(Request::get("/a"), Duration::from_secs(1)),
+            Ok(Response::empty(200))
+        );
+        assert!(!gate.tripped);
+    }
+
+    #[test]
+    fn a_stateless_session_ends_the_command_after_its_first_timed_reply() {
+        let mut probe = Probe::new(Some(false), true);
+        let mut gate = StatelessGate::new(&mut probe);
+
+        assert_eq!(
+            gate.request_within(Request::get("/a"), Duration::from_secs(1)),
+            Err(refused())
+        );
+        assert!(gate.tripped);
+        assert_eq!(gate.request(Request::get("/b")), Err(refused()));
+        assert_eq!(
+            gate.request_within(Request::get("/c"), Duration::from_secs(1)),
+            Err(refused())
+        );
+        assert_eq!(probe.sent, 1);
+    }
+
+    #[test]
+    fn a_stateless_session_ends_the_command_after_its_first_plain_reply() {
+        let mut probe = Probe::new(Some(false), false);
+        let mut gate = StatelessGate::new(&mut probe);
+
+        assert_eq!(gate.request(Request::get("/a")), Err(refused()));
+        assert!(gate.tripped);
+        assert_eq!(probe.sent, 1);
+    }
 
     #[test]
     fn a_broken_rule_is_the_stop_of_its_message() {
