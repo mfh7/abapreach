@@ -943,6 +943,10 @@ cells use it to test an interrupt while the lock is held, deterministically: the
 the stderr marker `FAULT: lock held, pausing N ms` and then sends Ctrl-C. `hold-lock` is not a
 reply drop, so it does not change the results in the table above.
 
+`hold-post:<ms>` (same bounds) pauses the runner right after the classrun POST has returned, before
+its outcome is mapped, and prints `FAULT: classrun POST done, pausing N ms` on stderr; it exists
+only for the live Ctrl-C cells and, like `hold-lock`, drops no reply.
+
 ### Carve-outs
 
 The carve-outs below are the items the release had to cover. Each shows the matrix result and the

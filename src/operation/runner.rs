@@ -1061,6 +1061,11 @@ impl Cycle<'_> {
             }
         };
 
+        // Test-only: the POST has run (its reply arrived or a fault dropped it); a pause here
+        // makes a Ctrl-C land after the POST on a system of any speed.
+        #[cfg(feature = "fault-injection")]
+        crate::fault::hold_post(self.cancel);
+
         match result {
             Ok(response) if response.status == 404 => RunnerEnd::Stop(self.needs_classrun()),
             Ok(response)

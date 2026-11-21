@@ -14,9 +14,12 @@ const DROP_REPLY: &str = "drop-reply";
 const FAIL_READ: &str = "fail-read";
 const RECONCILE: &str = "RECONCILE";
 const HOLD_LOCK: &str = "hold-lock";
+const HOLD_POST: &str = "hold-post";
 const SKIP_ACTIVATE: &str = "skip-activate";
 /// Upper bound of a `hold-lock` pause, so a forgotten variable cannot stall a run for long.
 const HOLD_LOCK_MAX_MS: u64 = 60_000;
+/// Upper bound of a `hold-post` pause, the same as `hold-lock`.
+const HOLD_POST_MAX_MS: u64 = HOLD_LOCK_MAX_MS;
 const UNKNOWN: &str = "unknown ABAPREACH_FAULT value";
 
 thread_local! {
@@ -141,6 +144,9 @@ pub enum Fault {
     FailReconcileRead,
     /// The deploy pauses this many milliseconds right after its LOCK succeeded.
     HoldLock(u64),
+    /// The runner pauses this many milliseconds right after the classrun POST has returned (its
+    /// reply arrived or a fault dropped it), before the outcome is mapped.
+    HoldPost(u64),
     /// The deploy stops after the source PUT and the UNLOCK, before the activation: the object
     /// is left with an inactive version, on every path (ADT HTTP has no reply to drop).
     SkipActivate,
@@ -166,6 +172,11 @@ impl Fault {
                 .ok()
                 .filter(|ms| (1..=HOLD_LOCK_MAX_MS).contains(ms))
                 .map(Self::HoldLock),
+            (HOLD_POST, ms) if !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()) => ms
+                .parse()
+                .ok()
+                .filter(|ms| (1..=HOLD_POST_MAX_MS).contains(ms))
+                .map(Self::HoldPost),
             _ => None,
         }
     }
@@ -223,7 +234,10 @@ impl Fault {
     pub fn target(self) -> Option<Target> {
         match self {
             Self::DropReply(target) => Some(target),
-            Self::FailReconcileRead | Self::HoldLock(_) | Self::SkipActivate => None,
+            Self::FailReconcileRead
+            | Self::HoldLock(_)
+            | Self::HoldPost(_)
+            | Self::SkipActivate => None,
         }
     }
 
@@ -232,6 +246,7 @@ impl Fault {
             Self::DropReply(target) => format!("{DROP_REPLY}:{}", target.name()),
             Self::FailReconcileRead => format!("{FAIL_READ}:{RECONCILE}"),
             Self::HoldLock(ms) => format!("{HOLD_LOCK}:{ms}"),
+            Self::HoldPost(ms) => format!("{HOLD_POST}:{ms}"),
             Self::SkipActivate => SKIP_ACTIVATE.to_owned(),
         }
     }
@@ -282,6 +297,21 @@ pub fn hold_lock(cancel: &crate::operation::deploy::CancelFlag) {
     };
 
     eprintln!("FAULT: lock held, pausing {ms} ms");
+    pause(ms, cancel);
+}
+
+/// Runs right after the classrun POST has returned when `hold-post:<ms>` is set: prints a marker
+/// on stderr, then waits until the time is up or Ctrl-C set the flag. A Ctrl-C that lands in this
+/// pause is an interrupt after the POST, whatever the speed of the system.
+pub fn hold_post(cancel: &crate::operation::deploy::CancelFlag) {
+    let Some(ms) = Fault::from_env().into_iter().find_map(|fault| match fault {
+        Fault::HoldPost(ms) => Some(ms),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    eprintln!("FAULT: classrun POST done, pausing {ms} ms");
     pause(ms, cancel);
 }
 
@@ -424,6 +454,74 @@ mod tests {
                 "{value:?}"
             );
         }
+    }
+
+    #[test]
+    fn hold_post_combines_with_the_other_faults() {
+        assert_eq!(
+            Fault::from_lookup(Some("drop-reply:CLASSRUN,hold-post:30000")),
+            Ok(vec![
+                Fault::DropReply(super::Target::parse("CLASSRUN", &[]).unwrap()),
+                Fault::HoldPost(30_000)
+            ])
+        );
+        assert_eq!(
+            Fault::from_lookup(Some("hold-lock:10,hold-post:60000")),
+            Ok(vec![Fault::HoldLock(10), Fault::HoldPost(60_000)])
+        );
+    }
+
+    #[test]
+    fn hold_post_takes_a_bounded_millisecond_count_and_drops_no_reply() {
+        let faults = Fault::from_lookup(Some("hold-post:5000")).unwrap();
+
+        assert_eq!(faults, vec![Fault::HoldPost(5000)]);
+        assert_eq!(faults[0].target(), None);
+        assert_eq!(faults[0].drop_reply(true), None);
+        assert_eq!(faults[0].fail_read(true), None);
+        assert_eq!(
+            Fault::warning(&faults).unwrap(),
+            "WARNING: fault injection active (hold-post:5000)"
+        );
+
+        for value in [
+            "hold-post",
+            "hold-post:",
+            "hold-post:0",
+            "hold-post:60001",
+            "hold-post:+5",
+            "hold-post:5s",
+        ] {
+            assert_eq!(
+                Fault::from_lookup(Some(value)),
+                Err("unknown ABAPREACH_FAULT value".to_owned()),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hold_post_pauses_only_when_set_and_a_set_cancel_flag_ends_the_pause() {
+        let cancel = CancelFlag::new();
+        let started = Instant::now();
+        {
+            let _scope = scoped(vec![Fault::HoldLock(5_000)]);
+            super::hold_post(&cancel);
+        }
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let signal = cancel.clone();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            signal.set();
+        });
+        let started = Instant::now();
+        {
+            let _scope = scoped(vec![Fault::HoldPost(20_000)]);
+            super::hold_post(&cancel);
+        }
+        thread.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

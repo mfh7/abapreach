@@ -37,6 +37,9 @@ Version metadata is `0.17.0`. This entry is finalized before the last release ca
   confirms every call. The reply shape of the run is assumed from the ADT format and not yet probed live.
 - RFC admission: the ABAP Unit run configuration (harmless tests, one object) and
   `inactiveobjects?USERNAME=`.
+- Fault-injection builds accept `hold-post:<ms>` (pause after the classrun POST, marker
+  `FAULT: classrun POST done, pausing N ms`), so the live Ctrl-C cells land after the POST on a slow
+  system.
 - `run CLAS <class>` (0.17.0): executes an existing class that implements `IF_OO_ADT_CLASSRUN`
   and prints its reply as is. `run` is not a dry run. `run --simulate --plan <FILE>` reads the
   class (exists, active, interface, package, author, active source hash) and the client role and
