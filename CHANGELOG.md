@@ -14,12 +14,12 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
-## [0.17.0] - 2026-11-22
+Version metadata is `0.17.0`. This entry is finalized before the last release candidate.
 
 ### Added
 - `inactive [--all]` lists the inactive objects of the logon user (`<ADT type> <name> <user>`, an
-  include also names its main program); MCP tool `abap_inactive`. The reply shape of the list was
-  checked live on the 7.50, 7.40 and 758 systems; `--all` sends `?USERNAME=*`. An entry marked
+  include also names its main program); MCP tool `abap_inactive`. The reply shape of the list is
+  assumed from the ADT format and not yet probed live; `--all` sends `?USERNAME=*`. An entry marked
   deleted ends with ` deleted`, and `activate` refuses it. The owner of an entry in the flat 7.40
   feed comes from the version feed, never from `adtcore:responsible`.
 - `activate [--simulate] TYPE/SUBTYPE:NAME...` activates own inactive Z/Y objects (`PROG/P`,
@@ -34,7 +34,7 @@ internal repository where that implementation was developed. See the
   (also each object a `--package` or `--tr` batch resolves to) must be on the list as `TYPE:NAME`,
   otherwise the whole call is refused before any test runs, naming the missing objects. A batch of
   more than 60 objects is refused (the confirmation form lists 60; the CLI keeps 100). The human
-  confirms every call. The reply shape of the run was checked live on the 7.50, 7.40 and 758 systems.
+  confirms every call. The reply shape of the run is assumed from the ADT format and not yet probed live.
 - RFC admission: the ABAP Unit run configuration (harmless tests, one object) and
   `inactiveobjects?USERNAME=`.
 - Fault-injection builds accept `hold-post:<ms>` (pause after the classrun POST, marker
