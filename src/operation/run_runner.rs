@@ -12,7 +12,7 @@
 //! | :--- | :--- | :--- | :--- |
 //! | `RAN` | the code ran to its end | no rollback by ABAPReach (as SA38) | 0 |
 //! | `RUN_FAILED: exception ...` | a catchable exception reached the runner | rolled back | 1 |
-//! | `RUN_FAILED: runtime error ...` | the runtime-error reply of the server | rolled back by the server | 1 |
+//! | `RUN_FAILED: runtime error ...` | the runtime-error reply of the server (also a known dump short text) | rolled back by the server | 1 |
 //! | `RUN_UNKNOWN: ...` | any other 5xx, no reply, a reply without a status line | unknown | 1 |
 //! | `SNIPPET_ERROR: line n: ...` | the snippet does not compile; nothing ran | none | 2 |
 

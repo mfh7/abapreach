@@ -3,7 +3,7 @@ use abapreach::config::Connection;
 use abapreach::transport::TransportError;
 use abapreach::transport::rfc::{
     DynamicRfcApi, Env, RfcLibrary, RfcPhase, RfcSymbols, classify_rfc_error,
-    connection_parameters, init_trace_environment,
+    connection_parameters, init_trace_environment, is_abap_runtime_failure,
 };
 
 // RFC_RC values from sapnwrfc.h, kept as literals so a wrong constant in the product is caught.
@@ -173,4 +173,34 @@ fn installed_library_resolves_every_symbol_and_reports_a_version() {
     let (major, _minor, _patch) = api.version();
 
     assert!(major >= 7, "unexpected RFC library major version {major}");
+}
+
+#[test]
+fn rfc_closed_is_a_runtime_failure_only_for_a_known_dump_text() {
+    let screen = classify_rfc_error(
+        RfcPhase::Invoke,
+        CLOSED,
+        "Screen output without connection to user.",
+    );
+    let shouted = classify_rfc_error(
+        RfcPhase::Invoke,
+        CLOSED,
+        "SCREEN OUTPUT WITHOUT CONNECTION TO USER",
+    );
+    let other = classify_rfc_error(RfcPhase::Invoke, CLOSED, "connection closed");
+    // The text alone is not enough: the code must be RFC_CLOSED or RFC_ABAP_RUNTIME_FAILURE.
+    let wrong_code = classify_rfc_error(
+        RfcPhase::Invoke,
+        COMMUNICATION_FAILURE,
+        "Screen output without connection to user.",
+    );
+    let runtime = classify_rfc_error(RfcPhase::Invoke, ABAP_RUNTIME_FAILURE, "SYSTEM_FAILURE");
+    let exception = classify_rfc_error(RfcPhase::Invoke, ABAP_EXCEPTION, "NO_SUCH_ENTRY");
+
+    assert!(is_abap_runtime_failure(&screen), "{screen:?}");
+    assert!(is_abap_runtime_failure(&shouted), "{shouted:?}");
+    assert!(!is_abap_runtime_failure(&other), "{other:?}");
+    assert!(!is_abap_runtime_failure(&wrong_code), "{wrong_code:?}");
+    assert!(is_abap_runtime_failure(&runtime), "{runtime:?}");
+    assert!(!is_abap_runtime_failure(&exception), "{exception:?}");
 }

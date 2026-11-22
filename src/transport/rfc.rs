@@ -78,6 +78,9 @@ const RFC_LOGON_FAILURE: c_int = 2;
 const RFC_ABAP_RUNTIME_FAILURE: c_int = 3;
 const RFC_ABAP_MESSAGE: c_int = 4;
 const RFC_ABAP_EXCEPTION: c_int = 5;
+/// `RFC_CLOSED`: the library's code when the work process ends the call with a dump of its own
+/// instead of a reply (for example a screen sent in the temporary runner).
+const RFC_CLOSED: c_int = 6;
 const RFC_ABAP_CLASS_EXCEPTION: c_int = 27;
 const RFC_AUTHORIZATION_FAILURE: c_int = 29;
 /// `RFC_INVALID_PARAMETER`: the code reported for a text the library's character set cannot hold.
@@ -841,13 +844,35 @@ pub fn classify_rfc_error(phase: RfcPhase, code: i32, message: &str) -> Transpor
     }
 }
 
+/// Short texts of ABAP runtime errors (dumps) that a report or class run by the runner raises
+/// itself, lower case. A reply that names one of them is a dump, not a lost reply: SAP answers it
+/// on ADT HTTP as an HTTP 500 page and on RFC as `RFC_CLOSED`, neither of which says "runtime error".
+///
+/// - `screen output without connection to user`: `DYNPRO_SEND_IN_BACKGROUND`, a report that sends a
+///   screen (`CALL SELECTION-SCREEN`) in the work process of the temporary runner.
+pub const KNOWN_DUMP_SHORT_TEXTS: &[&str] = &["screen output without connection to user"];
+
+/// Whether `text` contains one of the [`KNOWN_DUMP_SHORT_TEXTS`], ignoring case.
+pub fn mentions_known_dump_text(text: &str) -> bool {
+    let text = text.to_lowercase();
+
+    KNOWN_DUMP_SHORT_TEXTS
+        .iter()
+        .any(|short_text| text.contains(short_text))
+}
+
 /// Whether `error` is the ABAP runtime failure (a short dump) of a request that SAP was
 /// executing: the RFC library reports it as `RFC_ABAP_RUNTIME_FAILURE` after the call was sent.
+/// `RFC_CLOSED` counts only when its message is a known dump short text; any other lost
+/// connection stays uncertain.
 pub fn is_abap_runtime_failure(error: &TransportError) -> bool {
     match error {
         TransportError::Sent(inner) => is_abap_runtime_failure(inner),
         TransportError::Protocol(text) => {
             text.ends_with(&format!("(RFC code {RFC_ABAP_RUNTIME_FAILURE})"))
+        }
+        TransportError::PostSendUncertain(text) => {
+            text.ends_with(&format!("(RFC code {RFC_CLOSED})")) && mentions_known_dump_text(text)
         }
         _ => false,
     }

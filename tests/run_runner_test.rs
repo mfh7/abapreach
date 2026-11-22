@@ -14,6 +14,7 @@ use abapreach::mcp_write::{McpTools, TokenGate};
 use abapreach::operation::deploy::{CancelFlag, InterruptAction};
 use abapreach::operation::run_runner::{RUNNER_WAIT_TEXT, expiry, unix_now, utc_stamp};
 use abapreach::operation::runner_template::{OutType, generate_snippet};
+use abapreach::transport::rfc::{RfcPhase, classify_rfc_error};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use abapreach::{Exit, Factories, RfcLibraryInfo, run};
 use common::preview;
@@ -849,6 +850,19 @@ fn every_reply_of_the_post_maps_to_its_token_exit_code_and_a_clean_system() {
             "",
         ),
         (
+            "the Application Server Error page of a screen dump",
+            PostReply::Status(
+                500,
+                String::from_utf8_lossy(include_bytes!(
+                    "fixtures/m8/classrun_500_screen_output.html"
+                ))
+                .into_owned(),
+            ),
+            1,
+            vec!["RUN_FAILED: runtime error; see ST22 (dumps)"],
+            "",
+        ),
+        (
             "an ICM timeout",
             PostReply::Status(
                 503,
@@ -1001,6 +1015,20 @@ fn over_rfc_the_post_has_no_limit_and_its_failures_have_their_own_tokens() {
                 TransportError::Protocol("call failed (RFC code 3)".to_owned()).after_send(),
             ),
             "RUN_FAILED: runtime error; see ST22 (dumps)",
+        ),
+        // A report that sends a screen: the library closes the call with the dump short text.
+        (
+            PostReply::Error(classify_rfc_error(
+                RfcPhase::Invoke,
+                6,
+                "Screen output without connection to user.",
+            )),
+            "RUN_FAILED: runtime error; see ST22 (dumps)",
+        ),
+        // Any other closed call stays uncertain.
+        (
+            PostReply::Error(classify_rfc_error(RfcPhase::Invoke, 6, "connection closed")),
+            "RUN_UNKNOWN: the reply was lost; the code may have run",
         ),
         // Any other ABAP exception of the call is not a runtime error.
         (

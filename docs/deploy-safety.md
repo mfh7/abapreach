@@ -398,7 +398,9 @@ Safeguards, in the order they apply:
   user`), so a later classrun request from Eclipse does nothing.
 
 A runtime error in the code is `RUN_FAILED: runtime error`: the server rolls back what the code had
-not committed. A catchable exception that reaches the runner (a snippet) is `RUN_FAILED: exception
+not committed. A report that sends a screen (`Screen output without connection to user`, English logon
+language) is one, on ADT HTTP and on RFC; on 7.40 the RFC connection closes without that text and
+the run reads `RUN_UNKNOWN`. A catchable exception that reaches the runner (a snippet) is `RUN_FAILED: exception
 <class>: <text>`: ABAPReach rolls back the work since the last `COMMIT WORK`. In a submitted report
 an unhandled exception is a runtime error. Anything else that cuts the reply short (HTTP 5xx from the
 ICM, a timeout of `--timeout`, a dropped connection, a reply without a status line) is

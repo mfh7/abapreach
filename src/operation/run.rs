@@ -18,7 +18,7 @@ use crate::operation::quality::{self, QualityError};
 use crate::operation::read_table::{ReadTableError, TableData, fetch};
 use crate::operation::run_plan::{PlanFacts, RunArgs, RunPlan, plan_changed_text};
 use crate::operation::runner::RunnerGated;
-use crate::transport::rfc::is_abap_runtime_failure;
+use crate::transport::rfc::{is_abap_runtime_failure, mentions_known_dump_text};
 use crate::transport::{Request, Response, RunnerArm, SadtTransport, TransportError};
 use quick_xml::Reader;
 use quick_xml::events::Event;
@@ -678,17 +678,23 @@ pub(crate) fn cut(text: &str) -> String {
 /// Whether the body of an HTTP 500 is the report of an ABAP runtime error (a short dump), as
 /// opposed to a gateway or ICM error that leaves the work process running.
 ///
-/// The markers are provisional and loose: any 500 body that mentions `st22` or `runtime error`
-/// (in a link, a header or ICM text) counts, and the run then reads `RUN_FAILED` ("rolled back")
-/// where `RUN_UNKNOWN` would be the safer word. The exit code is the same for both.
-// TODO(live probe): tighten these to the markers of the SAP short dump page once a live classrun
-// that raises a runtime error shows the exact body, and add that body as a fixture.
+/// The generic markers are loose: any 500 body that mentions `st22` or `runtime error` (in a link,
+/// a header or ICM text) counts, and the run then reads `RUN_FAILED` ("rolled back") where
+/// `RUN_UNKNOWN` would be the safer word. The exit code is the same for both.
+///
+/// The live probe (2026-11-22, SAP_BASIS 7.50) showed that a dump of a report is not marked by
+/// them: SAP answers the standard ICF "Application Server Error" page whose text is only the short
+/// text of the dump (`Screen output without connection to user.`, fixture
+/// `tests/fixtures/m8/classrun_500_screen_output.html`). The generic markers stay; the known short
+/// texts of [`crate::transport::rfc::KNOWN_DUMP_SHORT_TEXTS`] are added to them.
 pub fn is_runtime_error_body(body: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    let text = String::from_utf8_lossy(body);
+    let lower = text.to_ascii_lowercase();
 
     ["abap runtime error", "runtime error", "short dump", "st22"]
         .iter()
-        .any(|marker| text.contains(marker))
+        .any(|marker| lower.contains(marker))
+        || mentions_known_dump_text(&text)
 }
 
 #[cfg(test)]
@@ -734,6 +740,20 @@ mod tests {
             b"<html>503 Service Unavailable: ICM timeout while waiting for the application</html>"
         ));
         assert!(!is_runtime_error_body(b""));
+    }
+
+    #[test]
+    fn the_screen_output_dump_page_is_a_runtime_error_body() {
+        let page = include_bytes!("../../tests/fixtures/m8/classrun_500_screen_output.html");
+
+        assert!(is_runtime_error_body(page));
+        assert!(is_runtime_error_body(
+            b"<span>SCREEN OUTPUT WITHOUT CONNECTION TO USER.</span>"
+        ));
+        // An ICM-style error page without the dump text stays a lost reply.
+        assert!(!is_runtime_error_body(
+            b"<html><title>Application Server Error</title><p>ICM: connection to the work process was reset.</p></html>"
+        ));
     }
 
     #[test]
@@ -889,6 +909,23 @@ mod tests {
     }
 
     #[test]
+    fn the_screen_output_dump_page_is_run_failed_and_an_icm_page_is_run_unknown() {
+        let page = include_str!("../../tests/fixtures/m8/classrun_500_screen_output.html");
+        let failed = reply(500, page);
+
+        assert_eq!(failed.outcome.stderr, RUN_FAILED);
+        assert_eq!(failed.verdict, Some(Verdict::Failed));
+
+        let icm = reply(
+            500,
+            "<html><title>Application Server Error</title><p>ICM: the work process did not answer.</p></html>",
+        );
+
+        assert!(icm.outcome.stderr.starts_with(RUN_UNKNOWN));
+        assert_eq!(icm.verdict, Some(Verdict::Unknown));
+    }
+
+    #[test]
     fn an_rfc_runtime_failure_is_run_failed() {
         let failure = TransportError::Protocol("call failed (RFC code 3)".to_owned()).after_send();
         let result = reply_result(Err(failure), "ZCL_A", "DEV");
@@ -903,5 +940,26 @@ mod tests {
             reply_result(Err(other), "ZCL_A", "DEV").verdict,
             Some(Verdict::Unknown)
         );
+    }
+
+    #[test]
+    fn an_rfc_closed_with_a_known_dump_text_is_run_failed_and_any_other_is_run_unknown() {
+        use crate::transport::rfc::{RfcPhase, classify_rfc_error};
+
+        let screen = classify_rfc_error(
+            RfcPhase::Invoke,
+            6,
+            "Screen output without connection to user.",
+        );
+        let result = reply_result(Err(screen), "ZREPORT", "DEV");
+
+        assert_eq!(result.outcome.stderr, RUN_FAILED);
+        assert_eq!(result.verdict, Some(Verdict::Failed));
+
+        let lost = classify_rfc_error(RfcPhase::Invoke, 6, "connection closed");
+        let result = reply_result(Err(lost), "ZREPORT", "DEV");
+
+        assert!(result.outcome.stderr.starts_with(RUN_UNKNOWN));
+        assert_eq!(result.verdict, Some(Verdict::Unknown));
     }
 }

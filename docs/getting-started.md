@@ -788,7 +788,7 @@ for every runner operation.
 | :--- | :---: | :--- |
 | output printed (class: the reply as is; report and snippet: `RAN`) | 0 | the code ran to its end; ABAPReach does not roll back (as SA38) |
 | `RUN_FAILED: exception <class>: <text>` | 1 | a catchable exception reached the runner (snippet); ABAPReach rolled back the work since the last `COMMIT WORK` |
-| `RUN_FAILED: runtime error; see ST22 (dumps)` | 1 | the server answered an ABAP runtime error (HTTP) or the call failed with a runtime failure (RFC); rolled back by the server to its last commit |
+| `RUN_FAILED: runtime error; see ST22 (dumps)` | 1 | the server answered an ABAP runtime error (HTTP 500 with a dump page) or the call failed with a runtime failure (RFC); also a report that sends a screen (dump `DYNPRO_SEND_IN_BACKGROUND`) when the reply carries the English short text `Screen output without connection to user`; rolled back by the server to its last commit |
 | `RUN_UNKNOWN: the reply was lost; the code may have run` | 1 | any other HTTP 5xx (an ICM timeout can answer while the work process still runs), a timeout, a lost connection, or a reply without a status line; look at the effects in SAP before running again |
 | `SNIPPET_ERROR: line <n>: <text>` | 2 | the snippet does not compile; nothing ran |
 | `REJECTED: ...` | 1 | a check or the server refused; the code did not run |
@@ -816,7 +816,9 @@ screen of report <REPORT> cannot be read`, and a run without parameters is not a
 still need the live probe: the interface of
 `CL_SALV_BS_RUNTIME_INFO` and which grid is captured when a report shows more than one, and the
 wording of the HTTP 500 body that marks a runtime error (`RUN_FAILED`), which is matched by the text
-`runtime error`, `short dump` or `ST22`; any other 500 counts as `RUN_UNKNOWN`.
+`runtime error`, `short dump` or `ST22`, or by the short text of a known dump (a report that sends a
+screen: `Screen output without connection to user`, seen live on 7.50 with an English logon language);
+any other 500 counts as `RUN_UNKNOWN`.
 
 ## Tested environment
 
