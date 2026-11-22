@@ -807,19 +807,19 @@ leaves at once (exit 130); the code keeps running on the server, and for a repor
 `RUNNER_LEFTOVER` lines on the stderr name the runner class and the commands that delete it (it also
 shows in `doctor`).
 
-This build of `run` is covered by offline tests only. The live checks on the 7.50, 7.40 and 758
-systems, over each path, belong to the 0.17.0 release checks. The selection screen is read through
+The 0.17.0 release checks ran `run` live on the 7.50, 7.40 and 758 systems (see
+[Tested environment](#tested-environment)); the paths without a live test are listed there. The selection
+screen is read through
 `RS_REPORTSELECTIONS_INFO` (table `FIELD_INFO`; interface verified on 7.40, 7.50 and 758). A report
 without a selection screen gives `REJECTED: parameter <NAME> is not on the selection screen of
 report <REPORT>` for every `--param`; a screen that cannot be read gives `REJECTED: the selection
-screen of report <REPORT> cannot be read`, and a run without parameters is not affected. Two things
-still need the live probe: the interface of
-`CL_SALV_BS_RUNTIME_INFO` and which grid is captured when a report shows more than one, and the
-wording of the HTTP 500 body that marks a runtime error (`RUN_FAILED`), which is matched by the text
-`runtime error`, `short dump` or `ST22`, or by the short text of a known dump (a report that sends a
-screen: `Screen output without connection to user` on 7.50, or on the 758 ADT page `Sending of dynpro <program>
-<screen> not possible: No window system type specified`; seen live with an English logon language);
-any other 500 counts as `RUN_UNKNOWN`.
+screen of report <REPORT> cannot be read`, and a run without parameters is not affected. The live
+cases do not cover which grid is captured when a report shows more than one. An HTTP 500 body marks a
+runtime error (`RUN_FAILED`) when it matches the text `runtime error`, `short dump` or `ST22`, or the
+short text of a known dump (a report that sends a screen: `Screen output without connection to user`
+on the 7.50 system, or on the ADT page of the 758 system `Sending of dynpro <program> <screen> not
+possible: No window system type specified`; seen live with an English logon language); any other
+500 counts as `RUN_UNKNOWN`.
 
 ## Tested environment
 
@@ -841,8 +841,17 @@ rerun for 0.16.0. The two systems:
 
 The 0.16.1 release checks also used a third system, an S/4HANA system with SAP_BASIS 758 (the 758 system),
 on `v0.16.1-rc.2` and `v0.16.1-rc.4` (the release binaries). On 0.16.1 it was covered by the smoke set and
-group m7 only; the full matrix on it is planned after this release. The results are in
+group m7 only. The results are in
 [Behavior differences: 0.16.1 release checks](behavior-differences.md#0161-release-checks-0161-rc2-0161-rc4).
+
+The 0.17.0 release checks ran on `v0.17.0-rc.1` to `v0.17.0-rc.4` (the release binaries are the rc.4
+binaries), on the same three systems. The full matrix runs once per release on each system; a later
+release candidate reruns only the cells its change touches. This is the first full matrix on the 758
+system. The final runs have no FAIL cell, and no test object was left on any system. The 0.17 features
+(`run`, `activate`, `aunit`, `inactive`) also ran as live cases on all three systems (rc.3 and rc.4 binaries).
+Windows x64 and Linux arm64 had no live run in 0.17.0 (as in 0.16.1); CI builds and checks their release
+files. The runs are listed per system in
+[Behavior differences: 0.17.0 release checks](behavior-differences.md#0170-release-checks-0170-rc1-to-rc4).
 
 Each cell has one of three results:
 
@@ -885,6 +894,35 @@ module is not installed there.
 The MCP cells drive the server with a scripted client that reproduces each client's advertised
 capabilities. The real clients were tested separately (see
 [MCP server: Support by client](mcp.md#support-by-client)).
+
+### Results of the 0.17.0 release checks
+
+Each row is one full-matrix run (or a rerun of the cells that failed on rc.1). Every final run has 0 FAIL;
+the 9 and 2 FAIL cells of the 758 rc.1 runs are explained below.
+
+| System | Run | PASS | UNSUPPORTED |
+| :--- | :--- | ---: | ---: |
+| SAP 7.50 system | rc.2, macOS arm64, three paths | 711 | 68 |
+| SAP 7.40 system | rc.2, macOS arm64, three paths | 491 | 288 |
+| SAP 758 system | rc.1, macOS arm64, ADT HTTP | 197 | 61 |
+| SAP 758 system | rc.1, macOS arm64, RFC SAP GUI library | 220 | 44 |
+| SAP 758 system | rc.2, Linux x64, RFC SDK | 171 | 35 |
+| SAP 758 system | rc.2, macOS arm64, m6-runner, ADT HTTP | 11 | 0 |
+| SAP 758 system | rc.2, macOS arm64, m6-runner, RFC SAP GUI library | 12 | 0 |
+| SAP 758 system | rc.2, macOS arm64, m6-ddic and m6-delete, ADT HTTP | 67 | 5 |
+
+The 758 rc.1 runs had 9 FAIL cells on ADT HTTP and 2 on the RFC SAP GUI library: 7 harness faults and 4
+Ctrl-C timing cells. The cells are explained in
+[Behavior differences](behavior-differences.md#0170-release-checks-0170-rc1-to-rc4) and the rerun on rc.2
+has no FAIL. The live cases
+of the 0.17 features: 66 and 70 PASS on the 7.50 system, 53 and 64 PASS on the 7.40 system, 61 and 70
+PASS on the 758 system (one Replay FAIL there is an outdated script expectation), on the rc.3 (Replay)
+and rc.4 (Extra) binaries.
+
+Not run live in 0.17.0 (offline tests cover them): Ctrl-C twice during `run`, the server-side `BASE`
+check, `RUN_UNKNOWN` from an ICM 5xx, the output budget with one-character lines and non-ASCII text, an
+expired payload re-posted, a snippet with `ENDMETHOD` or `INCLUDE` in a colon chain, a non-Z/Y name
+without `--allow-standard`, a plan mismatch, the MCP policy matrix and the selection-variant cell.
 
 ### Unsupported cells
 
@@ -948,7 +986,9 @@ reply drop, so it does not change the results in the table above.
 
 `hold-post:<ms>` (same bounds) pauses the runner right after the classrun POST has returned, before
 its outcome is mapped, and prints `FAULT: classrun POST done, pausing N ms` on stderr; it exists
-only for the live Ctrl-C cells and, like `hold-lock`, drops no reply.
+only for the live Ctrl-C cells and, like `hold-lock`, drops no reply. As with `hold-lock`, the pause ends
+early when Ctrl-C arrives. There is no pause when the POST session cannot be opened (the run ends in
+`REJECTED: runner POST failed: cannot open the POST session` before any POST).
 
 ### Carve-outs
 
