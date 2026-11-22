@@ -99,10 +99,12 @@ Version metadata is `0.17.0`. This entry is finalized before the last release ca
 
 ### Fixed
 - `run PROG` of a report that sends a screen (dump `DYNPRO_SEND_IN_BACKGROUND`) is reported
-  `RUN_FAILED: runtime error; see ST22 (dumps)` when the reply carries the English short text
-  `Screen output without connection to user`, on ADT HTTP and on RFC; it was `RUN_UNKNOWN`. Seen
-  live on SAP_BASIS 750. On 740 the RFC connection closes without a message, and the run stays
-  `RUN_UNKNOWN`, as does any other HTTP 500 and any other `RFC_CLOSED`.
+  `RUN_FAILED: runtime error; see ST22 (dumps)` when the reply carries the English dump text, on
+  ADT HTTP and on RFC; it was `RUN_UNKNOWN`. Seen live: on 750 both backends answer `Screen output
+  without connection to user`; on 758 RFC answers the same and the ADT HTTP page says `Sending of
+  dynpro <program> <screen> not possible: No window system type specified`. On 740 the RFC
+  connection closes without a message, and the run stays `RUN_UNKNOWN`, as does any other HTTP 500
+  and any other `RFC_CLOSED`.
 - `delete FUGR` on SAP_BASIS 758: the member listing has an expandable `FUGR/FF` category node
   without a name, which stopped the delete with `member listing: invalid function module name ""`.
   The category node is skipped; an unnamed module node is still an error.

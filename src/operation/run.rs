@@ -909,6 +909,20 @@ mod tests {
     }
 
     #[test]
+    fn the_758_dynpro_send_page_is_a_runtime_error_body_and_run_failed() {
+        let page = include_str!("../../tests/fixtures/m8/classrun_500_dynpro_send_758.html");
+
+        assert!(is_runtime_error_body(page.as_bytes()));
+
+        let failed = reply(500, page);
+
+        assert_eq!(failed.outcome.stderr, RUN_FAILED);
+        assert_eq!(failed.verdict, Some(Verdict::Failed));
+        // The program-specific start alone is not enough.
+        assert!(!is_runtime_error_body(b"Sending of dynpro ZREPORT 1001"));
+    }
+
+    #[test]
     fn the_screen_output_dump_page_is_run_failed_and_an_icm_page_is_run_unknown() {
         let page = include_str!("../../tests/fixtures/m8/classrun_500_screen_output.html");
         let failed = reply(500, page);

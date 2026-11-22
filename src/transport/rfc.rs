@@ -850,7 +850,13 @@ pub fn classify_rfc_error(phase: RfcPhase, code: i32, message: &str) -> Transpor
 ///
 /// - `screen output without connection to user`: `DYNPRO_SEND_IN_BACKGROUND`, a report that sends a
 ///   screen (`CALL SELECTION-SCREEN`) in the work process of the temporary runner.
-pub const KNOWN_DUMP_SHORT_TEXTS: &[&str] = &["screen output without connection to user"];
+/// - `not possible: no window system type specified`: the same dump on the ADT HTTP page of
+///   SAP_BASIS 758, whose text is `Sending of dynpro <program> <screen> not possible: No window
+///   system type specified`; only the fixed end of it is matched.
+pub const KNOWN_DUMP_SHORT_TEXTS: &[&str] = &[
+    "screen output without connection to user",
+    "not possible: no window system type specified",
+];
 
 /// Whether `text` contains one of the [`KNOWN_DUMP_SHORT_TEXTS`], ignoring case.
 pub fn mentions_known_dump_text(text: &str) -> bool {
