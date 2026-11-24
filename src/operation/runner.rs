@@ -1036,6 +1036,9 @@ impl Cycle<'_> {
             self.cancel
                 .hold_run_leaving(wait, leftover_lines(self.name(), self.input.conn, false))
         });
+        // Test-only: tells a live Ctrl-C cell that the POST is about to be in flight.
+        #[cfg(feature = "fault-injection")]
+        crate::fault::mark_post();
         let limit = self.extras.post_limit;
         let result = match opened {
             Ok(mut session) => {

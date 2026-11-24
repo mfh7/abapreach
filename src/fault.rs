@@ -300,6 +300,22 @@ pub fn hold_lock(cancel: &crate::operation::deploy::CancelFlag) {
     pause(ms, cancel);
 }
 
+/// The marker line [`mark_post`] prints, or `None` when no `hold-post` fault is active.
+fn post_marker() -> Option<&'static str> {
+    Fault::from_env()
+        .iter()
+        .any(|fault| matches!(fault, Fault::HoldPost(_)))
+        .then_some("FAULT: classrun POST sending")
+}
+
+/// Runs right before the classrun POST is sent when `hold-post:<ms>` is set: prints a marker on
+/// stderr so a live Ctrl-C cell knows the POST is about to be in flight.
+pub fn mark_post() {
+    if let Some(marker) = post_marker() {
+        eprintln!("{marker}");
+    }
+}
+
 /// Runs right after the classrun POST has returned when `hold-post:<ms>` is set: prints a marker
 /// on stderr, then waits until the time is up or Ctrl-C set the flag. A Ctrl-C that lands in this
 /// pause is an interrupt after the POST, whatever the speed of the system.
@@ -328,6 +344,39 @@ mod tests {
     use super::{Fault, pause, scoped, skip_activate};
     use crate::operation::deploy::CancelFlag;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_post_marker_shows_only_with_a_hold_post_fault() {
+        {
+            let _scope = scoped(vec![Fault::HoldLock(10)]);
+
+            assert_eq!(super::post_marker(), None);
+        }
+        {
+            let _scope = scoped(Vec::new());
+
+            assert_eq!(super::post_marker(), None);
+        }
+
+        let _scope = scoped(vec![Fault::HoldPost(10)]);
+
+        assert_eq!(super::post_marker(), Some("FAULT: classrun POST sending"));
+    }
+
+    #[test]
+    fn hold_post_waits_its_time_while_the_cancel_flag_is_unset() {
+        let faults = Fault::from_lookup(Some("hold-post:150")).unwrap();
+        let _scope = scoped(faults);
+        let cancel = CancelFlag::new();
+        let started = Instant::now();
+
+        super::hold_post(&cancel);
+
+        let elapsed = started.elapsed();
+
+        assert!(elapsed >= Duration::from_millis(150), "waited {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(5), "waited {elapsed:?}");
+    }
 
     #[test]
     fn hold_lock_combines_with_the_other_faults() {
