@@ -524,6 +524,81 @@ path; see [Deploy safety: Delete](deploy-safety.md#delete).
 
 To use ABAPReach from an AI assistant, see [MCP server](mcp.md).
 
+## Inactive objects, activation and ABAP Unit
+
+`inactive` lists the inactive objects of the logon user, one line `<ADT type> <name> <user>` each
+(`PROG/P`, `PROG/I`, `CLAS/OC`, `INTF/OI`, `FUGR/F`, `FUGR/FF`, DDIC types, and so on). An include also
+names its main program. Methods and other parts of a class are not listed, only the class. A reply that
+names no user (the flat 7.40 feed) prints `?` as the user; the person responsible for the object that
+feed may carry is never read as the owner of the inactive version. An entry that marks an inactive
+deletion ends with ` deleted`.
+
+```text
+abapreach inactive --conn A4H_001
+abapreach inactive --all --conn A4H_001
+```
+
+`--all` asks the system for every user's entries (`?USERNAME=*`). A release that does not offer the
+filter answers with an error and the command says so.
+
+`activate` activates inactive objects by the tokens `inactive` prints. It runs one `POST
+/sap/bc/adt/activation` per object, then reads the inactive list again: an object counts as active only
+when it is no longer listed. The exit code is 0 only when every object is active.
+
+```text
+abapreach activate --simulate PROG/P:ZEXAMPLE CLAS/OC:ZCL_EXAMPLE --conn A4H_001
+abapreach activate PROG/P:ZEXAMPLE CLAS/OC:ZCL_EXAMPLE --conn A4H_001
+```
+
+- Accepted types: `PROG/P`, `PROG/I` (activated under its main program), `CLAS/OC`, `INTF/OI`, `FUGR/FF`.
+  `FUGR/F` and every other type stop with the reason; DDIC objects go through the DDIC deploy.
+- Only Z and Y objects of the logon user. The user comes from the inactive list; when the list names none
+  (7.40), the author of the inactive version in the version feed decides. An object that is not listed,
+  belongs to someone else or has an unknown owner rejects the whole call before any activation. An
+  entry marked `deleted` is refused with the reason: activating it would complete the deletion.
+- ABAPReach reads `T000` first and refuses a productive client (`CCCATEGORY P`). A client that `T000`
+  does not list or that cannot be read is refused too.
+- `--simulate` runs every check above and prints `SIMULATED_OK <token> user <user>` per object.
+- A transportable class answers the first request with a worklist and activates nothing; ABAPReach sends
+  the second request with exactly that list, as the deploy does, and only when the list stays inside the
+  class.
+
+`aunit` runs ABAP Unit with harmless tests of every duration (no coverage):
+
+```text
+abapreach aunit CLAS ZCL_EXAMPLE --conn A4H_001
+abapreach aunit --package ZEXAMPLE --conn A4H_001
+abapreach aunit --tr A4HK900001 --conn A4H_001
+```
+
+Each alert prints `<kind> <level> <prog> <class>-><method>: <text>`, then `TESTS: <n> methods, <m> alerts`
+and `AUNIT: ACTIVE` (no alert) or `AUNIT: REJECTED`. The exit code is 0 only without alerts. A
+`--package` or `--tr` batch prints a block `== <TYPE> <NAME> ==` per object, `SUMMARY: <n> OK, <m> FAILED`
+and a `FAILED <TYPE> <NAME>: <reason>` line each; an error on one object counts as failed and the batch
+goes on. A batch without objects exits 1: an empty gate is not a pass.
+
+- Test code runs on the SAP system, so `aunit` counts as running code: the policy `run` (`off`, `plan`,
+  default `plan`, or `direct`) must not be `off`, and a productive client is refused. `aunit` needs no
+  plan file under `plan` or `direct`: it runs the test classes of the named objects only.
+- Types `PROG`, `CLAS` and `FUGR`; plain Z and Y names. An object that does not exist is rejected.
+- `--package` takes the programs, classes and function groups of the package (`TADIR`, not deleted);
+  program includes are skipped. `--tr` takes the request and its tasks: `R3TR` programs, classes and
+  function groups, and the parts of a class (`LIMU METH`, `CPUB`, `CPRO`, `CPRI`, `CLSD`, `CINC`,
+  `CDEF`, `CIMP`), which stand for the class. Other `LIMU` entries (`REPS`, `FUNC`) are not mapped and
+  are counted in a `W:` line. A batch holds at most 100 objects on the CLI. The MCP tool `abap_aunit`
+  refuses a batch of more than 60 objects: its confirmation form lists at most 60, and a run is
+  never confirmed from a cut list.
+
+`inactive`, `activate` and `aunit` take `--backend adt|rfc` like `deploy`. Without it they start on ADT
+HTTP, and when the first reply shows a session that keeps no state (a 7.40 system), they stop before
+anything is written and run again over RFC, with the `NOTE: ADT HTTP session is stateless on this
+release` and `NOTE: ADT HTTP failed before anything was written; falling back to RFC SADT` lines. A
+command that ran over RFC prints `backend: rfc` and `reason: <why>` ahead of its output. A stateless
+session may answer 404 for an object that exists, so with `--backend adt` (or without an RFC route) a
+404 stops with the reason instead of `does not exist`. `run PROG` and `run SNIPPET` choose the same
+way; `run CLAS` needs no stateful session and stays on ADT HTTP. The plan file of a run records the
+backend its simulate used, and the run keeps to it.
+
 ## DDIC objects and transaction codes
 
 Data elements (`DTEL`), domains (`DOMA`), tables (`TABL`: transparent tables and structures), table
@@ -545,6 +620,207 @@ authorizations are in [Deploy safety: DDIC and TRAN](deploy-safety.md#ddic-and-t
 type takes on the 7.50 and 7.40 systems is in
 [Behavior differences: Access path comparison](behavior-differences.md#access-path-comparison-0160-rc6).
 
+## Run a class, a report or a snippet
+
+`run` executes ABAP code on the SAP system with the authorizations of the logon user and prints its
+output. It is **not a dry run**: whatever the code writes to the database or elsewhere stays
+written, exactly as when you start it in SA38 or Eclipse. `--simulate` reads and checks and never
+executes anything.
+
+| Command | What runs | Where it works |
+| :--- | :--- | :--- |
+| `run CLAS <class>` | an existing class that implements `IF_OO_ADT_CLASSRUN` | any system where the class exists |
+| `run PROG <report>` | an active executable report (type 1), with parameters and a variant | development systems only |
+| `run SNIPPET <file>` | the ABAP statements of the file | development systems only |
+
+`run PROG` and `run SNIPPET` create a temporary runner class in `$TMP`, run it once and delete it
+(the same cycle as the DDIC types), so the system and client must allow repository changes and the
+user needs developer authorization for that class. On a quality or production system they stop
+with the reason before any request that changes something. A productive client (`T000-CCCATEGORY =
+P`) refuses every `run` mode.
+
+### Run a class
+
+```sh
+abapreach run CLAS ZCL_EXAMPLE --simulate --plan run.plan --conn A4H_001
+abapreach run CLAS ZCL_EXAMPLE --plan run.plan --conn A4H_001
+```
+
+The simulate checks that the class exists, is active and implements `IF_OO_ADT_CLASSRUN` (the class
+itself or a superclass), reads its package, author and active source hash, and checks that the
+client is not productive (`T000-CCCATEGORY` is not `P`; a client whose role cannot be read is
+refused too). The plan file holds the connection, client, backend, class name, source hash and
+package. The run executes only when its arguments match the plan file (a mismatch is a `STOP`,
+exit 2, before any connection) and the live facts still match (otherwise `REJECTED: plan changed
+since simulate (source hash); simulate again`, exit 1). A plan pins the backend it was written on.
+The class reply is printed as the server returns it.
+
+The plan binds the **active main source** of the class (`source/main`) and its package, not the local
+class includes (`CCDEF`, `CCIMP`, `CCMAC`) that the main source can call. A local include that changes
+between the simulate and the run does not change the plan, so the run still goes ahead. Simulate
+again after any change to the class, and read the includes before you trust an old plan file. (`run
+PROG` has the same limit: its plan covers the main program, not its includes.)
+
+### Run a report
+
+```sh
+abapreach run PROG ZREPORT --param P_DATE=20261101 --param S_BUKRS=1000 --variant V_DAILY \
+  --simulate --plan run.plan --conn A4H_001
+abapreach run PROG ZREPORT --param P_DATE=20261101 --param S_BUKRS=1000 --variant V_DAILY \
+  --plan run.plan --conn A4H_001
+```
+
+The report runs inside the runner class with `SUBMIT ... EXPORTING LIST TO MEMORY AND RETURN`; its
+list is read from memory and printed as text lines. The class contains two fixed `SUBMIT` shapes
+(with and without a variant) and no value of yours: the report name, the parameters and the
+variant travel in the encoded payload.
+
+- `--param NAME=VALUE` (repeatable) sets a parameter or the single value of a select-option, by its
+  selection-screen name (at most 8 characters of `A-Z 0-9 _`). A value has at most 45 characters
+  (the length of `RSPARAMS-LOW`) and no control character, and is in the internal format of the
+  field (`20261101` for a date). A select-option takes one `I EQ` row. A name that is not on the
+  selection screen is `REJECTED: parameter <NAME> is not on the selection screen of report
+  <REPORT>` and the report does not run. A parameter overrides the same field of a variant.
+- `--variant <NAME>` uses an existing selection variant of the report (`REJECTED` when it does not
+  exist). ABAPReach cannot create a variant; create it in SE38 or SA38.
+- The simulate reads the report: it exists, is active, has `TRDIR-SUBC = 1` (other types such as
+  module pools are refused), its package, author and active source hash. The plan binds the report
+  name, its source hash, `SUBC`, package, every `--param`, `--variant`, `--alv` and `--alv-columns`.
+- Right before `SUBMIT` the runner reads the active source of the report again and compares its
+  hash with the one of the simulate. A difference is `REJECTED: report changed since the simulate`
+  and the report does not run. The hash covers the main program, not its includes.
+- The runner checks `AUTHORITY-CHECK OBJECT 'S_PROGRAM'` for the report's authorization group with
+  action `SUBMIT`, as SA38 does.
+- Only `Z` and `Y` report names run; `--allow-standard` allows a standard report. A namespaced name
+  is accepted as a report name.
+
+**ALV output.** Most reports show an ALV grid, which a background `SUBMIT` cannot display. By
+default the runner captures the grid (`CL_SALV_BS_RUNTIME_INFO`: data and field catalog) instead:
+the output is one header line with the column texts and one line per row, tab-separated, then the
+list text if the report also wrote one.
+
+- Only the columns the field catalog shows are printed (not the technical ones and not the ones
+  marked `NO_OUT`), in field-catalog order. `--alv-columns all` (CLI only, never MCP) prints every
+  column of the table.
+- An amount is written with the currency of its reference field, a quantity with its unit, so the
+  decimals are the ones SA38 shows (no decimals for `JPY`). The notation of the number (decimal
+  separator) follows the user settings of the logon user, and thousands separators are left out. A
+  value without a reference is printed in its internal form, with a point as decimal separator.
+  A tab or a line break in a value becomes a blank.
+- `--alv off` keeps the plain list behaviour. A report that shows no grid is a normal run with the
+  list only.
+- Limits: one grid per run is captured (when a report shows two, only one of them; the live check
+  decides which); hierarchical, tree and docking-container ALVs are not captured; a report that
+  tests `SY-BATCH` or needs an interaction with the grid may behave differently.
+
+**Other limits.** A report that sends a screen or a popup, or calls the front end, ends in an ABAP
+runtime error (for example `DYNPRO_SEND_IN_BACKGROUND`): that cannot be detected before the run, and
+it is `RUN_FAILED` below. `WRITE` output of a report is its list; classic output of the runner itself
+is not used.
+
+### Run a snippet
+
+```sh
+abapreach run SNIPPET snippet.abap --simulate --plan run.plan --conn A4H_001
+abapreach run SNIPPET snippet.abap --plan run.plan --conn A4H_001
+```
+
+The file holds ABAP statements. They become the body of its own method `run_snippet` in the runner
+class, so one snippet compiles on every release:
+
+```abap
+DATA(lv_count) = lines( VALUE string_table( ( `a` ) ( `b` ) ) ).
+print( |count: { lv_count }| ).
+```
+
+- The only output is `print( iv_text )`, which takes a string and prints one line. Do not use `out`:
+  its type differs between releases. A classic `WRITE` is not captured.
+- Every statement ends with a period; the snippet is the body of one method. Refused before
+  anything is sent, statement by statement (colon chains and several statements on one line
+  included): `METHOD`, `ENDMETHOD`, `METHODS`, `CLASS`, `ENDCLASS`, `INTERFACE`, `ENDINTERFACE`,
+  `FORM`, `ENDFORM`, `DEFINE`, `END-OF-DEFINITION` and `INCLUDE`. A line has at most 255
+  characters and no control character (a tab counts). A text literal, a string template or a
+  statement left open at the end is refused.
+- The simulate prints the whole snippet and its plan binds the snippet text by its hash. A changed
+  file is `STOP: plan does not match the arguments (snippet)`.
+- A snippet that does not compile is `SNIPPET_ERROR: line <n>: <text>` (exit 2), with `n` the line
+  of your file. Nothing ran and the runner class is removed. It is not a bug of ABAPReach.
+- The snippet is your own code and runs inside the runner, so it can also call the methods of the
+  runner class or write protocol lines of the run. ABAPReach does not defend against that: the code
+  is yours, and it is shown in full in the simulate and in the MCP confirmation.
+
+### Rules before anything is sent
+
+- The name rule: only `Z` and `Y` names run; `--allow-standard` allows a standard class or report.
+  A namespaced class name is refused: its classrun path is not verified. A snippet has no name.
+- A temporary runner class is never run: a name that is the connection's `runner_prefix` or the
+  default `YCL_ABAPREACH_RUN_` followed by exactly eight characters of `0-9` and `A-Z` (the shape
+  ABAPReach generates) is a `STOP` (`a temporary runner class is not run; delete it (doctor)`). A
+  class that only starts with the prefix, such as `YCL_ABAPREACH_RUN_HELPER`, is an ordinary class.
+  A leftover of a crashed operation carries its own payload; remove it with the commands `doctor`
+  prints. The `runner_prefix` of a server entry starts with `Y` or `Z`, has at most 22 characters
+  of `A-Z`, `0-9` and `_`, and defaults to `YCL_ABAPREACH_RUN_`; a runner class is that prefix plus
+  the eight generated characters (at most 30 characters).
+- The connection policy `run` decides how: `plan` (the default) needs the two steps above;
+  `direct` lets the CLI run without `--plan`; `off` refuses `run` (and `aunit`) on the CLI and in
+  MCP. See [MCP server: `mcp_run`](mcp.md#mcp_run) for the MCP opt-in.
+- `--timeout <seconds>` (default 600, at most 3600) bounds the run request over ADT HTTP. The
+  connect timeout stays at 45 s. The RFC library has no call timeout and no cancel, so `--timeout`
+  on RFC is `STOP: --timeout is not supported over RFC` and an RFC run waits until SAP answers,
+  bounded by the dialog work process limit. The ICM processing timeout or the dialog work process
+  limit of the server may end a run first.
+- `--max-output <bytes>` (PROG and SNIPPET; default 6 MiB, at most 6 MiB) limits the output. The
+  runner counts the bytes it writes (the marker, the nonce, the hex text and the framing of every
+  line) and stops before the limit with `W: output cut after <n> lines`; the outcome stays `RAN`.
+  The limit keeps the reply under the 8 MiB the parser accepts. MCP uses 1 MiB.
+- The payload carries the logon user and an expiry time (UTC): the generation time plus `--timeout`
+  plus 20 minutes (over RFC: plus 75 minutes). The runner class refuses to run when `SY-UNAME`
+  differs or the time has passed (`REJECTED: run payload expired or foreign user`). A runner class
+  that a second Ctrl-C left behind therefore cannot be started again from Eclipse.
+
+### Results
+
+The run request is sent once, from a new session, and never repeated. The runner class is deleted
+after every outcome (and its `TADIR` entry proven gone); a class that stays is `RUNNER_LEFTOVER` as
+for every runner operation.
+
+| Result | Exit | Meaning |
+| :--- | :---: | :--- |
+| output printed (class: the reply as is; report and snippet: `RAN`) | 0 | the code ran to its end; ABAPReach does not roll back (as SA38) |
+| `RUN_FAILED: exception <class>: <text>` | 1 | a catchable exception reached the runner (snippet); ABAPReach rolled back the work since the last `COMMIT WORK` |
+| `RUN_FAILED: runtime error; see ST22 (dumps)` | 1 | the server answered an ABAP runtime error (HTTP 500 with a dump page) or the call failed with a runtime failure (RFC); also a report that sends a screen (dump `DYNPRO_SEND_IN_BACKGROUND`) when the reply carries the English short text `Screen output without connection to user`; rolled back by the server to its last commit |
+| `RUN_UNKNOWN: the reply was lost; the code may have run` | 1 | any other HTTP 5xx (an ICM timeout can answer while the work process still runs), a timeout, a lost connection, or a reply without a status line; look at the effects in SAP before running again |
+| `SNIPPET_ERROR: line <n>: <text>` | 2 | the snippet does not compile; nothing ran |
+| `REJECTED: ...` | 1 | a check or the server refused; the code did not run |
+| `STOP: ...` | 2 | input, configuration or policy; or the system has no classrun (HTTP 404) |
+
+No outcome of a report or snippet is reconciled afterwards (there is no object state to compare);
+the cleanup and its proof run after every outcome. A `W:` line on the stderr carries the cut note,
+messages of the runner and the runner name.
+
+Ctrl-C while the run is in flight: the first one prints `I: run in progress on the server; waiting
+for the reply (Ctrl-C again to leave)` for a class, and `I: run in progress on the server; waiting
+for the reply to clean up (Ctrl-C again to leave the runner class behind)` for a report or a
+snippet, and waits for the reply, which is printed; the exit code is then 130 when the run
+succeeded, and the exit of the outcome otherwise (1 for `RUN_FAILED` and `RUN_UNKNOWN`). A second Ctrl-C
+leaves at once (exit 130); the code keeps running on the server, and for a report or snippet the
+`RUNNER_LEFTOVER` lines on the stderr name the runner class and the commands that delete it (it also
+shows in `doctor`).
+
+The 0.17.0 release checks ran `run` live on the 7.50, 7.40 and 758 systems (see
+[Tested environment](#tested-environment)); the paths without a live test are listed there. The selection
+screen is read through
+`RS_REPORTSELECTIONS_INFO` (table `FIELD_INFO`; interface verified on 7.40, 7.50 and 758). A report
+without a selection screen gives `REJECTED: parameter <NAME> is not on the selection screen of
+report <REPORT>` for every `--param`; a screen that cannot be read gives `REJECTED: the selection
+screen of report <REPORT> cannot be read`, and a run without parameters is not affected. The live
+cases do not cover which grid is captured when a report shows more than one. An HTTP 500 body marks a
+runtime error (`RUN_FAILED`) when it matches the text `runtime error`, `short dump` or `ST22`, or the
+short text of a known dump (a report that sends a screen: `Screen output without connection to user`
+on the 7.50 system, or on the ADT page of the 758 system `Sending of dynpro <program> <screen> not
+possible: No window system type specified`; seen live with an English logon language); any other
+500 counts as `RUN_UNKNOWN`.
+
 ## Tested environment
 
 The 0.16.0 release matrix ran on `v0.16.0-rc.6` (the release binaries of 0.16.0), with the release and
@@ -565,8 +841,17 @@ rerun for 0.16.0. The two systems:
 
 The 0.16.1 release checks also used a third system, an S/4HANA system with SAP_BASIS 758 (the 758 system),
 on `v0.16.1-rc.2` and `v0.16.1-rc.4` (the release binaries). On 0.16.1 it was covered by the smoke set and
-group m7 only; the full matrix on it is planned after this release. The results are in
+group m7 only. The results are in
 [Behavior differences: 0.16.1 release checks](behavior-differences.md#0161-release-checks-0161-rc2-0161-rc4).
+
+The 0.17.0 release checks ran on `v0.17.0-rc.1` to `v0.17.0-rc.4` (the release binaries are the rc.4
+binaries), on the same three systems. The full matrix runs once per release on each system; a later
+release candidate reruns only the cells its change touches. This is the first full matrix on the 758
+system. The final runs have no FAIL cell, and no test object was left on any system. The 0.17 features
+(`run`, `activate`, `aunit`, `inactive`) also ran as live cases on all three systems (rc.3 and rc.4 binaries).
+Windows x64 and Linux arm64 had no live run in 0.17.0 (as in 0.16.1); CI builds and checks their release
+files. The runs are listed per system in
+[Behavior differences: 0.17.0 release checks](behavior-differences.md#0170-release-checks-0170-rc1-to-rc4).
 
 Each cell has one of three results:
 
@@ -609,6 +894,35 @@ module is not installed there.
 The MCP cells drive the server with a scripted client that reproduces each client's advertised
 capabilities. The real clients were tested separately (see
 [MCP server: Support by client](mcp.md#support-by-client)).
+
+### Results of the 0.17.0 release checks
+
+Each row is one full-matrix run (or a rerun of the cells that failed on rc.1). Every final run has 0 FAIL;
+the 9 and 2 FAIL cells of the 758 rc.1 runs are explained below.
+
+| System | Run | PASS | UNSUPPORTED |
+| :--- | :--- | ---: | ---: |
+| SAP 7.50 system | rc.2, macOS arm64, three paths | 711 | 68 |
+| SAP 7.40 system | rc.2, macOS arm64, three paths | 491 | 288 |
+| SAP 758 system | rc.1, macOS arm64, ADT HTTP | 197 | 61 |
+| SAP 758 system | rc.1, macOS arm64, RFC SAP GUI library | 220 | 44 |
+| SAP 758 system | rc.2, Linux x64, RFC SDK | 171 | 35 |
+| SAP 758 system | rc.2, macOS arm64, m6-runner, ADT HTTP | 11 | 0 |
+| SAP 758 system | rc.2, macOS arm64, m6-runner, RFC SAP GUI library | 12 | 0 |
+| SAP 758 system | rc.2, macOS arm64, m6-ddic and m6-delete, ADT HTTP | 67 | 5 |
+
+The 758 rc.1 runs had 9 FAIL cells on ADT HTTP and 2 on the RFC SAP GUI library: 7 harness faults and 4
+Ctrl-C timing cells. The cells are explained in
+[Behavior differences](behavior-differences.md#0170-release-checks-0170-rc1-to-rc4) and the rerun on rc.2
+has no FAIL. The live cases
+of the 0.17 features: 66 and 70 PASS on the 7.50 system, 53 and 64 PASS on the 7.40 system, 61 and 70
+PASS on the 758 system (one Replay FAIL there is an outdated script expectation), on the rc.3 (Replay)
+and rc.4 (Extra) binaries.
+
+Not run live in 0.17.0 (offline tests cover them): Ctrl-C twice during `run`, the server-side `BASE`
+check, `RUN_UNKNOWN` from an ICM 5xx, the output budget with one-character lines and non-ASCII text, an
+expired payload re-posted, a snippet with `ENDMETHOD` or `INCLUDE` in a colon chain, a non-Z/Y name
+without `--allow-standard`, a plan mismatch, the MCP policy matrix and the selection-variant cell.
 
 ### Unsupported cells
 
@@ -669,6 +983,12 @@ pauses the deploy after LOCK until the time is up or Ctrl-C arrives. The interru
 cells use it to test an interrupt while the lock is held, deterministically: the harness waits for
 the stderr marker `FAULT: lock held, pausing N ms` and then sends Ctrl-C. `hold-lock` is not a
 reply drop, so it does not change the results in the table above.
+
+`hold-post:<ms>` (same bounds) pauses the runner right after the classrun POST has returned, before
+its outcome is mapped, and prints `FAULT: classrun POST done, pausing N ms` on stderr; it exists
+only for the live Ctrl-C cells and, like `hold-lock`, drops no reply. As with `hold-lock`, the pause ends
+early when Ctrl-C arrives. There is no pause when the POST session cannot be opened (the run ends in
+`REJECTED: runner POST failed: cannot open the POST session` before any POST).
 
 ### Carve-outs
 

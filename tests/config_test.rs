@@ -2,6 +2,7 @@ use abapreach::config::{
     Config, ConfigPaths, Connection, LocalCredentialsPermission, RfcConfig, SaprouterSource,
     classify_credentials_mode, local_credentials_permission, scrub, tls_warning,
 };
+use abapreach::policy::{McpRun, McpRunSnippet};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -897,4 +898,217 @@ fn a_server_with_neither_backend_stops_at_resolve() {
     let error = config.resolve("dev_100", &env).unwrap_err();
 
     assert!(error.contains("neither"), "{error}");
+}
+
+#[test]
+fn the_run_keys_default_to_plan_with_mcp_closed() {
+    let policies = effective("", "").unwrap();
+
+    assert_eq!(policies.run.token(), "plan");
+    assert_eq!(policies.mcp_run.token(), "off");
+    assert_eq!(policies.mcp_run_snippet.token(), "off");
+    assert!(policies.mcp_run_allow.is_empty());
+}
+
+#[test]
+fn the_run_policies_display_as_their_tokens() {
+    assert_eq!(McpRun::Off.to_string(), "off");
+    assert_eq!(McpRun::Confirm.to_string(), "confirm");
+    assert_eq!(McpRunSnippet::Off.to_string(), "off");
+    assert_eq!(McpRunSnippet::On.to_string(), "on");
+}
+
+#[test]
+fn the_run_keys_read_their_values_and_a_server_overrides_single_keys() {
+    let top = r#","policies":{"run":"direct","mcp_run":"confirm","mcp_run_allow":[" clas:zcl_a ","PROG:ZCL_B",""],"mcp_run_snippet":"on"}"#;
+    let policies = effective(top, "").unwrap();
+
+    assert_eq!(policies.run.token(), "direct");
+    assert_eq!(policies.mcp_run.token(), "confirm");
+    assert_eq!(policies.mcp_run_snippet.token(), "on");
+    assert_eq!(policies.mcp_run_allow, ["CLAS:ZCL_A", "PROG:ZCL_B"]);
+    assert!(policies.is_run_allowed("prog", "zcl_b"));
+    assert!(!policies.is_run_allowed("PROG", "ZCL_B2"));
+    // An entry names one type: `CLAS:ZCL_A` does not allow the report or the group of that name.
+    assert!(policies.is_run_allowed("CLAS", "ZCL_A"));
+    assert!(!policies.is_run_allowed("PROG", "ZCL_A"));
+    assert!(!policies.is_run_allowed("FUGR", "ZCL_A"));
+
+    let overridden = effective(
+        top,
+        r#","policies":{"run":"off","mcp_run_allow":[],"mcp_run_snippet":"off"}"#,
+    )
+    .unwrap();
+
+    assert_eq!(overridden.run.token(), "off");
+    // Kept from the top level.
+    assert_eq!(overridden.mcp_run.token(), "confirm");
+    assert!(overridden.mcp_run_allow.is_empty());
+    assert_eq!(overridden.mcp_run_snippet.token(), "off");
+
+    let kept = effective(top, r#","policies":{"run":"plan"}"#).unwrap();
+
+    assert_eq!(kept.run.token(), "plan");
+    assert_eq!(kept.mcp_run_allow, ["CLAS:ZCL_A", "PROG:ZCL_B"]);
+}
+
+#[test]
+fn an_mcp_run_allow_entry_without_a_type_stops_the_load_with_the_form_to_write() {
+    for (bad, needle) in [
+        (
+            r#","policies":{"mcp_run_allow":["ZCL_A"]}"#,
+            "has no object type",
+        ),
+        (
+            r#","policies":{"mcp_run_allow":["CLAS:ZCL_A","ZREPORT"]}"#,
+            "ZREPORT",
+        ),
+        (
+            r#","policies":{"mcp_run_allow":["DTEL:ZX"]}"#,
+            "CLAS, PROG or FUGR",
+        ),
+        (r#","policies":{"mcp_run_allow":["CLAS:"]}"#, "has no name"),
+        (
+            r#","policies":{"mcp_run_allow":[":ZCL_A"]}"#,
+            "CLAS, PROG or FUGR",
+        ),
+    ] {
+        let top = effective(bad, "").unwrap_err();
+        let server = effective("", bad).unwrap_err();
+
+        assert!(top.contains("policies") && top.contains(needle), "{top}");
+        assert!(top.contains("CLAS:ZCL_TEST"), "{top}");
+        assert!(
+            server.contains("servers[0].policies") && server.contains(needle),
+            "{server}"
+        );
+    }
+
+    let good = effective(
+        r#","policies":{"mcp_run_allow":["fugr:zgroup","Prog:ZREP"]}"#,
+        "",
+    )
+    .unwrap();
+
+    assert_eq!(good.mcp_run_allow, ["FUGR:ZGROUP", "PROG:ZREP"]);
+}
+
+#[test]
+fn an_mcp_run_allow_name_that_is_a_pattern_or_malformed_stops_the_load() {
+    let long_class = format!("CLAS:Z{}", "A".repeat(30));
+    let long_report = format!("PROG:Z{}", "A".repeat(40));
+    let long_group = format!("FUGR:Z{}", "A".repeat(26));
+
+    for (entry, needle) in [
+        ("CLAS:ZCL_*", "pattern character"),
+        ("PROG:Z%", "pattern character"),
+        ("FUGR:ZG?", "pattern character"),
+        ("CLAS:Z*", "pattern character"),
+        ("CLAS:ZCL A", "blank"),
+        ("PROG:ZREP X", "blank"),
+        (long_class.as_str(), "at most 30"),
+        (long_report.as_str(), "at most 40"),
+        (long_group.as_str(), "at most 26"),
+        ("CLAS:1ZCL", "invalid name"),
+        ("CLAS:ZCL-A", "invalid name"),
+        ("PROG:ZREP.", "invalid name"),
+        ("CLAS:ZCL\u{c4}", "invalid name"),
+    ] {
+        let bad = format!(r#","policies":{{"mcp_run_allow":["{entry}"]}}"#);
+        let top = effective(&bad, "").unwrap_err();
+        let server = effective("", &bad).unwrap_err();
+
+        assert!(
+            top.contains("mcp_run_allow") && top.contains(needle),
+            "{entry}: {top}"
+        );
+        assert!(
+            server.contains("servers[0].policies") && server.contains(needle),
+            "{entry}: {server}"
+        );
+    }
+
+    // Exact names of the longest allowed length and a namespaced name load.
+    let good = effective(
+        &format!(
+            r#","policies":{{"mcp_run_allow":["clas:{}","PROG:/ns/zrep","FUGR:{}"]}}"#,
+            "A".repeat(30),
+            "G".repeat(26)
+        ),
+        "",
+    )
+    .unwrap();
+
+    assert_eq!(good.mcp_run_allow.len(), 3);
+    assert_eq!(good.mcp_run_allow[1], "PROG:/NS/ZREP");
+}
+
+#[test]
+fn an_unknown_run_value_stops_the_load_and_mcp_counts_direct_as_plan() {
+    for bad in [
+        r#","policies":{"run":"always"}"#,
+        r#","policies":{"mcp_run":"token"}"#,
+        r#","policies":{"mcp_run_snippet":"confirm"}"#,
+        r#","policies":{"mcp_run_allow":"ZCL_A"}"#,
+    ] {
+        assert!(effective(bad, "").is_err(), "{bad}");
+    }
+
+    let direct = effective(r#","policies":{"run":"direct"}"#, "").unwrap();
+
+    assert_eq!(direct.run.token(), "direct");
+    assert_eq!(direct.for_mcp().run.token(), "plan");
+}
+
+#[test]
+fn the_mcp_snapshot_offers_run_only_where_both_keys_allow_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let connections = directory.path().join("connections.json");
+    let env = BTreeMap::new();
+    let load = |text: &str| {
+        fs::write(&connections, text).unwrap();
+
+        Config::load(
+            ConfigPaths {
+                connections: connections.clone(),
+                local: directory.path().join("connections.local.json"),
+            },
+            &env,
+        )
+        .unwrap()
+    };
+    let server = |id: &str, policies: &str| {
+        format!(
+            r#"{{"systemId":"{id}","host":"example.com","port":443,"clients":["100"]{policies}}}"#
+        )
+    };
+
+    let closed = load(&format!(r#"{{"servers":[{}]}}"#, server("DEV", "")));
+
+    assert!(!closed.mcp_policies().run_offered());
+    assert!(closed.mcp_runnable().is_empty());
+
+    let confirm = r#","policies":{"mcp_run":"confirm"}"#;
+    let off = r#","policies":{"mcp_run":"confirm","run":"off"}"#;
+    let mixed = load(&format!(
+        r#"{{"servers":[{},{},{}]}}"#,
+        server("DEV", confirm),
+        server("QAS", off),
+        server("PRD", "")
+    ));
+
+    assert!(mixed.mcp_policies().run_offered());
+    assert_eq!(mixed.mcp_runnable(), ["DEV_100"]);
+
+    // A server that was absent at the start gets nothing.
+    let absent = mixed.mcp_policies();
+    let absent = absent.absent();
+
+    assert_eq!(absent.mcp_run.token(), "off");
+    assert!(absent.mcp_run_allow.is_empty());
+    assert_eq!(absent.mcp_run_snippet.token(), "off");
+
+    let only_off = load(&format!(r#"{{"servers":[{}]}}"#, server("QAS", off)));
+
+    assert!(!only_off.mcp_policies().run_offered());
 }

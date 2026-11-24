@@ -9,13 +9,14 @@ use crate::adt::{
     ActivationBody, ObjectRef, USAGE_REQUEST_XML, classify_activation, parse_object_refs,
 };
 use crate::operation::read_table::validate_preview_body;
-use crate::operation::runner::validate_runner_prefix;
+use crate::operation::runner::{RUNNER_CLASS_REFUSED, is_runner_class, validate_runner_prefix};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::cell::RefCell;
 
 const DISCOVERY: &str = "/sap/bc/adt/discovery";
 const INACTIVE_OBJECTS: &str = "/sap/bc/adt/activation/inactiveobjects";
+const TESTRUNS: &str = "/sap/bc/adt/abapunit/testruns";
 const CHECKRUNS: &str = "/sap/bc/adt/checkruns?reporters=abapCheckRun";
 const ACTIVATION: &str = "/sap/bc/adt/activation?method=activate&preauditRequested=";
 const SEARCH: &str = "/sap/bc/adt/repository/informationsystem/search";
@@ -50,6 +51,8 @@ const LOCK: &str = "_action=LOCK&accessMode=MODIFY";
 const UNLOCK: &str = "_action=UNLOCK&lockHandle=";
 /// TRKORR is a CHAR 20 field.
 const MAX_REQUEST: usize = 20;
+/// An SAP user name is at most 12 characters; the encoded form of one may be longer.
+const MAX_USER: usize = 36;
 /// The class includes that have a source of their own; `main` only exists as a version feed.
 const INCLUDES: [&str; 4] = ["definitions", "implementations", "macros", "testclasses"];
 
@@ -250,6 +253,27 @@ impl RunnerArm {
             return Err("not a runner class name".to_owned());
         }
 
+        Self::arm_checked(name)
+    }
+
+    /// Arms `name`, an existing class `run CLAS` executes: any upper-case class name that is not
+    /// namespaced, at most 30 characters, and not a temporary runner class (it starts with
+    /// `runner_prefix` or the default prefix: a leftover carries its own payload). Its one
+    /// classrun POST is admitted like a runner's; no other class can be run, and a create that
+    /// mentions the name stays refused.
+    pub fn arm_class(name: &str, runner_prefix: &str) -> Result<Self, String> {
+        if !is_class_name(name) {
+            return Err("not a class name that can be run".to_owned());
+        }
+
+        if is_runner_class(name, runner_prefix) {
+            return Err(RUNNER_CLASS_REFUSED.to_owned());
+        }
+
+        Self::arm_checked(name)
+    }
+
+    fn arm_checked(name: &str) -> Result<Self, String> {
         ARMED.with(|armed| {
             let mut armed = armed.borrow_mut();
 
@@ -273,6 +297,16 @@ impl Drop for RunnerArm {
 /// An upper-case class name of at most 30 characters that starts with `Y` or `Z`.
 fn is_runner_name(name: &str) -> bool {
     name.starts_with(['Y', 'Z'])
+        && name.len() <= MAX_CLASS_NAME
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// An upper-case class name of at most 30 characters that starts with a letter. A namespaced name
+/// has no verified path form yet.
+fn is_class_name(name: &str) -> bool {
+    name.starts_with(|first: char| first.is_ascii_uppercase())
         && name.len() <= MAX_CLASS_NAME
         && name
             .bytes()
@@ -675,6 +709,10 @@ fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
         return true;
     }
 
+    if path == INACTIVE_OBJECTS {
+        return query.is_some_and(is_inactive_user);
+    }
+
     if path == SEARCH {
         return query.is_some_and(|query| is_group_search(query) || is_class_search(query));
     }
@@ -692,6 +730,158 @@ fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
         (Part::Object, None) => true,
         _ => false,
     }
+}
+
+/// `USERNAME=<user>` or `USERNAME=*`, the user filter of the inactive-objects list.
+fn is_inactive_user(query: &str) -> bool {
+    query.strip_prefix("USERNAME=").is_some_and(|user| {
+        user == "*" || (!user.is_empty() && user.len() <= MAX_USER && is_encoded(user))
+    })
+}
+
+/// The ABAP Unit run configuration the `aunit` command sends: no other element, no text, no
+/// coverage, only harmless tests, a pinned selection (the object's own tests, every duration,
+/// an inclusive object set), and exactly one object of the kinds that have tests (a program,
+/// a class or a function group). The run executes test code on the server, so this is the one
+/// body of that endpoint that leaves the process.
+fn is_aunit_body(body: &[u8]) -> bool {
+    const ELEMENTS: [&str; 11] = [
+        "external",
+        "coverage",
+        "options",
+        "uriType",
+        "testDeterminationStrategy",
+        "testRiskLevels",
+        "testDurations",
+        "objectSets",
+        "objectSet",
+        "objectReferences",
+        "objectReference",
+    ];
+
+    let Ok(text) = std::str::from_utf8(body) else {
+        return false;
+    };
+    let mut reader = Reader::from_str(text);
+    let mut root_seen = false;
+    let mut references = 0;
+    let mut harmless = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                let local = element.local_name().into_inner();
+
+                if !root_seen {
+                    if local != "runConfiguration" {
+                        return false;
+                    }
+
+                    root_seen = true;
+
+                    continue;
+                }
+
+                match local {
+                    "coverage" if attribute_of(&element, "active").as_deref() != Some("false") => {
+                        return false;
+                    }
+                    "testRiskLevels" => {
+                        harmless = attribute_of(&element, "harmless").as_deref() == Some("true")
+                            && attribute_of(&element, "dangerous").as_deref() == Some("false")
+                            && attribute_of(&element, "critical").as_deref() == Some("false");
+
+                        if !harmless {
+                            return false;
+                        }
+                    }
+                    // The selection is pinned: the tests of this object and nothing assigned to
+                    // it from elsewhere, every duration, the semantic URI type.
+                    "uriType" if !has_attributes(&element, &[("value", "semantic")]) => {
+                        return false;
+                    }
+                    "testDeterminationStrategy"
+                        if !has_attributes(
+                            &element,
+                            &[
+                                ("sameProgram", "true"),
+                                ("assignedTests", "false"),
+                                ("appendAssignedTestsPreview", "true"),
+                            ],
+                        ) =>
+                    {
+                        return false;
+                    }
+                    "testDurations"
+                        if !has_attributes(
+                            &element,
+                            &[("short", "true"), ("medium", "true"), ("long", "true")],
+                        ) =>
+                    {
+                        return false;
+                    }
+                    "objectSet" if !has_attributes(&element, &[("kind", "inclusive")]) => {
+                        return false;
+                    }
+                    "objectReference" => {
+                        references += 1;
+
+                        let Some(uri) = attribute_of(&element, "uri") else {
+                            return false;
+                        };
+
+                        if has_query_marker(&uri) || !is_testable_object(&uri) {
+                            return false;
+                        }
+                    }
+                    other if ELEMENTS.contains(&other) => {}
+                    _ => return false,
+                }
+            }
+            Ok(Event::Text(text)) => {
+                if !text.as_ref().trim().is_empty() {
+                    return false;
+                }
+            }
+            Ok(Event::Decl(_) | Event::End(_)) => {}
+            Ok(Event::Eof) => return root_seen && harmless && references == 1,
+            Ok(_) | Err(_) => return false,
+        }
+    }
+}
+
+/// Whether `element` carries exactly the attributes in `expected` (name and value, any order) and
+/// no other. A namespace declaration counts as another attribute.
+fn has_attributes(element: &BytesStart<'_>, expected: &[(&str, &str)]) -> bool {
+    let mut seen = 0;
+
+    for attribute in element.attributes() {
+        let Ok(attribute) = attribute else {
+            return false;
+        };
+        let Ok(value) = attribute.normalized_value(quick_xml::XmlVersion::Implicit1_0) else {
+            return false;
+        };
+        let name = attribute.key.local_name().into_inner();
+
+        if !expected
+            .iter()
+            .any(|(wanted, text)| *wanted == name && *text == value)
+        {
+            return false;
+        }
+
+        seen += 1;
+    }
+
+    seen == expected.len()
+}
+
+/// A program, a class or a function group as the object of an ABAP Unit run.
+fn is_testable_object(uri: &str) -> bool {
+    parse_path(uri).is_some_and(|parsed| {
+        parsed.part == Part::Object && matches!(parsed.kind, Kind::Prog | Kind::Clas | Kind::Group)
+    })
 }
 
 /// `search?operation=quickSearch&query=<NAME>&maxResults=10&objectType=FUGR%2FFF`, the typed
@@ -746,6 +936,10 @@ fn is_put(path: &str, query: Option<&str>) -> bool {
 fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> bool {
     if uri == CHECKRUNS {
         return has_content_type(request, "application/*") && is_checkrun_body(&request.body);
+    }
+
+    if uri == TESTRUNS {
+        return has_content_type(request, "application/xml") && is_aunit_body(&request.body);
     }
 
     if path == DATA_PREVIEW {

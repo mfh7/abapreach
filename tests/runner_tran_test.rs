@@ -13,7 +13,7 @@ const NONCE: &str = "0123456789ABCDEF0123456789ABCDEF";
 const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// The pinned hash of the `TRAN` template: a template line that changes is a deliberate act.
-const PINNED: &str = "8a2cceaac3eee61a8e17011e78d07823cc72ce2516cd0d3d307bf6478e835867";
+const PINNED: &str = "c1bac263713b53f50ace5e500d4b0b4ecac0fc1c7e5f255bbf021d91888379f9";
 
 /// The text of one method of the `TRAN` part, from `METHOD` to `ENDMETHOD.`.
 fn body(method: &str) -> String {

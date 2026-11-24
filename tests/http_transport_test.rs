@@ -686,6 +686,91 @@ fn timeout_after_send_is_uncertain() {
     assert!(error.is_post_send_uncertain(), "{error:?}");
 }
 
+/// A server that answers the first request only after `delay`.
+fn serve_slow(delay: Duration, reply: &'static str) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/", listener.local_addr().unwrap());
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+
+        read_request(&stream);
+        thread::sleep(delay);
+        let _ = stream.write_all(reply.as_bytes());
+    });
+
+    (base_url, handle)
+}
+
+#[test]
+fn a_request_limit_replaces_the_client_timeout_for_that_request_only() {
+    // The client allows 200 ms; the reply takes 700 ms. The limit of the request wins.
+    let (base_url, server) = serve_slow(Duration::from_millis(700), OK);
+    let mut transport = HttpTransport::connect(config(&base_url, 200)).unwrap();
+
+    assert!(transport.supports_request_timeout());
+
+    let response = transport
+        .request_within(Request::post("/run", Vec::new()), Duration::from_secs(10))
+        .unwrap();
+
+    server.join().unwrap();
+    assert_eq!(response.status, 200);
+}
+
+#[test]
+fn a_request_limit_that_passes_is_an_uncertain_write_and_the_client_limit_returns() {
+    // The client allows 5 s; the limit of the request is 300 ms and the reply takes 1.5 s.
+    let (base_url, server) = serve_silent(Duration::from_millis(1500));
+    let mut transport = HttpTransport::connect(config(&base_url, 5000)).unwrap();
+    let started = Instant::now();
+    let error = transport
+        .request_within(
+            Request::post("/run", Vec::new()),
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+
+    server.join().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the limit of the request ended it"
+    );
+    assert!(error.is_post_send_uncertain(), "{error:?}");
+}
+
+#[test]
+fn the_connect_timeout_stays_the_one_derived_from_the_client_timeout() {
+    // Nothing listens: a long request limit does not turn a refused connect into a lost reply.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/", listener.local_addr().unwrap());
+
+    drop(listener);
+
+    let mut transport = HttpTransport::connect(config(&base_url, 1000)).unwrap();
+    let error = transport
+        .request_within(Request::post("/run", Vec::new()), Duration::from_secs(3600))
+        .unwrap_err();
+
+    assert!(!error.is_post_send_uncertain(), "{error:?}");
+    assert!(
+        matches!(error, TransportError::PreSendConnectivity(_)),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_scripted_transport_records_the_limit_of_each_request() {
+    let mut transport =
+        HttpTransport::for_test(vec![Ok(Response::empty(200)), Ok(Response::empty(200))]);
+
+    transport
+        .request_within(Request::post("/run", Vec::new()), Duration::from_secs(600))
+        .unwrap();
+    transport.request(Request::get("/x")).unwrap();
+
+    assert_eq!(transport.limits(), [Some(Duration::from_secs(600)), None]);
+}
+
 #[test]
 fn fixture_preserves_v1_source_and_hash() {
     let source_uri = "/sap/bc/adt/programs/programs/ytest_abapreach01/source/main?version=active";

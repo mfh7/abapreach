@@ -164,7 +164,8 @@ pub fn group_nodestructure_uri(group: &str) -> String {
 /// an error, never an empty list, when it is not a complete document with a `TREE_CONTENT` (a
 /// group the server does not know answers 200 with an empty body, a cut body has no closing tag),
 /// when a function module has no valid name, or when the object type summary names `FUGR/FF` but
-/// no such node was listed.
+/// no such node was listed. SAP_BASIS 758 adds a category node of type `FUGR/FF` without a name
+/// that is expandable; it is no function module and is skipped.
 pub fn group_members(xml: &str) -> Result<Vec<String>, String> {
     let mut reader = Reader::from_str(xml);
     let mut members = std::collections::BTreeSet::new();
@@ -175,6 +176,7 @@ pub fn group_members(xml: &str) -> Result<Vec<String>, String> {
     let mut field = String::new();
     let mut object_type = String::new();
     let mut object_name = String::new();
+    let mut expandable = String::new();
 
     loop {
         match reader.read_event().map_err(|error| error.to_string())? {
@@ -186,6 +188,7 @@ pub fn group_members(xml: &str) -> Result<Vec<String>, String> {
                         in_node = true;
                         object_type.clear();
                         object_name.clear();
+                        expandable.clear();
                     }
                     "OBJECT_TYPES" => in_types = true,
                     _ => {}
@@ -197,14 +200,28 @@ pub fn group_members(xml: &str) -> Result<Vec<String>, String> {
             Event::Text(text) => {
                 let text = text.xml_content(XmlVersion::Implicit1_0);
 
-                push_field(&field, &text, &mut object_type, &mut object_name, in_node);
+                push_field(
+                    &field,
+                    &text,
+                    &mut object_type,
+                    &mut object_name,
+                    &mut expandable,
+                    in_node,
+                );
                 summary_has_modules |=
                     in_types && !in_node && field == "OBJECT_TYPE" && text == "FUGR/FF";
             }
             Event::CData(text) => {
                 let text = text.into_inner().into_owned();
 
-                push_field(&field, &text, &mut object_type, &mut object_name, in_node);
+                push_field(
+                    &field,
+                    &text,
+                    &mut object_type,
+                    &mut object_name,
+                    &mut expandable,
+                    in_node,
+                );
                 summary_has_modules |=
                     in_types && !in_node && field == "OBJECT_TYPE" && text == "FUGR/FF";
             }
@@ -217,7 +234,9 @@ pub fn group_members(xml: &str) -> Result<Vec<String>, String> {
                     "SEU_ADT_REPOSITORY_OBJ_NODE" => {
                         in_node = false;
 
-                        if object_type == "FUGR/FF" {
+                        let category = object_name.is_empty() && expandable == "X";
+
+                        if object_type == "FUGR/FF" && !category {
                             if !is_member_name(&object_name) {
                                 return Err(format!(
                                     "invalid function module name {object_name:?}"
@@ -247,6 +266,7 @@ fn push_field(
     text: &str,
     object_type: &mut String,
     object_name: &mut String,
+    expandable: &mut String,
     in_node: bool,
 ) {
     if !in_node {
@@ -256,6 +276,7 @@ fn push_field(
     match field {
         "OBJECT_TYPE" => object_type.push_str(text),
         "OBJECT_NAME" => object_name.push_str(text),
+        "EXPANDABLE" => expandable.push_str(text),
         _ => {}
     }
 }

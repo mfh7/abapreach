@@ -1419,14 +1419,14 @@ fn promotion_refuses_to_overwrite_an_existing_output_directory_content() {
 }
 
 #[test]
-fn the_changelog_keeps_the_unreleased_section_above_the_released_0_16_0_section() {
+fn the_changelog_keeps_the_unreleased_section_above_the_released_0_16_1_section() {
     let text = std::fs::read_to_string(root().join("CHANGELOG.md")).unwrap();
     let next = text
         .find("## [Unreleased]")
         .expect("the Unreleased heading");
     let released = text
-        .find("## [0.16.0] - 2026-11-12")
-        .expect("the 0.16.0 heading");
+        .find("## [0.16.1] - 2026-11-20")
+        .expect("the 0.16.1 heading");
 
     assert!(next < released);
 }

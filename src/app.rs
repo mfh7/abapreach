@@ -17,6 +17,8 @@ use crate::object::{
     check_create, check_create_extension, check_deploy_options, check_deploy_source, check_read,
     check_read_extension,
 };
+use crate::operation::activate::{self, ActivateInput};
+use crate::operation::aunit::{self, Scope};
 use crate::operation::create::{CreateInput, CreateProg};
 use crate::operation::create_ddic::{self, DdicCreate};
 use crate::operation::delete::{self, Context};
@@ -25,7 +27,9 @@ use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch, batch_unse
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
 use crate::operation::deploy_ddic::{self, DdicDeploy};
 use crate::operation::doctor::Doctor;
+use crate::operation::inactive;
 use crate::operation::payload::Kind;
+use crate::operation::quality;
 use crate::operation::read::{ReadProg, ReadTarget};
 use crate::operation::read_ddic::{self, DdicRead};
 use crate::operation::read_table::{
@@ -33,13 +37,13 @@ use crate::operation::read_table::{
 };
 use crate::operation::runner_tran::{self, TranCreate, TranRead};
 use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
-use crate::policy::Terminal;
+use crate::policy::{RunPolicy, Terminal};
 use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use crate::transport::http::{HttpConfig, HttpTransport};
 use crate::transport::rfc::{
     DynamicRfcApi, Env, FunctionApi, RfcApi, RfcLibrary, RfcTransport, connection_parameters,
 };
-use crate::transport::{SadtTransport, TransportError};
+use crate::transport::{Request, Response, SadtTransport, TransportError};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
@@ -384,6 +388,10 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::Create { conn, .. }
         | Command::ReadTable { conn, .. }
         | Command::Delete { conn, .. }
+        | Command::Inactive { conn, .. }
+        | Command::Activate { conn, .. }
+        | Command::Aunit { conn, .. }
+        | Command::Run { conn, .. }
         | Command::Doctor { conn } => Some(conn),
         Command::Mcp => None,
     }
@@ -402,6 +410,7 @@ fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories, registry: &
     match loaded {
         Ok((config, paths)) => {
             let writable = config.mcp_writable();
+            let runnable = config.mcp_runnable();
             // The flag a signal handler sets: it ends the server once a write has settled.
             let cancel = factories.cancel();
             let tools = McpTools::new(
@@ -411,6 +420,7 @@ fn mcp(env: BTreeMap<String, String>, factories: &mut dyn Factories, registry: &
             .with_registry(registry);
             let mut server = Server::new(tools, false)
                 .with_writable(writable)
+                .with_runnable(runnable)
                 .with_kinds(registry.kinds().collect())
                 .with_version(registry.version_text());
             // Not the locked handles: the reader thread owns stdin, and stdout is shared.
@@ -665,6 +675,111 @@ fn execute(
                     None,
                 )
             },
+        ),
+        Command::Inactive { all, backend, .. } => route(
+            OperationKind::Inactive,
+            backend.map(backend_kind),
+            false,
+            connection,
+            factories,
+            |transport, _, _, _| {
+                let result = inactive::run(transport, all, &connection.user);
+
+                // A read holds no lock, so a failed session end is only a note.
+                quality::attempt(result, end_session(transport))
+            },
+        ),
+        Command::Activate {
+            objects,
+            simulate,
+            backend,
+            ..
+        } => {
+            if let Err(message) = activate::check_targets(&objects) {
+                return stop(message);
+            }
+
+            route(
+                OperationKind::Activate,
+                backend.map(backend_kind),
+                false,
+                connection,
+                factories,
+                |transport, _, cancel, _| {
+                    let input = ActivateInput {
+                        targets: &objects,
+                        client: &connection.client,
+                        user: &connection.user,
+                        simulate,
+                    };
+                    let result = activate::run(transport, &input, cancel);
+
+                    quality::attempt(result, end_session(transport))
+                },
+            )
+        }
+        Command::Aunit {
+            kind,
+            name,
+            package,
+            tr,
+            backend,
+            ..
+        } => {
+            if connection.policies.run == RunPolicy::Off {
+                return stop(format!("aunit is off for {} (policy run)", connection.id));
+            }
+
+            let scope =
+                match Scope::parse(kind.zip(name.as_deref()), package.as_deref(), tr.as_deref()) {
+                    Ok(scope) => scope,
+                    Err(message) => return stop(message),
+                };
+
+            route(
+                OperationKind::Aunit,
+                backend.map(backend_kind),
+                false,
+                connection,
+                factories,
+                |transport, _, _, _| {
+                    let result = aunit::run(transport, &scope, &connection.client);
+
+                    quality::attempt(result, end_session(transport))
+                },
+            )
+        }
+        Command::Run {
+            kind,
+            target,
+            simulate,
+            plan,
+            params,
+            variant,
+            alv,
+            alv_columns,
+            allow_standard,
+            timeout,
+            max_output,
+            backend,
+            ..
+        } => crate::run_cli::execute(
+            &crate::run_cli::RunCommand {
+                kind,
+                target: &target,
+                simulate,
+                plan: plan.as_deref(),
+                params: &params,
+                variant: variant.as_deref(),
+                alv,
+                alv_columns,
+                allow_standard,
+                timeout,
+                max_output,
+                backend,
+            },
+            connection,
+            factories,
         ),
         Command::Mcp => stop("the MCP server needs no connection"),
         Command::Read {
@@ -1680,7 +1795,7 @@ pub(crate) fn route(
             BackendKind::AdtHttp => factories.adt(connection),
             BackendKind::RfcSadt => factories.rfc(connection),
         };
-        let done = match opened {
+        let mut done = match opened {
             Ok(mut transport) => {
                 // A new session of the same backend, for the read that settles a lost reply.
                 let mut fresh = || match backend {
@@ -1688,10 +1803,38 @@ pub(crate) fn route(
                     BackendKind::RfcSadt => factories.rfc(connection),
                 };
 
-                attempt(&mut *transport, &selection, &cancel, &mut fresh)
+                if backend == BackendKind::AdtHttp
+                    && explicit.is_none()
+                    && connection.rfc.is_some()
+                    && probes_stateless(operation)
+                {
+                    let mut gate = StatelessGate::new(&mut *transport);
+                    let done = attempt(&mut gate, &selection, &cancel, &mut fresh);
+
+                    // Nothing was written: the first reply showed a session that keeps no state,
+                    // so its reads cannot be trusted (an existing object may answer 404) and
+                    // the RFC path takes the command.
+                    if gate.tripped {
+                        Attempt {
+                            fallback_allowed: true,
+                            ..Attempt::failed(
+                                quality::STATELESS_HTTP.to_owned(),
+                                Failure::CapabilityUnavailable,
+                            )
+                        }
+                    } else {
+                        done
+                    }
+                } else {
+                    attempt(&mut *transport, &selection, &cancel, &mut fresh)
+                }
             }
             Err(error) => Attempt::from_error(&error),
         };
+
+        if backend == BackendKind::RfcSadt && probes_stateless(operation) {
+            done.outcome.stdout = selection_lines(&selection, &done.outcome.stdout);
+        }
 
         if backend == BackendKind::RfcSadt || !done.fallback_allowed {
             return exit_of(earlier, done.outcome);
@@ -1704,6 +1847,99 @@ pub(crate) fn route(
             "NOTE: {backend} failed before anything was written; falling back to RFC SADT"
         ));
     }
+}
+
+/// The commands whose reads over ADT HTTP need a session that keeps state: the ones that read
+/// the repository without a backend report of their own.
+fn probes_stateless(operation: OperationKind) -> bool {
+    matches!(
+        operation,
+        OperationKind::Inactive | OperationKind::Activate | OperationKind::Aunit
+    )
+}
+
+/// The ADT HTTP transport of a command that reads before it writes anything: the first reply that
+/// shows a session without state ends the command, and every request after it is refused unsent.
+struct StatelessGate<'a> {
+    inner: &'a mut dyn SadtTransport,
+    tripped: bool,
+}
+
+impl<'a> StatelessGate<'a> {
+    fn new(inner: &'a mut dyn SadtTransport) -> Self {
+        Self {
+            inner,
+            tripped: false,
+        }
+    }
+
+    fn refused() -> TransportError {
+        TransportError::PreSendConnectivity(quality::STATELESS_HTTP.to_owned())
+    }
+}
+
+impl SadtTransport for StatelessGate<'_> {
+    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+        if self.tripped {
+            return Err(Self::refused());
+        }
+
+        let response = self.inner.request(request)?;
+
+        if self.inner.stateful_supported() == Some(false) {
+            self.tripped = true;
+
+            return Err(Self::refused());
+        }
+
+        Ok(response)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.inner.close()
+    }
+
+    fn supports_request_timeout(&self) -> bool {
+        self.inner.supports_request_timeout()
+    }
+
+    fn request_within(
+        &mut self,
+        request: Request,
+        limit: Duration,
+    ) -> Result<Response, TransportError> {
+        if self.tripped {
+            return Err(Self::refused());
+        }
+
+        let response = self.inner.request_within(request, limit)?;
+
+        if self.inner.stateful_supported() == Some(false) {
+            self.tripped = true;
+
+            return Err(Self::refused());
+        }
+
+        Ok(response)
+    }
+
+    fn stateful_supported(&self) -> Option<bool> {
+        self.inner.stateful_supported()
+    }
+}
+
+/// The backend and the reason of a command that prints none of its own, ahead of its output.
+fn selection_lines(selection: &Selection, stdout: &str) -> String {
+    let mut lines = vec![
+        format!("backend: {}", selection.backend.token()),
+        format!("reason: {}", selection.reason),
+    ];
+
+    if !stdout.is_empty() {
+        lines.push(stdout.to_owned());
+    }
+
+    lines.join("\n")
 }
 
 fn exit_of(mut stderr: Vec<String>, outcome: Outcome) -> Exit {
@@ -1732,7 +1968,148 @@ fn as_note(block: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::runner_exit;
+    use super::{StatelessGate, runner_exit};
+    use crate::operation::quality;
+    use crate::transport::{Request, Response, SadtTransport, TransportError};
+    use std::time::Duration;
+
+    /// A transport that answers 200, counts its requests and reports a fixed session state.
+    struct Probe {
+        stateful: Option<bool>,
+        timeout: bool,
+        sent: usize,
+        limits: Vec<Duration>,
+    }
+
+    impl Probe {
+        fn new(stateful: Option<bool>, timeout: bool) -> Self {
+            Self {
+                stateful,
+                timeout,
+                sent: 0,
+                limits: Vec::new(),
+            }
+        }
+    }
+
+    impl SadtTransport for Probe {
+        fn request(&mut self, _request: Request) -> Result<Response, TransportError> {
+            self.sent += 1;
+
+            Ok(Response::empty(200))
+        }
+
+        fn close(&mut self) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn supports_request_timeout(&self) -> bool {
+            self.timeout
+        }
+
+        fn request_within(
+            &mut self,
+            request: Request,
+            limit: Duration,
+        ) -> Result<Response, TransportError> {
+            self.limits.push(limit);
+
+            self.request(request)
+        }
+
+        fn stateful_supported(&self) -> Option<bool> {
+            self.stateful
+        }
+    }
+
+    /// Like `Probe`, but it keeps the defaults of the trait for the timeout and the session state.
+    struct Plain;
+
+    impl SadtTransport for Plain {
+        fn request(&mut self, _request: Request) -> Result<Response, TransportError> {
+            Ok(Response::empty(200))
+        }
+
+        fn close(&mut self) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    fn refused() -> TransportError {
+        TransportError::PreSendConnectivity(quality::STATELESS_HTTP.to_owned())
+    }
+
+    #[test]
+    fn the_gate_reports_the_timeout_support_and_session_state_of_its_transport() {
+        for (timeout, stateful) in [(true, Some(true)), (false, Some(false)), (true, None)] {
+            let mut probe = Probe::new(stateful, timeout);
+            let gate = StatelessGate::new(&mut probe);
+
+            assert_eq!(gate.supports_request_timeout(), timeout);
+            assert_eq!(gate.stateful_supported(), stateful);
+        }
+
+        let mut plain = Plain;
+        let gate = StatelessGate::new(&mut plain);
+
+        assert!(!gate.supports_request_timeout());
+        assert_eq!(gate.stateful_supported(), None);
+    }
+
+    #[test]
+    fn a_stateful_session_passes_every_request_and_the_limit_of_a_timed_one() {
+        let mut probe = Probe::new(Some(true), true);
+        let mut gate = StatelessGate::new(&mut probe);
+
+        assert_eq!(gate.request(Request::get("/a")), Ok(Response::empty(200)));
+        assert_eq!(
+            gate.request_within(Request::get("/b"), Duration::from_secs(7)),
+            Ok(Response::empty(200))
+        );
+        assert!(!gate.tripped);
+        assert_eq!(probe.sent, 2);
+        assert_eq!(probe.limits, vec![Duration::from_secs(7)]);
+    }
+
+    #[test]
+    fn an_unknown_session_state_trips_nothing() {
+        let mut probe = Probe::new(None, true);
+        let mut gate = StatelessGate::new(&mut probe);
+
+        assert_eq!(
+            gate.request_within(Request::get("/a"), Duration::from_secs(1)),
+            Ok(Response::empty(200))
+        );
+        assert!(!gate.tripped);
+    }
+
+    #[test]
+    fn a_stateless_session_ends_the_command_after_its_first_timed_reply() {
+        let mut probe = Probe::new(Some(false), true);
+        let mut gate = StatelessGate::new(&mut probe);
+
+        assert_eq!(
+            gate.request_within(Request::get("/a"), Duration::from_secs(1)),
+            Err(refused())
+        );
+        assert!(gate.tripped);
+        assert_eq!(gate.request(Request::get("/b")), Err(refused()));
+        assert_eq!(
+            gate.request_within(Request::get("/c"), Duration::from_secs(1)),
+            Err(refused())
+        );
+        assert_eq!(probe.sent, 1);
+    }
+
+    #[test]
+    fn a_stateless_session_ends_the_command_after_its_first_plain_reply() {
+        let mut probe = Probe::new(Some(false), false);
+        let mut gate = StatelessGate::new(&mut probe);
+
+        assert_eq!(gate.request(Request::get("/a")), Err(refused()));
+        assert!(gate.tripped);
+        assert_eq!(probe.sent, 1);
+    }
 
     #[test]
     fn a_broken_rule_is_the_stop_of_its_message() {

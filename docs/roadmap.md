@@ -1,10 +1,11 @@
 # Roadmap
 
-Version 1.0.0 brings every feature of the earlier internal tooling into the Rust binary. That
-scope is fixed: features are not added to match other tools, and no feature of the earlier
-tooling is dropped. Each milestone ships as a minor release (0.12.0, 0.13.0, ...); 1.0.0 follows
-when every feature below is released and the [release gate](#release-gate) passes. Shipped work
-moves to the [changelog](../CHANGELOG.md).
+Version 1.0.0 brings every feature of the earlier internal tooling into the Rust binary, plus
+four additions: running ABAP code (`run`), read-only SQL with joins, object search, and the
+application server instance in `doctor` and ping. That scope is fixed: no other feature is added,
+and no feature of the earlier tooling is dropped. Each milestone ships as a minor
+release (0.12.0, 0.13.0, ...); 1.0.0 follows when every feature below is released and the
+[release gate](#release-gate) passes. Shipped work moves to the [changelog](../CHANGELOG.md).
 
 ## Milestones
 
@@ -18,6 +19,7 @@ moves to the [changelog](../CHANGELOG.md).
 | 0.15.0 | Programs and includes: `create PROG` (program and include), include read, deploy and delete; ADT HTTP logoff fix; MCP additions (released) |
 | 0.16.0 | DDIC: data elements, domains, tables (transparent tables and structures), table types; transaction codes (`TRAN`): read, simulate, create and delete, through classrun on the 7.50 and 7.40 systems (released) |
 | 0.16.1 | `--tr` for objects no open request holds; classrun on newer releases (tested on a S/4HANA 758 system); classrun POST from a new session; runner cleanup proof against `TADIR`; MCP re-reads connections per call (released) |
+| 0.17.0 | `inactive`, `activate`, `aunit` (ABAP Unit) and `run` (class, report with ALV capture, code snippet), with MCP tools; defaults: `run: plan`, `mcp_run: off`, `mcp_run_snippet: off`; tested on the 7.50, 7.40 and S/4HANA 758 systems (released) |
 | later | The remaining features below, one milestone at a time |
 
 Platforms come before new features, so every feature after 0.12.0 is built and tested on
@@ -81,6 +83,30 @@ developer authorization. Setup and limits: [Getting started: DDIC objects and tr
 Not in 0.16.0: messages (`MSAG`), text pools (`TEXT`), CDS (`DDLS`), enhancements (`ENHO`), restore
 of an old version (`rfc-deploy restore`), and the lifecycle (inactive, activate, ATC, ABAP Unit).
 Deploy of `TRAN` does not exist: a transaction code is created and deleted, not changed.
+Inactive objects, activation and ABAP Unit shipped in 0.17.0; ATC is still planned.
+
+## Shipped in 0.17.0
+
+| Feature | Reference command | Path |
+| :--- | :--- | :--- |
+| List the inactive objects of the logon user (`inactive [--all]`) | `inactive` | ADT |
+| Activate own inactive Z/Y objects (`activate`, with `--simulate`) | `activate` | ADT |
+| ABAP Unit for a program, class or function group, or for a package or request (`aunit`) | `aunit` | ADT |
+| Run an existing class that implements `IF_OO_ADT_CLASSRUN` (`run CLAS`) | new | classrun |
+| Run an executable report and print its list, with ALV capture (`run PROG`) | new | classrun (temporary runner class) |
+| Run a code snippet (`run SNIPPET`) | new | classrun (temporary runner class) |
+| MCP: `abap_inactive`, `abap_activate_simulate`, `abap_activate`, `abap_aunit`, `abap_run` | MCP server (0.14.0) | stdio |
+
+`run` executes code on the SAP system, so it has its own safety gates. The policy key `run`
+defaults to `plan`: a run needs the plan file from `run --simulate`. A productive client refuses
+every run, and `run PROG` and `run SNIPPET` work on development systems only. In MCP, `abap_run` and
+`abap_aunit` stay off until a connection sets `mcp_run: confirm` and lists each object in
+`mcp_run_allow`; a snippet also needs `mcp_run_snippet: on`. The human confirms every MCP run.
+The reply shapes of `inactive` and `run` were checked live on the 7.50, 7.40 and S/4HANA 758 systems.
+The behavior, outcomes and limits of each command are in the [changelog](../CHANGELOG.md) and
+[MCP server](mcp.md).
+
+Not in 0.17.0: ATC (`atc`).
 
 ## Planned for 1.0.0
 
@@ -101,8 +127,13 @@ Deploy of `TRAN` does not exist: a transaction code is created and deleted, not 
 | Transport gate | `rfc-gate` | standard? |
 | Package export and drift | `export`, `drift` | standard? |
 | Own locks (SM12), unlock | `locks`, `unlock` | standard? |
-| Inactive objects, activation | `inactive`, `activate` | ADT |
-| ATC, ABAP Unit | `atc`, `aunit` | ADT |
+| ATC | `atc` | ADT |
+
+### SAP_BASIS 758 follow-ups
+
+| Feature | Note |
+| :--- | :--- |
+| TABL conversion check on 758 | 758 has no `DD_DECIDE`, so a TABL change that needs the conversion verdict is rejected. The class `CL_DD_DECIDE` exists on 758 and may replace it; its API is unverified and needs a design note. |
 
 ### System information
 
@@ -113,6 +144,28 @@ Deploy of `TRAN` does not exist: a transaction code is created and deleted, not 
 | DDIC field info | `rfc-read ddic` | RFC (`DDIF_FIELDINFO_GET` is remote-enabled) |
 | Where-used | `rfc-read where-used` | ADT? |
 | Test call of a remote FM | `rfc-call` | RFC |
+
+### Additions beyond the earlier tooling
+
+| Feature | Reference command | Path |
+| :--- | :--- | :--- |
+| Read-only SQL with joins (beyond the one-table `read-table`) | new | ADT? |
+| Object search by name pattern and type | new | ADT |
+| The application server instance that answered, in `doctor` and ping | new | ADT, RFC |
+
+`run` shipped in 0.17.0. The SQL path keeps the `read-table` policies (denied tables, row limit).
+
+### Outside the 1.0.0 scope, timing to be decided
+
+Features ABAP FS offers that are not part of 1.0.0. Whether each comes before or after 1.0.0 is
+decided later.
+
+| Feature | Note |
+| :--- | :--- |
+| ABAP debugger (breakpoints, stepping, variables) | ADT debugger API |
+| Transport view (browse, compare, release requests) | release stays a user action today |
+| Blame (who changed each line, when, under which request) | needs version history (`versions`, planned for 1.0.0) |
+| Compare one object between two systems | needs two connections in one command |
 
 ### Setup
 

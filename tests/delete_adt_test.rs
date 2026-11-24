@@ -583,6 +583,38 @@ fn a_function_group_reports_its_members_and_has_no_source() {
     );
 }
 
+/// SAP_BASIS 758 lists an expandable `FUGR/FF` category node without a name before the modules.
+#[test]
+fn the_758_category_node_is_skipped_and_an_unnamed_module_stays_an_error() {
+    let category = "<SEU_ADT_REPOSITORY_OBJ_NODE><OBJECT_TYPE>FUGR/FF</OBJECT_TYPE><OBJECT_NAME/>\
+                    <TECH_NAME>SAPLZFG</TECH_NAME><OBJECT_URI/><EXPANDABLE>X</EXPANDABLE>\
+                    </SEU_ADT_REPOSITORY_OBJ_NODE>";
+    let nodes = [category, &node("FUGR/FF", "ZFM_A")].concat();
+
+    assert_eq!(
+        abapreach::adt::group_members(&listing(&nodes)).unwrap(),
+        ["ZFM_A"]
+    );
+
+    let unnamed = "<SEU_ADT_REPOSITORY_OBJ_NODE><OBJECT_TYPE>FUGR/FF</OBJECT_TYPE><OBJECT_NAME/>\
+                   <EXPANDABLE/></SEU_ADT_REPOSITORY_OBJ_NODE>";
+    let error = abapreach::adt::group_members(&listing(unnamed)).unwrap_err();
+
+    assert_eq!(error, "invalid function module name \"\"");
+}
+
+#[test]
+fn a_member_name_in_a_cdata_section_is_read_like_text() {
+    let cdata = "<SEU_ADT_REPOSITORY_OBJ_NODE><OBJECT_TYPE><![CDATA[FUGR/FF]]></OBJECT_TYPE>\
+                 <OBJECT_NAME><![CDATA[ZFM_C]]></OBJECT_NAME><EXPANDABLE/>\
+                 </SEU_ADT_REPOSITORY_OBJ_NODE>";
+
+    assert_eq!(
+        abapreach::adt::group_members(&listing(cdata)).unwrap(),
+        ["ZFM_C"]
+    );
+}
+
 #[test]
 fn a_function_group_without_function_modules_has_no_members() {
     let main = Fake::default().get(GROUP, 200, &group_metadata()).post(

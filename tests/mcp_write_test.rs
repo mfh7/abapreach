@@ -26,13 +26,15 @@ use std::time::Duration;
 
 const PASSWORD: &str = "secret-pw";
 const HOST: &str = "example.com";
-const WRITE_TOOLS: [&str; 6] = [
+const WRITE_TOOLS: [&str; 8] = [
     "abap_simulate",
     "abap_deploy",
     "abap_create_simulate",
     "abap_create",
     "abap_delete_simulate",
     "abap_delete",
+    "abap_activate_simulate",
+    "abap_activate",
 ];
 const PROGRAM: &str = "REPORT ytest_abapreach01.\n\nWRITE / 'v2'.";
 const CLASS_SOURCE: &str = "CLASS zcl_a DEFINITION PUBLIC.\nENDCLASS.";
@@ -452,7 +454,7 @@ fn write_tools_are_listed_with_the_connections_that_may_write() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
 
-    assert_eq!(names.len(), 8);
+    assert_eq!(names.len(), 11);
 
     for tool in &tools {
         let description = tool["description"].as_str().unwrap();
@@ -475,7 +477,7 @@ fn an_all_off_configuration_lists_reads_only_and_a_write_tool_is_unknown() {
     let writable = rig.config().mcp_writable();
 
     assert!(writable.is_empty());
-    assert_eq!(tool_list_for(&writable).len(), 2);
+    assert_eq!(tool_list_for(&writable).len(), 3);
 
     let mut server = Server::new(
         McpTools::new(

@@ -24,7 +24,7 @@ use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 pub use crate::adt::format_messages;
 
@@ -37,7 +37,7 @@ pub(crate) const NO_REQUEST: &str = "the object is not local but the lock return
 
 const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET without a version returns it; restore only by deploying the base source again on your order";
 const NO_STATEFUL_SESSION: &str = "ADT HTTP stateful session unavailable (no sap-contextid)";
-const INACTIVE_OBJECTS_ACCEPT: &str =
+pub(crate) const INACTIVE_OBJECTS_ACCEPT: &str =
     "application/vnd.sap.adt.inactivectsobjects.v1+xml, application/xml;q=0.8";
 const WHERE_USED_LIMIT: usize = 50;
 const RUNTIME_WARNING: &str = "W: callers' syntax check does not catch missing CALL FUNCTION parameters; they dump at runtime";
@@ -137,6 +137,9 @@ pub const INTERRUPT_EXIT_CODE: i32 = 130;
 pub enum InterruptAction {
     ExitNow,
     Deferred,
+    /// A run is in flight and this is the first interrupt: the handler prints the text to stderr
+    /// and the run goes on until its reply arrives.
+    Waiting(&'static str),
 }
 
 /// Set from the Ctrl-C handler; checked once the lock is held.
@@ -151,6 +154,13 @@ pub struct CancelFlag {
     shutdown: Arc<AtomicBool>,
     /// How many interrupts the handler saw while something was held; two skip a reconciliation.
     interrupts: Arc<AtomicUsize>,
+    /// The text of the first Ctrl-C while a `run` request is in flight; `None` outside one.
+    run_wait: Arc<Mutex<Option<&'static str>>>,
+    /// How many interrupts the handler saw during the `run` request in flight.
+    run_interrupts: Arc<AtomicUsize>,
+    /// What the second Ctrl-C prints on stderr before it ends the process: the runner class that
+    /// stays behind, with the commands that remove it. `None` outside such a request.
+    run_leftover: Arc<Mutex<Option<String>>>,
 }
 
 impl CancelFlag {
@@ -203,6 +213,42 @@ impl CancelFlag {
         WriteScope(self)
     }
 
+    /// Marks the one `run` request in flight. The first Ctrl-C in this window prints `wait` and
+    /// leaves the request alone, the second leaves the process (exit 130). The guard ends the
+    /// window.
+    pub fn hold_run(&self, wait: &'static str) -> RunScope<'_> {
+        self.run_interrupts.store(0, Ordering::SeqCst);
+        *self.run_wait.lock().unwrap_or_else(PoisonError::into_inner) = Some(wait);
+
+        RunScope(self)
+    }
+
+    /// [`hold_run`](Self::hold_run) for a request whose abandoned run leaves a runner class: the
+    /// second Ctrl-C prints `leftover` before the process ends (exit 130).
+    pub fn hold_run_leaving(&self, wait: &'static str, leftover: String) -> RunScope<'_> {
+        let scope = self.hold_run(wait);
+
+        *self
+            .run_leftover
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(leftover);
+
+        scope
+    }
+
+    /// The text the second Ctrl-C prints while a runner `run` request is in flight.
+    pub fn run_leftover(&self) -> Option<String> {
+        self.run_leftover
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Whether a Ctrl-C arrived during the `run` request that has just ended.
+    pub fn run_interrupted(&self) -> bool {
+        self.run_interrupts.load(Ordering::SeqCst) > 0
+    }
+
     /// Whether a second interrupt arrived while the first was deferred.
     pub fn is_second_interrupt(&self) -> bool {
         self.interrupts.load(Ordering::SeqCst) >= 2
@@ -211,6 +257,21 @@ impl CancelFlag {
     /// A SIGINT must not end the process while a lock is held or a create write is unresolved.
     /// The flag then makes the operation settle safely before it reports.
     pub fn on_interrupt(&self) -> InterruptAction {
+        let waiting = *self.run_wait.lock().unwrap_or_else(PoisonError::into_inner);
+
+        if let Some(text) = waiting {
+            // A `run` request cannot be taken back: the first interrupt waits for its reply, the
+            // second gives it up.
+            return if self.run_interrupts.fetch_add(1, Ordering::SeqCst) == 0 {
+                // A server that was told to end does so once the run has settled.
+                self.request_shutdown();
+
+                InterruptAction::Waiting(text)
+            } else {
+                InterruptAction::ExitNow
+            };
+        }
+
         if !self.lock_held() && self.write_in_flight.load(Ordering::SeqCst) == 0 {
             return InterruptAction::ExitNow;
         }
@@ -228,6 +289,24 @@ pub struct LockScope<'a>(&'a CancelFlag);
 impl Drop for LockScope<'_> {
     fn drop(&mut self) {
         self.0.lock_held.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Ends the `run` request window when the holding scope ends, however it ends.
+pub struct RunScope<'a>(&'a CancelFlag);
+
+impl Drop for RunScope<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .run_wait
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .0
+            .run_leftover
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
 }
 
@@ -956,6 +1035,16 @@ impl Run<'_> {
                             "PARTIAL: the new source is saved inactive and nothing was activated",
                         )
                     });
+                }
+
+                #[cfg(feature = "fault-injection")]
+                if crate::fault::skip_activate() {
+                    return Ok(Finish::status(
+                        Status::Partial,
+                        "PARTIAL: the new source is saved inactive and nothing was activated \
+                         (fault skip-activate)",
+                    )
+                    .lock_released());
                 }
 
                 Ok(self
@@ -2150,7 +2239,7 @@ pub fn activation_request_xml(name: &str, uri: &str) -> String {
 
 /// The second activation request of a class: every object of the worklist as listed, member
 /// entries with their `#type=` fragment included.
-fn worklist_request_xml(references: &[ObjectRef]) -> String {
+pub(crate) fn worklist_request_xml(references: &[ObjectRef]) -> String {
     let mut body = String::from(concat!(
         r#"<?xml version="1.0" encoding="UTF-8"?>"#,
         r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core">"#,
@@ -2176,7 +2265,7 @@ fn worklist_request_xml(references: &[ObjectRef]) -> String {
 }
 
 /// Whether `uri` is the object or lies below it (`/includes/...`, `/source/main#...`).
-fn under(object_uri: &str, uri: &str) -> bool {
+pub(crate) fn under(object_uri: &str, uri: &str) -> bool {
     let (object, uri) = (object_uri.to_ascii_lowercase(), uri.to_ascii_lowercase());
 
     uri == object || uri.starts_with(&format!("{object}/"))

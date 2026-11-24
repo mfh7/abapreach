@@ -14,8 +14,109 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
-Version metadata is `0.16.1`. This entry is finalized before the last release candidate.
+## [0.17.0] - 2026-11-22
 
+### Added
+- `inactive [--all]` lists the inactive objects of the logon user (`<ADT type> <name> <user>`, an
+  include also names its main program); MCP tool `abap_inactive`. The reply shape of the list was
+  checked live on the 7.50, 7.40 and 758 systems; `--all` sends `?USERNAME=*`. An entry marked
+  deleted ends with ` deleted`, and `activate` refuses it. The owner of an entry in the flat 7.40
+  feed comes from the version feed, never from `adtcore:responsible`.
+- `activate [--simulate] TYPE/SUBTYPE:NAME...` activates own inactive Z/Y objects (`PROG/P`,
+  `PROG/I`, `CLAS/OC`, `INTF/OI`, `FUGR/FF`), one activation request per object with the worklist
+  resend of a transportable class, and proves the result against the inactive list. It refuses a
+  productive client (`T000`), `FUGR/F` and every foreign or unlisted object before any request. MCP
+  tools `abap_activate_simulate` and `abap_activate` (plan token, `mcp_write`).
+- `aunit PROG|CLAS|FUGR NAME` and `aunit --package P` / `--tr TRKORR` run ABAP Unit (harmless
+  tests, every duration) and print `<kind> <level> <prog> <class>-><method>: <text>`; exit 0 only
+  without alerts. It refuses a productive client and a policy `run: off`. MCP tool `abap_aunit` sits
+  behind the policy `mcp_run: confirm` (default `off`) and `mcp_run_allow`: every object of the call
+  (also each object a `--package` or `--tr` batch resolves to) must be on the list as `TYPE:NAME`,
+  otherwise the whole call is refused before any test runs, naming the missing objects. A batch of
+  more than 60 objects is refused (the confirmation form lists 60; the CLI keeps 100). The human
+  confirms every call. The reply shape of the run was checked live on the 7.50, 7.40 and 758 systems.
+- RFC admission: the ABAP Unit run configuration (harmless tests, one object) and
+  `inactiveobjects?USERNAME=`.
+- Fault-injection builds accept `hold-post:<ms>` (pause after the classrun POST, marker
+  `FAULT: classrun POST done, pausing N ms`), so the live Ctrl-C cells land after the POST on a slow
+  system.
+- `run CLAS <class>` (0.17.0): executes an existing class that implements `IF_OO_ADT_CLASSRUN`
+  and prints its reply as is. `run` is not a dry run. `run --simulate --plan <FILE>` reads the
+  class (exists, active, interface, package, author, active source hash) and the client role and
+  writes the plan file; the run needs that file under the default policy and stops when the
+  arguments or the live facts differ. Only `Z` and `Y` names run, `--allow-standard` allows a
+  standard class; a productive client (`T000-CCCATEGORY = P`) refuses every run. The request is
+  sent once from a new session; `--timeout` (default 600, at most 3600) bounds it over ADT HTTP
+  and is refused on RFC. Outcomes: reply and exit 0, `RUN_FAILED: runtime error; see ST22
+  (dumps)`, `RUN_UNKNOWN: the reply was lost; the code may have run`, `REJECTED`, `STOP`. The
+  first Ctrl-C prints `I: run in progress on the server; waiting for the reply (Ctrl-C again to
+  leave)` on stderr and waits for the reply, the second leaves with exit 130. A temporary runner
+  class (the `runner_prefix` of the connection or `YCL_ABAPREACH_RUN_`, plus exactly eight characters
+  of `0-9A-Z`) is never run. The plan binds the main source of a class or report, not the
+  includes it calls.
+- `run PROG <report>` (0.17.0): submits an active executable report inside the temporary runner
+  class (`SUBMIT ... EXPORTING LIST TO MEMORY AND RETURN`, new runner mode `RUN_PROG`) and prints
+  its list. `--param NAME=VALUE` (parameters and single-value select-options, values up to 45
+  characters) and `--variant` are checked against the selection screen; the plan binds the report
+  name, its source hash, `SUBC`, package and every option, and the class compares the active source
+  hash again right before `SUBMIT` (`REJECTED: report changed since the simulate`). The class
+  checks `S_PROGRAM` (`SUBMIT`) and `TRDIR-SUBC = 1`. `run PROG` and `run SNIPPET` work on
+  development systems only: they stop before any change on a system or client that forbids
+  repository changes.
+- ALV capture for `run PROG`: a grid the report shows (`CL_SALV_TABLE`,
+  `REUSE_ALV_GRID_DISPLAY`) is captured with `CL_SALV_BS_RUNTIME_INFO` and printed as tab-separated
+  lines (a header of the column texts, then one line per row); only the visible columns of the field
+  catalog by default, `--alv-columns all` for every column (CLI only); amounts and quantities are
+  written with their currency and unit decimals; `--alv off` keeps the plain list. One grid per run
+  is captured.
+- `run SNIPPET <file>` (0.17.0): the statements of the file become the body of a method of the
+  runner class; the only output is `print( iv_text )`. A snippet that could leave its method
+  (`METHOD`, `ENDMETHOD`, `METHODS`, `CLASS`, `ENDCLASS`, `INTERFACE`, `ENDINTERFACE`, `FORM`,
+  `ENDFORM`, `DEFINE`, `END-OF-DEFINITION`, `INCLUDE`, judged per statement, colon chains
+  included), a statement left open, a control character or a line over 255 characters is refused
+  before any connection. A compile error is `SNIPPET_ERROR: line <n>: <text>` (exit 2) with the
+  line of the file; the snippet text and its hash are part of the plan.
+- Outcomes of a report or snippet: `RAN` (exit 0, no rollback by ABAPReach, as in SA38),
+  `RUN_FAILED: exception <class>: <text>` (a catchable exception; rolled back),
+  `RUN_FAILED: runtime error; see ST22 (dumps)`, `RUN_UNKNOWN: the reply was lost; the code may have
+  run`, `SNIPPET_ERROR`. `--max-output <bytes>` (default 6 MiB; MCP 1 MiB) is counted by the runner
+  in bytes of the reply and ends in `W: output cut after <n> lines` with the outcome `RAN`. The
+  payload names the logon user and an expiry (generation time plus `--timeout` plus 20 minutes; RFC:
+  75 minutes): a runner class left behind by a second Ctrl-C refuses to run again. The second
+  Ctrl-C leaves with exit 130 and prints the `RUNNER_LEFTOVER` lines. The first Ctrl-C prints its
+  waiting text (it was not printed before).
+- Policy keys `run` (`off`, `plan`, `direct`; default `plan`), `mcp_run` (`off`, `confirm`; default
+  `off`), `mcp_run_allow` (exact `TYPE:NAME` entries: `CLAS:`, `PROG:` or `FUGR:`; a plain name stops
+  the configuration load; so does a name with a blank, a pattern character, an invalid character or
+  a length over the limit of its type) and `mcp_run_snippet` (`off`, `on`; default `off`). `run:
+  off` also refuses `run` and `aunit` on the CLI and in MCP. A 0.16 binary stops on a configuration that holds them.
+- MCP tool `abap_run` (class, report and snippet), behind `mcp_run` and `mcp_run_allow` (a snippet also
+  behind `mcp_run_snippet: on`); it and `abap_aunit` are
+  listed only for a connection with `mcp_run: confirm` and `run` not `off`. It always asks the
+  human in a form that shows the full content, whatever `mcp_write` says, refuses a confirmation
+  longer than 6000 characters, takes the single write slot, and passes its output through the
+  secret check. `read_table_denied` does not protect against what a run reads.
+
+### Fixed
+- `run PROG` of a report that sends a screen (dump `DYNPRO_SEND_IN_BACKGROUND`) is reported
+  `RUN_FAILED: runtime error; see ST22 (dumps)` when the reply carries the English dump text, on
+  ADT HTTP and on RFC; it was `RUN_UNKNOWN`. Seen live: on 750 both backends answer `Screen output
+  without connection to user`; on 758 RFC answers the same and the ADT HTTP page says `Sending of
+  dynpro <program> <screen> not possible: No window system type specified`. On 740 the RFC
+  connection closes without a message, and the run stays `RUN_UNKNOWN`, as does any other HTTP 500
+  and any other `RFC_CLOSED`.
+- `delete FUGR` on SAP_BASIS 758: the member listing has an expandable `FUGR/FF` category node
+  without a name, which stopped the delete with `member listing: invalid function module name ""`.
+  The category node is skipped; an unnamed module node is still an error.
+- `aunit` on SAP_BASIS 758: the existence read of the object sent `Accept: application/xml`,
+  which the release answers with `HTTP 406`; it now accepts any representation.
+- TABL conversion check on SAP_BASIS 758: the release has no function module `DD_DECIDE`, so the
+  runner aborted and `deploy TABL` printed `ERROR` (`the simulate status is uncertain`). A change
+  that needs the conversion verdict is now `REJECTED: The conversion check of <table> is not
+  available on this release (no function module DD_DECIDE)`. Changes decided before that step
+  (new tables, no change, table class) are unaffected.
+
+## [0.16.1] - 2026-11-20
 
 ### Added
 - `deploy`, `deploy --simulate` and `delete` over ADT: `--tr <request>` now adds a transportable

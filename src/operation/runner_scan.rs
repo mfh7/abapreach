@@ -25,6 +25,7 @@ pub const ALLOWED_FUNCTIONS: &[&str] = &[
     "DD_GET_NAMETAB",
     "DD_NTAB_GEN",
     "DD_TABL_EXPAND",
+    "FUNCTION_EXISTS",
     "RPY_TRANSACTION_DELETE",
     "RPY_TRANSACTION_INSERT",
     "RS_ACCESS_PERMISSION",
@@ -52,6 +53,77 @@ pub const ALLOWED_CLASSES: &[&str] = &[
     "IF_OO_ADT_INTRNL_CLASSRUN",
 ];
 
+/// Function modules only the `RUN_PROG` template may call: the list the submitted report writes to
+/// memory, and the selection screen of the report (interface verified live).
+pub const RUN_PROG_FUNCTIONS: &[&str] = &[
+    "LIST_FREE_MEMORY",
+    "LIST_FROM_MEMORY",
+    "LIST_TO_ASCI",
+    "RS_REPORTSELECTIONS_INFO",
+];
+
+/// Classes only the `RUN_PROG` template may name: the capture of an ALV grid, and the exception of
+/// the source hash.
+pub const RUN_PROG_CLASSES: &[&str] = &[
+    "CL_SALV_BS_RUNTIME_INFO",
+    "CX_ABAP_MESSAGE_DIGEST",
+    "CX_SALV_BS_SC_RUNTIME_INFO",
+];
+
+/// The two statements the `RUN_PROG` template may hold: the generated `SUBMIT`, with no variant
+/// and with one. Every token of the statement is fixed, so no value reaches it except through the
+/// variables it names. Every other mode refuses `SUBMIT` in any shape.
+const SUBMIT_SHAPES: [&[&str]; 2] = [
+    &[
+        "submit",
+        "(",
+        "lv_report",
+        ")",
+        "with",
+        "selection",
+        "-",
+        "table",
+        "mt_sel",
+        "exporting",
+        "list",
+        "to",
+        "memory",
+        "and",
+        "return",
+    ],
+    &[
+        "submit",
+        "(",
+        "lv_report",
+        ")",
+        "using",
+        "selection",
+        "-",
+        "set",
+        "lv_variant",
+        "with",
+        "selection",
+        "-",
+        "table",
+        "mt_sel",
+        "exporting",
+        "list",
+        "to",
+        "memory",
+        "and",
+        "return",
+    ],
+];
+
+/// What a scan allows beyond the allow-lists of every template.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScanMode {
+    /// Every template except `RUN_PROG`.
+    Strict,
+    /// The `RUN_PROG` template: the generated `SUBMIT` and the names it needs.
+    RunProg,
+}
+
 /// Generic reference types that name no class.
 const GENERIC_TYPES: [&str; 2] = ["DATA", "OBJECT"];
 
@@ -66,6 +138,11 @@ enum Token {
 /// Reports every violation as `line N: ...`. `runner` is the one `Y`/`Z` name that may appear:
 /// the class name, given when the whole source is scanned and absent for the constant part.
 pub fn scan(code: &str, runner: Option<&str>) -> Result<(), Vec<String>> {
+    scan_as(code, runner, ScanMode::Strict)
+}
+
+/// [`scan`] with the rules of `mode`.
+pub fn scan_as(code: &str, runner: Option<&str>, mode: ScanMode) -> Result<(), Vec<String>> {
     let tokens = tokenize(code);
     let mut found = Vec::new();
 
@@ -78,8 +155,8 @@ pub fn scan(code: &str, runner: Option<&str>) -> Result<(), Vec<String>> {
             _ => {}
         }
 
-        statement_rules(&tokens, index, &mut found);
-        danger_rules(&tokens, index, &mut found);
+        statement_rules(&tokens, index, mode, &mut found);
+        danger_rules(&tokens, index, mode, &mut found);
     }
 
     logic_rule(&tokens, &mut found);
@@ -190,9 +267,10 @@ fn next_word(tokens: &[(Token, usize)], index: usize) -> Option<&str> {
     }
 }
 
-fn class_rule(name: &str, line: usize, generic: bool, found: &mut Vec<String>) {
+fn class_rule(name: &str, line: usize, generic: bool, mode: ScanMode, found: &mut Vec<String>) {
     let upper = name.to_ascii_uppercase();
     let allowed = ALLOWED_CLASSES.contains(&upper.as_str())
+        || (mode == ScanMode::RunProg && RUN_PROG_CLASSES.contains(&upper.as_str()))
         || (generic && GENERIC_TYPES.contains(&upper.as_str()));
 
     if !allowed {
@@ -203,7 +281,12 @@ fn class_rule(name: &str, line: usize, generic: bool, found: &mut Vec<String>) {
 }
 
 /// The statement patterns that name a function module or a class.
-fn statement_rules(tokens: &[(Token, usize)], index: usize, found: &mut Vec<String>) {
+fn statement_rules(
+    tokens: &[(Token, usize)],
+    index: usize,
+    mode: ScanMode,
+    found: &mut Vec<String>,
+) {
     let line = tokens[index].1;
 
     match &tokens[index].0 {
@@ -215,7 +298,10 @@ fn statement_rules(tokens: &[(Token, usize)], index: usize, found: &mut Vec<Stri
         {
             match tokens.get(index + 2) {
                 Some((Token::Text(name), _))
-                    if ALLOWED_FUNCTIONS.contains(&name.to_ascii_uppercase().as_str()) => {}
+                    if ALLOWED_FUNCTIONS.contains(&name.to_ascii_uppercase().as_str())
+                        || (mode == ScanMode::RunProg
+                            && RUN_PROG_FUNCTIONS
+                                .contains(&name.to_ascii_uppercase().as_str())) => {}
                 Some((Token::Text(name), _)) => found.push(format!(
                     "line {line}: CALL FUNCTION '{name}' is not on the allow-list"
                 )),
@@ -226,7 +312,7 @@ fn statement_rules(tokens: &[(Token, usize)], index: usize, found: &mut Vec<Stri
         }
         Token::Word(word) => {
             if matches!(tokens.get(index + 1), Some((Token::Arrow, _))) {
-                class_rule(word, line, false, found);
+                class_rule(word, line, false, mode, found);
             }
 
             let upper = word.to_ascii_uppercase();
@@ -236,26 +322,26 @@ fn statement_rules(tokens: &[(Token, usize)], index: usize, found: &mut Vec<Stri
                 "REF" if word_at(tokens, index + 1, "TO") => {
                     after(2)
                         .iter()
-                        .for_each(|name| class_rule(name, line, true, found));
+                        .for_each(|name| class_rule(name, line, true, mode, found));
                 }
                 "NEW" | "CAST" | "INTERFACES" => {
                     after(1)
                         .iter()
-                        .for_each(|name| class_rule(name, line, false, found));
+                        .for_each(|name| class_rule(name, line, false, mode, found));
                 }
                 "INHERITING" if word_at(tokens, index + 1, "FROM") => {
                     after(2)
                         .iter()
-                        .for_each(|name| class_rule(name, line, false, found));
+                        .for_each(|name| class_rule(name, line, false, mode, found));
                 }
                 "EXCEPTION" if word_at(tokens, index + 1, "TYPE") => {
                     after(2)
                         .iter()
-                        .for_each(|name| class_rule(name, line, false, found));
+                        .for_each(|name| class_rule(name, line, false, mode, found));
                 }
-                "CATCH" => catch_rule(tokens, index + 1, found),
+                "CATCH" => catch_rule(tokens, index + 1, mode, found),
                 "CREATE" if word_at(tokens, index + 1, "OBJECT") => {
-                    create_rule(tokens, index + 2, found)
+                    create_rule(tokens, index + 2, mode, found)
                 }
                 _ => {}
             }
@@ -268,7 +354,7 @@ fn statement_rules(tokens: &[(Token, usize)], index: usize, found: &mut Vec<Stri
 /// class. No template uses one, so none is allowed. `MODIFY` and `DELETE dbtab FROM wa` read the
 /// same as the internal-table forms, so every `MODIFY` and a `DELETE .. FROM` with a work area
 /// are refused (shortcut: a template that needs one gets an explicit allow entry here).
-fn danger_rules(tokens: &[(Token, usize)], index: usize, found: &mut Vec<String>) {
+fn danger_rules(tokens: &[(Token, usize)], index: usize, mode: ScanMode, found: &mut Vec<String>) {
     let line = tokens[index].1;
     let mut refuse = |what: &str| found.push(format!("line {line}: {what} is not allowed"));
     let symbol_at = |offset: usize, expected: char| {
@@ -286,6 +372,7 @@ fn danger_rules(tokens: &[(Token, usize)], index: usize, found: &mut Vec<String>
                 .is_some_and(|w| w.starts_with(|c: char| c.is_ascii_digit()));
 
             match word.to_ascii_uppercase().as_str() {
+                "SUBMIT" if mode == ScanMode::RunProg && is_generated_submit(tokens, index) => {}
                 "SUBMIT" => refuse("SUBMIT"),
                 "GENERATE" => refuse("GENERATE"),
                 "EXEC" if at(1, "SQL") => refuse("EXEC SQL"),
@@ -321,30 +408,57 @@ fn starts(tokens: &[(Token, usize)], index: usize) -> bool {
 }
 
 /// `CATCH a b INTO x`: every word up to `INTO` or the end of the statement is a class.
-fn catch_rule(tokens: &[(Token, usize)], from: usize, found: &mut Vec<String>) {
+fn catch_rule(tokens: &[(Token, usize)], from: usize, mode: ScanMode, found: &mut Vec<String>) {
     for (token, line) in &tokens[from.min(tokens.len())..] {
         match token {
             Token::Word(word) if word.eq_ignore_ascii_case("INTO") => break,
             Token::Word(word)
                 if ["BEFORE", "UNWIND"].contains(&word.to_ascii_uppercase().as_str()) => {}
-            Token::Word(word) => class_rule(word, *line, false, found),
+            Token::Word(word) => class_rule(word, *line, false, mode, found),
             _ => break,
         }
     }
 }
 
 /// `CREATE OBJECT x TYPE c`: the word after `TYPE` before the statement ends is a class.
-fn create_rule(tokens: &[(Token, usize)], from: usize, found: &mut Vec<String>) {
+fn create_rule(tokens: &[(Token, usize)], from: usize, mode: ScanMode, found: &mut Vec<String>) {
     for index in from.min(tokens.len())..tokens.len() {
         match &tokens[index].0 {
             Token::Symbol('.') => break,
             Token::Word(word) if word.eq_ignore_ascii_case("TYPE") => {
                 if let Some(name) = next_word(tokens, index + 1) {
-                    class_rule(name, tokens[index].1, false, found);
+                    class_rule(name, tokens[index].1, false, mode, found);
                 }
                 break;
             }
             _ => {}
         }
     }
+}
+
+/// Whether the statement that starts at `index` is, token for token, one of the generated
+/// `SUBMIT` shapes. A text literal, a comment, or any other word makes it a different statement.
+fn is_generated_submit(tokens: &[(Token, usize)], index: usize) -> bool {
+    let statement: Vec<String> = tokens[index..]
+        .iter()
+        .take_while(|(token, _)| !matches!(token, Token::Symbol('.')))
+        .map(|(token, _)| match token {
+            Token::Word(word) => word.to_ascii_lowercase(),
+            Token::Symbol(symbol) => symbol.to_string(),
+            Token::Text(_) | Token::Arrow => String::new(),
+        })
+        .collect();
+
+    // The statement must also end with a period inside the scanned text.
+    let ended = tokens[index..]
+        .iter()
+        .any(|(token, _)| matches!(token, Token::Symbol('.')));
+
+    ended
+        && SUBMIT_SHAPES.iter().any(|shape| {
+            statement
+                .iter()
+                .map(String::as_str)
+                .eq(shape.iter().copied())
+        })
 }

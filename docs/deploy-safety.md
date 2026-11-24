@@ -365,6 +365,51 @@ is rejected. A transportable object needs `--tr`.
 
 **Limits.** The file size limit is 256 KiB. `TABL` writes cover transparent tables and structures only.
 
+## Run
+
+`run` is not a dry run. A class that `run CLAS` executes, a report that `run PROG` submits and a
+snippet that `run SNIPPET` runs write to the database, send mail or call other systems exactly as
+they do when Eclipse or SA38 starts them; the run request ends a dialog step, so the database
+commits, and ABAPReach has no rollback for what the code committed itself (and none for the data a
+report wrote and did not commit: it is committed with the end of the dialog step, as in SA38).
+Only `--simulate` is free of effects: it reads the class or report (package, author, active source
+hash, `SUBC`), the snippet hash and the client role, and writes the plan file. Use it first, and read
+the output before the real run.
+
+Safeguards, in the order they apply:
+
+- Name rule: `Z` and `Y` names only, unless the CLI is given `--allow-standard`. A snippet has no
+  name; MCP needs the exact report name on `mcp_run_allow` and `mcp_run_snippet: on` for a snippet.
+- Productive client: `T000-CCCATEGORY = 'P'` refuses every `run`, simulate included; an unreadable
+  client role refuses too. The runner modes check it again inside the class.
+- Plan file: the run needs the file its simulate wrote under the default policy `run: plan`, and
+  stops when the arguments (name, parameters, variant, ALV options, snippet text), the source hash,
+  `SUBC` or the package differ from it. The class also compares the active source hash of a report
+  with the plan right before `SUBMIT`.
+- Policy: `run: off` refuses `run` on the CLI and in MCP; `direct` allows the CLI without a plan.
+- The run request is sent once. A lost reply is `RUN_UNKNOWN`, never a second request.
+- `run PROG` and `run SNIPPET` create a temporary runner class in `$TMP`, so a system or client that
+  does not allow repository changes stops them with the reason before any request that changes
+  something. The class is generated from constant code; no value of yours is in the code except the
+  snippet, which is your own code. The scan of the runner class refuses `SUBMIT` in every template
+  except the two exact statements of the `RUN_PROG` template.
+- The payload names the logon user and an expiry time; a runner class that stays behind (a second
+  Ctrl-C) refuses to run for another user or after the expiry (`run payload expired or foreign
+  user`), so a later classrun request from Eclipse does nothing.
+
+A runtime error in the code is `RUN_FAILED: runtime error`: the server rolls back what the code had
+not committed. A report that sends a screen (`Screen output without connection to user`, English logon
+language) is one, on ADT HTTP and on RFC; on 7.40 the RFC connection closes without that text and
+the run reads `RUN_UNKNOWN`. A catchable exception that reaches the runner (a snippet) is `RUN_FAILED: exception
+<class>: <text>`: ABAPReach rolls back the work since the last `COMMIT WORK`. In a submitted report
+an unhandled exception is a runtime error. Anything else that cuts the reply short (HTTP 5xx from the
+ICM, a timeout of `--timeout`, a dropped connection, a reply without a status line) is
+`RUN_UNKNOWN`: the work process may still be running the code. The `--timeout` limit ends the wait
+of the client only; it does not stop the code.
+
+`read_table_denied` and the other read policies do not apply inside a report or a snippet: the code
+reads with the authorizations of the logon user.
+
 ## Cancellation and SIGKILL
 
 - A write cancelled while it runs ends at its safe point with exit 130: unlock and nothing
@@ -394,6 +439,9 @@ is rejected. A transportable object needs `--tr`.
 | `DELETED (reconciled)`, `PARTIAL` (delete) | 1 | inspect the SAP state; read before retrying |
 | `ACTIVE (reconciled)` | 1 | file is active; verify with `read` |
 | `STOP: ...` | 2 | input, configuration, or guard |
+| reply of `run CLAS`, `RAN` of `run PROG` and `run SNIPPET` | 0 | the code ran and answered |
+| `RUN_FAILED`, `RUN_UNKNOWN` | 1 | the code ended in a runtime error or an exception, or the reply was lost; see [Run](#run) |
+| `SNIPPET_ERROR: line <n>: ...` | 2 | the snippet does not compile; nothing ran |
 
 Exit code 3 is not used by this release.
 

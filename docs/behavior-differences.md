@@ -275,6 +275,129 @@ systems are the 7.50 system, the 7.40 system and the 758 system (S/4HANA).
   there runs over RFC only (unchanged). Issue #13 (a data preview with a single-value `=` condition reported
   as unreliable on the 758 system) is out of scope: ABAPReach's own queries use `IN`.
 
+### 0.17.0 release checks (0.17.0-rc.1 to rc.4)
+
+The runs are from 2026-11-21 and 2026-11-22. The 0.17.0 release binaries are the rc.4 binaries. rc.4 differs
+from rc.3 only in one more known dump text: the ADT HTTP page of the 758 system for a report that sends a
+screen. rc.3 differs
+from rc.2 only in the `run` reply mapping: a report that sends a screen now reads `RUN_FAILED` where the
+reply carries the dump short text. rc.2 differs from rc.1 only in fault-injection code (`hold-post`); the
+macOS release binary of rc.1 and rc.2 is byte-identical. The systems are the 7.50 system, the 7.40 system
+and the 758 system (S/4HANA). All runs use the live harness on the three paths: ADT HTTP, RFC through the
+SAP GUI library and RFC through the NW RFC SDK.
+
+The full matrix runs once per release on each system. A later release candidate reruns only the cells its
+change touches.
+
+| System | Host | Run | Scope | PASS | UNSUPPORTED | FAIL |
+| :--- | :--- | :--- | :--- | ---: | ---: | ---: |
+| 7.50 | macOS arm64 | rc.2 | full matrix, 3 paths | 711 | 68 | 0 |
+| 7.40 | macOS arm64 | rc.2 | full matrix, 3 paths | 491 | 288 | 0 |
+| 758 | macOS arm64 | rc.1 | full matrix, ADT HTTP | 197 | 61 | 9 (explained below) |
+| 758 | macOS arm64 | rc.1 | full matrix, RFC SAP GUI library | 220 | 44 | 2 (explained below) |
+| 758 | Linux x64 | rc.2 | full matrix, RFC SDK | 171 | 35 | 0 |
+| 758 | macOS arm64 | rc.2 | group m6-runner, ADT HTTP | 11 | 0 | 0 |
+| 758 | macOS arm64 | rc.2 | group m6-runner, RFC SAP GUI library | 12 | 0 | 0 |
+| 758 | macOS arm64 | rc.2 | groups m6-ddic and m6-delete, ADT HTTP | 67 | 5 | 0 |
+
+- Why the 758 runs are split. The first full runs on the 758 system were rc.1 (ADT HTTP and RFC SAP GUI
+  library). They had FAIL cells that rc.2 resolved, and the cells were rerun on rc.2 instead of repeating the
+  full matrix. The RFC SDK path ran on Linux x64 on rc.2. Two outages of the network connection to the 758 system (a
+  refused connection on the local port) cut runs on 2026-11-21 and 2026-11-22. The cut runs are kept as
+  superseded logs and are not counted.
+- The 11 FAIL cells of the rc.1 runs on the 758 system:
+  - 7 cells of the ADT HTTP run were harness faults, not product defects. The harness helper that fills the test
+    class posted the classrun from the session that had activated the class, and on the 758 system that
+    session answers `Class does not implement if_oo_adt_classrun~main method!`; ABAPReach itself posts the
+    classrun from a new session (see [Getting started: Run, Results](getting-started.md#results) and the
+    0.16.1 entry of the [changelog](../CHANGELOG.md)). The harness also expected a conversion check where
+    the 758 system has none (no `DD_DECIDE`, see below). Both are fixed in the harness. The rerun on rc.2
+    (the m6 rows above) has 0 FAIL.
+  - 4 cells were Ctrl-C timing cells (2 on ADT HTTP, 2 on the RFC SAP GUI library). rc.2 adds the fault `hold-post`, which pauses
+    the runner after the classrun POST so that the Ctrl-C lands after it (see
+    [Getting started: Fault injection](getting-started.md#fault-injection)). The rerun (m6-runner rows)
+    has 0 FAIL.
+- UNSUPPORTED cells of the 7.40 system (288): ADT HTTP is stateless there (160 cells), the system holds
+  `$TMP` objects only, so no `--tr` or transportable-package cell can run (42), plus the cells that need
+  the fault-injection ADT path, a second user, a 758-only fixture or a helper function module that is not
+  installed there.
+- Windows x64 and Linux arm64 had no live run in 0.17.0 (as in 0.16.1). CI builds and checks the release
+  files for both.
+
+#### 0.17 feature live cases
+
+The cells of the 0.17 features ran as scripts: the Replay set on the rc.3 binary, the Extra set on the rc.4
+binary. They use `$TMP` and `YTEST_ABAPREACH*`
+objects only; every object was deleted and proved absent from a fresh session.
+
+| System | Replay (0.17 cases) | Extra (8 cases added on 2026-11-22) |
+| :--- | :--- | :--- |
+| 7.50 | 66 PASS, 0 FAIL | 70 PASS, 0 FAIL |
+| 7.40 | 53 PASS, 0 FAIL | 64 PASS, 0 FAIL |
+| 758 | 61 PASS, 1 FAIL (script expectation, see below) | 70 PASS, 0 FAIL |
+
+The Replay set covers:
+
+- `run` of a class (classrun), of a report with parameters, and with an unknown parameter;
+- ALV capture (`CL_SALV_TABLE`, `REUSE_ALV_GRID_DISPLAY`, `--alv-columns all`; hidden columns are not
+  printed);
+- `run SNIPPET`, and a snippet syntax error with its line;
+- `aunit` of a program (one test passes, one fails) and of a class without tests;
+- `inactive`, `activate --simulate`, `activate`, and a second `activate` that is refused;
+- an inactive object made by the faults `drop-reply:PUT` and `skip-activate` (the 7.50 system, ADT HTTP and
+  RFC);
+- `delete FUGR` on the 758 system;
+- the `TABL` conversion check (7.50 and 7.40 systems) and its refusal on the 758 system;
+- `doctor` with `RUNNER leftovers: none`.
+
+The Extra set covers:
+
+- a report that sends a screen: `RUN_FAILED` on the 7.50 and 758 systems, where the reply carries the
+  English dump text; on the 7.40 system the RFC connection closes without it and the run reads
+  `RUN_UNKNOWN`;
+- a snippet that raises an exception: `RUN_FAILED: exception CX_SY_NO_HANDLER ...`; the rollback is proven
+  (the inserted row is absent, and the row of a control run is present). The table used for the proof is
+  `YTEST_ABAPREACHL`, 16 characters, because a transparent table name has at most 16 characters;
+- a report changed after the simulate: `REJECTED: plan changed since simulate (source hash); simulate again`;
+- a run longer than 60 seconds on ADT HTTP (7.50 and 758 systems), on the RFC SAP GUI library and on the
+  RFC SDK;
+- `--timeout` per request: on ADT HTTP the run reads `RUN_UNKNOWN` (lost reply); over RFC it is refused
+  with `STOP: --timeout is not supported over RFC ...`;
+- a class `aunit` with one passing and one failing method;
+- a parameter value of 45 characters (accepted) and of 46 characters (refused).
+
+The one Replay FAIL on the 758 system is an outdated expectation of the script: it expected a source hash
+after `create FUNC`, but a create without a source makes an empty skeleton and prints no hash (as `create
+PROG` does). The output `CREATE: ACTIVE` is correct.
+
+#### Differences between the three systems
+
+- Classrun POST from a new session. On the 758 system the session that activated a class answers `Class does
+  not implement if_oo_adt_classrun~main method!`, so ABAPReach posts the classrun from a new session (see
+  [Getting started: Run, Results](getting-started.md#results)). The harness fill helper did not, which
+  caused 7 of the rc.1 FAIL cells.
+- No `DD_DECIDE` on the 758 system. A `TABL` change that needs the conversion verdict ends in a clean
+  `REJECTED: The conversion check of <table> is not available on this release (no function module
+  DD_DECIDE)`. The 7.50 and 7.40 systems return the verdict.
+- A report that sends a screen. The 7.50 and 758 systems send an English dump text with the reply, so the
+  run reads `RUN_FAILED: runtime error; see ST22 (dumps)`: `Screen output without connection to user` on
+  7.50 (both backends) and on 758 over RFC, and `Sending of dynpro <program> <screen> not possible: No
+  window system type specified` on the 758 ADT HTTP page. On the 7.40 system the RFC connection closes
+  without it, and the run reads `RUN_UNKNOWN`.
+- ADT HTTP is stateless on the 7.40 system, so `run` and the other runner operations use RFC there
+  (unchanged).
+
+#### No live test in 0.17.0 (covered offline)
+
+These have no live cell. Offline tests cover them: Ctrl-C twice during `run` (the harness covers Ctrl-C
+twice for `create`, not `run`); the server-side `BASE` check (reachable only by a change between the client
+read and the POST); `RUN_UNKNOWN` from an ICM 5xx (a recorded body); the output budget with one-character
+lines and non-ASCII text; an expired payload re-posted; a snippet with `ENDMETHOD` or `INCLUDE` in a colon
+chain; a name that is not Z or Y without `--allow-standard`; a plan mismatch; the MCP policy matrix (`run:
+off` with `mcp_run: confirm`, `mcp_run: off`, a name missing from `mcp_run_allow`, an aunit batch with one
+object outside the allow list); and the selection-variant cell (it needs a variant made once in SE38 on
+each system).
+
 ## `create PROG` operation (0.15.0)
 
 The create operation covers the `create PROG` cases of the reference test suite

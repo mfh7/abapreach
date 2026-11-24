@@ -3,8 +3,8 @@ mod common;
 use abapreach::config::{Config, ConfigPaths, Connection};
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::operation::runner::{
-    CreateError, DEFAULT_RUNNER_PREFIX, create_with_fresh_name, runner_name, runner_name_with,
-    validate_runner_prefix,
+    CreateError, DEFAULT_RUNNER_PREFIX, create_with_fresh_name, is_runner_class, runner_name,
+    runner_name_with, validate_runner_prefix,
 };
 use abapreach::transport::{Response, TransportError};
 use abapreach::{Factories, Opened, RfcLibraryInfo, run};
@@ -139,6 +139,41 @@ fn a_generated_name_is_prefix_plus_eight_alphabet_characters_within_thirty() {
     assert!(suffix.chars().all(|c| SUFFIX_ALPHABET.contains(c)));
     assert_eq!(name.len(), 26);
     assert!(name.len() <= 30);
+}
+
+#[test]
+fn a_runner_class_is_the_prefix_plus_the_generated_suffix_shape() {
+    // Every generated name is judged a runner class, for the default and a chosen prefix.
+    for _ in 0..50 {
+        assert!(is_runner_class(&runner_name("ZMY_RUN_1_"), "ZMY_RUN_1_"));
+        assert!(is_runner_class(
+            &runner_name(DEFAULT_RUNNER_PREFIX),
+            "ZMY_RUN_1_"
+        ));
+    }
+
+    assert!(is_runner_class(
+        " ycl_abapreach_run_ab12cd34 ",
+        "ZMY_RUN_1_"
+    ));
+    assert!(is_runner_class("zmy_run_1_ab12cd34", "ZMY_RUN_1_"));
+
+    // A class that only starts with the prefix is an ordinary class: the suffix is not eight
+    // characters of 0-9 A-Z.
+    for name in [
+        "YCL_ABAPREACH_RUN_HELPER",
+        "YCL_ABAPREACH_RUN_AB12CD3",
+        "YCL_ABAPREACH_RUN_AB12CD345",
+        "YCL_ABAPREACH_RUN_AB12CD3_",
+        "YCL_ABAPREACH_RUN_AB12 D34",
+        "YCL_ABAPREACH_RUN_",
+        "YCL_ABAPREACH_RUN",
+        "ZCL_AB12CD34",
+    ] {
+        assert!(!is_runner_class(name, "ZMY_RUN_1_"), "{name}");
+    }
+
+    assert!(!is_runner_class("ZMY_RUN_1_HELPER", "ZMY_RUN_1_"));
 }
 
 #[test]

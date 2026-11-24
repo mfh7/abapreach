@@ -17,6 +17,7 @@ use crate::transport::{
     Request, Response, RunnerArm, SadtTransport, TransportError, runner_verdict,
 };
 use std::cell::RefCell;
+use std::time::Duration;
 
 /// The product default; the live test harness selects its own prefix through `runner_prefix`.
 pub const DEFAULT_RUNNER_PREFIX: &str = "YCL_ABAPREACH_RUN_";
@@ -27,6 +28,28 @@ const SUFFIX_ALPHABET: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 /// The largest multiple of 36 that fits a byte: a byte at or above it is redrawn, so every
 /// alphabet character is equally likely.
 const BIAS_LIMIT: u8 = 252;
+
+/// The reason `run CLAS` gives for a temporary runner class.
+pub const RUNNER_CLASS_REFUSED: &str = "a temporary runner class is not run; delete it (doctor)";
+
+/// Whether `name` is a temporary runner class of a connection with `runner_prefix`: the prefix
+/// (or the product default) followed by exactly the generated suffix, eight characters of
+/// `[0-9A-Z]` (see [`runner_name`]). Such a class carries a payload of its own (a leftover of a
+/// crash), so `run CLAS` never runs one. A class that only starts with the prefix, such as a
+/// hand-written `YCL_ABAPREACH_RUN_HELPER`, is an ordinary class.
+pub fn is_runner_class(name: &str, runner_prefix: &str) -> bool {
+    let name = name.trim().to_ascii_uppercase();
+    let shaped = |prefix: &str| {
+        name.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.len() == SUFFIX_LENGTH
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        })
+    };
+
+    shaped(&runner_prefix.to_ascii_uppercase()) || shaped(DEFAULT_RUNNER_PREFIX)
+}
 
 /// The `runner_prefix` rule: upper-case letters, digits, and underscore, starting with `Y` or
 /// `Z`, at most 22 characters, so the name stays within the 30 characters of a class name.
@@ -127,8 +150,14 @@ impl<'a> RunnerGated<'a> {
     }
 }
 
-impl SadtTransport for RunnerGated<'_> {
-    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+impl RunnerGated<'_> {
+    /// The one send: the runner rules judge the request, then it goes out with the limit of the
+    /// request (`None` is the limit of the transport).
+    fn gated(
+        &mut self,
+        request: Request,
+        limit: Option<Duration>,
+    ) -> Result<Response, TransportError> {
         if runner_verdict(&request) == Some(false) {
             return Err(TransportError::RequestNotAllowed(format!(
                 "{} {}",
@@ -142,7 +171,10 @@ impl SadtTransport for RunnerGated<'_> {
                 fault.drop_reply(crate::transport::rfc::is_fault_target(target, &request))
             })
         });
-        let response = self.inner.request(request)?;
+        let response = match limit {
+            Some(limit) => self.inner.request_within(request, limit)?,
+            None => self.inner.request(request)?,
+        };
 
         // The request has run and SAP executed it; only the reply is discarded.
         #[cfg(feature = "fault-injection")]
@@ -152,6 +184,12 @@ impl SadtTransport for RunnerGated<'_> {
 
         Ok(response)
     }
+}
+
+impl SadtTransport for RunnerGated<'_> {
+    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+        self.gated(request, None)
+    }
 
     fn close(&mut self) -> Result<(), TransportError> {
         self.inner.close()
@@ -159,6 +197,18 @@ impl SadtTransport for RunnerGated<'_> {
 
     fn stateful_supported(&self) -> Option<bool> {
         self.inner.stateful_supported()
+    }
+
+    fn supports_request_timeout(&self) -> bool {
+        self.inner.supports_request_timeout()
+    }
+
+    fn request_within(
+        &mut self,
+        request: Request,
+        limit: Duration,
+    ) -> Result<Response, TransportError> {
+        self.gated(request, Some(limit))
     }
 }
 
@@ -236,6 +286,24 @@ pub struct CycleInput<'a> {
     pub build: &'a dyn Fn(&str, OutType) -> Result<String, String>,
 }
 
+/// What a run mode (`run PROG`, `run SNIPPET`) adds to the cycle of the runner. The default is the
+/// cycle of every other operation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CycleExtras {
+    /// The time the classrun `POST` may take over ADT HTTP. `None` is the limit of the transport.
+    pub post_limit: Option<Duration>,
+    /// The text of the first Ctrl-C while the `POST` is in flight. With it the second Ctrl-C ends
+    /// the process (exit 130) and prints the `RUNNER_LEFTOVER` lines of the runner class.
+    pub wait_text: Option<&'static str>,
+    /// Where a snippet stands in the class source: its first line (from 1) and its line count. An
+    /// activation error inside it is the snippet's own error, not a bug of the template.
+    pub snippet: Option<(usize, usize)>,
+}
+
+/// The start of the `STOP` text that is no stop but the error of a snippet: the operation prints
+/// it as it is, without the `STOP: ` prefix, and the exit is 2.
+pub const SNIPPET_ERROR_PREFIX: &str = "SNIPPET_ERROR: ";
+
 /// How a row ended, before the cleanup is taken into account.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunnerEnd {
@@ -289,19 +357,9 @@ impl RunnerRun {
 
     /// `RUNNER_LEFTOVER` and the two exact cleanup commands, for the stderr.
     pub fn leftover_text(&self) -> Option<String> {
-        self.leftover.as_ref().map(|name| {
-            format!(
-                "RUNNER_LEFTOVER: {name}\n\
-                 abapreach delete --simulate CLAS:{name} --plan <FILE> --conn {conn}\n\
-                 abapreach delete CLAS:{name} --plan <FILE> --conn {conn}{hint}",
-                conn = self.conn,
-                hint = if self.directory_only {
-                    DIRECTORY_HINT
-                } else {
-                    ""
-                }
-            )
-        })
+        self.leftover
+            .as_ref()
+            .map(|name| leftover_lines(name, &self.conn, self.directory_only))
     }
 
     /// Whether the later rows of a batch are skipped: a class that stays, a signal, or a stop.
@@ -330,6 +388,16 @@ impl RunnerRun {
             RunnerEnd::Interrupted => INTERRUPT_EXIT_CODE,
         }
     }
+}
+
+/// `RUNNER_LEFTOVER` and the two exact cleanup commands for a runner class that stays.
+pub fn leftover_lines(name: &str, conn: &str, directory_only: bool) -> String {
+    format!(
+        "RUNNER_LEFTOVER: {name}\n\
+         abapreach delete --simulate CLAS:{name} --plan <FILE> --conn {conn}\n\
+         abapreach delete CLAS:{name} --plan <FILE> --conn {conn}{hint}",
+        hint = if directory_only { DIRECTORY_HINT } else { "" }
+    )
 }
 
 /// A row of a batch: it ran, or an earlier row stopped the batch.
@@ -379,6 +447,17 @@ pub fn run_cycle(
     post: PostRoute<'_>,
     cancel: &CancelFlag,
 ) -> RunnerRun {
+    run_cycle_with(input, open, post, cancel, &CycleExtras::default())
+}
+
+/// [`run_cycle`] with the additions of a run mode.
+pub fn run_cycle_with(
+    input: &CycleInput<'_>,
+    open: &mut Opener<'_>,
+    post: PostRoute<'_>,
+    cancel: &CancelFlag,
+    extras: &CycleExtras,
+) -> RunnerRun {
     let post_via = match post {
         PostRoute::Http(_) => PostTransport::Http,
         PostRoute::Cycle => post_transport(input.backend, true),
@@ -427,6 +506,7 @@ pub fn run_cycle(
         expected: None,
         out: OutType::default(),
         directory_left: false,
+        extras: *extras,
     };
     let end = match cycle.steps(post, open) {
         Ok(end) | Err(end) => end,
@@ -484,6 +564,7 @@ struct Cycle<'a> {
     out: OutType,
     /// The last proof found the class gone and `TADIR` still holding its row.
     directory_left: bool,
+    extras: CycleExtras,
 }
 
 impl Cycle<'_> {
@@ -879,6 +960,23 @@ impl Cycle<'_> {
             return Err(RunnerEnd::Stop(self.needs_classrun()));
         }
 
+        // An unclosed block (IF, LOOP, TRY ...) is reported at the ENDMETHOD right after the
+        // snippet, row `first + count`: that error belongs to the last snippet line.
+        if let Some((first, count)) = self.extras.snippet
+            && let Some(message) = messages.iter().find(|message| {
+                let row = message.row as usize;
+
+                message.is_error() && row >= first && row <= first + count
+            })
+        {
+            let line = (message.row as usize - first + 1).min(count.max(1));
+
+            return Err(RunnerEnd::Stop(format!(
+                "{SNIPPET_ERROR_PREFIX}line {line}: {}",
+                cut(&self.mask(message.text.trim()))
+            )));
+        }
+
         match messages.iter().find(|message| message.is_error()) {
             Some(message) => {
                 self.notes.push(TEMPLATE_BUG.to_owned());
@@ -932,12 +1030,22 @@ impl Cycle<'_> {
             PostRoute::Cycle => (open(), self.input.backend == BackendKind::AdtHttp),
             PostRoute::Http(open_post) => (open_post(), true),
         };
+        // A run mode waits for its reply: the first Ctrl-C is told so, the second leaves the
+        // runner class behind and says which one.
+        let _running = self.extras.wait_text.map(|wait| {
+            self.cancel
+                .hold_run_leaving(wait, leftover_lines(self.name(), self.input.conn, false))
+        });
+        let limit = self.extras.post_limit;
         let result = match opened {
             Ok(mut session) => {
-                let result = if gated {
-                    RunnerGated::new(&mut *session).request(request)
-                } else {
-                    session.request(request)
+                let result = match (gated, limit) {
+                    (true, Some(limit)) => {
+                        RunnerGated::new(&mut *session).request_within(request, limit)
+                    }
+                    (true, None) => RunnerGated::new(&mut *session).request(request),
+                    (false, Some(limit)) => session.request_within(request, limit),
+                    (false, None) => session.request(request),
                 };
 
                 if let Err(error) = session.close() {
@@ -952,6 +1060,11 @@ impl Cycle<'_> {
                 ));
             }
         };
+
+        // Test-only: the POST has run (its reply arrived or a fault dropped it); a pause here
+        // makes a Ctrl-C land after the POST on a system of any speed.
+        #[cfg(feature = "fault-injection")]
+        crate::fault::hold_post(self.cancel);
 
         match result {
             Ok(response) if response.status == 404 => RunnerEnd::Stop(self.needs_classrun()),
@@ -1234,4 +1347,131 @@ fn ok(response: &Response) -> bool {
 
 fn cut(text: &str) -> String {
     text.chars().take(MESSAGE_LIMIT).collect()
+}
+
+/// The outcome mapping of a run (`run_runner::map_run`) on cycles that ended in a given way. It
+/// lives here because only this module can build a `RunnerRun` without running a whole cycle.
+#[cfg(test)]
+mod run_mapping_tests {
+    use super::{PostTransport, RunnerEnd, RunnerRun};
+    use crate::backend::Failure;
+    use crate::cli::AlvColumns;
+    use crate::operation::run_runner::map_run;
+    use crate::runner_protocol::{Nonce, RunMode, hex_text};
+    use crate::transport::{Response, TransportError};
+
+    const NONCE: &str = "0123456789ABCDEF0123456789ABCDEF";
+    const INTERRUPTED: &str = "I: interrupted; the run had finished before the reply was read";
+
+    fn run(end: RunnerEnd) -> RunnerRun {
+        RunnerRun {
+            name: None,
+            post: PostTransport::Http,
+            end,
+            leftover: None,
+            notes: Vec::new(),
+            preflight: None,
+            interrupted: false,
+            uncertain: false,
+            directory_only: false,
+            conn: "DEV_100".to_owned(),
+        }
+    }
+
+    fn mapped(run: &RunnerRun) -> crate::operation::run::RunResult {
+        map_run(
+            run,
+            &Nonce::parse(NONCE).unwrap(),
+            RunMode::RunSnippet,
+            AlvColumns::Visible,
+        )
+    }
+
+    /// The reply of a snippet run that printed one line and ended with `RAN`.
+    fn ran() -> Response {
+        let body = [
+            "BEGIN:RUN_SNIPPET".to_owned(),
+            format!("LINE:{}", hex_text("done")),
+            "STATUS:RAN".to_owned(),
+            "END:3".to_owned(),
+        ];
+
+        Response::text(
+            200,
+            body.iter()
+                .map(|rest| format!("ABAPREACH:{NONCE}:{rest}\n\n"))
+                .collect::<String>(),
+        )
+    }
+
+    #[test]
+    fn a_run_that_did_not_start_may_fall_back_only_when_nothing_was_sent_or_left() {
+        let lost = || TransportError::PreSendConnectivity("no route to host".to_owned());
+        let result = mapped(&run(RunnerEnd::NotStarted(lost())));
+
+        assert!(result.fallback_allowed);
+        assert_eq!(result.failure, Some(Failure::PreSendConnectivity));
+        assert_eq!(result.detail.as_deref(), Some(&*lost().to_string()));
+        assert_eq!(result.outcome.exit, 1);
+        assert_eq!(
+            result.outcome.stderr,
+            "ERROR: pre-send connectivity failure: no route to host"
+        );
+
+        // A refused logon is no reason to try the other backend.
+        let refused = mapped(&run(RunnerEnd::NotStarted(TransportError::Authorization(
+            "HTTP 401".to_owned(),
+        ))));
+
+        assert!(!refused.fallback_allowed);
+        assert_eq!(refused.failure, Some(Failure::Authorization));
+        assert_eq!(
+            refused.detail.as_deref(),
+            Some("authorization failed: HTTP 401")
+        );
+
+        // A class that stays, or a signal, ends the fallback.
+        let mut left = run(RunnerEnd::NotStarted(lost()));
+
+        left.leftover = Some("YCL_X".to_owned());
+
+        assert!(!mapped(&left).fallback_allowed);
+
+        let mut signalled = run(RunnerEnd::NotStarted(lost()));
+
+        signalled.interrupted = true;
+
+        let result = mapped(&signalled);
+
+        assert!(!result.fallback_allowed);
+        assert_eq!(result.outcome.exit, 130);
+    }
+
+    #[test]
+    fn a_signal_after_a_finished_run_says_so_and_after_a_failed_one_it_does_not() {
+        let mut finished = run(RunnerEnd::Posted(ran()));
+
+        finished.interrupted = true;
+
+        let result = mapped(&finished);
+
+        assert_eq!(result.outcome.exit, 130);
+        assert!(result.outcome.stderr.contains(INTERRUPTED));
+        assert_eq!(result.outcome.stdout, "done");
+
+        let mut failed = run(RunnerEnd::Posted(Response::empty(503)));
+
+        failed.interrupted = true;
+
+        let result = mapped(&failed);
+
+        assert_eq!(result.outcome.exit, 1);
+        assert!(!result.outcome.stderr.contains(INTERRUPTED));
+
+        // Without a signal there is nothing to say either way.
+        let result = mapped(&run(RunnerEnd::Posted(ran())));
+
+        assert_eq!(result.outcome.exit, 0);
+        assert!(!result.outcome.stderr.contains(INTERRUPTED));
+    }
 }

@@ -918,6 +918,17 @@
       lv_ok       TYPE abap_bool.
 
     CLEAR: ev_action, ev_modeflag, ev_daction, ev_allowed.
+    " SAP_BASIS 758 has no DD_DECIDE: the verdict cannot be taken, so the change is rejected.
+    CALL FUNCTION 'FUNCTION_EXISTS'
+      EXPORTING
+        funcname           = 'DD_DECIDE'
+      EXCEPTIONS
+        function_not_exist = 1
+        OTHERS             = 2.
+    IF sy-subrc <> 0.
+      msg( iv_level = `E` iv_text = |The conversion check of { iv_tabname } is not available on this release (no function module DD_DECIDE)| ).
+      RETURN.
+    ENDIF.
     lt_fresh_03p = it_dd03p.
     lt_fresh_08v = it_dd08v.
     IF expanded( EXPORTING is_dd02v = is_dd02v

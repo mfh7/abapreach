@@ -87,10 +87,15 @@ pub struct HttpTransport {
     session_id: Option<u64>,
     /// `None` until a stateful reply is seen; then whether any reply set the context cookie.
     stateful_supported: Option<bool>,
+    /// The time limit of the request in flight, replacing the client's own for that request.
+    request_limit: Option<Duration>,
     #[cfg(feature = "test-support")]
     responder: Option<Responder>,
     #[cfg(feature = "test-support")]
     recorded: Vec<Request>,
+    /// Test-only: the limit each recorded request carried.
+    #[cfg(feature = "test-support")]
+    limits: Vec<Option<Duration>>,
 }
 
 impl HttpTransport {
@@ -129,10 +134,13 @@ impl HttpTransport {
             session_open: false,
             session_id: Some(NEXT_SESSION.fetch_add(1, Ordering::Relaxed)),
             stateful_supported: None,
+            request_limit: None,
             #[cfg(feature = "test-support")]
             responder: None,
             #[cfg(feature = "test-support")]
             recorded: Vec::new(),
+            #[cfg(feature = "test-support")]
+            limits: Vec::new(),
         })
     }
 
@@ -193,14 +201,22 @@ impl HttpTransport {
             session_open: false,
             session_id: None,
             stateful_supported: None,
+            request_limit: None,
             responder: Some(responder),
             recorded: Vec::new(),
+            limits: Vec::new(),
         }
     }
 
     #[cfg(feature = "test-support")]
     pub fn recorded(&self) -> &[Request] {
         &self.recorded
+    }
+
+    /// The time limit each recorded request carried, in order; `None` is the client's own.
+    #[cfg(feature = "test-support")]
+    pub fn limits(&self) -> &[Option<Duration>] {
+        &self.limits
     }
 
     pub fn classify(status: u16, csrf_token: Option<&str>) -> TransportError {
@@ -326,6 +342,7 @@ impl HttpTransport {
         #[cfg(feature = "test-support")]
         let response = if let Some(responder) = self.responder.as_mut() {
             self.recorded.push(prepared);
+            self.limits.push(self.request_limit);
             responder(request)
         } else {
             self.send_real(prepared)
@@ -407,6 +424,11 @@ impl HttpTransport {
             .basic_auth(&self.username, Some(&self.password))
             .body(prepared.body);
 
+        // Only the total time changes: the connect timeout of the client stays as built.
+        if let Some(limit) = self.request_limit {
+            builder = builder.timeout(limit);
+        }
+
         for (name, value) in &prepared.headers {
             builder = builder.header(name, value);
         }
@@ -481,6 +503,25 @@ impl SadtTransport for HttpTransport {
         }
 
         Ok(retry)
+    }
+
+    fn supports_request_timeout(&self) -> bool {
+        true
+    }
+
+    /// The limit applies to this request, its CSRF refetch and its single retry, and ends with it.
+    fn request_within(
+        &mut self,
+        request: Request,
+        limit: Duration,
+    ) -> Result<Response, TransportError> {
+        self.request_limit = Some(limit);
+
+        let response = self.request(request);
+
+        self.request_limit = None;
+
+        response
     }
 
     /// Whether the server keeps the stateful session; `None` until a stateful reply arrives.

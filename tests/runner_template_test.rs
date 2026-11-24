@@ -3,7 +3,9 @@
 //! proven live. These tests pin everything that can be checked without a SAP system.
 
 use abapreach::operation::payload::{Kind, Mode, Request, encode};
-use abapreach::operation::runner_scan::{ALLOWED_CLASSES, ALLOWED_FUNCTIONS, scan};
+use abapreach::operation::runner_scan::{
+    ALLOWED_CLASSES, ALLOWED_FUNCTIONS, ScanMode, scan, scan_as,
+};
 use abapreach::operation::runner_template::{
     CORE_ONLY, NAME_PLACEHOLDER, OutType, TEMPLATES, TypeTemplate, generate, generate_for,
     template_hash, template_lines,
@@ -16,58 +18,75 @@ const NONCE: &str = "0123456789ABCDEF0123456789ABCDEF";
 const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// One pinned hash per shipped template: adding or changing a template line is a deliberate act.
-const PINNED: [(&str, &str); 6] = [
+const PINNED: [(&str, &str); 8] = [
     (
         "CORE",
-        "5b184ab33877ae31b034c65c07cf2070abb7b897be82dfa57c0cba258fff2fab",
+        "c46de5889e8dad7a4270b711f64ef2329e32dee85f8ee2e352ffa9e8c076cd2b",
     ),
     (
         "TRAN",
-        "8a2cceaac3eee61a8e17011e78d07823cc72ce2516cd0d3d307bf6478e835867",
+        "c1bac263713b53f50ace5e500d4b0b4ecac0fc1c7e5f255bbf021d91888379f9",
     ),
     (
         "DTEL",
-        "10f40d5390759351e41d14c2b5242e09245bbf3928eab69bad278df58a1c2a35",
+        "25b111de2bc2f48566d256176d2e69423f426e6977b767fe834d9923764f6a55",
     ),
     (
         "DOMA",
-        "10f40d5390759351e41d14c2b5242e09245bbf3928eab69bad278df58a1c2a35",
+        "25b111de2bc2f48566d256176d2e69423f426e6977b767fe834d9923764f6a55",
     ),
     (
         "TABL",
-        "10f40d5390759351e41d14c2b5242e09245bbf3928eab69bad278df58a1c2a35",
+        "25b111de2bc2f48566d256176d2e69423f426e6977b767fe834d9923764f6a55",
     ),
     (
         "TTYP",
-        "10f40d5390759351e41d14c2b5242e09245bbf3928eab69bad278df58a1c2a35",
+        "25b111de2bc2f48566d256176d2e69423f426e6977b767fe834d9923764f6a55",
+    ),
+    (
+        "RUN_PROG",
+        "8f7d6b09910d8208d283a9e23510c609639b45f4a96247ba55035d26163e457f",
+    ),
+    (
+        "SNIPPET",
+        "fe6c7da81eaf2435d16d8a701fd7bfb79b8a3cc86a522cd3b237aa03fe4c6da9",
     ),
 ];
 
-/// Filled from the generated sources of 0.16.0 (commit 539f13a).
-const GENERATED: [(&str, &str); 6] = [
+/// The generated source of every template for `NAME` and `payload()`. The 0.16.0 values moved with
+/// 0.17.0, which added the run-mode lines to the shared core.
+const GENERATED: [(&str, &str); 8] = [
     (
         "CORE",
-        "dc63f6f2d12c1e69c4c45a78a351f4e83506435bf727af43d4d668ee7fcd0b08",
+        "ef83dd89a1a1d9bdb231f285ac537bd5e3081900ac29fb576ab59df665432dd5",
     ),
     (
         "TRAN",
-        "5b99718f96dae2dd50931369433d3c67318d2d44df9d921de705ae0f48ada9fa",
+        "81e6fb90b96fdff13282b894fd95624712a08939102e6f74113fefb801797995",
     ),
     (
         "DTEL",
-        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+        "5955a3240f7f2243d637f175b1d32e3d6a1d1dbd6b08f3f05ff81b3b44955156",
     ),
     (
         "DOMA",
-        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+        "5955a3240f7f2243d637f175b1d32e3d6a1d1dbd6b08f3f05ff81b3b44955156",
     ),
     (
         "TABL",
-        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+        "5955a3240f7f2243d637f175b1d32e3d6a1d1dbd6b08f3f05ff81b3b44955156",
     ),
     (
         "TTYP",
-        "01126a03c02620d7952948a975931f2174c197b0956f63a1062b32496af7c5cf",
+        "5955a3240f7f2243d637f175b1d32e3d6a1d1dbd6b08f3f05ff81b3b44955156",
+    ),
+    (
+        "RUN_PROG",
+        "bf9414aa0f9730cbf908af096fd9d4e307c7a534be5200fe6e2965d10d05736a",
+    ),
+    (
+        "SNIPPET",
+        "e17b8c2eb438cffa84bafef955a31eb6744c35ff3778bfa2bc91f46b3e80d1cd",
     ),
 ];
 
@@ -541,6 +560,15 @@ fn every_payload_key_the_encoder_writes_is_known_to_the_template() {
 
 // ---- the scanner ---------------------------------------------------------------------------------
 
+/// The scan mode of a template: only `RUN_PROG` has the generated `SUBMIT` and its names.
+fn mode_of(template: &TypeTemplate) -> ScanMode {
+    if template.name == "RUN_PROG" {
+        ScanMode::RunProg
+    } else {
+        ScanMode::Strict
+    }
+}
+
 fn rejected(code: &str, runner: Option<&str>) -> Vec<String> {
     scan(code, runner).expect_err(code)
 }
@@ -548,11 +576,28 @@ fn rejected(code: &str, runner: Option<&str>) -> Vec<String> {
 #[test]
 fn the_shipped_templates_pass_the_scanner() {
     for template in TEMPLATES {
-        scan(&template_lines(template).join("\n"), None)
+        let mode = mode_of(template);
+
+        scan_as(&template_lines(template).join("\n"), None, mode)
             .unwrap_or_else(|found| panic!("{}: {found:?}", template.name));
-        scan(&source(template), Some(NAME))
+        scan_as(&source(template), Some(NAME), mode)
             .unwrap_or_else(|found| panic!("{}: {found:?}", template.name));
     }
+}
+
+#[test]
+fn the_run_prog_template_reads_the_selection_screen_through_field_info() {
+    let template = TEMPLATES
+        .iter()
+        .find(|template| template.name == "RUN_PROG")
+        .unwrap();
+    let text = template_lines(template).join("\n").to_lowercase();
+
+    assert!(!text.contains("fupararef"));
+    assert!(text.contains("call function 'rs_reportselections_info'"));
+    assert!(text.contains("field_info          = lt_info"));
+    assert!(text.contains("no_selections       = 1"));
+    assert!(text.contains("type standard table of rsel_info"));
 }
 
 #[test]
@@ -982,7 +1027,7 @@ fn the_out_type_changes_exactly_the_one_declaration_line_and_still_scans() {
             out[changed[0]],
             "      mo_out     TYPE REF TO if_oo_adt_classrun_out,"
         );
-        scan(&out.join("\n"), Some(NAME))
+        scan_as(&out.join("\n"), Some(NAME), mode_of(template))
             .unwrap_or_else(|found| panic!("{}: {found:?}", template.name));
     }
 }

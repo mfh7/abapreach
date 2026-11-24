@@ -46,6 +46,8 @@ use std::hash::{BuildHasher, Hasher};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod quality;
+mod run;
 mod runner;
 
 /// How long a plan token stays valid.
@@ -82,6 +84,8 @@ pub enum Operation {
     Deploy,
     Create,
     Delete,
+    Activate,
+    Aunit,
 }
 
 /// What a simulation settled and a later write must repeat. `fields` holds every argument the
@@ -1214,11 +1218,30 @@ fn ask(
 ) -> Result<(), String> {
     let summary = confirmation_summary_with(connection, ticket, registry);
 
-    if holds_secret(connection, &summary) {
+    ask_form(
+        connection,
+        &summary,
+        &typed_text(ticket),
+        timeout,
+        session,
+        read,
+    )
+}
+
+/// Shows the human `summary` and takes the typed `expected` text: `Ok` only when it matches. A
+/// summary that holds a configured secret is refused without asking.
+fn ask_form(
+    connection: &Connection,
+    summary: &str,
+    expected: &str,
+    timeout: Duration,
+    session: &mut dyn Session,
+    read: &mut dyn FnMut(&str, &Map<String, Value>) -> ToolResult,
+) -> Result<(), String> {
+    if holds_secret(connection, summary) {
         return Err(SECRET_REJECTED.to_owned());
     }
 
-    let expected = typed_text(ticket);
     let form = Form {
         message: format!("{summary}\nType {expected} to confirm."),
         label: format!("Type {expected} to confirm"),
@@ -1604,9 +1627,18 @@ fn ddic_lines(preview: &DdicPreview) -> Vec<String> {
 
 /// What the human types: the name of the object, or `DELETE <n>` for a batch of `n`.
 fn typed_text(ticket: &Ticket) -> String {
-    if ticket.operation != Operation::Delete {
+    if !matches!(
+        ticket.operation,
+        Operation::Delete | Operation::Activate | Operation::Aunit
+    ) {
         return ticket.fields.get("name").cloned().unwrap_or_default();
     }
+
+    let verb = match ticket.operation {
+        Operation::Delete => "DELETE",
+        Operation::Activate => "ACTIVATE",
+        _ => "RUN",
+    };
 
     let objects: Vec<&str> = ticket
         .fields
@@ -1615,10 +1647,10 @@ fn typed_text(ticket: &Ticket) -> String {
 
     match objects.as_slice() {
         [one] => one
-            .split_once(':')
+            .split_once([':', ' '])
             .map_or(*one, |(_, name)| name)
             .to_owned(),
-        many => format!("DELETE {}", many.len()),
+        many => format!("{verb} {}", many.len()),
     }
 }
 
@@ -1713,16 +1745,27 @@ pub fn confirmation_summary_with(
         Operation::Deploy => "DEPLOY",
         Operation::Create => "CREATE",
         Operation::Delete => "DELETE (permanent)",
+        Operation::Activate => "ACTIVATE",
+        Operation::Aunit => "RUN ABAP UNIT (runs test code on the system)",
     };
-    let backend = backend_text(ticket, registry);
+    // A run of tests names the backend it resolved before the form; with none resolved the
+    // phrase is left out rather than printing a guess.
+    let backend = if matches!(ticket.operation, Operation::Aunit) && ticket.backend.is_none() {
+        String::new()
+    } else {
+        format!(", backend {}", backend_text(ticket, registry))
+    };
     let mut lines = vec![format!(
-        "{what} on {} (SID {}, client {}), backend {backend}",
+        "{what} on {} (SID {}, client {}){backend}",
         sanitize(&connection.id, SUMMARY_LINE),
         sanitize(&connection.system_id, SUMMARY_LINE),
         sanitize(&connection.client, SUMMARY_LINE),
     )];
 
-    if ticket.operation == Operation::Delete {
+    if matches!(
+        ticket.operation,
+        Operation::Delete | Operation::Activate | Operation::Aunit
+    ) {
         let named: Vec<String> = if ticket.listing.is_empty() {
             ticket
                 .fields
@@ -1754,6 +1797,10 @@ pub fn confirmation_summary_with(
 
         if let Some(tr) = ticket.fields.get("tr") {
             lines.push(format!("tr: {}", sanitize(tr, SUMMARY_LINE)));
+        }
+
+        if let Some(scope) = ticket.fields.get("scope") {
+            lines.push(format!("scope: {}", sanitize(scope, SUMMARY_LINE)));
         }
 
         // A mixed batch runs each object on the backend it was simulated on.
@@ -1876,6 +1923,10 @@ impl<G: WriteGate> McpTools<'_, G> {
             "abap_create" => self.create(arguments, true, session),
             "abap_delete_simulate" => self.delete(arguments, false, session),
             "abap_delete" => self.delete(arguments, true, session),
+            "abap_activate_simulate" => self.activate(arguments, false, session),
+            "abap_activate" => self.activate(arguments, true, session),
+            "abap_aunit" => self.aunit(arguments, session),
+            "abap_run" => self.run(arguments, session),
             "abap_read_source" if runner::runner_type_of(arguments).is_some() => {
                 self.runner_read(arguments, session)
             }

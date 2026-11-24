@@ -504,6 +504,33 @@ pub fn run_with(
     crate::app::run_registered(args, env, factories, registry)
 }
 
+/// What one interrupt does: the first one during a `run` request has no exit, it prints the
+/// waiting line on `err` so the user knows a second one gives the run up. The second one prints
+/// the runner class that its abandoned run leaves behind (when the run has one) and ends the
+/// process. Returns whether the process must exit now.
+fn handle_interrupt(cancel: &CancelFlag, err: &mut dyn std::io::Write) -> bool {
+    // The leftover is read first: the interrupt that ends the process is the second one, and the
+    // window that holds the text closes when the run is over.
+    let leftover = cancel.run_leftover();
+
+    match cancel.on_interrupt() {
+        InterruptAction::ExitNow => {
+            if let Some(leftover) = leftover {
+                let _ = writeln!(err, "{leftover}");
+            }
+
+            true
+        }
+        InterruptAction::Waiting(text) => {
+            // A failed write to stderr must not stop the wait.
+            let _ = writeln!(err, "{text}");
+
+            false
+        }
+        InterruptAction::Deferred => false,
+    }
+}
+
 /// The whole process: trace environment, interrupt handler, environment map, run, print, exit.
 /// The public `main` is `run_main(Registry::new())`.
 pub fn run_main(registry: Registry) -> ! {
@@ -519,7 +546,7 @@ pub fn run_main(registry: Registry) -> ! {
     // The trace environment goes first: `ctrlc` starts a thread, after which `set_var` is unsound.
     after_trace_environment(|| {
         let _ = ctrlc::set_handler(move || {
-            if on_interrupt.on_interrupt() == InterruptAction::ExitNow {
+            if handle_interrupt(&on_interrupt, &mut std::io::stderr()) {
                 // No lock is held, but an open ADT session still keeps its context on SAP.
                 end_open_sessions();
                 std::process::exit(INTERRUPT_EXIT_CODE);
@@ -578,4 +605,75 @@ pub(crate) fn doctor_line(
     };
 
     extension.doctor_line(&mut doctor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::operation::run::WAIT_TEXT;
+
+    #[test]
+    fn the_first_interrupt_during_a_run_writes_the_waiting_line_and_the_second_exits() {
+        let cancel = CancelFlag::new();
+        let _running = cancel.hold_run(WAIT_TEXT);
+        let mut written = Vec::new();
+
+        assert!(!handle_interrupt(&cancel, &mut written));
+        assert_eq!(
+            String::from_utf8(written.clone()).unwrap(),
+            format!("{WAIT_TEXT}\n")
+        );
+
+        // The second interrupt gives the run up and prints nothing more.
+        assert!(handle_interrupt(&cancel, &mut written));
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            format!("{WAIT_TEXT}\n")
+        );
+    }
+
+    #[test]
+    fn the_second_interrupt_of_a_runner_run_prints_the_leftover_lines() {
+        let cancel = CancelFlag::new();
+        let _running =
+            cancel.hold_run_leaving(WAIT_TEXT, "RUNNER_LEFTOVER: ZX\nremove it".to_owned());
+        let mut written = Vec::new();
+
+        // The first interrupt prints the waiting line only, not the leftover.
+        assert!(!handle_interrupt(&cancel, &mut written));
+        assert_eq!(
+            String::from_utf8(written.clone()).unwrap(),
+            format!("{WAIT_TEXT}\n")
+        );
+
+        // The second one prints the leftover and ends the process.
+        assert!(handle_interrupt(&cancel, &mut written));
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            format!("{WAIT_TEXT}\nRUNNER_LEFTOVER: ZX\nremove it\n")
+        );
+    }
+
+    #[test]
+    fn a_class_run_has_no_leftover_to_print() {
+        let cancel = CancelFlag::new();
+        let _running = cancel.hold_run(WAIT_TEXT);
+        let mut written = Vec::new();
+
+        assert!(!handle_interrupt(&cancel, &mut written));
+        assert!(handle_interrupt(&cancel, &mut written));
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            format!("{WAIT_TEXT}\n")
+        );
+    }
+
+    #[test]
+    fn an_interrupt_with_nothing_held_exits_without_a_line() {
+        let cancel = CancelFlag::new();
+        let mut written = Vec::new();
+
+        assert!(handle_interrupt(&cancel, &mut written));
+        assert!(written.is_empty());
+    }
 }

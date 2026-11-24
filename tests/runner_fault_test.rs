@@ -249,6 +249,43 @@ fn a_dropped_classrun_reply_over_the_http_post_of_an_sadt_cycle() {
 }
 
 #[test]
+fn hold_post_pauses_after_the_classrun_post_and_a_set_cancel_flag_ends_the_pause_early() {
+    for backend in BACKENDS {
+        let sap = sap();
+        let cancel = CancelFlag::new();
+        let signal = cancel.clone();
+        // The cycle before the POST runs in memory and takes milliseconds: a flag set a second in
+        // can only land inside the pause that follows the POST.
+        let setter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1000));
+            signal.set();
+        });
+        let _scope = fault::scoped(faults("drop-reply:CLASSRUN,hold-post:30000"));
+        let mut open = || opener(backend, &sap);
+        let started = std::time::Instant::now();
+        let run = run_cycle(&input(backend), &mut open, PostRoute::Cycle, &cancel);
+        let elapsed = started.elapsed();
+
+        setter.join().unwrap();
+        // The POST ran once and its reply was dropped; the pause held the run until the flag.
+        assert_eq!(sap.borrow().posts, 1, "{backend:?}");
+        assert!(
+            matches!(&run.end, RunnerEnd::PostUncertain(_)),
+            "{backend:?}: {:?}",
+            run.end
+        );
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "{backend:?}: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(20),
+            "{backend:?}: {elapsed:?}"
+        );
+    }
+}
+
+#[test]
 fn the_runner_stages_are_dropped_after_they_ran_and_the_class_is_removed() {
     // (fault value, expected stage text, whether the POST is reached)
     let cases = [

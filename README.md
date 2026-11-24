@@ -5,7 +5,7 @@
 **Read and deploy ABAP source from the command line, over ADT HTTP or RFC, including
 systems you can only reach through SAProuter.**
 
-![version](https://img.shields.io/badge/version-0.16.1-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50_%7C_758-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
+![version](https://img.shields.io/badge/version-0.17.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50_%7C_758-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
 
 ```text
 $ abapreach deploy PROG ZDEMO ZDEMO.abap --base 63886692bf65... --conn A4H_001
@@ -184,7 +184,7 @@ the SAP system, but the user needs developer authorization for that class. See
 
 ## Platforms
 
-Release 0.16.1 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
+Release 0.17.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
 library lookup per OS, the release file checks, the Linux glibc baseline, the credential
 file permission rules and the test matrix are in
 [Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
@@ -193,15 +193,20 @@ cell, and every UNSUPPORTED cell has its reason listed. The interactive group (p
 including the interrupt-while-locked cells, is from the 0.13.0 matrix and was not rerun. See
 [Tested environment](docs/getting-started.md#tested-environment).
 
-The 0.16.1 release checks ran on `v0.16.1-rc.2` and `v0.16.1-rc.4`; the release binaries are the rc.4
-binaries. The full matrix ran on rc.2 against the 7.50 system (macOS arm64: 541 PASS, 3 FAIL) and the
-7.40 system (Linux x64: 267 PASS, 3 FAIL). The 3 FAIL cells are older cells whose expectations predate
-0.16.1; they are explained and are not product defects. The 0.16.1 cells (group m7) passed on both
-systems, and the smoke set passed on all three systems on rc.4. The S/4HANA SAP_BASIS 758 system (the
-758 system) is a new tested environment: on 0.16.1 it was covered by the smoke set and group m7 only,
-and the full matrix on it is planned after this release. No test object was left on any system. One
-path has no live test: `--tr` adding an object that no open request holds. See
-[Behavior differences: 0.16.1 release checks](docs/behavior-differences.md#0161-release-checks-0161-rc2-0161-rc4).
+The 0.17.0 release checks ran on `v0.17.0-rc.1` to `v0.17.0-rc.4`; the release binaries are the rc.4
+binaries. The full matrix runs once per release on each system, and a later release candidate reruns
+only the cells its change touches. The full matrix passed with no FAIL cell on the 7.50 system (macOS
+arm64, all three paths: 711 PASS) and on the 7.40 system (macOS arm64, all three paths: 491 PASS). On
+the 758 system it ran on rc.1 (macOS arm64: ADT HTTP and RFC SAP GUI library) and on rc.2 (Linux x64:
+RFC SDK, 171 PASS, 0 FAIL). The 11 FAIL cells of the rc.1 runs are explained (7 harness faults, 4 Ctrl-C
+timing cells; the details are in the linked section) and the rerun on rc.2 has no FAIL cell. The 0.17
+features (`run`, `activate`, `aunit`, `inactive`) also ran as live cases on all three
+systems (the Replay set on the rc.3 binary, the Extra set on the rc.4 binary), in `$TMP` with `YTEST_ABAPREACH*` objects only: 66 and 70 PASS (0 FAIL) on the 7.50 system,
+53 and 64 PASS (0 FAIL) on the 7.40 system, 61 and 70 PASS on the 758 system (its one Replay FAIL is an outdated script expectation, not a product defect). Every test
+object was deleted and proved absent from a fresh session. Windows x64 and Linux arm64 had no live run in
+0.17.0 (as in 0.16.1); CI builds and checks their release files. Some paths have no live test and are
+covered offline only (for example Ctrl-C twice during `run` and the MCP policy matrix). See
+[Behavior differences: 0.17.0 release checks](docs/behavior-differences.md#0170-release-checks-0170-rc1-to-rc4).
 
 An explicit `ABAPREACH_RFC_LIBRARY` that cannot be loaded stops the command with an
 error. ABAPReach does not fall back to another library in that case.
@@ -367,7 +372,13 @@ abapreach create PROG|FUGR|FUNC|CLAS|INTF|DTEL|DOMA|TABL|TTYP|TRAN <NAME> [FILE]
     [--package <PACKAGE>] [--subc 1|I] [--fugr <GROUP>] [--prog <REPORT>] [--tr <request>] [--simulate]
     [--backend adt|rfc] --conn <SID>_<client>
 abapreach delete TYPE:NAME... [--simulate] [--tr <request>] --plan <FILE> --conn <SID>_<client>
+abapreach run CLAS|PROG|SNIPPET <NAME|FILE> [--simulate] [--plan <FILE>] [--param NAME=VALUE]...
+    [--variant <V>] [--alv on|off] [--alv-columns visible|all] [--allow-standard] [--timeout <s>]
+    [--max-output <bytes>] [--backend adt|rfc] --conn <SID>_<client>
 abapreach read-table <TABLE> [--fields <A,B>] [--where '<condition>'] [--rows 1-5000] --conn <SID>_<client>
+abapreach inactive [--all] --conn <SID>_<client>
+abapreach activate TYPE/SUBTYPE:NAME... [--simulate] --conn <SID>_<client>
+abapreach aunit PROG|CLAS|FUGR <NAME> | --package <PACKAGE> | --tr <request> --conn <SID>_<client>
 abapreach doctor --conn <SID>_<client>
 abapreach mcp
 ```
@@ -377,7 +388,10 @@ must be `-` (stdout). `--base` and `--backend` both pin the backend, so a failed
 switches to the other one. `--include` and `--create-include` apply to `CLAS` only. `--main` applies to
 a `PROG` include only. `--subc` applies to `PROG` only. `--prog` is required for `TRAN` and applies to
 `TRAN` only. `--text` is required except for `DTEL`, `DOMA`, `TABL` and `TTYP`, whose description is in
-the XML file.
+the XML file. `inactive`, `activate` and `aunit` are described in
+[Getting started](docs/getting-started.md#inactive-objects-activation-and-abap-unit). `run` is not a
+dry run: see [Getting started](docs/getting-started.md#run-a-class-a-report-or-a-snippet). `run PROG`
+and `run SNIPPET` use a temporary runner class and so work on development systems only.
 The grammar and the limits are in [Getting started](docs/getting-started.md#program-includes).
 [Getting started](docs/getting-started.md#other-source-objects) has examples.
 

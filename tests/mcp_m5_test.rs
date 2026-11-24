@@ -351,13 +351,14 @@ fn the_tool_schemas_carry_the_m5_arguments() {
     // The annotations are untouched hints: the server never relies on them.
     for tool in &tools {
         let name = tool["name"].as_str().unwrap();
-        let read = name == "abap_read_source" || name == "abap_read_table";
+        let read =
+            name == "abap_read_source" || name == "abap_read_table" || name == "abap_inactive";
 
         // Only `abap_read_source` is not read-only: a DDIC or transaction read creates and
         // deletes a temporary class. Its destructive hint stays false.
         assert_eq!(
             tool["annotations"]["readOnlyHint"],
-            name == "abap_read_table",
+            name == "abap_read_table" || name == "abap_inactive",
             "{name}"
         );
         assert_eq!(tool["annotations"]["destructiveHint"], !read, "{name}");
