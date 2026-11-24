@@ -36,20 +36,20 @@ fn the_skip_activate_stop_is_compiled_only_with_the_fault_injection_feature() {
 #[test]
 fn the_hold_post_pause_is_compiled_only_with_the_fault_injection_feature() {
     let runner = include_str!("../src/operation/runner.rs").replace("\r\n", "\n");
-    let call = runner
+    let post = &runner[runner.find("fn post(").expect("fn post")..];
+    let call = post
         .find("crate::fault::hold_post(self.cancel);")
         .expect("call site");
 
     assert!(
-        runner[..call]
+        post[..call]
             .trim_end()
             .ends_with("#[cfg(feature = \"fault-injection\")]")
     );
     // The pause follows the classrun POST and precedes the mapping of its outcome.
-    assert!(runner[..call].rfind("session.request(request)").is_some());
-    assert!(
-        runner[call..]
-            .find("Ok(response) => RunnerEnd::Posted(response)")
-            .is_some()
-    );
+    let request = post.find("session.request(request)").expect("POST request");
+    let outcome = call + post[call..].find("match result {").expect("outcome match");
+
+    assert!(request < call, "the pause comes after the POST");
+    assert!(call < outcome, "the pause comes before the outcome match");
 }

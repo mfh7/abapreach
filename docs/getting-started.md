@@ -817,9 +817,9 @@ screen of report <REPORT> cannot be read`, and a run without parameters is not a
 cases do not cover which grid is captured when a report shows more than one. An HTTP 500 body marks a
 runtime error (`RUN_FAILED`) when it matches the text `runtime error`, `short dump` or `ST22`, or the
 short text of a known dump (a report that sends a screen: `Screen output without connection to user`
-on the 7.50 system, or on the ADT page of the 758 system `Sending of dynpro <program> <screen> not
-possible: No window system type specified`; seen live with an English logon language); any other
-500 counts as `RUN_UNKNOWN`.
+on the 7.50 system, or on the ADT page of the 758 system
+`Sending of dynpro <program> <screen> not possible: No window system type specified`; seen live with
+an English logon language); any other 500 counts as `RUN_UNKNOWN`.
 
 ## Tested environment
 

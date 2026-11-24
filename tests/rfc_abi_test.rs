@@ -204,3 +204,15 @@ fn rfc_closed_is_a_runtime_failure_only_for_a_known_dump_text() {
     assert!(is_abap_runtime_failure(&runtime), "{runtime:?}");
     assert!(!is_abap_runtime_failure(&exception), "{exception:?}");
 }
+
+#[test]
+fn rfc_closed_is_a_runtime_failure_for_the_758_dynpro_send_text() {
+    let text =
+        "Sending of dynpro YTEST_ABAPREACH_X17A 1000 not possible: No window system type specified";
+    let dynpro = classify_rfc_error(RfcPhase::Invoke, CLOSED, text);
+    // The text alone is not enough: the code must be RFC_CLOSED or RFC_ABAP_RUNTIME_FAILURE.
+    let wrong_code = classify_rfc_error(RfcPhase::Invoke, COMMUNICATION_FAILURE, text);
+
+    assert!(is_abap_runtime_failure(&dynpro), "{dynpro:?}");
+    assert!(!is_abap_runtime_failure(&wrong_code), "{wrong_code:?}");
+}

@@ -687,6 +687,10 @@ pub(crate) fn cut(text: &str) -> String {
 /// text of the dump (`Screen output without connection to user.`, fixture
 /// `tests/fixtures/m8/classrun_500_screen_output.html`). The generic markers stay; the known short
 /// texts of [`crate::transport::rfc::KNOWN_DUMP_SHORT_TEXTS`] are added to them.
+///
+/// The SAP_BASIS 758 ADT page of a screen dump is covered too: it carries the text `Sending of
+/// dynpro <program> <screen> not possible: No window system type specified` (fixture
+/// `tests/fixtures/m8/classrun_500_dynpro_send_758.html`).
 pub fn is_runtime_error_body(body: &[u8]) -> bool {
     let text = String::from_utf8_lossy(body);
     let lower = text.to_ascii_lowercase();
