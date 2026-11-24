@@ -987,9 +987,10 @@ reply drop, so it does not change the results in the table above.
 `hold-post:<ms>` (same bounds) pauses the runner right after the classrun POST has returned, before
 its outcome is mapped, and prints `FAULT: classrun POST done, pausing N ms` on stderr; it exists
 only for the live Ctrl-C cells and, like `hold-lock`, drops no reply. As with `hold-lock`, the pause ends
-early when Ctrl-C arrives. Right before the POST is sent it also prints `FAULT: classrun POST sending`
-on stderr, which the Ctrl-C cells wait for. There is no pause when the POST session cannot be opened
-(the run ends in `REJECTED: runner POST failed: cannot open the POST session` before any POST).
+early when Ctrl-C arrives. Right before the POST request starts it also prints
+`FAULT: classrun POST sending` on stderr (the POST session may still log on after it), which the
+Ctrl-C cells wait for. There is no pause when the POST session cannot be opened (the run ends in
+`REJECTED: runner POST failed: cannot open the POST session` before any POST).
 
 ### Carve-outs
 
