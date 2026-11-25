@@ -3209,6 +3209,413 @@ fn an_unreadable_search_reply_is_rejected_and_the_output_is_scrubbed_of_secrets(
     assert!(table_of(&exit).starts_with("PROG/P ZP package=ZPACK pw is"));
 }
 
+// ---- where-used ------------------------------------------------------------------------------
+
+const USAGE_URI: &str = "/sap/bc/adt/repository/informationsystem/usageReferences";
+const WHERE_USED_758_CLAS: &str = "USED-BY CLAS ZTEST_OBJECT package=ZTEST_OBJECT via=ADT\n\
+    USED-BY FUGR /SMB/ZIP_UPLOAD_DOWNLOAD package=/SMB/COMMON via=ADT\n\
+    USED-BY FUGR PAOC_SBP_TOOLS package=PAOC_SBP_PYP via=ADT\n\
+    USED-BY PROG ZTEST_OBJECT package=$TMP via=ADT\n\
+    USED-BY PROG/I ZTEST_OBJECT package=ZTEST_OBJECT via=ADT\n\
+    WHERE-USED: 5";
+
+fn where_used(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "where-used"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+fn usage_reply(name: &str) -> Result<Response, TransportError> {
+    source(&fs::read_to_string(common::fixture_path_in("m9", name)).unwrap())
+}
+
+fn discovery_reply(hrefs: &[&str]) -> Result<Response, TransportError> {
+    let collections: String = hrefs
+        .iter()
+        .map(|href| format!(r#"<app:collection href="{href}"/>"#))
+        .collect();
+
+    source(&format!(
+        r#"<app:service xmlns:app="http://www.w3.org/2007/app">{collections}</app:service>"#
+    ))
+}
+
+fn column_reply(name: &str, values: &[&str]) -> Result<Response, TransportError> {
+    let values: Vec<Option<&str>> = values.iter().map(|value| Some(*value)).collect();
+
+    source(&common::preview(&[(name, &values)]))
+}
+
+/// The replies of a data element fallback: the discovery without a DDIC collection, then the
+/// dictionary check and the rows of each table in the order the command reads them. `TRDIR` is a
+/// view on every release, so its check takes four lookups.
+fn dtel_fallback_replies() -> Vec<Result<Response, TransportError>> {
+    vec![
+        discovery_reply(&["/sap/bc/adt/programs/programs"]),
+        dd02l("WBCROSSGT", "TRANSP", None),
+        column_reply("INCLUDE", &["ZREPORT_TOP", "LZFGU01"]),
+        dd02l("TRDIR", "VIEW", Some("D")),
+        source(&common::preview(&[
+            ("DDLNAME", &[]),
+            ("OBJECTNAME", &[]),
+            ("OBJECTTYPE", &[]),
+        ])),
+        source(&common::preview(&[
+            ("VIEWNAME", &[Some("TRDIR")]),
+            ("TABNAME", &[Some("REPOSRC")]),
+            ("TABPOS", &[Some("0001")]),
+        ])),
+        dd02l("REPOSRC", "TRANSP", None),
+        column_reply("NAME", &["SAPLZFG"]),
+        dd02l("WBCROSSI", "TRANSP", None),
+        source(&common::preview(&[
+            ("INCLUDE", &[Some("ZREPORT_TOP")]),
+            ("MASTER", &[Some("ZREPORT")]),
+        ])),
+        dd02l("DD03L", "TRANSP", None),
+        column_reply("TABNAME", &["ZSTRUCT"]),
+        dd02l("TADIR", "TRANSP", None),
+        source(&common::preview(&[
+            ("OBJECT", &[Some("PROG"), Some("FUGR")]),
+            ("OBJ_NAME", &[Some("ZREPORT"), Some("ZFG")]),
+            ("DEVCLASS", &[Some("ZPACK"), Some("ZPACK_FG")]),
+        ])),
+    ]
+}
+
+const DTEL_FALLBACK_OUTPUT: &str = "USED-BY FUGR ZFG package=ZPACK_FG via=WBCROSSGT\n\
+    USED-BY PROG ZREPORT package=ZPACK via=WBCROSSGT\n\
+    USED-BY TABL ZSTRUCT package=? via=DD03L\n\
+    WHERE-USED: 3";
+const DTEL_FALLBACK_WARNING: &str =
+    "W: no ADT where-used for DTEL on this release; using cross-reference tables";
+
+#[test]
+fn where_used_takes_a_type_a_name_and_an_optional_maximum_of_one_to_five_thousand() {
+    let cli = |args: &[&str]| {
+        let mut full = vec!["abapreach", "where-used"];
+
+        full.extend_from_slice(args);
+
+        Cli::try_parse_from(full)
+    };
+
+    match cli(&["CLAS", "CL_ABAP_ZIP", "--conn", "dev_100"])
+        .unwrap()
+        .command
+    {
+        Command::WhereUsed {
+            object_type,
+            name,
+            max,
+            conn,
+        } => {
+            assert_eq!(object_type, "CLAS");
+            assert_eq!(name, "CL_ABAP_ZIP");
+            assert_eq!(max, 200);
+            assert_eq!(conn, "dev_100");
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&["dtel", "ZDE_A", "--max", "5000", "--conn", "dev_100"])
+        .unwrap()
+        .command
+    {
+        Command::WhereUsed {
+            object_type, max, ..
+        } => {
+            assert_eq!(object_type, "dtel");
+            assert_eq!(max, 5000);
+        }
+        other => panic!("{other:?}"),
+    }
+    for max in ["0", "5001", "-1", "x", ""] {
+        assert!(
+            cli(&["CLAS", "ZCL_A", "--max", max, "--conn", "dev_100"]).is_err(),
+            "{max}"
+        );
+        assert_stops_locally(&[
+            "abapreach",
+            "where-used",
+            "CLAS",
+            "ZCL_A",
+            "--max",
+            max,
+            "--conn",
+            "dev_100",
+        ]);
+    }
+    assert!(
+        cli(&["CLAS", "--conn", "dev_100"]).is_err(),
+        "a name is needed"
+    );
+    assert!(cli(&["CLAS", "ZCL_A"]).is_err(), "a connection is needed");
+    assert!(cli(&["CLAS", "ZCL_A", "ZCL_B", "--conn", "dev_100"]).is_err());
+}
+
+#[test]
+fn where_used_stops_locally_on_a_type_or_name_outside_the_rules() {
+    for args in [
+        vec!["MSAG", "ZMSG"],
+        vec!["TRAN", "SE38"],
+        vec!["DDLS", "ZDDL"],
+        vec!["BOGUS", "ZNAME"],
+        vec!["CLAS", "ZCL A"],
+        vec!["CLAS", "ZCL'A"],
+        vec!["CLAS", "/NS/ZCL_A"],
+        vec!["PROG", "Z$PROG"],
+        vec!["PROG", "../ZPROG"],
+        vec!["FUNC", ""],
+        vec!["DTEL", "ZDE'A"],
+        vec!["DOMA", "ZDO;A"],
+        vec!["TABL", &"Z".repeat(31)],
+    ] {
+        let mut fake = Fake::default();
+        let mut full = args.clone();
+
+        full.extend(["--conn", "dev_100"]);
+
+        let exit = where_used(&full, &mut fake);
+
+        assert_eq!(exit.code, 2, "{args:?}: {}", exit.stderr);
+        assert!(
+            exit.stderr.starts_with("STOP: "),
+            "{args:?}: {}",
+            exit.stderr
+        );
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0), "{args:?}");
+    }
+}
+
+#[test]
+fn where_used_over_adt_posts_the_object_query_and_prints_the_sorted_users() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![usage_reply(
+        "usage-clas-758.xml",
+    )]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = where_used(&["clas", "cl_abap_zip", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), WHERE_USED_758_CLAS);
+    assert_eq!(exit.stderr, "");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+
+    let calls = calls.borrow();
+
+    assert_eq!(calls.calls.len(), 1);
+    assert_eq!(calls.calls[0].method, "POST");
+    assert_eq!(
+        calls.calls[0].uri,
+        format!("{USAGE_URI}?uri=/sap/bc/adt/oo/classes/cl_abap_zip")
+    );
+    assert_eq!(
+        calls.calls[0].body,
+        abapreach::adt::USAGE_REQUEST_XML.as_bytes()
+    );
+    assert_eq!(calls.closes, 1);
+}
+
+#[test]
+fn a_where_used_without_a_user_is_exit_zero() {
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![usage_reply("usage-prog-740.xml")]));
+
+    let exit = where_used(&["PROG", "RSPARAM", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "WHERE-USED: 0");
+    assert_eq!(exit.stderr, "");
+}
+
+#[test]
+fn where_used_cuts_the_list_at_max_with_a_warning() {
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![usage_reply("usage-clas-758.xml")]));
+
+    let exit = where_used(
+        &["CLAS", "CL_ABAP_ZIP", "--max", "1", "--conn", "dev_100"],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "USED-BY CLAS ZTEST_OBJECT package=ZTEST_OBJECT via=ADT\nWHERE-USED: 1"
+    );
+    assert_eq!(
+        exit.stderr,
+        "W: 5 objects found; the first 1 are shown (--max)"
+    );
+}
+
+#[test]
+fn a_ddic_type_the_release_does_not_list_is_read_from_the_cross_reference_tables_over_adt() {
+    let (calls, adt) = shared(ScriptedTransport::replies(dtel_fallback_replies()));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = where_used(&["DTEL", "ZDE_A", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), DTEL_FALLBACK_OUTPUT);
+    assert_eq!(exit.stderr, DTEL_FALLBACK_WARNING);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+
+    let calls = calls.borrow();
+
+    assert_eq!(calls.calls[0].method, "GET");
+    assert_eq!(calls.calls[0].uri, "/sap/bc/adt/discovery");
+    assert!(
+        calls.calls.iter().skip(1).all(|call| call
+            .uri
+            .starts_with("/sap/bc/adt/datapreview/ddic?rowNumber=")),
+        "{:?}",
+        calls.calls.iter().map(|call| &call.uri).collect::<Vec<_>>()
+    );
+    assert_eq!(calls.calls.len(), 14);
+}
+
+#[test]
+fn a_ddic_type_the_release_lists_goes_through_the_usage_search() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![
+        discovery_reply(&[
+            "/sap/bc/adt/ddic/dataelements",
+            "/sap/bc/adt/ddic/structures",
+        ]),
+        usage_reply("usage-prog-750.xml"),
+    ]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = where_used(&["DTEL", "ZDE_A", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "USED-BY PROG RFVISL00 package=FVVI via=ADT\nWHERE-USED: 1"
+    );
+    assert_eq!(exit.stderr, "");
+    assert_eq!(
+        calls.borrow().calls[1].uri,
+        format!("{USAGE_URI}?uri=/sap/bc/adt/ddic/dataelements/zde_a")
+    );
+}
+
+#[test]
+fn where_used_over_the_rfc_backend_passes_admission_with_the_fake() {
+    // An ADT kind: the usage POST and the function group search are exact shapes.
+    let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(rfc_replies(
+        &[usage_reply("usage-clas-758.xml")],
+    ))));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(rfc);
+
+    let exit = where_used(&["CLAS", "CL_ABAP_ZIP", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), WHERE_USED_758_CLAS);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert_eq!(api.borrow().api().counts().2, 1);
+    assert_eq!(
+        api.borrow().api().last_request().uri,
+        format!("{USAGE_URI}?uri=/sap/bc/adt/oo/classes/cl_abap_zip")
+    );
+
+    // The fallback: the discovery GET and every data preview leave the process.
+    let replies = dtel_fallback_replies();
+    let count = replies.len();
+    let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(rfc_replies(
+        &replies,
+    ))));
+    let mut fake = Fake::default();
+
+    fake.rfc.push_back(rfc);
+
+    let exit = where_used(&["DTEL", "ZDE_A", "--conn", "qas_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), DTEL_FALLBACK_OUTPUT);
+    assert!(
+        exit.stderr.contains(DTEL_FALLBACK_WARNING),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+    assert_eq!(api.borrow().api().counts().2, count);
+}
+
+#[test]
+fn where_used_falls_back_to_rfc_only_before_anything_was_sent() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc
+        .push_back(scripted(vec![usage_reply("usage-prog-750.xml")]));
+
+    let exit = where_used(&["PROG", "RSPARAM", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "USED-BY PROG RFVISL00 package=FVVI via=ADT\nWHERE-USED: 1"
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn a_where_used_the_system_refuses_or_cannot_read_is_an_error_without_fallback() {
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(404, "<html/>"))]));
+
+    let exit = where_used(&["CLAS", "ZCL_A", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .starts_with("ERROR: the where-used search answered HTTP 404"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(table_of(&exit), "");
+    assert_eq!(fake.rfc_opened, 0);
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![source("<a><b></a>")]));
+
+    let exit = where_used(&["CLAS", "ZCL_A", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .starts_with("REJECTED: cannot read the where-used reply"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(fake.rfc_opened, 0);
+}
+
 // ---- delete ----------------------------------------------------------------------------------
 
 const DELETE_PROG: &str = "/sap/bc/adt/programs/programs/ztest_del";

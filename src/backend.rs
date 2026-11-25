@@ -75,6 +75,7 @@ pub enum OperationKind {
     Search,
     Dumps,
     Dump,
+    WhereUsed,
     Delete,
     /// `run`: the class, report or snippet an operation executes.
     Run,
@@ -95,6 +96,7 @@ impl fmt::Display for OperationKind {
             Self::Search => write!(formatter, "search"),
             Self::Dumps => write!(formatter, "dumps"),
             Self::Dump => write!(formatter, "dump"),
+            Self::WhereUsed => write!(formatter, "where-used"),
             Self::Delete => write!(formatter, "delete"),
             Self::Run => write!(formatter, "run"),
             Self::Doctor => write!(formatter, "doctor"),

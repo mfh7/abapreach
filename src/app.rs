@@ -41,6 +41,7 @@ use crate::operation::runner_tran::{self, TranCreate, TranRead};
 use crate::operation::search::{self, Query as SearchQuery};
 use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
 use crate::operation::sql::{self, Query as SqlQuery, TEXT_MAX};
+use crate::operation::where_used::{self, Query as WhereUsedQuery};
 use crate::policy::{RunPolicy, Terminal};
 use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use crate::transport::http::{HttpConfig, HttpTransport};
@@ -396,6 +397,7 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::Search { conn, .. }
         | Command::Dumps { conn, .. }
         | Command::Dump { conn, .. }
+        | Command::WhereUsed { conn, .. }
         | Command::Delete { conn, .. }
         | Command::Inactive { conn, .. }
         | Command::Activate { conn, .. }
@@ -488,9 +490,28 @@ fn stop_attempt(message: &str) -> Attempt {
 pub(crate) fn read_attempt(read: Result<TableData, PreviewError>) -> Attempt {
     match read {
         Ok(data) => table_attempt(&data),
-        Err(PreviewError::Refused(message)) => stop_attempt(&message),
-        Err(PreviewError::Rejected(message)) => rejected_attempt(&message),
-        Err(PreviewError::Failed { failure, message }) => Attempt::failed(message, failure),
+        Err(error) => preview_error_attempt(error),
+    }
+}
+
+/// The attempt of a run that reads through the data preview and prints its own outcome.
+fn outcome_attempt(result: Result<Outcome, PreviewError>) -> Attempt {
+    match result {
+        Ok(outcome) => Attempt {
+            outcome,
+            failure: None,
+            fallback_allowed: false,
+            detail: None,
+        },
+        Err(error) => preview_error_attempt(error),
+    }
+}
+
+fn preview_error_attempt(error: PreviewError) -> Attempt {
+    match error {
+        PreviewError::Refused(message) => stop_attempt(&message),
+        PreviewError::Rejected(message) => rejected_attempt(&message),
+        PreviewError::Failed { failure, message } => Attempt::failed(message, failure),
     }
 }
 
@@ -846,6 +867,33 @@ fn execute(
                     let note = end_session(transport);
 
                     text_attempt(shown).noted(note)
+                },
+            )
+        }
+        Command::WhereUsed {
+            object_type,
+            name,
+            max,
+            ..
+        } => {
+            let query = match WhereUsedQuery::new(&object_type, &name, max) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            route(
+                OperationKind::WhereUsed,
+                None,
+                false,
+                connection,
+                factories,
+                |transport, _, _, _| {
+                    let result = where_used::run(transport, &query, &connection.policies);
+
+                    // A read holds no lock, so a failed session end is only a note.
+                    let note = end_session(transport);
+
+                    outcome_attempt(result).noted(note)
                 },
             )
         }

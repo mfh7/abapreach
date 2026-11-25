@@ -9,6 +9,7 @@ Commands:
   search      Finds objects by name pattern through the ADT object search
   dumps       Lists the ST22 short dumps from table SNAP, newest first, one line each
   dump        Shows one short dump: error, program, include, line, user, client, short text and source
+  where-used  Lists the objects that use one object, through ADT or the standard cross-reference tables
   delete      Deletes objects from a plan written by `--simulate`
   inactive    Lists the inactive objects of the logon user, one `<ADT type> <name> <user>` line each
   activate    Activates own inactive Z/Y objects, named as `inactive` prints them

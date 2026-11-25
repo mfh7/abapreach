@@ -1,6 +1,7 @@
 use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
+use std::collections::HashSet;
 
 /// The `atom:id` of the inactive version in the version list of an object.
 pub const INACTIVE_VERSION_ID: &str = "99999";
@@ -566,6 +567,137 @@ pub fn parse_callers(xml: &str) -> Result<Vec<Caller>, String> {
     }
 
     Ok(callers)
+}
+
+/// One using object of a where-used result, with the type as ADT names it (`CLAS/OC`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UsingObject {
+    pub kind: String,
+    pub name: String,
+    pub package: Option<String>,
+}
+
+/// One `usageReferences:referencedObject`, as listed.
+#[derive(Default)]
+struct UsageEntry {
+    uri: String,
+    parent_uri: String,
+    object: UsingObject,
+}
+
+/// The objects that use the asked object, from a `usageReferenceResult`. The reply is a tree: a
+/// package (`DEVC/K`) is never a user, and a part of an object (a method, an include of a
+/// function group, a function module) names its object as `parentUri` when the reply lists that
+/// object, so only the object is kept. An entry with no type or no name is a part or a
+/// placeholder, not an object. The `numberOfResults` attribute is not read: a trimmed or capped
+/// reply keeps the original count. Order and repeats are the caller's concern.
+pub fn parse_usage_objects(xml: &str) -> Result<Vec<UsingObject>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut entries: Vec<UsageEntry> = Vec::new();
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element) => match local_name(&element) {
+                "referencedObject" => {
+                    let mut entry = UsageEntry::default();
+
+                    for (key, value) in attributes_of(&element)? {
+                        match key.as_str() {
+                            "uri" => entry.uri = value,
+                            "parentUri" => entry.parent_uri = value,
+                            _ => {}
+                        }
+                    }
+
+                    entries.push(entry);
+                }
+                "adtObject" => {
+                    if let Some(entry) = entries.last_mut() {
+                        for (key, value) in attributes_of(&element)? {
+                            match key.as_str() {
+                                "name" => entry.object.name = value,
+                                "type" => entry.object.kind = value,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                "packageRef" => {
+                    if let Some(entry) = entries.last_mut()
+                        && entry.object.package.is_none()
+                    {
+                        entry.object.package = attributes_of(&element)?
+                            .into_iter()
+                            .find_map(|(key, value)| (key == "name").then_some(value));
+                    }
+                }
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    let is_object = |entry: &UsageEntry| {
+        let object = &entry.object;
+
+        !object.kind.trim().is_empty()
+            && !object.name.trim().is_empty()
+            && !object.kind.starts_with("DEVC")
+    };
+    let objects: HashSet<&str> = entries
+        .iter()
+        .filter(|entry| is_object(entry))
+        .map(|entry| entry.uri.as_str())
+        .collect();
+
+    Ok(entries
+        .iter()
+        .filter(|entry| is_object(entry))
+        .filter(|entry| entry.parent_uri.is_empty() || !objects.contains(entry.parent_uri.as_str()))
+        .map(|entry| entry.object.clone())
+        .collect())
+}
+
+/// The `href` of every collection of an ADT discovery document (`app:collection`), as listed.
+pub fn discovery_collections(xml: &str) -> Result<Vec<String>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut hrefs = Vec::new();
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(&element) == "collection" =>
+            {
+                hrefs.extend(
+                    attributes_of(&element)?
+                        .into_iter()
+                        .find_map(|(key, value)| (key == "href").then_some(value)),
+                );
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(hrefs)
+}
+
+/// The attributes of an element as `(local name, value)` pairs.
+fn attributes_of(element: &BytesStart<'_>) -> Result<Vec<(String, String)>, String> {
+    let mut pairs = Vec::new();
+
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        let value = attribute
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|error| error.to_string())?
+            .into_owned();
+
+        pairs.push((attribute.key.local_name().into_inner().to_owned(), value));
+    }
+
+    Ok(pairs)
 }
 
 /// One checkrun or activation message, printed as `TYPE row N: MSG`.

@@ -844,15 +844,26 @@ fn usage(uri: &str) -> String {
 }
 
 fn usage_post(uri: &str) -> Request {
-    Request::post(
+    with_usage_headers(Request::post(
         usage(uri),
         abapreach::adt::USAGE_REQUEST_XML.as_bytes().to_vec(),
-    )
+    ))
+}
+
+fn with_usage_headers(mut request: Request) -> Request {
+    for header in ["Content-Type", "Accept"] {
+        request
+            .headers
+            .insert(header.to_owned(), "application/*".to_owned());
+    }
+
+    request
 }
 
 #[test]
 fn a_where_used_request_on_a_program_or_include_is_admitted_in_the_emitted_shape_only() {
     assert_admitted(&[usage_post(PROGRAM), usage_post(INCLUDE)]);
+    // The objects of the other where-used kinds are admitted by `where_used_admission_test.rs`.
     assert_eq!(
         usage(INCLUDE),
         format!("/sap/bc/adt/repository/informationsystem/usageReferences?uri={INCLUDE}")
@@ -895,15 +906,12 @@ fn a_where_used_request_on_a_program_or_include_is_admitted_in_the_emitted_shape
         usage_post("/sap/bc/adt/programs/includes/.."),
         usage_post("/sap/bc/adt/programs/includes/"),
         usage_post("/sap/bc/adt/programs/programs/"),
-        // A URI part, a context, another collection or kind.
+        // A URI part, a context, or another collection.
         usage_post(&format!("{INCLUDE}/source/main")),
         usage_post(&format!("{PROGRAM}/source/main")),
         usage_post(&format!("{INCLUDE}/mainprograms")),
         usage_post(&context_include()),
         usage_post("/sap/bc/adt/programs/includes"),
-        usage_post("/sap/bc/adt/oo/classes/zcl_a"),
-        usage_post("/sap/bc/adt/oo/interfaces/zif_a"),
-        usage_post("/sap/bc/adt/functions/groups/zfg"),
         // Extra or misplaced query.
         Request::post(
             format!("{}&x=1", usage(INCLUDE)),

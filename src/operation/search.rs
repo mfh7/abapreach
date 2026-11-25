@@ -175,7 +175,7 @@ impl Query {
 
 /// A character no printed field keeps: a control character or a Unicode format character (`Cf`),
 /// such as a bidi override or a zero-width mark, that could reorder or hide the text of a line.
-fn is_dropped(character: char) -> bool {
+pub(crate) fn is_dropped(character: char) -> bool {
     character.is_control()
         || matches!(
             character,

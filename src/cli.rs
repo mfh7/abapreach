@@ -4,6 +4,9 @@ use crate::operation::aunit::AunitKind;
 use crate::operation::dumps::{DEFAULT_ROWS as DUMPS_ROWS, ROWS as DUMPS_RANGE};
 use crate::operation::payload::Kind;
 use crate::operation::search::{DEFAULT_MAX, MAX_RESULTS};
+use crate::operation::where_used::{
+    DEFAULT_MAX as WHERE_USED_MAX, MAX_RESULTS as WHERE_USED_RESULTS,
+};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -215,6 +218,22 @@ pub enum Command {
         /// Release 7.50 refuses SNAP in the data preview; there `rfc` reads it through RFC_READ_TABLE
         #[arg(long)]
         backend: Option<Backend>,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Lists the objects that use one object, through ADT or the standard cross-reference tables
+    WhereUsed {
+        /// PROG, FUNC, FUGR, CLAS, INTF, DTEL, DOMA, TABL or TTYP
+        #[arg(value_name = "TYPE")]
+        object_type: String,
+
+        /// The object name
+        name: String,
+
+        /// 1 to 5000 objects
+        #[arg(long, default_value_t = WHERE_USED_MAX, value_parser = clap::value_parser!(u32).range(i64::from(*WHERE_USED_RESULTS.start())..=i64::from(*WHERE_USED_RESULTS.end())))]
+        max: u32,
 
         #[arg(long)]
         conn: String,

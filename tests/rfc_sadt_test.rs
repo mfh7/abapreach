@@ -45,7 +45,9 @@ fn default_accept() {
         BTreeMap::from([("Accept".to_owned(), "*/*".to_owned())])
     );
 
-    let mut named = Request::get("/sap/bc/adt/discovery");
+    // The discovery itself is admitted with no header at all, so a named `Accept` is shown on a
+    // read that takes headers.
+    let mut named = Request::get("/sap/bc/adt/programs/programs/z/source/main?version=active");
 
     named
         .headers
@@ -418,10 +420,18 @@ fn function_group_resolution_inactive_list_and_metadata_reads_are_admitted() {
         Request::get("/sap/bc/adt/functions/groups/zfg/fmodules/zfm"),
         Request::get("/sap/bc/adt/oo/interfaces/zif_a"),
     ]);
-    assert_admitted(&[Request::post(
+    let mut usage = Request::post(
         usage_references_uri(&uri_of(ObjectKind::Func, "zfm")),
-        Vec::new(),
-    )]);
+        abapreach::adt::USAGE_REQUEST_XML.as_bytes().to_vec(),
+    );
+
+    for header in ["Content-Type", "Accept"] {
+        usage
+            .headers
+            .insert(header.to_owned(), "application/*".to_owned());
+    }
+
+    assert_admitted(&[usage]);
 }
 
 #[test]
@@ -1014,7 +1024,8 @@ fn unapproved_queries_and_repository_shapes_are_refused() {
         ),
         Request::get("/sap/bc/adt/activation/inactiveobjects?x=1"),
         Request::post("/sap/bc/adt/activation/inactiveobjects", Vec::new()),
-        // where-used: a function module, program or include only, one uri parameter.
+        // where-used: the exact body is required, and one uri parameter; the kinds that are
+        // admitted are listed in `where_used_admission_test.rs`.
         Request::post(usage_references_uri(CLASS), Vec::new()),
         Request::post(
             usage_references_uri("/sap/bc/adt/programs/programs/zprog"),

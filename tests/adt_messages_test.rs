@@ -1,9 +1,9 @@
 mod common;
 
 use abapreach::adt::{
-    AdtMessage, Caller, format_messages, function_group_of, function_group_search_uri,
-    parse_callers, parse_inactive_feed_refs, parse_messages, parse_object_refs, parse_search_refs,
-    usage_references_uri,
+    AdtMessage, Caller, discovery_collections, format_messages, function_group_of,
+    function_group_search_uri, parse_callers, parse_inactive_feed_refs, parse_messages,
+    parse_object_refs, parse_search_refs, parse_usage_objects, usage_references_uri,
 };
 use common::Fixture;
 use std::fs;
@@ -307,4 +307,89 @@ fn inactive_feed_mode_keeps_the_750_shape_and_the_transport_exclusion() {
         parse_object_refs(xml).unwrap()
     );
     assert_eq!(parse_object_refs(xml).unwrap().len(), 1);
+}
+
+#[test]
+fn a_usage_result_lists_the_main_objects_and_not_their_parts_or_packages() {
+    let xml = r#"<u:usageReferenceResult xmlns:u="u" xmlns:adtcore="c" numberOfResults="9"><u:referencedObjects>
+        <u:referencedObject uri="/pk" isResult="false"><u:adtObject adtcore:name="ZPK" adtcore:type="DEVC/K"><adtcore:packageRef adtcore:name="ZPK"/></u:adtObject></u:referencedObject>
+        <u:referencedObject uri="/fg" parentUri="/pk" isResult="false"><u:adtObject adtcore:name="ZFG" adtcore:type="FUGR/F"><adtcore:packageRef adtcore:name="ZPK"/></u:adtObject></u:referencedObject>
+        <u:referencedObject uri="/fg/fm" parentUri="/fg" usageInformation="gradeDirect"><u:adtObject adtcore:name="ZFM" adtcore:type="FUGR/FF"><adtcore:packageRef adtcore:name="ZPK"/></u:adtObject></u:referencedObject>
+        <u:referencedObject uri="/fg/inc" parentUri="/fg"><u:adtObject adtcore:name="LZFGU01" adtcore:type="PROG/I"/></u:referencedObject>
+        <u:referencedObject uri="/cl/m" parentUri="/cl-not-listed"><u:adtObject adtcore:name="GET" adtcore:type=""/></u:referencedObject>
+        <u:referencedObject uri="/x" parentUri="/pk"><u:adtObject adtcore:name="" adtcore:type="WEBI/3I"/></u:referencedObject>
+        <u:referencedObject uri="/pr" parentUri="/pk"><u:adtObject adtcore:name="ZPROG" adtcore:type="PROG/P"><adtcore:packageRef adtcore:name="ZPK"/></u:adtObject></u:referencedObject>
+        <u:referencedObject uri="/inc" parentUri="/pk"><u:adtObject adtcore:name="ZINC" adtcore:type="PROG/I"/></u:referencedObject>
+        </u:referencedObjects></u:usageReferenceResult>"#;
+    let objects: Vec<(String, String, Option<String>)> = parse_usage_objects(xml)
+        .unwrap()
+        .into_iter()
+        .map(|object| (object.kind, object.name, object.package))
+        .collect();
+
+    assert_eq!(
+        objects,
+        [
+            (
+                "FUGR/F".to_owned(),
+                "ZFG".to_owned(),
+                Some("ZPK".to_owned())
+            ),
+            (
+                "PROG/P".to_owned(),
+                "ZPROG".to_owned(),
+                Some("ZPK".to_owned())
+            ),
+            ("PROG/I".to_owned(), "ZINC".to_owned(), None),
+        ]
+    );
+    assert_eq!(
+        parse_usage_objects(
+            "<u:usageReferenceResult xmlns:u=\"u\"><u:referencedObjects/></u:usageReferenceResult>"
+        ),
+        Ok(Vec::new())
+    );
+    assert!(parse_usage_objects("<a><b></a>").is_err());
+}
+
+#[test]
+fn a_discovery_lists_the_href_of_every_collection() {
+    let xml = r#"<app:service xmlns:app="a" xmlns:atom="t"><app:workspace><atom:title>w</atom:title>
+        <app:collection href="/sap/bc/adt/ddic/domains"><atom:title>Domains</atom:title></app:collection>
+        <app:collection href="/sap/bc/adt/ddic/tables"/>
+        <app:collection><atom:title>no href</atom:title></app:collection></app:workspace></app:service>"#;
+
+    assert_eq!(
+        discovery_collections(xml),
+        Ok(vec![
+            "/sap/bc/adt/ddic/domains".to_owned(),
+            "/sap/bc/adt/ddic/tables".to_owned()
+        ])
+    );
+    assert_eq!(discovery_collections(""), Ok(Vec::new()));
+    assert!(discovery_collections("<a><b></a>").is_err());
+}
+
+/// A typed part (a method) whose object the reply does not list is kept as it is, with its ADT
+/// type; a part whose object is listed goes, whatever its type.
+#[test]
+fn a_typed_part_whose_object_is_not_listed_is_kept_and_one_whose_object_is_listed_is_dropped() {
+    let xml = r#"<u:usageReferenceResult xmlns:u="u" xmlns:adtcore="c"><u:referencedObjects>
+        <u:referencedObject uri="/cl/m" parentUri="/cl-not-listed"><u:adtObject adtcore:name="GET" adtcore:type="CLAS/OM"/></u:referencedObject>
+        <u:referencedObject uri="/cl2"><u:adtObject adtcore:name="ZCL_B" adtcore:type="CLAS/OC"/></u:referencedObject>
+        <u:referencedObject uri="/cl2/m" parentUri="/cl2"><u:adtObject adtcore:name="SET" adtcore:type="CLAS/OM"/></u:referencedObject>
+        </u:referencedObjects></u:usageReferenceResult>"#;
+    let kept: Vec<(String, String)> = parse_usage_objects(xml)
+        .unwrap()
+        .into_iter()
+        .map(|object| (object.kind, object.name))
+        .collect();
+
+    assert_eq!(
+        kept,
+        [
+            ("CLAS/OM".to_owned(), "GET".to_owned()),
+            ("CLAS/OC".to_owned(), "ZCL_B".to_owned())
+        ]
+    );
 }

@@ -27,6 +27,7 @@ const NODE_STRUCTURE: &str = "/sap/bc/adt/repository/nodestructure";
 const FUNCTION_VALIDATION: &str = "/sap/bc/adt/functions/validation";
 const OBJECT_VALIDATION: &str = "/sap/bc/adt/oo/validation/objectname";
 const GROUPS: &str = "/sap/bc/adt/functions/groups";
+const DDIC: &str = "/sap/bc/adt/ddic";
 const CLASSES: &str = "/sap/bc/adt/oo/classes";
 const INTERFACES: &str = "/sap/bc/adt/oo/interfaces";
 const PROGRAMS: &str = "/sap/bc/adt/programs/programs";
@@ -97,6 +98,11 @@ impl Admission {
     /// Whether the request may be sent. A class first step waits for its RFC response before a
     /// resend can be admitted.
     pub fn admits(&mut self, request: &Request) -> bool {
+        // Two headers that differ only in case are one header to SAP and two to the checks below.
+        if has_ambiguous_headers(request) {
+            return false;
+        }
+
         let uri = request.uri.as_str();
 
         if uri.contains('#') {
@@ -110,6 +116,8 @@ impl Admission {
         let (path, query) = split_query(uri);
 
         match request.method.as_str() {
+            // The discovery is read as the `doctor` probe and `where-used` send it: nothing else.
+            "GET" if uri == DISCOVERY => request.body.is_empty() && request.headers.is_empty(),
             "GET" => is_read(uri, path, query),
             "DELETE" => request.body.is_empty() && is_delete(path, query),
             "PUT" => is_put(path, query) && has_content_type(request, "text/plain; charset=utf-8"),
@@ -731,7 +739,7 @@ fn split_query(uri: &str) -> (&str, Option<&str>) {
 }
 
 fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
-    if uri == DISCOVERY || uri == INACTIVE_OBJECTS {
+    if uri == INACTIVE_OBJECTS {
         return true;
     }
 
@@ -982,7 +990,9 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
     }
 
     if path == USAGE_REFERENCES {
-        return query.is_some_and(|query| is_where_used_object(query, &request.body));
+        return has_content_type(request, "application/*")
+            && has_header(request, "Accept", "application/*")
+            && query.is_some_and(|query| is_where_used_object(query, &request.body));
     }
 
     if path == NODE_STRUCTURE {
@@ -1027,6 +1037,16 @@ fn is_delete(path: &str, query: Option<&str>) -> bool {
 
 fn has_content_type(request: &Request, expected: &str) -> bool {
     has_header(request, "Content-Type", expected)
+}
+
+/// Whether two header names are equal ignoring case.
+fn has_ambiguous_headers(request: &Request) -> bool {
+    let mut seen = std::collections::HashSet::new();
+
+    request
+        .headers
+        .keys()
+        .any(|name| !seen.insert(name.to_ascii_lowercase()))
 }
 
 fn has_header(request: &Request, name: &str, expected: &str) -> bool {
@@ -1166,21 +1186,57 @@ fn is_validation(path: &str, query: &str) -> bool {
         && is_encoded(text)
 }
 
-/// `uri=<function module>`, the object a where-used request asks for; or a program or include
-/// as `usage_references_uri` emits it, with exactly `USAGE_REQUEST_XML` as the body.
+/// The DDIC collections a where-used request may name; `where_used.rs` builds the same URIs.
+const DDIC_COLLECTIONS: [&str; 5] = [
+    "dataelements",
+    "domains",
+    "tables",
+    "structures",
+    "tabletypes",
+];
+
+/// `uri=<object URI>` and nothing else, with exactly `USAGE_REQUEST_XML` as the body. The object
+/// is one of the kinds `usage_references_uri` emits: a program or an include, a function module,
+/// a function group, a class, an interface, or a data element, domain, table or table type of the
+/// DDIC collections. Each name is plain (letters, digits, `_`), because the query keeps `/` and
+/// unreserved characters literal and encodes every other one: a `%`, `.`, `..` or `?` is refused.
 fn is_where_used_object(query: &str, body: &[u8]) -> bool {
     let Some(uri) = query.strip_prefix("uri=") else {
         return false;
     };
 
-    uri.strip_prefix(PROGRAMS)
+    body == USAGE_REQUEST_XML.as_bytes() && is_where_used_uri(uri)
+}
+
+fn is_where_used_uri(uri: &str) -> bool {
+    if let Some(name) = uri
+        .strip_prefix(PROGRAMS)
         .or_else(|| uri.strip_prefix(PROGRAM_INCLUDES))
         .and_then(|rest| rest.strip_prefix('/'))
-        .map_or_else(
-            || parse_path(uri).is_some_and(|p| p.kind == Kind::Func && p.part == Part::Object),
-            // Plain names only: the M1 program rule would admit `$`, `-`, `.` and `%2f`.
-            |name| is_name(name, false) && body == USAGE_REQUEST_XML.as_bytes(),
-        )
+    {
+        // Plain names only: the M1 program rule would admit `$`, `-`, `.` and `%2f`.
+        return is_name(name, false);
+    }
+
+    if let Some(name) = uri
+        .strip_prefix(DDIC)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .and_then(|rest| {
+            DDIC_COLLECTIONS
+                .iter()
+                .find_map(|collection| rest.strip_prefix(collection)?.strip_prefix('/'))
+        })
+    {
+        return is_name(name, false);
+    }
+
+    parse_path(uri).is_some_and(|parsed| {
+        parsed.part == Part::Object
+            && matches!(
+                parsed.kind,
+                Kind::Func | Kind::Clas | Kind::Intf | Kind::Group
+            )
+    })
 }
 
 /// Splits an ADT path into its object and the part below it. Names are checked as path segments:
