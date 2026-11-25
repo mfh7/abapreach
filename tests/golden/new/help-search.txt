@@ -1,0 +1,12 @@
+Finds objects by name pattern through the ADT object search
+
+Usage: abapreach search [OPTIONS] --conn <CONN> <PATTERN>
+
+Arguments:
+  <PATTERN>  The name or a pattern: `*` is the only wildcard, and a pattern without one names exactly one object
+
+Options:
+      --type <TYPE>  One object type: PROG, FUNC, FUGR, CLAS, INTF, DTEL, DOMA, TABL (transparent tables), TTYP, TRAN, DDLS or MSAG
+      --max <MAX>    1 to 1000 results [default: 50]
+      --conn <CONN>  
+  -h, --help         Print help

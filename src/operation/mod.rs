@@ -29,6 +29,7 @@ pub mod runner_route;
 pub mod runner_scan;
 pub mod runner_template;
 pub mod runner_tran;
+pub mod search;
 pub mod simulate_ddic;
 pub mod sql;
 pub mod transport_request;

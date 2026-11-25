@@ -41,13 +41,14 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// File name, arguments, and whether the text is on stdout (help, version) or stderr (a STOP).
-const COMMANDS: [(&str, &[&str], bool); 16] = [
+const COMMANDS: [(&str, &[&str], bool); 17] = [
     ("help-top.txt", &["--help"], true),
     ("help-read.txt", &["read", "--help"], true),
     ("help-deploy.txt", &["deploy", "--help"], true),
     ("help-create.txt", &["create", "--help"], true),
     ("help-read-table.txt", &["read-table", "--help"], true),
     ("help-sql.txt", &["sql", "--help"], true),
+    ("help-search.txt", &["search", "--help"], true),
     ("help-delete.txt", &["delete", "--help"], true),
     ("help-run.txt", &["run", "--help"], true),
     ("help-mcp.txt", &["mcp", "--help"], true),
@@ -135,9 +136,9 @@ fn the_cli_golden_texts_name_the_new_types_the_prog_option_and_the_footprint() {
     }
 
     assert!(golden("new", "help-read.txt").contains("temporary class"));
-    // The top level grew by `sql` of 0.18, the quality commands and `run` of 0.17 and is otherwise the old text:
+    // The top level grew by `sql` and `search` of 0.18, the quality commands and `run` of 0.17 and is otherwise the old text:
     // the footprint sits in the help of the subcommands.
-    let added = ["sql", "inactive", "activate", "aunit", "run"];
+    let added = ["sql", "search", "inactive", "activate", "aunit", "run"];
     let top = golden("new", "help-top.txt");
     let without: String = top
         .lines()

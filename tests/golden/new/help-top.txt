@@ -6,6 +6,7 @@ Commands:
   create      
   read-table  Reads rows of one table through the ADT data preview
   sql         Runs one read-only SELECT with joins through the ADT freestyle data preview
+  search      Finds objects by name pattern through the ADT object search
   delete      Deletes objects from a plan written by `--simulate`
   inactive    Lists the inactive objects of the logon user, one `<ADT type> <name> <user>` line each
   activate    Activates own inactive Z/Y objects, named as `inactive` prints them

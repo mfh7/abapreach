@@ -2,7 +2,7 @@ mod common;
 
 use abapreach::adt::{
     AdtMessage, Caller, format_messages, function_group_of, function_group_search_uri,
-    parse_callers, parse_inactive_feed_refs, parse_messages, parse_object_refs,
+    parse_callers, parse_inactive_feed_refs, parse_messages, parse_object_refs, parse_search_refs,
     usage_references_uri,
 };
 use common::Fixture;
@@ -275,6 +275,27 @@ fn flat_740_feed_lists_objects_only_in_the_inactive_feed_mode() {
     // The 750 reader and its callers (RFC admission, activation worklist) still see nothing.
     assert!(parse_object_refs(FLAT_740).unwrap().is_empty());
     assert!(parse_object_refs(with_body).unwrap().is_empty());
+}
+
+/// Only the search reader fills the package and the description: the activation resend check
+/// compares whole references, so the other readers leave both empty.
+#[test]
+fn only_the_search_reader_fills_the_package_and_the_description() {
+    let xml = r#"<adtcore:objectReferences xmlns:adtcore="a"><adtcore:objectReference adtcore:uri="/a" adtcore:type="PROG/P" adtcore:name="A" adtcore:packageName="ZPACK" adtcore:description="text"/></adtcore:objectReferences>"#;
+
+    for refs in [
+        parse_inactive_feed_refs(xml).unwrap(),
+        parse_object_refs(xml).unwrap(),
+    ] {
+        assert!(refs.iter().all(|object| object.package.is_none()));
+        assert!(refs.iter().all(|object| object.description.is_none()));
+    }
+
+    let found = parse_search_refs(xml).unwrap();
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].package.as_deref(), Some("ZPACK"));
+    assert_eq!(found[0].description.as_deref(), Some("text"));
 }
 
 #[test]

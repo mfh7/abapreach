@@ -410,30 +410,41 @@ pub fn classify_activation(body: &str) -> ActivationBody {
     }
 }
 
-/// An object reference of a worklist (`ioc:object/ioc:ref`), kept as listed.
+/// An object reference of a worklist (`ioc:object/ioc:ref`) or of a search reply, kept as listed.
+/// The package and the description exist only in a search reply.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ObjectRef {
     pub uri: String,
     pub kind: String,
     pub name: String,
     pub parent_uri: Option<String>,
+    pub package: Option<String>,
+    pub description: Option<String>,
 }
 
 /// The object references of an `ioc:inactiveObjects` list. An entry without `ioc:object` carries
 /// only its transport request, and a reference inside `ioc:transport` is the request, so neither
 /// is an object.
 pub fn parse_object_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
-    collect_refs(xml, false)
+    collect_refs(xml, false, false)
 }
 
 /// Like [`parse_object_refs`], but also reads the flat 7.40 feed, where every
 /// `adtcore:objectReference` is an object. Only for the advisory inactive-sibling warning: the
 /// admission and activation callers keep the strict reader.
 pub fn parse_inactive_feed_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
-    collect_refs(xml, true)
+    collect_refs(xml, true, false)
 }
 
-fn collect_refs(xml: &str, flat: bool) -> Result<Vec<ObjectRef>, String> {
+/// The objects of a `quickSearch` reply, in reply order: every `adtcore:objectReference`, with its
+/// package and description when it names them. The reply is the flat feed of the inactive list on
+/// 7.40, so the same reader serves both. Only this reader fills the package and the description:
+/// a worklist reference is compared as a whole by the activation resend check.
+pub fn parse_search_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
+    collect_refs(xml, true, true)
+}
+
+fn collect_refs(xml: &str, flat: bool, details: bool) -> Result<Vec<ObjectRef>, String> {
     let mut reader = Reader::from_str(xml);
     let mut refs = Vec::new();
     let mut in_object = false;
@@ -442,15 +453,15 @@ fn collect_refs(xml: &str, flat: bool) -> Result<Vec<ObjectRef>, String> {
         match reader.read_event().map_err(|error| error.to_string())? {
             Event::Start(element) => match local_name(&element) {
                 "object" => in_object = true,
-                "ref" if in_object => refs.push(object_ref(&element)?),
-                "objectReference" if flat => refs.push(object_ref(&element)?),
+                "ref" if in_object => refs.push(object_ref(&element, details)?),
+                "objectReference" if flat => refs.push(object_ref(&element, details)?),
                 _ => {}
             },
             Event::Empty(element)
                 if (in_object && local_name(&element) == "ref")
                     || (flat && local_name(&element) == "objectReference") =>
             {
-                refs.push(object_ref(&element)?);
+                refs.push(object_ref(&element, details)?);
             }
             Event::End(element) if element.local_name().into_inner() == "object" => {
                 in_object = false;
@@ -463,7 +474,7 @@ fn collect_refs(xml: &str, flat: bool) -> Result<Vec<ObjectRef>, String> {
     Ok(refs)
 }
 
-fn object_ref(element: &BytesStart<'_>) -> Result<ObjectRef, String> {
+fn object_ref(element: &BytesStart<'_>, details: bool) -> Result<ObjectRef, String> {
     let mut found = ObjectRef::default();
 
     for attribute in element.attributes() {
@@ -478,6 +489,8 @@ fn object_ref(element: &BytesStart<'_>) -> Result<ObjectRef, String> {
             "type" => found.kind = value,
             "name" => found.name = value,
             "parentUri" => found.parent_uri = Some(value),
+            "packageName" if details => found.package = Some(value),
+            "description" if details => found.description = Some(value),
             _ => {}
         }
     }

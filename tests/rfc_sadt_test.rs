@@ -664,6 +664,31 @@ fn a_class_worklist_resend_must_exactly_match_the_first_rfc_response_and_is_cons
     }
 }
 
+/// A worklist reference that carries a description and a package is the same reference: the
+/// resend check compares uri, type, name and parent only.
+#[test]
+fn a_worklist_reference_with_a_description_and_a_package_still_admits_its_resend() {
+    let first = activation(true, activation_request_xml("zcl_a", CLASS));
+    let response = format!(
+        concat!(
+            r#"<ioc:inactiveObjects xmlns:ioc="http://www.sap.com/abapxml/inactiveCtsObjects">"#,
+            r#"<ioc:entry><ioc:object><ioc:ref adtcore:uri="{uri}" "#,
+            r#"adtcore:type="CLAS/OC" adtcore:name="ZCL_A" "#,
+            r#"adtcore:description="A class" adtcore:packageName="ZPACK" "#,
+            r#"xmlns:adtcore="http://www.sap.com/adt/core"/>"#,
+            r#"</ioc:object></ioc:entry></ioc:inactiveObjects>"#,
+        ),
+        uri = CLASS
+    );
+    let mut transport = with_activation_response(response);
+
+    assert!(admits(&mut transport, &first));
+    assert!(admits(
+        &mut transport,
+        &activation(false, worklist(&[CLASS]))
+    ));
+}
+
 #[test]
 fn a_class_worklist_resend_rejects_changed_or_missing_reference_metadata() {
     let member = format!("{CLASS}/source/main#type=CLAS%2FOM;name=PROBE");
@@ -967,24 +992,13 @@ fn unapproved_queries_and_repository_shapes_are_refused() {
         Request::get(format!("{class_source}?version=workingArea")),
         Request::get(format!("{class_source}?x=1&version=active")),
         Request::get(class_source.clone()),
-        // Group search: exactly the typed quickSearch the resolver sends.
-        Request::get(format!(
-            "{search}?operation=quickSearch&query=ZFM&maxResults=10"
-        )),
-        Request::get(format!(
-            "{search}?operation=quickSearch&query=ZFM&maxResults=100&objectType=FUGR%2FFF"
-        )),
-        Request::get(format!(
-            "{search}?operation=quickSearch&query=ZFM&maxResults=10&objectType=CLAS%2FOC"
-        )),
+        // Searches: the broader `search` shape is covered in `search_admission_test.rs`; what
+        // matches neither it nor the two older shapes stays refused.
         Request::get(format!(
             "{search}?operation=quickSearch&query=ZF%26M&maxResults=10&objectType=FUGR%2FFF"
         )),
         Request::get(format!(
             "{search}?operation=quickSearch&query=&maxResults=10&objectType=FUGR%2FFF"
-        )),
-        Request::get(format!(
-            "{search}?operation=quickSearch&query=Z*&maxResults=10&objectType=FUGR%2FFF"
         )),
         Request::get(format!(
             "{search}?operation=quickSearch&query=ZFM&maxResults=10&objectType=FUGR%2FFF&x=1"

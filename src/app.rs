@@ -37,6 +37,7 @@ use crate::operation::read_table::{
     CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableRequest, TableData,
 };
 use crate::operation::runner_tran::{self, TranCreate, TranRead};
+use crate::operation::search::{self, Query as SearchQuery};
 use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
 use crate::operation::sql::{self, Query as SqlQuery, TEXT_MAX};
 use crate::policy::{RunPolicy, Terminal};
@@ -391,6 +392,7 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::Create { conn, .. }
         | Command::ReadTable { conn, .. }
         | Command::Sql { conn, .. }
+        | Command::Search { conn, .. }
         | Command::Delete { conn, .. }
         | Command::Inactive { conn, .. }
         | Command::Activate { conn, .. }
@@ -720,6 +722,31 @@ fn execute(
                     let attempt = read_attempt(read);
 
                     attempt.noted(note)
+                },
+            )
+        }
+        Command::Search {
+            pattern,
+            object_type,
+            max,
+            ..
+        } => {
+            let query = match SearchQuery::new(&pattern, object_type.as_deref(), max) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            route(
+                OperationKind::Search,
+                None,
+                false,
+                connection,
+                factories,
+                |transport, _, _, _| {
+                    let result = search::run(transport, &query);
+
+                    // A read holds no lock, so a failed session end is only a note.
+                    quality::attempt(result, end_session(transport))
                 },
             )
         }

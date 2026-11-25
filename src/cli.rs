@@ -2,6 +2,7 @@ use crate::extension::{ExtensionKind, ExtensionOptions, Registry, Verbs};
 use crate::operation::activate::ActivateTarget;
 use crate::operation::aunit::AunitKind;
 use crate::operation::payload::Kind;
+use crate::operation::search::{DEFAULT_MAX, MAX_RESULTS};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -154,6 +155,24 @@ pub enum Command {
         /// 1 to 5000; the data preview of the 740 release stops there.
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=5000))]
         rows: u32,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Finds objects by name pattern through the ADT object search
+    Search {
+        /// The name or a pattern: `*` is the only wildcard, and a pattern without one names exactly
+        /// one object
+        pattern: String,
+
+        /// One object type: PROG, FUNC, FUGR, CLAS, INTF, DTEL, DOMA, TABL (transparent tables),
+        /// TTYP, TRAN, DDLS or MSAG
+        #[arg(long = "type", value_name = "TYPE")]
+        object_type: Option<String>,
+
+        /// 1 to 1000 results
+        #[arg(long, default_value_t = DEFAULT_MAX, value_parser = clap::value_parser!(u32).range(i64::from(*MAX_RESULTS.start())..=i64::from(*MAX_RESULTS.end())))]
+        max: u32,
 
         #[arg(long)]
         conn: String,

@@ -2854,6 +2854,357 @@ fn sql_output_is_cut_at_one_mebibyte_and_scrubbed_of_secrets() {
     assert!(!exit.stdout.contains("secret-pw"), "{}", exit.stdout);
 }
 
+// ---- search ----------------------------------------------------------------------------------
+
+const SEARCH_URI: &str = "/sap/bc/adt/repository/informationsystem/search";
+const SEARCH_758_TABLE: &str = "TABL/DS RFC_SYSTEM_IDENTITY package=SQRFC1 System ID\n\
+    TABL/DS RFC_SYSTEM_INFO package=SOAP_CONFIG Proxy Structure (Generated)\n\
+    FUGR/FF RFC_SYSTEM_INFO package=SRCX Liefert versch. Informationen über das System.\n\
+    SUSH RFC_SYSTEM_INFO RF package=SRCX RFC_SYSTEM_INFO\n\
+    TABL/DS RFC_SYSTEM_INFO_RESPONSE package=SOAP_CONFIG Proxy Structure (generated)\n\
+    SEARCH: 5 objects";
+
+fn search(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "search"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+fn search_reply(name: &str) -> Result<Response, TransportError> {
+    source(&fs::read_to_string(common::fixture_path_in("m9", name)).unwrap())
+}
+
+#[test]
+fn search_takes_a_pattern_an_optional_type_and_a_maximum_of_one_to_a_thousand() {
+    let cli = |args: &[&str]| {
+        let mut full = vec!["abapreach", "search"];
+
+        full.extend_from_slice(args);
+
+        Cli::try_parse_from(full)
+    };
+
+    match cli(&["ZCL_*", "--conn", "dev_100"]).unwrap().command {
+        Command::Search {
+            pattern,
+            object_type,
+            max,
+            conn,
+        } => {
+            assert_eq!(pattern, "ZCL_*");
+            assert!(object_type.is_none());
+            assert_eq!(max, 50);
+            assert_eq!(conn, "dev_100");
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&[
+        "ZCL_*", "--type", "CLAS", "--max", "1000", "--conn", "dev_100",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::Search {
+            object_type, max, ..
+        } => {
+            assert_eq!(object_type.as_deref(), Some("CLAS"));
+            assert_eq!(max, 1000);
+        }
+        other => panic!("{other:?}"),
+    }
+    for max in ["0", "1001", "-1", "x", ""] {
+        assert!(
+            cli(&["Z*", "--max", max, "--conn", "dev_100"]).is_err(),
+            "{max}"
+        );
+        assert_stops_locally(&[
+            "abapreach",
+            "search",
+            "Z*",
+            "--max",
+            max,
+            "--conn",
+            "dev_100",
+        ]);
+    }
+    assert!(cli(&["--conn", "dev_100"]).is_err(), "a pattern is needed");
+    assert!(cli(&["Z*"]).is_err(), "a connection is needed");
+    assert!(cli(&["Z*", "A*", "--conn", "dev_100"]).is_err());
+}
+
+#[test]
+fn search_stops_locally_on_a_pattern_or_type_outside_the_rules() {
+    for args in [
+        vec![""],
+        vec!["ZCL ABAP"],
+        vec!["ZCL%2A"],
+        vec!["ZCL?"],
+        vec!["$TMP"],
+        vec!["/NS/"],
+        vec!["ZCL/X"],
+        vec!["Z*", "--type", "BOGUS"],
+        vec!["Z*", "--type", "CLAS/OC"],
+        vec!["Z*", "--type", ""],
+    ] {
+        let mut fake = Fake::default();
+        let mut full = args.clone();
+
+        full.extend(["--conn", "dev_100"]);
+
+        let exit = search(&full, &mut fake);
+
+        assert_eq!(exit.code, 2, "{args:?}: {}", exit.stderr);
+        assert!(
+            exit.stderr.starts_with("STOP: "),
+            "{args:?}: {}",
+            exit.stderr
+        );
+        assert_eq!(table_of(&exit), "", "{args:?}");
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0), "{args:?}");
+    }
+
+    let mut fake = Fake::default();
+    let exit = search(&["Z*", "--type", "BOGUS", "--conn", "dev_100"], &mut fake);
+
+    assert!(
+        exit.stderr
+            .contains("unknown type BOGUS (known: PROG, FUNC, FUGR, CLAS, INTF"),
+        "{}",
+        exit.stderr
+    );
+}
+
+#[test]
+fn search_prints_one_line_per_object_over_adt_and_sends_the_upper_case_pattern() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![search_reply(
+        "search-untyped-758.xml",
+    )]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = search(&["rfc_system_i*", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), SEARCH_758_TABLE);
+    assert_eq!(exit.stderr, "");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert_eq!(calls.borrow().closes, 1);
+    assert_eq!(calls.borrow().calls.len(), 1);
+    assert_eq!(
+        calls.borrow().calls[0].uri,
+        format!("{SEARCH_URI}?operation=quickSearch&query=RFC_SYSTEM_I*&maxResults=50")
+    );
+    assert_eq!(calls.borrow().calls[0].method, "GET");
+}
+
+#[test]
+fn a_typed_search_sends_the_object_type_and_filters_a_reply_that_ignored_it() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![search_reply(
+        "search-untyped-750.xml",
+    )]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = search(
+        &[
+            "RFC_SYSTEM_I*",
+            "--type",
+            "func",
+            "--max",
+            "7",
+            "--conn",
+            "dev_100",
+        ],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "FUGR/FF RFC_SYSTEM_INFO package=SRCX Function Module\n\
+         FUGR/FF RFC_SYSTEM_INFO_FASTSER package=SRCX Function Module\n\
+         SEARCH: 2 objects"
+    );
+    assert_eq!(
+        exit.stderr,
+        "W: the reply held objects of other types; 3 left out (the result may hold fewer than --max objects)"
+    );
+    assert_eq!(
+        calls.borrow().calls[0].uri,
+        format!(
+            "{SEARCH_URI}?operation=quickSearch&query=RFC_SYSTEM_I*&maxResults=7&objectType=FUGR%2FFF"
+        )
+    );
+}
+
+#[test]
+fn a_search_without_a_hit_is_exit_zero() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![source(
+        r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core"/>"#,
+    )]));
+
+    let exit = search(&["ZNOTHING_*", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "SEARCH: 0 objects");
+    assert_eq!(exit.stderr, "");
+}
+
+#[test]
+fn search_over_the_rfc_backend_passes_admission_with_the_fake() {
+    for (args, uri, reply, count) in [
+        (
+            vec!["rfc_system_i*", "--conn", "dev_100"],
+            format!("{SEARCH_URI}?operation=quickSearch&query=RFC_SYSTEM_I*&maxResults=50"),
+            "search-untyped-758.xml",
+            5,
+        ),
+        (
+            vec![
+                "cl_abap_*",
+                "--type",
+                "clas",
+                "--max",
+                "1000",
+                "--conn",
+                "dev_100",
+            ],
+            format!(
+                "{SEARCH_URI}?operation=quickSearch&query=CL_ABAP_*&maxResults=1000&objectType=CLAS%2FOC"
+            ),
+            "search-clas-758.xml",
+            1,
+        ),
+    ] {
+        let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(rfc_replies(
+            &[search_reply(reply)],
+        ))));
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(scripted(vec![pre_send()]));
+        fake.rfc.push_back(rfc);
+
+        let exit = search(&args, &mut fake);
+
+        assert_eq!(exit.code, 0, "{args:?}: {}", exit.stderr);
+        assert!(
+            table_of(&exit).ends_with(&if count == 1 {
+                "SEARCH: 1 object".to_owned()
+            } else {
+                format!("SEARCH: {count} objects")
+            }),
+            "{}",
+            exit.stdout
+        );
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+        // The one search left the process: admission let the exact shape through.
+        assert_eq!(api.borrow().api().counts().2, 1, "{args:?}");
+        assert_eq!(api.borrow().api().last_request().uri, uri);
+    }
+}
+
+#[test]
+fn an_rfc_only_connection_searches_over_a_fresh_rfc_connection() {
+    let mut fake = Fake::default();
+
+    fake.rfc
+        .push_back(scripted(vec![search_reply("search-untyped-740.xml")]));
+
+    let exit = search(&["RFC_SYSTEM_I*", "--conn", "qas_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        table_of(&exit).ends_with("SEARCH: 4 objects"),
+        "{}",
+        exit.stdout
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+}
+
+#[test]
+fn search_falls_back_to_rfc_only_before_anything_was_sent() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc
+        .push_back(scripted(vec![search_reply("search-untyped-750.xml")]));
+
+    let exit = search(&["RFC_SYSTEM_I*", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        table_of(&exit).ends_with("SEARCH: 5 objects"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+/// FED answers no discovery on ADT HTTP, so the search path is not served there: an error, never
+/// a silent switch to the RFC path (that is the caller's pin of the route).
+#[test]
+fn a_search_the_system_does_not_serve_is_an_error_without_fallback() {
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(404, "<html/>"))]));
+
+    let exit = search(&["Z*", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .starts_with("ERROR: the object search answered HTTP 404"),
+        "{}",
+        exit.stderr
+    );
+    assert!(exit.stderr.contains("does not offer"), "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "");
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn an_unreadable_search_reply_is_rejected_and_the_output_is_scrubbed_of_secrets() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![source("<a><b></a>")]));
+
+    let exit = search(&["Z*", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .starts_with("REJECTED: cannot read the search reply"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(fake.rfc_opened, 0);
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![source(
+        r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core"><adtcore:objectReference adtcore:type="PROG/P" adtcore:name="ZP" adtcore:packageName="ZPACK" adtcore:description="pw is secret-pw"/></adtcore:objectReferences>"#,
+    )]));
+
+    let exit = search(&["ZP", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(!exit.stdout.contains("secret-pw"), "{}", exit.stdout);
+    assert!(table_of(&exit).starts_with("PROG/P ZP package=ZPACK pw is"));
+}
+
 // ---- delete ----------------------------------------------------------------------------------
 
 const DELETE_PROG: &str = "/sap/bc/adt/programs/programs/ztest_del";

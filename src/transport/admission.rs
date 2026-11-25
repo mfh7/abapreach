@@ -9,7 +9,8 @@ use crate::adt::{
     ActivationBody, ObjectRef, USAGE_REQUEST_XML, classify_activation, parse_object_refs,
 };
 use crate::operation::read_table::validate_preview_body;
-use crate::operation::runner::{RUNNER_CLASS_REFUSED, is_runner_class, validate_runner_prefix};
+use crate::operation::runner::{RUNNER_CLASS_REFUSED, is_runner_class};
+use crate::operation::search::{MAX_RESULTS, is_encoded_type, validate_pattern};
 use crate::operation::sql::{FREESTYLE_URI, validate_body};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -39,11 +40,7 @@ const MAX_PREVIEW_ROWS: u32 = 5000;
 /// A DDIC identifier is at most 30 characters, `/NAMESPACE/` included.
 const MAX_ENTITY: usize = 30;
 const OBJECT_STRUCTURE: &str = "version=active&withShortDescriptions=true";
-const SEARCH_TAIL: &str = "&maxResults=10&objectType=FUGR%2FFF";
-const CLASS_SEARCH: &str = "operation=quickSearch&query=";
-const CLASS_SEARCH_TAIL: &str = "objectType=CLAS%2FOC";
-/// The `maxResults` of the runner class search: a plain number in this range.
-const CLASS_SEARCH_LIMIT: std::ops::RangeInclusive<u32> = 1..=100;
+const QUICK_SEARCH: &str = "operation=quickSearch&query=";
 /// The classrun endpoint of ADT; only `POST <CLASSRUN>/<armed runner>` is ever admitted.
 const CLASSRUN: &str = "/sap/bc/adt/oo/classrun";
 /// A class name is at most 30 characters.
@@ -743,7 +740,7 @@ fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
     }
 
     if path == SEARCH {
-        return query.is_some_and(|query| is_group_search(query) || is_class_search(query));
+        return query.is_some_and(is_pattern_search);
     }
 
     let Some(parsed) = parse_path(path) else {
@@ -913,35 +910,36 @@ fn is_testable_object(uri: &str) -> bool {
     })
 }
 
-/// `search?operation=quickSearch&query=<NAME>&maxResults=10&objectType=FUGR%2FFF`, the typed
-/// search that resolves the function group of a function module.
-fn is_group_search(query: &str) -> bool {
-    query
-        .strip_prefix("operation=quickSearch&query=")
-        .and_then(|rest| rest.strip_suffix(SEARCH_TAIL))
-        .is_some_and(|name| is_name(name, false))
-}
-
-/// `search?operation=quickSearch&query=<PREFIX>*&maxResults=<1..=100>&objectType=CLAS%2FOC`, the
-/// leftover search of `doctor`. The prefix follows the `runner_prefix` rule; no other wildcard.
-fn is_class_search(query: &str) -> bool {
-    let Some((prefix, rest)) = query
-        .strip_prefix(CLASS_SEARCH)
-        .and_then(|rest| rest.split_once("*&maxResults="))
+/// `search?operation=quickSearch&query=<PATTERN>&maxResults=<1..=1000>[&objectType=<TYPE>]`, the
+/// `search` command, in this order and with nothing else. It is also the one shape of the function
+/// group resolver (`<NAME>&maxResults=10&objectType=FUGR%2FFF`) and of the `doctor` leftover search
+/// (`<PREFIX>*&maxResults=<n>&objectType=CLAS%2FOC`). The pattern is the canonical form of
+/// `validate_pattern` (upper case, no encoding), and the type one of the encoded ADT types the
+/// command knows.
+fn is_pattern_search(query: &str) -> bool {
+    let Some((pattern, rest)) = query
+        .strip_prefix(QUICK_SEARCH)
+        .and_then(|rest| rest.split_once("&maxResults="))
     else {
         return false;
     };
-    let Some((limit, object_type)) = rest.split_once('&') else {
-        return false;
+    let (limit, object_type) = match rest.split_once("&objectType=") {
+        Some((limit, object_type)) => (limit, Some(object_type)),
+        None => (rest, None),
     };
 
-    validate_runner_prefix(prefix).is_ok()
-        && object_type == CLASS_SEARCH_TAIL
-        && !limit.starts_with('0')
-        && limit.bytes().all(|byte| byte.is_ascii_digit())
-        && limit
+    validate_pattern(pattern).is_ok_and(|canonical| canonical == pattern)
+        && is_plain_number_in(limit, &MAX_RESULTS)
+        && object_type.is_none_or(is_encoded_type)
+}
+
+/// A decimal number without a sign, a leading zero or an encoding, inside `range`.
+fn is_plain_number_in(text: &str, range: &std::ops::RangeInclusive<u32>) -> bool {
+    !text.starts_with('0')
+        && text.bytes().all(|byte| byte.is_ascii_digit())
+        && text
             .parse::<u32>()
-            .is_ok_and(|limit| CLASS_SEARCH_LIMIT.contains(&limit))
+            .is_ok_and(|number| range.contains(&number))
 }
 
 /// `nodestructure?parent_type=FUGR%2FF&parent_name=<NAME>&withShortDescriptions=false`, the

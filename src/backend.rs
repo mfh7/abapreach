@@ -72,6 +72,7 @@ pub enum OperationKind {
     Create(CreateKind),
     ReadTable,
     Sql,
+    Search,
     Delete,
     /// `run`: the class, report or snippet an operation executes.
     Run,
@@ -89,6 +90,7 @@ impl fmt::Display for OperationKind {
             Self::Create(kind) => write!(formatter, "create {}", kind.token()),
             Self::ReadTable => write!(formatter, "read-table"),
             Self::Sql => write!(formatter, "sql"),
+            Self::Search => write!(formatter, "search"),
             Self::Delete => write!(formatter, "delete"),
             Self::Run => write!(formatter, "run"),
             Self::Doctor => write!(formatter, "doctor"),
