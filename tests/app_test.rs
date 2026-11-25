@@ -2246,6 +2246,11 @@ fn a_view_over_a_denied_table_is_rejected_after_the_lookups_only() {
     let (calls, adt) = shared(ScriptedTransport::replies(vec![
         dd02l("ZV_USERS", "VIEW", Some("D")),
         source(&common::preview(&[
+            ("DDLNAME", &[]),
+            ("OBJECTNAME", &[]),
+            ("OBJECTTYPE", &[]),
+        ])),
+        source(&common::preview(&[
             ("VIEWNAME", &[Some("ZV_USERS")]),
             ("TABNAME", &[Some("USR02")]),
             ("TABPOS", &[Some("0001")]),
@@ -2261,7 +2266,7 @@ fn a_view_over_a_denied_table_is_rejected_after_the_lookups_only() {
     assert!(exit.stderr.starts_with("REJECTED: "), "{}", exit.stderr);
     assert!(exit.stderr.contains("USR02"), "{}", exit.stderr);
     assert_eq!(table_of(&exit), "");
-    assert_eq!(calls.borrow().calls.len(), 2);
+    assert_eq!(calls.borrow().calls.len(), 3);
     assert_eq!(fake.rfc_opened, 0, "a rejection never falls back");
 }
 

@@ -29,6 +29,15 @@ fn database_view(name: &str) -> Result<Response, TransportError> {
     class_of(name, "VIEW", Some("D"))
 }
 
+/// A `DDLDEPENDENCY` answer without a row: the name is no generated CDS SQL view.
+fn no_cds() -> Result<Response, TransportError> {
+    ok(preview(&[
+        ("DDLNAME", &[]),
+        ("OBJECTNAME", &[]),
+        ("OBJECTTYPE", &[]),
+    ]))
+}
+
 fn bases(view: &str, tables: &[&str]) -> Result<Response, TransportError> {
     let names: Vec<Option<&str>> = tables.iter().map(|_| Some(view)).collect();
     let tabs: Vec<Option<&str>> = tables.iter().map(|table| Some(*table)).collect();
@@ -586,7 +595,9 @@ fn output_beyond_the_size_cap_is_cut_at_a_row_boundary() {
 fn a_denied_base_table_of_a_view_fails_before_the_data_read() {
     let mut transport = ScriptedTransport::replies(vec![
         database_view("ZV_USERS"),
+        no_cds(),
         bases("ZV_USERS", &["T000", "USR02"]),
+        transparent("T000"),
     ]);
     let error = run(
         &mut transport,
@@ -605,9 +616,9 @@ fn a_denied_base_table_of_a_view_fails_before_the_data_read() {
         other => panic!("{other:?}"),
     }
 
-    assert_eq!(transport.calls.len(), 2);
+    assert_eq!(transport.calls.len(), 4);
     assert!(
-        sent(&transport, 1)
+        sent(&transport, 2)
             .1
             .contains("FROM DD26S WHERE VIEWNAME = 'ZV_USERS'")
     );
@@ -626,7 +637,9 @@ fn the_deny_list_of_the_view_check_is_the_policy_in_force() {
     let relaxed = policies_denying(&[]);
     let mut transport = ScriptedTransport::replies(vec![
         database_view("ZV_USERS"),
+        no_cds(),
         bases("ZV_USERS", &["USR02"]),
+        transparent("USR02"),
         ok(preview(&[("BNAME", &[Some("X")])])),
     ]);
 
@@ -635,6 +648,7 @@ fn the_deny_list_of_the_view_check_is_the_policy_in_force() {
     let added = policies_denying(&["T000"]);
     let mut transport = ScriptedTransport::replies(vec![
         database_view("SBC_CLIENT"),
+        no_cds(),
         bases("SBC_CLIENT", &["t000"]),
     ]);
 
@@ -645,10 +659,12 @@ fn the_deny_list_of_the_view_check_is_the_policy_in_force() {
 }
 
 #[test]
-fn a_view_over_allowed_tables_is_read_after_two_lookups() {
+fn a_view_over_allowed_tables_is_read_after_four_lookups() {
     let mut transport = ScriptedTransport::replies(vec![
         database_view("SBC_CLIENT"),
+        no_cds(),
         bases("SBC_CLIENT", &["T000"]),
+        transparent("T000"),
         ok(preview(&[("MANDT", &[Some("100")])])),
     ]);
     let data = run(
@@ -658,9 +674,17 @@ fn a_view_over_allowed_tables_is_read_after_two_lookups() {
     )
     .unwrap();
 
-    assert_eq!(transport.calls.len(), 3);
+    assert_eq!(transport.calls.len(), 5);
     assert_eq!(
         sent(&transport, 1),
+        (
+            "/sap/bc/adt/datapreview/ddic?rowNumber=10&ddicEntityName=DDLDEPENDENCY".to_owned(),
+            "SELECT DDLNAME, OBJECTNAME, OBJECTTYPE FROM DDLDEPENDENCY WHERE OBJECTNAME = 'SBC_CLIENT' AND OBJECTTYPE = 'VIEW'"
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        sent(&transport, 2),
         (
             "/sap/bc/adt/datapreview/ddic?rowNumber=500&ddicEntityName=DD26S".to_owned(),
             "SELECT VIEWNAME, TABNAME, TABPOS FROM DD26S WHERE VIEWNAME = 'SBC_CLIENT' AND AS4LOCAL = 'A'"
@@ -668,7 +692,15 @@ fn a_view_over_allowed_tables_is_read_after_two_lookups() {
         )
     );
     assert_eq!(
-        sent(&transport, 2),
+        sent(&transport, 3),
+        (
+            "/sap/bc/adt/datapreview/ddic?rowNumber=10&ddicEntityName=DD02L".to_owned(),
+            "SELECT TABNAME, TABCLASS, VIEWCLASS FROM DD02L WHERE TABNAME = 'T000' AND AS4LOCAL = 'A'"
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        sent(&transport, 4),
         (
             "/sap/bc/adt/datapreview/ddic?rowNumber=5&ddicEntityName=SBC_CLIENT".to_owned(),
             "SELECT * FROM SBC_CLIENT".to_owned()
@@ -763,17 +795,21 @@ fn a_lookup_that_fails_or_cannot_be_read_is_rejected_fail_closed() {
 
 #[test]
 fn a_view_without_a_readable_base_list_is_rejected() {
-    rejected(database_view("T001"), vec![bases("T001", &[])], 2);
+    rejected(database_view("T001"), vec![no_cds(), bases("T001", &[])], 3);
     rejected(
         database_view("T001"),
-        vec![Ok(Response::text(500, "boom"))],
-        2,
+        vec![no_cds(), Ok(Response::text(500, "boom"))],
+        3,
     );
-    rejected(database_view("T001"), vec![ok("<<".to_owned())], 2);
     rejected(
         database_view("T001"),
-        vec![ok(preview(&[("VIEWNAME", &[Some("T001")])]))],
-        2,
+        vec![no_cds(), ok("<<".to_owned())],
+        3,
+    );
+    rejected(
+        database_view("T001"),
+        vec![no_cds(), ok(preview(&[("VIEWNAME", &[Some("T001")])]))],
+        3,
     );
 }
 
@@ -1025,7 +1061,7 @@ fn a_base_table_row_of_another_view_or_without_a_table_is_unreadable() {
     };
 
     for reply in [rows("OTHER", Some("T001")), rows("T001", None)] {
-        let message = rejected(database_view("T001"), vec![reply], 2);
+        let message = rejected(database_view("T001"), vec![no_cds(), reply], 3);
 
         assert!(
             message.contains("the base tables of T001 are unreadable"),
@@ -1083,4 +1119,101 @@ fn a_reply_without_a_root_columns_or_column_names_is_no_table() {
     }
 
     assert!(parse_preview(&format!("{PREVIEW_OPEN}{column}</dataPreview:tableData>")).is_ok());
+}
+
+#[test]
+fn a_generated_cds_sql_view_is_rejected_before_its_base_tables_and_the_read() {
+    let generated = ok(preview(&[
+        ("DDLNAME", &[Some("I_COMPANYCODE")]),
+        ("OBJECTNAME", &[Some("ICOMPANYCODE")]),
+        ("OBJECTTYPE", &[Some("VIEW")]),
+    ]));
+    let mut transport = ScriptedTransport::replies(vec![database_view("ICOMPANYCODE"), generated]);
+    let error = run(
+        &mut transport,
+        &request("ICOMPANYCODE", &[], None, 5),
+        &Policies::default(),
+    )
+    .unwrap_err();
+
+    match error {
+        ReadTableError::Rejected(message) => {
+            assert!(message.contains("generated CDS SQL view"), "{message}");
+            assert!(message.ends_with("nothing was read"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(transport.calls.len(), 2);
+    transport.assert_finished();
+}
+
+#[test]
+fn a_view_over_a_view_is_checked_down_to_its_tables() {
+    let mut transport = ScriptedTransport::replies(vec![
+        database_view("ZV_OUTER"),
+        no_cds(),
+        bases("ZV_OUTER", &["ZV_INNER"]),
+        database_view("ZV_INNER"),
+        no_cds(),
+        bases("ZV_INNER", &["USR02"]),
+    ]);
+    let error = run(
+        &mut transport,
+        &request("ZV_OUTER", &[], None, 5),
+        &Policies::default(),
+    )
+    .unwrap_err();
+
+    match error {
+        ReadTableError::Rejected(message) => {
+            assert!(
+                message.contains("view ZV_INNER reads table USR02"),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    transport.assert_finished();
+}
+
+#[test]
+fn a_base_table_the_dictionary_does_not_know_is_rejected() {
+    let mut transport = ScriptedTransport::replies(vec![
+        database_view("ZV"),
+        no_cds(),
+        bases("ZV", &["GONE"]),
+        ok(preview(&[
+            ("TABNAME", &[]),
+            ("TABCLASS", &[]),
+            ("VIEWCLASS", &[]),
+        ])),
+    ]);
+    let error = run(
+        &mut transport,
+        &request("ZV", &[], None, 5),
+        &Policies::default(),
+    )
+    .unwrap_err();
+
+    match error {
+        ReadTableError::Rejected(message) => {
+            assert!(
+                message.contains("GONE is not in the ABAP dictionary"),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(transport.calls.len(), 4);
+}
+
+#[test]
+fn where_of_read_table_keeps_decimal_numbers() {
+    assert_eq!(
+        body_of("T001", &[], Some("a = 1.5 and b between 0.5 and 2.25")),
+        "SELECT * FROM T001 WHERE A = 1.5 AND B BETWEEN 0.5 AND 2.25"
+    );
 }
