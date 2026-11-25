@@ -80,6 +80,7 @@ pub enum OperationKind {
     /// `run`: the class, report or snippet an operation executes.
     Run,
     Doctor,
+    Ping,
     Inactive,
     Activate,
     Aunit,
@@ -100,6 +101,7 @@ impl fmt::Display for OperationKind {
             Self::Delete => write!(formatter, "delete"),
             Self::Run => write!(formatter, "run"),
             Self::Doctor => write!(formatter, "doctor"),
+            Self::Ping => write!(formatter, "ping"),
             Self::Inactive => write!(formatter, "inactive"),
             Self::Activate => write!(formatter, "activate"),
             Self::Aunit => write!(formatter, "aunit"),

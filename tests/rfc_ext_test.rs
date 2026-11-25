@@ -21,11 +21,21 @@ static DESTROYS: AtomicU32 = AtomicU32::new(0);
 static SETS: AtomicU32 = AtomicU32::new(0);
 static FAIL_CREATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static BODY: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+// Which stage of RFC_SYSTEM_INFO fails: 1 invoke, 2 get structure, 3 get string of RFCSAPRL,
+// 4 get string of RFCHOST, 5 get string length of RFCKERNRL. 0 none.
+static SYSINFO_FAIL: AtomicU32 = AtomicU32::new(0);
+static STRING_GETS: AtomicU32 = AtomicU32::new(0);
+static STRING_LENGTHS: AtomicU32 = AtomicU32::new(0);
+static STRUCTURE_GETS: AtomicU32 = AtomicU32::new(0);
 
 #[no_mangle] pub extern "C" fn fake_creates() -> u32 { CREATES.load(Ordering::SeqCst) }
 #[no_mangle] pub extern "C" fn fake_destroys() -> u32 { DESTROYS.load(Ordering::SeqCst) }
 #[no_mangle] pub extern "C" fn fake_sets() -> u32 { SETS.load(Ordering::SeqCst) }
 #[no_mangle] pub extern "C" fn fake_fail_next_create() -> u32 { FAIL_CREATE.store(true, Ordering::SeqCst); 0 }
+#[no_mangle] pub extern "C" fn fake_sysinfo_fail(stage: u32) -> u32 { SYSINFO_FAIL.store(stage, Ordering::SeqCst); 0 }
+#[no_mangle] pub extern "C" fn fake_string_gets() -> u32 { STRING_GETS.load(Ordering::SeqCst) }
+#[no_mangle] pub extern "C" fn fake_string_lengths() -> u32 { STRING_LENGTHS.load(Ordering::SeqCst) }
+#[no_mangle] pub extern "C" fn fake_structure_gets() -> u32 { STRUCTURE_GETS.load(Ordering::SeqCst) }
 
 const FN_YFM: usize = 0x10;
 const FN_SADT: usize = 0x20;
@@ -34,6 +44,7 @@ const FN_ABAP_EXC: usize = 0x40;
 const FN_HUGE: usize = 0x50;
 const FN_NULL_ROW: usize = 0x60;
 const FN_READ_TABLE: usize = 0x70;
+const FN_SYSINFO: usize = 0x80;
 
 unsafe fn read(pointer: *const c_void) -> String {
     if WIDE {
@@ -147,6 +158,7 @@ pub unsafe extern "C" fn RfcGetFunctionDesc(_: *mut c_void, name: *const c_void,
         "HUGE_TABLE" => FN_HUGE as *mut c_void,
         "NULL_ROW" => FN_NULL_ROW as *mut c_void,
         "RFC_READ_TABLE" => FN_READ_TABLE as *mut c_void,
+        "RFC_SYSTEM_INFO" => FN_SYSINFO as *mut c_void,
         "MISSING_FM" => { fail_key(info, 5, "FU_NOT_FOUND", "function module not found"); std::ptr::null_mut() }
         _ => { fail(info, 20, "bad function"); std::ptr::null_mut() }
     }
@@ -166,6 +178,17 @@ pub unsafe extern "C" fn RfcCreateFunction(descriptor: *mut c_void, info: *mut c
 pub unsafe extern "C" fn RfcGetStructure(container: *mut c_void, name: *const c_void, out: *mut *mut c_void, info: *mut c_void) -> c_int {
     let parent = at(container);
     let name = read(name);
+    if parent.function == FN_SYSINFO {
+        // Only the exporting structure of the function itself, and it exists once invoked.
+        STRUCTURE_GETS.fetch_add(1, Ordering::SeqCst);
+        if parent.kind != 0 || name != "RFCSI_EXPORT" || SYSINFO_FAIL.load(Ordering::SeqCst) == 2 {
+            return fail(info, 20, "bad structure");
+        }
+        match parent.children.get("RFCSI_EXPORT") {
+            Some(child) => { *out = *child as *mut c_void; return 0; }
+            None => return fail(info, 20, "structure read before the invoke"),
+        }
+    }
     if parent.kind > 1 || strict(parent.function) {
         return fail(info, 20, "bad structure");
     }
@@ -224,7 +247,18 @@ pub unsafe extern "C" fn RfcSetXString(_: *mut c_void, _: *const c_void, value: 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn RfcGetStringLength(_: *mut c_void, name: *const c_void, length: *mut c_uint, info: *mut c_void) -> c_int {
+pub unsafe extern "C" fn RfcGetStringLength(container: *mut c_void, name: *const c_void, length: *mut c_uint, info: *mut c_void) -> c_int {
+    if at(container).function == FN_SYSINFO {
+        STRING_LENGTHS.fetch_add(1, Ordering::SeqCst);
+        let name = read(name);
+        if at(container).kind != 1 || (name == "RFCKERNRL" && SYSINFO_FAIL.load(Ordering::SeqCst) == 5) {
+            return fail(info, 20, "bad length container");
+        }
+        return match at(container).fields.get(&name) {
+            Some(Value::Text(text)) => { *length = text.chars().count() as c_uint; 0 }
+            _ => fail(info, 20, "bad length name"),
+        };
+    }
     match read(name).as_str() {
         "STATUS_CODE" => { *length = 3; 0 }
         "MESSAGE_BODY" => { *length = BODY.lock().unwrap().len().max(2) as c_uint; 0 }
@@ -233,7 +267,24 @@ pub unsafe extern "C" fn RfcGetStringLength(_: *mut c_void, name: *const c_void,
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn RfcGetString(_: *mut c_void, name: *const c_void, buffer: *mut c_void, size: c_uint, written: *mut c_uint, info: *mut c_void) -> c_int {
+pub unsafe extern "C" fn RfcGetString(container: *mut c_void, name: *const c_void, buffer: *mut c_void, size: c_uint, written: *mut c_uint, info: *mut c_void) -> c_int {
+    if at(container).function == FN_SYSINFO {
+        STRING_GETS.fetch_add(1, Ordering::SeqCst);
+        let name = read(name);
+        let stage = SYSINFO_FAIL.load(Ordering::SeqCst);
+        if at(container).kind != 1 || (name == "RFCSAPRL" && stage == 3) || (name == "RFCHOST" && stage == 4) {
+            return fail(info, 20, "bad get string");
+        }
+        let text = match at(container).fields.get(&name) {
+            Some(Value::Text(text)) => text.clone(),
+            _ => return fail(info, 20, "bad get string name"),
+        };
+        // The buffer is the length the library reported for this field, plus the terminator.
+        if size as usize != text.chars().count() + 1 { return fail(info, 13, "bad buffer size"); }
+        write(buffer, &text);
+        *written = text.chars().count() as c_uint;
+        return 0;
+    }
     if read(name) != "STATUS_CODE" || size < 4 { return fail(info, 20, "bad get string"); }
     write(buffer, "200");
     *written = 3;
@@ -255,6 +306,25 @@ pub unsafe extern "C" fn RfcInvoke(_: *mut c_void, function: *mut c_void, info: 
     let function = at(function);
     match function.function {
         FN_ABAP_EXC => fail_key(info, 5, "ZCX_EXC_KEY", "fake abap exception"),
+        FN_SYSINFO => {
+            if SYSINFO_FAIL.load(Ordering::SeqCst) == 1 {
+                return fail_key(info, 5, "SYSINFO_INVOKE", "system info invoke failed");
+            }
+            // Fields are blank-padded to the width of RFCSI_EXPORT, as the function module fills them.
+            let export = node(1, FN_SYSINFO) as *mut Node;
+            for (name, value, width) in [
+                ("RFCDEST", "apphost_HD1_00", 32usize),
+                ("RFCHOST", "apphost", 8),
+                ("RFCSYSID", "HD1", 8),
+                ("RFCSAPRL", "750", 4),
+                ("RFCKERNRL", "753", 4),
+                ("RFCDBSYS", "DB6", 10),
+            ] {
+                at(export as *mut c_void).fields.insert(name.into(), Value::Text(format!("{value:<width$}")));
+            }
+            function.children.insert("RFCSI_EXPORT".into(), export);
+            0
+        }
         FN_YFM => {
             let text = |node: &Node, name: &str| match node.fields.get(name) {
                 Some(Value::Text(text)) => text.clone(),
@@ -514,13 +584,25 @@ pub unsafe extern "C" fn RfcGetParameterDescByIndex(descriptor: *mut c_void, ind
 ];
 
 fn build(directory: &Path, wide: bool, omit: &[&str]) -> PathBuf {
+    build_without_base(directory, wide, omit, &[])
+}
+
+/// Like [`build`], and the library does not export the base symbols `rename`: the function stays
+/// in the source under another name.
+fn build_without_base(directory: &Path, wide: bool, omit: &[&str], rename: &[&str]) -> PathBuf {
     let source = directory.join("fake.rs");
     let library = directory.join(format!(
         "fake_ext_{}.{}",
         if wide { "wide" } else { "narrow" },
         std::env::consts::DLL_EXTENSION
     ));
-    let mut text = format!("#![allow(dead_code)]\nconst WIDE: bool = {wide};\n{FAKE_BASE}");
+    let mut base = FAKE_BASE.to_owned();
+
+    for name in rename {
+        base = base.replace(&format!("fn {name}("), &format!("fn renamed_{name}("));
+    }
+
+    let mut text = format!("#![allow(dead_code)]\nconst WIDE: bool = {wide};\n{base}");
 
     for (name, code) in FAKE_EXT {
         if !omit.contains(&name) {
@@ -1276,4 +1358,179 @@ fn a_library_without_the_function_symbols_cannot_read_a_table() {
 
     assert!(error.to_string().contains("RfcGetChars"), "{error}");
     assert_eq!(fixture.counter(b"fake_creates\0"), 0);
+}
+
+// ---- the typed RFC_SYSTEM_INFO call ------------------------------------------------------------
+
+fn sysinfo_fail(path: &Path, stage: u32) {
+    let library = unsafe { libloading::Library::new(path) }.unwrap();
+    let arm: libloading::Symbol<unsafe extern "C" fn(u32) -> u32> =
+        unsafe { library.get(b"fake_sysinfo_fail\0") }.unwrap();
+
+    unsafe { arm(stage) };
+}
+
+/// A failed call leaves nothing behind: every function it created is destroyed.
+fn assert_clean(fixture: &Fixture, context: &str) {
+    assert_eq!(
+        fixture.counter(b"fake_destroys\0"),
+        fixture.counter(b"fake_creates\0"),
+        "{context}: the function is destroyed"
+    );
+}
+
+#[test]
+fn the_system_info_call_names_the_function_and_the_structure_and_trims_the_fields() {
+    for wide in WIDTHS {
+        let mut fixture = Fixture::new(wide, &[]);
+        let info = fixture
+            .api
+            .system_info()
+            .unwrap_or_else(|error| panic!("wide {wide}: {error}"));
+
+        // The fake knows only `RFC_SYSTEM_INFO` for the function and `RFCSI_EXPORT` for the
+        // structure, and pads every field to its width: the trailing blanks are gone.
+        assert_eq!(info.instance, "apphost_HD1_00", "wide: {wide}");
+        assert_eq!(info.host, "apphost", "wide: {wide}");
+        assert_eq!(info.system_id, "HD1", "wide: {wide}");
+        assert_eq!(info.release, "750", "wide: {wide}");
+        assert_eq!(info.kernel, "753", "wide: {wide}");
+        assert_eq!(info.database, "DB6", "wide: {wide}");
+        assert!(info.invoke_time.is_some(), "wide: {wide}");
+        assert_eq!(fixture.counter(b"fake_creates\0"), 1, "wide: {wide}");
+        assert_eq!(fixture.counter(b"fake_destroys\0"), 1, "wide: {wide}");
+        // One structure read, and each of the six fields sized once and read once.
+        assert_eq!(fixture.counter(b"fake_structure_gets\0"), 1, "wide: {wide}");
+        assert_eq!(fixture.counter(b"fake_string_lengths\0"), 6, "wide: {wide}");
+        assert_eq!(fixture.counter(b"fake_string_gets\0"), 6, "wide: {wide}");
+        // No parameter was set: the call sends nothing of its own.
+        assert_eq!(fixture.counter(b"fake_sets\0"), 0, "wide: {wide}");
+    }
+}
+
+#[test]
+fn the_system_info_buffers_are_the_reported_length_plus_the_terminator_in_either_width() {
+    // The fake refuses a buffer of any other size, so a successful read is the proof; a second
+    // call on the same connection reads the same values and keeps the handles balanced.
+    for wide in WIDTHS {
+        let mut fixture = Fixture::new(wide, &[]);
+        let first = fixture.api.system_info().unwrap();
+        let second = fixture.api.system_info().unwrap();
+
+        assert_eq!(
+            (first.instance.as_str(), first.release.as_str()),
+            (second.instance.as_str(), second.release.as_str()),
+            "wide: {wide}"
+        );
+        assert_eq!(fixture.counter(b"fake_creates\0"), 2, "wide: {wide}");
+        assert_eq!(fixture.counter(b"fake_destroys\0"), 2, "wide: {wide}");
+    }
+}
+
+#[test]
+fn a_system_info_call_that_fails_at_any_stage_is_an_error_and_leaves_no_function_behind() {
+    for wide in WIDTHS {
+        // The invoke, the structure, a string read and a string length each fail on their own.
+        for (stage, needle) in [
+            (1, "RfcInvoke: system info invoke failed"),
+            (2, "RfcGetStructure"),
+            (3, "RfcGetString"),
+            (5, "RfcGetStringLength"),
+        ] {
+            let mut fixture = Fixture::new(wide, &[]);
+
+            sysinfo_fail(&fixture.path, stage);
+
+            let error = fixture.api.system_info().unwrap_err();
+
+            assert!(
+                error.to_string().contains(needle),
+                "stage {stage} wide {wide}: {error}"
+            );
+            assert_eq!(
+                fixture.counter(b"fake_creates\0"),
+                1,
+                "stage {stage} wide {wide}"
+            );
+            assert_clean(&fixture, &format!("stage {stage} wide {wide}"));
+        }
+
+        // The creation fails: there is no function to destroy, and the next call works.
+        let mut fixture = Fixture::new(wide, &[]);
+
+        fail_next_create(&fixture.path);
+
+        let error = fixture.api.system_info().unwrap_err();
+
+        assert!(
+            error.to_string().contains("cannot create"),
+            "wide {wide}: {error}"
+        );
+        assert_eq!(fixture.counter(b"fake_destroys\0"), 0, "wide: {wide}");
+        assert!(fixture.api.system_info().is_ok(), "wide: {wide}");
+        assert_eq!(fixture.counter(b"fake_destroys\0"), 1, "wide: {wide}");
+    }
+}
+
+#[test]
+fn a_host_that_cannot_be_read_only_drops_the_host() {
+    for wide in WIDTHS {
+        let mut fixture = Fixture::new(wide, &[]);
+
+        sysinfo_fail(&fixture.path, 4);
+
+        let info = fixture
+            .api
+            .system_info()
+            .unwrap_or_else(|error| panic!("wide {wide}: {error}"));
+
+        assert_eq!(info.host, "", "wide: {wide}");
+        assert_eq!(info.instance, "apphost_HD1_00", "wide: {wide}");
+        assert_eq!(info.release, "750", "wide: {wide}");
+        assert_clean(&fixture, &format!("wide {wide}"));
+    }
+}
+
+#[test]
+fn the_system_info_call_needs_no_optional_symbol() {
+    for wide in WIDTHS {
+        let all = RfcSymbols::optional_names();
+        let mut fixture = Fixture::new(wide, &all);
+        let info = fixture
+            .api
+            .system_info()
+            .unwrap_or_else(|error| panic!("wide {wide}: {error}"));
+
+        assert_eq!(info.system_id, "HD1", "wide: {wide}");
+        assert_clean(&fixture, &format!("wide {wide}"));
+    }
+}
+
+#[test]
+fn a_library_without_a_symbol_the_call_reads_with_never_reaches_system_info() {
+    for wide in WIDTHS {
+        for symbol in [
+            "RfcGetString",
+            "RfcGetStringLength",
+            "RfcGetStructure",
+            "RfcInvoke",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = build_without_base(directory.path(), wide, &[], &[symbol]);
+            let library = RfcLibrary::load(&Env::test_paths(path.to_str().unwrap(), "", ""))
+                .unwrap_or_else(|error| panic!("the fake must load: {error}"));
+            let parameters = vec![("ASHOST".to_owned(), "good.example.com".to_owned())];
+            let error = match DynamicRfcApi::load(library, parameters) {
+                Ok(_) => panic!("{symbol} wide {wide}: the API must not load"),
+                Err(error) => error,
+            };
+
+            assert!(error.contains(symbol), "{symbol} wide {wide}: {error}");
+            assert_eq!(
+                counter_at(&path, b"fake_creates\0"),
+                0,
+                "{symbol} wide {wide}"
+            );
+        }
+    }
 }

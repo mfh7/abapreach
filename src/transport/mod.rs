@@ -170,4 +170,12 @@ pub trait SadtTransport {
             "RFC_READ_TABLE needs the RFC backend".to_owned(),
         ))
     }
+
+    /// One typed `RFC_SYSTEM_INFO` call on this session. Only the RFC transport has it; ADT HTTP
+    /// reads the same facts from a request.
+    fn system_info(&mut self) -> Result<rfc::SystemInfo, TransportError> {
+        Err(TransportError::Protocol(
+            "this transport has no RFC_SYSTEM_INFO call".to_owned(),
+        ))
+    }
 }

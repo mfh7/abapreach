@@ -41,7 +41,7 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// File name, arguments, and whether the text is on stdout (help, version) or stderr (a STOP).
-const COMMANDS: [(&str, &[&str], bool); 20] = [
+const COMMANDS: [(&str, &[&str], bool); 21] = [
     ("help-top.txt", &["--help"], true),
     ("help-read.txt", &["read", "--help"], true),
     ("help-deploy.txt", &["deploy", "--help"], true),
@@ -56,6 +56,7 @@ const COMMANDS: [(&str, &[&str], bool); 20] = [
     ("help-run.txt", &["run", "--help"], true),
     ("help-mcp.txt", &["mcp", "--help"], true),
     ("help-doctor.txt", &["doctor", "--help"], true),
+    ("help-ping.txt", &["ping", "--help"], true),
     ("version.txt", &["--version"], true),
     (
         "err-read-unknown-type.txt",
@@ -139,7 +140,7 @@ fn the_cli_golden_texts_name_the_new_types_the_prog_option_and_the_footprint() {
     }
 
     assert!(golden("new", "help-read.txt").contains("temporary class"));
-    // The top level grew by `sql`, `search`, `dumps`, `dump` and `where-used` of 0.18, the quality commands and `run` of 0.17 and is otherwise the old text:
+    // The top level grew by `sql`, `search`, `dumps`, `dump`, `where-used` and `ping` of 0.18, the quality commands and `run` of 0.17 and is otherwise the old text:
     // the footprint sits in the help of the subcommands.
     let added = [
         "sql",
@@ -147,6 +148,7 @@ fn the_cli_golden_texts_name_the_new_types_the_prog_option_and_the_footprint() {
         "dumps",
         "dump",
         "where-used",
+        "ping",
         "inactive",
         "activate",
         "aunit",

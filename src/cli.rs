@@ -375,6 +375,15 @@ pub enum Command {
         #[arg(long)]
         conn: String,
     },
+    /// Shows the system, the application server instance that answered and the round trip time
+    Ping {
+        /// `adt` reads /system/information over ADT HTTP, `rfc` calls RFC_SYSTEM_INFO
+        #[arg(long)]
+        backend: Option<Backend>,
+
+        #[arg(long)]
+        conn: String,
+    },
 }
 
 /// What `run` executes.

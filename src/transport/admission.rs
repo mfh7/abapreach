@@ -8,6 +8,7 @@ use super::Request;
 use crate::adt::{
     ActivationBody, ObjectRef, USAGE_REQUEST_XML, classify_activation, parse_object_refs,
 };
+use crate::operation::ping::{SYSTEM_INFORMATION_ACCEPT, SYSTEM_INFORMATION_URI};
 use crate::operation::read_table::validate_preview_body;
 use crate::operation::runner::{RUNNER_CLASS_REFUSED, is_runner_class};
 use crate::operation::search::{MAX_RESULTS, is_encoded_type, validate_pattern};
@@ -118,7 +119,7 @@ impl Admission {
         match request.method.as_str() {
             // The discovery is read as the `doctor` probe and `where-used` send it: nothing else.
             "GET" if uri == DISCOVERY => request.body.is_empty() && request.headers.is_empty(),
-            "GET" => is_read(uri, path, query),
+            "GET" => is_read(uri, path, query) || is_system_information(request),
             "DELETE" => request.body.is_empty() && is_delete(path, query),
             "PUT" => is_put(path, query) && has_content_type(request, "text/plain; charset=utf-8"),
             "POST" => {
@@ -736,6 +737,17 @@ fn split_query(uri: &str) -> (&str, Option<&str>) {
         Some((path, query)) => (path, Some(query)),
         None => (uri, None),
     }
+}
+
+/// `GET /sap/bc/adt/system/information` with no query, no body and the one `Accept` the `ping`
+/// command sends: the Atom feed of the system and instance facts. It is metadata only, so a
+/// running runner does not change the verdict. `ping` over RFC calls `RFC_SYSTEM_INFO` instead
+/// and never sends this request through the SADT endpoint; the shape exists for parity with the
+/// RFC SADT backend, which serves every ADT read the HTTP backend can send.
+fn is_system_information(request: &Request) -> bool {
+    request.uri == SYSTEM_INFORMATION_URI
+        && request.body.is_empty()
+        && has_header(request, "Accept", SYSTEM_INFORMATION_ACCEPT)
 }
 
 fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {

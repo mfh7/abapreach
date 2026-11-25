@@ -3,7 +3,7 @@ mod common;
 use abapreach::config::Connection;
 use abapreach::operation::deploy::CancelFlag;
 use abapreach::transport::http::HttpTransport;
-use abapreach::transport::rfc::TraceTarget;
+use abapreach::transport::rfc::{SystemInfo, TraceTarget};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use abapreach::{Exit, Factories, Opened, RfcLibraryIdentity, RfcLibraryInfo, run};
 use common::ScriptedTransport;
@@ -48,6 +48,10 @@ impl<T: SadtTransport> SadtTransport for Shared<T> {
     fn stateful_supported(&self) -> Option<bool> {
         self.0.borrow().stateful_supported()
     }
+
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        self.0.borrow_mut().system_info()
+    }
 }
 
 fn shared<T: SadtTransport + 'static>(transport: T) -> (Rc<RefCell<T>>, Opened) {
@@ -65,24 +69,28 @@ fn discovery() -> Opened {
     .1
 }
 
-/// The discovery reply followed by the replies of the runner reads.
+/// The discovery reply, the replies of the runner reads and the reply of the instance read.
 fn discovery_with(
     runner: Vec<Result<Response, TransportError>>,
 ) -> Vec<Result<Response, TransportError>> {
     let mut replies = vec![Ok(Response::text(200, "<app:service/>"))];
 
     replies.extend(runner);
+    replies.push(common::sysinfo_reply("sysinfo-750.xml"));
 
     replies
 }
 
 /// A SADT session whose runner reads find nothing to report.
 fn sadt_runner() -> Opened {
-    shared(ScriptedTransport::replies(runner_replies(
-        classrun_found(),
-        search_reply(&[]),
-        Vec::new(),
-    )))
+    shared(
+        ScriptedTransport::replies(runner_replies(
+            classrun_found(),
+            search_reply(&[]),
+            Vec::new(),
+        ))
+        .with_system_info(Ok(common::system_info())),
+    )
     .1
 }
 
@@ -387,6 +395,7 @@ fn doctor_probes_both_backends_with_one_logon_each() {
             "capability read PROG: ADT HTTP, RFC SADT",
             "capability deploy PROG: ADT HTTP, RFC SADT",
             "capability doctor: ADT HTTP, RFC SADT",
+            "instance ***_HD1_00",
             WARNING,
         ]
         .join("\n")
@@ -405,8 +414,8 @@ fn doctor_probes_both_backends_with_one_logon_each() {
     let transport = cell.borrow();
 
     // The discovery, then the interface preview, the leftover search, two preflight previews, the
-    // `OUT` type preview and the two orphan previews on the same session.
-    assert_eq!(transport.calls.len(), 8);
+    // `OUT` type preview, the two orphan previews and the system information on the same session.
+    assert_eq!(transport.calls.len(), 9);
     assert_eq!(transport.calls[0].method, "GET");
     assert_eq!(transport.calls[0].uri, DISCOVERY_URI);
     assert_eq!(transport.closes, 1);
@@ -453,14 +462,7 @@ fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
 
     fake.library.push_back(library());
     fake.ping.push_back(Ok(()));
-    fake.sadt.push_back(
-        shared(ScriptedTransport::replies(runner_replies(
-            classrun_found(),
-            search_reply(&[]),
-            Vec::new(),
-        )))
-        .1,
-    );
+    fake.sadt.push_back(sadt_runner());
 
     let exit = run(
         ["abapreach", "doctor", "--conn", "qas_100"]
@@ -499,6 +501,7 @@ fn an_rfc_only_connection_skips_the_adt_probe_and_reports_it() {
             "capability read PROG: RFC SADT",
             "capability deploy PROG: RFC SADT",
             "capability doctor: RFC SADT",
+            "instance ***_HD1_00",
         ]
         .join("\n")
     );
@@ -1822,6 +1825,515 @@ fn the_runner_probes_are_read_only_and_leak_neither_host_nor_secret() {
     }
 
     // Discovery, interface preview, search, one metadata read, two preflight previews, the `OUT`
-    // type preview, the two orphan previews.
-    assert_eq!(transport.calls.len(), 9);
+    // type preview, the two orphan previews, the system information.
+    assert_eq!(transport.calls.len(), 10);
+}
+
+// ---- the instance line (the same reading as `ping`) ----------------------------------------------
+
+/// A doctor run on an ADT session whose last reply is the one of the instance read.
+fn adt_doctor_with_instance(instance: Result<Response, TransportError>) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let mut replies = vec![Ok(Response::text(200, "<app:service/>"))];
+
+    replies.extend(runner_replies(
+        classrun_found(),
+        search_reply(&[]),
+        Vec::new(),
+    ));
+    replies.push(instance);
+    fake.adt
+        .push_back(shared(ScriptedTransport::replies(replies)).1);
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+
+    doctor(directory.path(), &mut fake)
+}
+
+fn instance_lines(exit: &Exit) -> Vec<&str> {
+    exit.stdout
+        .lines()
+        .filter(|line| line.starts_with("instance"))
+        .collect()
+}
+
+#[test]
+fn the_instance_line_follows_the_capability_lines_on_each_release() {
+    for (fixture, line) in [
+        ("sysinfo-750.xml", "instance ***_HD1_00"),
+        ("sysinfo-758.xml", "instance ***_S4D_11"),
+        (
+            "sysinfo-740-404.xml",
+            "instance unknown (no /system/information on this release)",
+        ),
+    ] {
+        let exit = adt_doctor_with_instance(common::sysinfo_reply(fixture));
+        let lines: Vec<&str> = exit.stdout.lines().collect();
+        let capability = lines
+            .iter()
+            .position(|line| *line == "capability doctor: ADT HTTP, RFC SADT")
+            .unwrap();
+
+        assert_eq!(exit.code, 0, "{fixture}: {}", exit.stdout);
+        assert_eq!(lines[capability + 1], line, "{fixture}");
+        assert_eq!(instance_lines(&exit), [line], "{fixture}");
+    }
+}
+
+#[test]
+fn a_406_leaves_the_instance_unknown_and_the_verdict_unchanged() {
+    let exit = adt_doctor_with_instance(Ok(Response::empty(406)));
+
+    assert_eq!(exit.code, 0, "{}", exit.stdout);
+    assert_eq!(instance_lines(&exit), ["instance unknown (HTTP 406)"]);
+}
+
+#[test]
+fn a_failed_instance_read_leaves_the_instance_unknown_and_the_verdict_unchanged() {
+    for (reply, reason) in [
+        (Ok(Response::empty(500)), "HTTP 500"),
+        (
+            Err(TransportError::NoResponse("lost".to_owned())),
+            "no answer",
+        ),
+    ] {
+        let exit = adt_doctor_with_instance(reply);
+
+        assert_eq!(exit.code, 0, "{}", exit.stdout);
+        assert_eq!(
+            instance_lines(&exit),
+            [format!("instance unknown ({reason})").as_str()]
+        );
+    }
+}
+
+#[test]
+fn the_instance_comes_from_the_adt_session_alone_when_both_backends_pass() {
+    let exit = adt_doctor_with_instance(common::sysinfo_reply("sysinfo-750.xml"));
+
+    assert_eq!(instance_lines(&exit), ["instance ***_HD1_00"]);
+}
+
+#[test]
+fn without_an_adt_answer_the_instance_comes_from_the_sadt_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(Err(TransportError::PreSendConnectivity(
+        "no route".to_owned(),
+    )));
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+    fake.sadt.push_back(
+        shared(
+            ScriptedTransport::replies(runner_replies(
+                classrun_found(),
+                search_reply(&[]),
+                Vec::new(),
+            ))
+            .with_system_info(Ok(SystemInfo {
+                instance: "apphost_FED_00".to_owned(),
+                ..common::system_info()
+            })),
+        )
+        .1,
+    );
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert_eq!(instance_lines(&exit), ["instance ***_FED_00"]);
+    assert_eq!(fake.sadt_calls, 1);
+}
+
+#[test]
+fn a_failed_rfc_system_info_leaves_the_instance_unknown_without_failing_the_doctor() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+    fake.sadt.push_back(
+        shared(
+            ScriptedTransport::replies(runner_replies(
+                classrun_found(),
+                search_reply(&[]),
+                Vec::new(),
+            ))
+            .with_system_info(Err(TransportError::Authorization(
+                "no authority".to_owned(),
+            ))),
+        )
+        .1,
+    );
+
+    let exit = run(
+        ["abapreach", "doctor", "--conn", "qas_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        rfc_only_env(directory.path()),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stdout);
+    assert_eq!(instance_lines(&exit), ["instance unknown (not authorized)"]);
+}
+
+#[test]
+fn no_answering_backend_prints_no_instance_line() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(Err(TransportError::PreSendConnectivity(
+        "no route".to_owned(),
+    )));
+    fake.library.push_back(Err("not found".to_owned()));
+
+    let exit = doctor(directory.path(), &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert_eq!(instance_lines(&exit), Vec::<&str>::new());
+}
+
+fn feed(name: &str) -> Result<Response, TransportError> {
+    Ok(Response::text(
+        200,
+        format!(
+            r#"<atom:feed xmlns:atom="http://www.w3.org/2005/Atom"><atom:entry><atom:id>ApplicationServerName</atom:id><atom:title>{name}</atom:title></atom:entry></atom:feed>"#
+        ),
+    ))
+}
+
+#[test]
+fn the_instance_host_is_always_masked_whatever_the_configured_host_is() {
+    // The configured host is `example.com`; none of these names holds it.
+    for (name, line) in [
+        ("example.com_HD1_00", "instance ***_HD1_00"),
+        ("apphost_HD1_00", "instance ***_HD1_00"),
+        ("apphost.corp.example.net_HD1_00", "instance ***_HD1_00"),
+        ("192.0.2.1_S4D_11", "instance ***_S4D_11"),
+        ("my_app_host_FED_02", "instance ***_FED_02"),
+    ] {
+        let exit = adt_doctor_with_instance(feed(name));
+
+        assert_eq!(instance_lines(&exit), [line], "{name}");
+        assert!(!exit.stdout.contains("apphost"), "{name}: {}", exit.stdout);
+        assert!(!exit.stdout.contains("192.0.2.1"), "{name}");
+    }
+}
+
+#[test]
+fn a_malformed_instance_name_is_instance_stars_never_the_raw_value() {
+    for name in [
+        "apphost",
+        "apphost_HD1",
+        "apphost_hd1_00",
+        "apphost_HD1_0",
+        "apphost_HD10_00",
+        "_HD1_00",
+        "secret-host.example.net",
+    ] {
+        let exit = adt_doctor_with_instance(feed(name));
+
+        assert_eq!(instance_lines(&exit), ["instance ***"], "{name}");
+        assert!(!exit.stdout.contains(name), "{name}: {}", exit.stdout);
+    }
+}
+
+#[test]
+fn an_instance_reason_is_a_fixed_category_and_never_carries_error_or_reply_text() {
+    // Hosts that are not in the config, in every shape an error or a reply can quote one.
+    for (reply, reason) in [
+        (
+            Err(TransportError::NoResponse(
+                "apphost.corp.net lost".to_owned(),
+            )),
+            "no answer",
+        ),
+        (
+            Err(TransportError::PostSendUncertain(
+                "apphost.corp.net".to_owned(),
+            )),
+            "no answer",
+        ),
+        (
+            Err(TransportError::PreSendConnectivity(
+                "apphost.corp.net refused".to_owned(),
+            )),
+            "request failed",
+        ),
+        (
+            Err(TransportError::Protocol("apphost.corp.net".to_owned())),
+            "request failed",
+        ),
+        (
+            Err(TransportError::Authorization("apphost.corp.net".to_owned())),
+            "not authorized",
+        ),
+        (
+            Err(TransportError::Http {
+                status: 503,
+                message: "apphost.corp.net".to_owned(),
+            }),
+            "HTTP 503",
+        ),
+        // An unknown entity: the parser error quotes the entity name.
+        (
+            Ok(Response::text(
+                200,
+                r#"<atom:feed xmlns:atom="http://www.w3.org/2005/Atom"><atom:entry><atom:id>ApplicationServerName</atom:id><atom:title>&apphost.corp.net;</atom:title></atom:entry></atom:feed>"#,
+            )),
+            "unreadable reply",
+        ),
+        (
+            Ok(Response::text(200, "<a></apphost.corp.net>")),
+            "unreadable reply",
+        ),
+    ] {
+        let exit = adt_doctor_with_instance(reply);
+
+        assert_eq!(exit.code, 0, "{reason}: {}", exit.stdout);
+        assert_eq!(
+            instance_lines(&exit),
+            [format!("instance unknown ({reason})").as_str()]
+        );
+        assert!(!exit.stdout.contains("apphost.corp.net"), "{}", exit.stdout);
+        assert!(!exit.stderr.contains("apphost.corp.net"), "{}", exit.stderr);
+    }
+}
+
+// ---- the instance line through the RFC path -------------------------------------------------------
+
+const ROUTE: &str = "/H/router.corp.example/S/3299/W/routerpw/H/10.9.8.7/S/3200";
+/// Every piece of the connection that must never reach an output.
+const SECRETS: [&str; 5] = [
+    "secret-pw",
+    ROUTE,
+    "router.corp.example",
+    "routerpw",
+    "10.9.8.7",
+];
+
+/// A doctor run over the SADT session alone (`qas_100` has no ADT) whose `RFC_SYSTEM_INFO` answers
+/// `answer` and whose close fails with `close`, with the route of the connection set.
+fn rfc_doctor(answer: Result<SystemInfo, TransportError>, close: Option<TransportError>) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut fake = Fake::default();
+    let script = ScriptedTransport::replies(runner_replies(
+        classrun_found(),
+        search_reply(&[]),
+        Vec::new(),
+    ))
+    .with_system_info(answer);
+    let opened: Opened = match close {
+        Some(error) => Ok(Box::new(common::CloseFails {
+            inner: script,
+            error,
+        })),
+        None => shared(script).1,
+    };
+    let mut env = rfc_only_env(directory.path());
+
+    env.insert("QAS_SAPROUTER".to_owned(), ROUTE.to_owned());
+    fake.library.push_back(library());
+    fake.ping.push_back(Ok(()));
+    fake.sadt.push_back(opened);
+
+    run(
+        ["abapreach", "doctor", "--conn", "qas_100"]
+            .map(str::to_owned)
+            .to_vec(),
+        env,
+        &mut fake,
+    )
+}
+
+fn rfc_instance(instance: &str) -> Exit {
+    rfc_doctor(
+        Ok(SystemInfo {
+            instance: instance.to_owned(),
+            ..common::system_info()
+        }),
+        None,
+    )
+}
+
+#[test]
+fn the_rfc_instance_host_is_masked_in_every_shape_of_name() {
+    for (name, line) in [
+        ("apphost_HD1_00", "instance ***_HD1_00"),
+        // The host may hold underscores, dots and colons; only the last two parts are the system.
+        ("my_app_host_FED_02", "instance ***_FED_02"),
+        ("_a_b_c_S4D_11", "instance ***_S4D_11"),
+        ("apphost.corp.example.net_HD1_00", "instance ***_HD1_00"),
+        ("APPHOST.CORP_HD1_99", "instance ***_HD1_99"),
+        ("192.0.2.1_S4D_11", "instance ***_S4D_11"),
+        ("2001:db8::1_HD1_00", "instance ***_HD1_00"),
+        ("host-with-dash_H1D_10", "instance ***_H1D_10"),
+        // A control or format character is dropped before the shape is read.
+        ("app\u{202E}host_HD1_00", "instance ***_HD1_00"),
+        ("app\thost\n_HD1_00", "instance ***_HD1_00"),
+        ("apphost_HD1_00  ", "instance ***_HD1_00"),
+    ] {
+        let exit = rfc_instance(name);
+
+        assert_eq!(exit.code, 0, "{name:?}: {}", exit.stdout);
+        assert_eq!(instance_lines(&exit), [line], "{name:?}");
+        assert!(
+            !exit.stdout.contains("apphost"),
+            "{name:?}: {}",
+            exit.stdout
+        );
+        assert!(!exit.stdout.contains("192.0.2.1"), "{name:?}");
+        assert!(!exit.stdout.contains("db8"), "{name:?}");
+        assert!(!exit.stdout.contains("corp"), "{name:?}");
+        assert_eq!(exit.stderr, "", "{name:?}");
+    }
+}
+
+#[test]
+fn a_malformed_rfc_instance_is_instance_stars_and_an_empty_one_is_unreadable() {
+    for name in [
+        "apphost",
+        "apphost_HD1",
+        "apphost_hd1_00",
+        "apphost_HD1_0",
+        "apphost_HD1_000",
+        "apphost_HD1_0A",
+        "apphost_HD10_00",
+        "apphost_HD_00",
+        "_HD1_00",
+        "__00",
+        "HD1_00",
+        "secret-host.example.net",
+        "apphost__HD1",
+        "apphost HD1 00",
+        "apphost_HD1_00_",
+    ] {
+        let exit = rfc_instance(name);
+
+        assert_eq!(exit.code, 0, "{name:?}: {}", exit.stdout);
+        assert_eq!(instance_lines(&exit), ["instance ***"], "{name:?}");
+        assert!(
+            !exit.stdout.contains("apphost"),
+            "{name:?}: {}",
+            exit.stdout
+        );
+        assert!(!exit.stdout.contains("secret-host"), "{name:?}");
+    }
+
+    for name in ["", "   ", "\u{200B}\u{202E}", "\t\n"] {
+        let exit = rfc_instance(name);
+
+        assert_eq!(exit.code, 0, "{name:?}: {}", exit.stdout);
+        assert_eq!(
+            instance_lines(&exit),
+            ["instance unknown (unreadable reply)"],
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
+fn a_long_rfc_instance_is_cut_before_the_shape_is_read() {
+    // 64 characters is the longest value; the tail with the system id is gone, so the cut name is
+    // malformed and prints no part of the host.
+    let exit = rfc_instance(&format!("{}_HD1_00", "h".repeat(80)));
+
+    assert_eq!(instance_lines(&exit), ["instance ***"]);
+    assert!(!exit.stdout.contains("hhhh"), "{}", exit.stdout);
+}
+
+#[test]
+fn an_rfc_instance_that_holds_a_secret_never_prints_it() {
+    for name in [
+        "secret-pw_HD1_00",
+        "sec\u{200B}ret-pw_HD1_00",
+        "router.corp.example_HD1_00",
+        "10.9.8.7_HD1_00",
+        "routerpw",
+    ] {
+        let exit = rfc_instance(name);
+
+        for secret in SECRETS {
+            assert!(
+                !exit.stdout.contains(secret),
+                "{name:?} leaks {secret}: {}",
+                exit.stdout
+            );
+            assert!(!exit.stderr.contains(secret), "{name:?} leaks {secret}");
+        }
+
+        assert!(!exit.stdout.contains("ret-pw"), "{name:?}: {}", exit.stdout);
+    }
+}
+
+#[test]
+fn an_error_or_close_note_with_a_secret_or_a_route_never_reaches_the_doctor_output() {
+    let leaking = format!(
+        "logon secret-pw failed via {ROUTE} host router.corp.example pw routerpw gw 10.9.8.7"
+    );
+    let errors = [
+        (
+            TransportError::Authorization(leaking.clone()),
+            "not authorized",
+        ),
+        (TransportError::Protocol(leaking.clone()), "request failed"),
+        (
+            TransportError::PreSendConnectivity(leaking.clone()),
+            "request failed",
+        ),
+        (TransportError::NoResponse(leaking.clone()), "no answer"),
+        (
+            TransportError::PostSendUncertain(leaking.clone()),
+            "no answer",
+        ),
+        (
+            TransportError::Http {
+                status: 502,
+                message: leaking.clone(),
+            },
+            "HTTP 502",
+        ),
+        (
+            TransportError::Protocol(leaking.clone()).after_send(),
+            "request failed",
+        ),
+    ];
+
+    for (error, reason) in errors {
+        // The instance read fails, and the close fails with the same kind of text.
+        let exit = rfc_doctor(Err(error.clone()), Some(error.clone()));
+        let output = format!("{}\n{}", exit.stdout, exit.stderr);
+
+        assert_eq!(exit.code, 0, "{reason}: {output}");
+        assert_eq!(
+            instance_lines(&exit),
+            [format!("instance unknown ({reason})").as_str()],
+            "{reason}"
+        );
+
+        for secret in SECRETS {
+            assert!(
+                !output.contains(secret),
+                "{reason} leaks {secret}: {output}"
+            );
+        }
+    }
+
+    // A good reading with a failing close still masks the note.
+    let exit = rfc_doctor(
+        Ok(common::system_info()),
+        Some(TransportError::Protocol(leaking)),
+    );
+    let output = format!("{}\n{}", exit.stdout, exit.stderr);
+
+    assert_eq!(instance_lines(&exit), ["instance ***_HD1_00"]);
+    // The note is there, so the masking above is tested on a line that exists.
+    assert!(output.contains("session close failed"), "{output}");
+
+    for secret in SECRETS {
+        assert!(!output.contains(secret), "leaks {secret}: {output}");
+    }
 }

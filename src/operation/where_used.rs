@@ -19,7 +19,8 @@ use crate::operation::read::resolve_group;
 use crate::operation::read_table::{
     CLI_MAX_ROWS, Query as PreviewQuery, ReadTableRequest, TableData, fetch, identifier,
 };
-use crate::operation::search::{TYPES, is_dropped};
+use crate::operation::search::TYPES;
+use crate::operation::text::is_dropped;
 use crate::policy::Policies;
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use std::cell::Cell;

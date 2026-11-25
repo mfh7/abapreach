@@ -1,0 +1,8 @@
+Shows the system, the application server instance that answered and the round trip time
+
+Usage: abapreach ping [OPTIONS] --conn <CONN>
+
+Options:
+      --backend <BACKEND>  `adt` reads /system/information over ADT HTTP, `rfc` calls RFC_SYSTEM_INFO [possible values: adt, rfc]
+      --conn <CONN>        
+  -h, --help               Print help

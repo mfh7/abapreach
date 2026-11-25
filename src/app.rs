@@ -31,6 +31,7 @@ use crate::operation::doctor::Doctor;
 use crate::operation::dumps::{self, DumpQuery, ListOptions, ListQuery};
 use crate::operation::inactive;
 use crate::operation::payload::Kind;
+use crate::operation::ping;
 use crate::operation::quality;
 use crate::operation::read::{ReadProg, ReadTarget};
 use crate::operation::read_ddic::{self, DdicRead};
@@ -301,7 +302,8 @@ pub(crate) fn run_registered(
             );
         }
     };
-    let is_doctor = matches!(cli.command, Command::Doctor { .. });
+    // `ping` prints the instance name as SAP reports it; only the doctor also masks the hosts.
+    let masks_hosts = matches!(cli.command, Command::Doctor { .. });
     let Some(conn) = connection_id(&cli.command) else {
         return with_warning(mcp(env, factories, registry), warning.as_deref());
     };
@@ -335,7 +337,7 @@ pub(crate) fn run_registered(
 
     let mut secrets = connection.secrets();
 
-    if is_doctor {
+    if masks_hosts {
         secrets.extend(connection.hosts());
         secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     }
@@ -403,7 +405,8 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::Activate { conn, .. }
         | Command::Aunit { conn, .. }
         | Command::Run { conn, .. }
-        | Command::Doctor { conn } => Some(conn),
+        | Command::Doctor { conn }
+        | Command::Ping { conn, .. } => Some(conn),
         Command::Mcp => None,
     }
 }
@@ -702,6 +705,22 @@ fn execute(
                 stderr: String::new(),
             }
         }
+        Command::Ping { backend, .. } => route(
+            OperationKind::Ping,
+            backend.map(backend_kind),
+            false,
+            connection,
+            factories,
+            |transport, selection, _, _| {
+                let reading = ping::read(transport, selection.backend, &connection.secrets());
+                let result = reading
+                    .map(|reading| reading.outcome(selection.backend))
+                    .map_err(|failure| failure.error);
+
+                // A read holds no lock, so a failed session end is only a note.
+                quality::attempt(result, end_session(transport))
+            },
+        ),
         Command::ReadTable {
             table,
             fields,

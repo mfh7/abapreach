@@ -18,6 +18,11 @@ use std::path::{Path, PathBuf};
 
 pub const SADT_REST_RFC_ENDPOINT: &str = "SADT_REST_RFC_ENDPOINT";
 
+/// The standard function module that answers with the system and the instance of the logon.
+pub const SYSTEM_INFO_FUNCTION: &str = "RFC_SYSTEM_INFO";
+/// Its exporting structure; the fields below are the ones [`SystemInfo`] reads.
+const SYSTEM_INFO_STRUCTURE: &str = "RFCSI_EXPORT";
+
 /// The library reads this (through the C runtime's `getenv`) when it opens its log, which is its
 /// first call.
 pub const RFC_TRACE_DIR_ENV: &str = "RFC_TRACE_DIR";
@@ -595,6 +600,14 @@ pub trait RfcApi {
             "RFC_READ_TABLE is not available on this RFC API".to_owned(),
         ))
     }
+
+    /// One typed `RFC_SYSTEM_INFO` call. An API that has no such call (a test double of the
+    /// SADT endpoint) reports it as unsupported.
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        Err(TransportError::Protocol(
+            "this RFC API has no RFC_SYSTEM_INFO call".to_owned(),
+        ))
+    }
 }
 
 /// The standard function module the typed table read calls.
@@ -844,6 +857,58 @@ fn table_rows(result: &FunctionResult) -> Result<TableRows, TransportError> {
     Ok(TableRows { columns, rows })
 }
 
+/// The part of `RFCSI_EXPORT` that `ping` and `doctor` print, each field with trailing blanks
+/// dropped. `host` is the short application server host the library reports. It is never printed,
+/// and a failed read only leaves it empty.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SystemInfo {
+    /// `RFCDEST`: the instance name, `<host>_<SID>_<NN>`.
+    pub instance: String,
+    /// `RFCHOST`.
+    pub host: String,
+    /// `RFCSYSID`.
+    pub system_id: String,
+    /// `RFCSAPRL`: the SAP release.
+    pub release: String,
+    /// `RFCKERNRL`: the kernel release.
+    pub kernel: String,
+    /// `RFCDBSYS`: the database system.
+    pub database: String,
+    /// The time of the `RfcInvoke` alone, after the logon and the function description; `None`
+    /// when the API cannot time it apart.
+    pub invoke_time: Option<std::time::Duration>,
+}
+
+impl SystemInfo {
+    /// The `RFCSI_EXPORT` fields this type reads, in the order of [`SystemInfo::from_fields`].
+    pub const FIELDS: [&'static str; 6] = [
+        "RFCDEST",
+        "RFCHOST",
+        "RFCSYSID",
+        "RFCSAPRL",
+        "RFCKERNRL",
+        "RFCDBSYS",
+    ];
+
+    /// Builds the value from a reader of one `RFCSI_EXPORT` field by name. The first failing read
+    /// is the error, except `RFCHOST`, which only drops its own field. `invoke_time` is `None`.
+    pub fn from_fields(
+        mut read: impl FnMut(&str) -> Result<String, TransportError>,
+    ) -> Result<Self, TransportError> {
+        let mut field = |name: &str| read(name).map(|text| text.trim_end().to_owned());
+
+        Ok(Self {
+            instance: field(Self::FIELDS[0])?,
+            host: field(Self::FIELDS[1]).unwrap_or_default(),
+            system_id: field(Self::FIELDS[2])?,
+            release: field(Self::FIELDS[3])?,
+            kernel: field(Self::FIELDS[4])?,
+            database: field(Self::FIELDS[5])?,
+            invoke_time: None,
+        })
+    }
+}
+
 pub struct RfcTransport<A> {
     api: A,
     opened: bool,
@@ -998,6 +1063,12 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
 
         self.api.read_table(call)
     }
+
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        self.ensure_open()?;
+
+        self.api.system_info()
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -1009,6 +1080,8 @@ pub struct FakeRfcApi {
     responses: std::collections::VecDeque<RfcEndpointResponse>,
     tables: std::collections::VecDeque<Result<FunctionResult, TransportError>>,
     table_calls: Vec<FunctionCall>,
+    system_info_calls: usize,
+    system_info: Option<Result<SystemInfo, TransportError>>,
 }
 
 #[cfg(feature = "test-support")]
@@ -1022,7 +1095,23 @@ impl FakeRfcApi {
             responses: std::collections::VecDeque::new(),
             tables: std::collections::VecDeque::new(),
             table_calls: Vec::new(),
+            system_info_calls: 0,
+            system_info: None,
         }
+    }
+
+    /// The fake answers `RFC_SYSTEM_INFO` with `answer`, every time.
+    pub fn with_system_info(answer: Result<SystemInfo, TransportError>) -> Self {
+        Self {
+            system_info: Some(answer),
+            ..Self::ok()
+        }
+    }
+
+    /// How many typed `RFC_SYSTEM_INFO` calls the fake served; they are no invocation of the
+    /// SADT endpoint and never count in [`FakeRfcApi::counts`].
+    pub fn system_info_calls(&self) -> usize {
+        self.system_info_calls
     }
 
     pub fn with_responses(responses: Vec<RfcEndpointResponse>) -> Self {
@@ -1094,6 +1183,16 @@ impl RfcApi for FakeRfcApi {
                 "the fake has no reply for this RFC_READ_TABLE call".to_owned(),
             )),
         }
+    }
+
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        self.system_info_calls += 1;
+
+        self.system_info.clone().unwrap_or_else(|| {
+            Err(TransportError::Protocol(
+                "the fake RFC API has no RFC_SYSTEM_INFO answer".to_owned(),
+            ))
+        })
     }
 }
 
@@ -1922,6 +2021,35 @@ impl DynamicRfcApi {
         Ok(function)
     }
 
+    /// Invokes `RFC_SYSTEM_INFO` and reads the character fields of `RFCSI_EXPORT`. It reads them
+    /// as strings, which every library of the loader exports, so no optional symbol is needed.
+    fn read_system_info(
+        &self,
+        connection: RfcHandle,
+        function: RfcHandle,
+    ) -> Result<SystemInfo, TransportError> {
+        let mut error = RfcErrorInfo::default();
+        // The logon and the function description are done: only the invoke is timed.
+        let started = std::time::Instant::now();
+        // SAFETY: `connection` is the open handle of `ensure_open` and `function` the live handle
+        // of `create_function`, neither destroyed yet; `error` is a valid, initialized
+        // `RfcErrorInfo` the library may write to.
+        let result = unsafe { (self.symbols.invoke)(connection, function, &mut error) };
+        let invoke_time = started.elapsed();
+
+        check(self.width, RfcPhase::Invoke, "RfcInvoke", result, &error)?;
+
+        let export = self.structure(RfcPhase::Invoke, function, SYSTEM_INFO_STRUCTURE)?;
+        // `get_string` sizes its buffer from `RfcGetStringLength` of the same field and decodes
+        // only what the library wrote. `export` belongs to the invoked `function`, which the
+        // caller destroys only after this returns.
+        let mut info = SystemInfo::from_fields(|name| self.get_string(export, name))?;
+
+        info.invoke_time = Some(invoke_time);
+
+        Ok(info)
+    }
+
     fn call(
         &self,
         connection: RfcHandle,
@@ -1982,6 +2110,22 @@ impl RfcApi for DynamicRfcApi {
         // A failing destroy must not turn a sent request into a reported failure.
         // SAFETY: `function` was created by `create_function` on this connection and is destroyed
         // exactly once, here; `destroy_error` outlives the call.
+        unsafe {
+            (self.symbols.destroy_function)(function, &mut destroy_error);
+        }
+
+        result
+    }
+
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        let connection = self.ensure_open()?;
+        let function = self.create_function(connection, SYSTEM_INFO_FUNCTION)?;
+        let result = self.read_system_info(connection, function);
+        let mut destroy_error = RfcErrorInfo::default();
+
+        // A failing destroy must not turn an answered call into a reported failure.
+        // SAFETY: `function` came from `create_function` and is destroyed exactly once, here,
+        // after the last read of it; `destroy_error` is a valid `RfcErrorInfo`.
         unsafe {
             (self.symbols.destroy_function)(function, &mut destroy_error);
         }

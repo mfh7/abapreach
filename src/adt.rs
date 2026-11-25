@@ -371,10 +371,97 @@ pub fn parse_versions(xml: &str) -> Result<Vec<VersionEntry>, String> {
     Ok(entries)
 }
 
+/// The entries of the `/system/information` feed that `ping` and `doctor` print. Every other
+/// entry (the host address, the database server, the `NotAuthorized*` flags) is dropped here, so
+/// it never reaches an output.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SystemInformation {
+    pub application_server: Option<String>,
+    pub kernel_release: Option<String>,
+    pub database_system: Option<String>,
+    pub os_name: Option<String>,
+}
+
+/// Reads `atom:id` and `atom:title` of every `atom:entry` by local name and keeps the four ids
+/// of [`SystemInformation`]. A body that is not XML is an error; an unknown id is ignored.
+pub fn parse_system_information(xml: &str) -> Result<SystemInformation, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut info = SystemInformation::default();
+    let mut in_entry = false;
+    let mut id = String::new();
+    let mut title = String::new();
+    let mut field: Option<FeedField> = None;
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) => match local_name(&element) {
+                "entry" => {
+                    in_entry = true;
+                    id.clear();
+                    title.clear();
+                    field = None;
+                }
+                "id" if in_entry => field = Some(FeedField::Id),
+                "title" if in_entry => field = Some(FeedField::Title),
+                _ => {}
+            },
+            Event::Text(text) => {
+                push_entry_text(
+                    field,
+                    &text.xml_content(XmlVersion::Implicit1_0),
+                    &mut id,
+                    &mut title,
+                );
+            }
+            Event::CData(text) => push_entry_text(field, &text.into_inner(), &mut id, &mut title),
+            Event::GeneralRef(reference) => {
+                push_entry_text(field, &reference_text(&reference)?, &mut id, &mut title);
+            }
+            Event::End(element) => match element.local_name().into_inner() {
+                "id" | "title" => field = None,
+                "entry" => {
+                    let slot = match id.trim() {
+                        "ApplicationServerName" => Some(&mut info.application_server),
+                        "KernelRelease" => Some(&mut info.kernel_release),
+                        "DBSystem" => Some(&mut info.database_system),
+                        "OSName" => Some(&mut info.os_name),
+                        _ => None,
+                    };
+
+                    if let Some(slot) = slot {
+                        slot.get_or_insert_with(|| title.trim().to_owned());
+                    }
+
+                    in_entry = false;
+                }
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(info)
+}
+
+fn push_entry_text(field: Option<FeedField>, text: &str, id: &mut String, title: &mut String) {
+    match field {
+        Some(FeedField::Id) => id.push_str(text),
+        Some(FeedField::Title) => title.push_str(text),
+        None => {}
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Field {
     Id,
     Author,
+}
+
+#[derive(Clone, Copy)]
+enum FeedField {
+    Id,
+    Title,
 }
 
 /// What the body of an activation answer is. The status is 200 in every case, so the root of the

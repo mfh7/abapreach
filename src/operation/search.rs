@@ -9,6 +9,7 @@ use crate::adt::{ObjectRef, parse_search_refs};
 use crate::backend::Failure;
 use crate::domain::Outcome;
 use crate::operation::quality::QualityError;
+use crate::operation::text::squeeze;
 use crate::transport::{Request, SadtTransport, TransportError};
 use std::ops::RangeInclusive;
 
@@ -173,36 +174,6 @@ impl Query {
     }
 }
 
-/// A character no printed field keeps: a control character or a Unicode format character (`Cf`),
-/// such as a bidi override or a zero-width mark, that could reorder or hide the text of a line.
-pub(crate) fn is_dropped(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character,
-            '\u{AD}'
-                | '\u{600}'..='\u{605}'
-                | '\u{61C}'
-                | '\u{6DD}'
-                | '\u{70F}'
-                | '\u{890}'..='\u{891}'
-                | '\u{8E2}'
-                | '\u{180E}'
-                | '\u{200B}'..='\u{200F}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{206F}'
-                | '\u{FEFF}'
-                | '\u{FFF9}'..='\u{FFFB}'
-                | '\u{110BD}'
-                | '\u{110CD}'
-                | '\u{13430}'..='\u{1343F}'
-                | '\u{1BCA0}'..='\u{1BCA3}'
-                | '\u{1D173}'..='\u{1D17A}'
-                | '\u{E0001}'
-                | '\u{E0020}'..='\u{E007F}'
-        )
-}
-
 /// Whether `name` matches `pattern`: `*` is any run of characters (also none), every other
 /// character stands for itself, and a pattern without `*` is the whole name. Both are upper case.
 fn pattern_matches(pattern: &str, name: &str) -> bool {
@@ -231,16 +202,8 @@ fn pattern_matches(pattern: &str, name: &str) -> bool {
 
 /// One output line: `<TYPE> <NAME> package=<P> <description>`. Whitespace inside a field (the
 /// padded name of an authorization default, a wrapped description) becomes one space, so a line
-/// stays a line, and every other dropped character (see [`is_dropped`]) is removed.
+/// stays a line, and every other dropped character (see `text::is_dropped`) is removed.
 fn line(object: &ObjectRef) -> String {
-    let squeeze = |text: &str| {
-        text.chars()
-            .filter(|character| character.is_whitespace() || !is_dropped(*character))
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
     let package = squeeze(object.package.as_deref().unwrap_or_default());
     let package = if package.is_empty() { "?" } else { &package };
     let line = format!(
