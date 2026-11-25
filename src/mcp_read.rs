@@ -3,7 +3,7 @@
 //! The result carries the same data in `content` text and in `structuredContent`; the status
 //! comes from the operation's own state, never from formatted text.
 
-use crate::app::{Attempt, Factories, end_session, route};
+use crate::app::{Attempt, Factories, end_session, read_attempt, route};
 use crate::backend::OperationKind;
 use crate::cli::{IncludeKind, LineRange, ObjectKind};
 use crate::config::{Config, ConfigPaths, Connection, McpPolicies, scrub};
@@ -17,7 +17,7 @@ use crate::operation::inactive::{self, InactiveEntry};
 use crate::operation::quality;
 use crate::operation::read::{ReadProg, ReadTarget, project_lines};
 use crate::operation::read_table::{
-    MAX_OUTPUT_BYTES, MCP_MAX_ROWS, Query, ReadTable, ReadTableError, ReadTableRequest, mcp_rows,
+    MAX_OUTPUT_BYTES, MCP_MAX_ROWS, Query, ReadTable, ReadTableRequest, mcp_rows,
 };
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
@@ -361,20 +361,7 @@ impl<'a> ReadTools<'a> {
 
                         done()
                     }
-                    Err(ReadTableError::Rejected(message)) => Attempt {
-                        outcome: Outcome {
-                            status: None,
-                            exit: 1,
-                            stdout: String::new(),
-                            stderr: format!("REJECTED: {message}"),
-                        },
-                        failure: None,
-                        fallback_allowed: false,
-                        detail: None,
-                    },
-                    Err(ReadTableError::Failed { failure, message }) => {
-                        Attempt::failed(message, failure)
-                    }
+                    Err(error) => read_attempt(Err(error)),
                 };
 
                 attempt.noted(note)

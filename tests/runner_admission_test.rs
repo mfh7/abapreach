@@ -409,24 +409,56 @@ fn other_searches_stay_refused_and_the_group_search_is_unchanged() {
     }
 }
 
+fn freestyle(uri: &str, body: &str) -> Request {
+    let mut request = Request::post(uri, body.as_bytes().to_vec());
+
+    request
+        .headers
+        .insert("Content-Type".to_owned(), "text/plain".to_owned());
+    request
+        .headers
+        .insert("Accept".to_owned(), "application/*".to_owned());
+
+    request
+}
+
+/// The 0.17 rule stays: while a runner is armed, a freestyle data preview is refused on both
+/// transports, in any spelling of its path.
 #[test]
-fn a_freestyle_data_preview_stays_refused() {
+fn a_freestyle_data_preview_stays_refused_while_a_runner_is_armed() {
     for uri in [
         "/sap/bc/adt/datapreview/freestyle",
         "/sap/bc/adt/datapreview/freestyle?rowNumber=1",
+        "/SAP/BC/ADT/DATAPREVIEW/FREESTYLE?rowNumber=1",
+        "/sap/bc/adt/datapreview/Freestyle?rowNumber=1",
+        "/sap/bc/adt/datapreview/./freestyle?rowNumber=1",
+        "/sap/bc/adt/datapreview//freestyle?rowNumber=1",
+        "/sap/bc/adt/datapreview/freestyle;x=1?rowNumber=1",
+        "/sap/bc/adt/datapreview/%66reestyle?rowNumber=1",
+        "/sap/bc/adt/x/../datapreview/freestyle?rowNumber=1",
     ] {
-        let mut request = Request::post(uri, b"SELECT * FROM T001".to_vec());
+        // A canonical body: only the arm refuses it.
+        assert_both(Some(RUNNER), &freestyle(uri, "SELECT * FROM T001"), false);
+    }
+}
 
-        request
-            .headers
-            .insert("Content-Type".to_owned(), "text/plain".to_owned());
-        request
-            .headers
-            .insert("Accept".to_owned(), "application/*".to_owned());
+/// Unarmed, the exact 0.18 shape is admitted on both transports, and a spelling that is not the
+/// exact path stays refused on RFC SADT.
+#[test]
+fn an_unarmed_freestyle_data_preview_is_admitted_only_in_its_exact_shape() {
+    let exact = freestyle(
+        "/sap/bc/adt/datapreview/freestyle?rowNumber=1",
+        "SELECT * FROM T001",
+    );
 
-        let _arm = RunnerArm::arm(RUNNER).unwrap();
+    assert_both(None, &exact, true);
 
-        assert!(!rfc_admits(&request), "{uri}");
+    for uri in [
+        "/SAP/BC/ADT/DATAPREVIEW/FREESTYLE?rowNumber=1",
+        "/sap/bc/adt/datapreview/Freestyle?rowNumber=1",
+        "/sap/bc/adt/datapreview/freestyle",
+    ] {
+        assert!(!rfc_admits(&freestyle(uri, "SELECT * FROM T001")), "{uri}");
     }
 }
 

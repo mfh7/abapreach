@@ -10,6 +10,7 @@ use crate::adt::{
 };
 use crate::operation::read_table::validate_preview_body;
 use crate::operation::runner::{RUNNER_CLASS_REFUSED, is_runner_class, validate_runner_prefix};
+use crate::operation::sql::{FREESTYLE_URI, validate_body};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::cell::RefCell;
@@ -322,6 +323,12 @@ pub fn runner_verdict(request: &Request) -> Option<bool> {
         return Some(admits_classrun_post(request));
     }
 
+    // While a runner is armed, nothing in this process has a reason to run a freestyle data
+    // preview, so it is refused in any spelling (the 0.17 rule, kept beside the 0.18 shape).
+    if is_armed() && reaches_freestyle(&request.uri) {
+        return Some(false);
+    }
+
     (request.method == "POST" && !admits_runner_create(request)).then_some(false)
 }
 
@@ -329,6 +336,19 @@ pub fn runner_verdict(request: &Request) -> Option<bool> {
 /// repeated percent-encoding, `.`/`..` segments, doubled slashes, matrix parameters, or a query
 /// that starts early. The decision is on path segments: a class named `ZCL_X_CLASSRUN` is not it.
 fn reaches_classrun(uri: &str) -> bool {
+    reaches(uri, is_classrun_window)
+}
+
+/// Whether the URI reaches the freestyle data preview, or a path below it, in any spelling.
+fn reaches_freestyle(uri: &str) -> bool {
+    reaches(uri, is_freestyle_window)
+}
+
+fn is_armed() -> bool {
+    ARMED.with(|armed| armed.borrow().is_some())
+}
+
+fn reaches(uri: &str, window: fn(&[&str]) -> bool) -> bool {
     let mut text = uri.to_owned();
 
     loop {
@@ -336,7 +356,7 @@ fn reaches_classrun(uri: &str) -> bool {
         // without a split at the first one.
         let path = text.split(['?', '#']).next().unwrap_or_default();
 
-        if is_classrun_path(&text) || is_classrun_path(path) {
+        if has_window(&text, window) || has_window(path, window) {
             return true;
         }
 
@@ -350,10 +370,21 @@ fn reaches_classrun(uri: &str) -> bool {
     }
 }
 
-/// Whether the path, as written or with its dot segments resolved, holds the classrun resource.
-/// A fifth segment that begins with the word counts too (`classrunx`, `classrun.NAME`): no such
-/// resource exists, and refusing it keeps the rule independent of server quirks.
-fn is_classrun_path(path: &str) -> bool {
+/// Five path segments of the classrun resource. A fifth segment that begins with the word counts
+/// too (`classrunx`, `classrun.NAME`): no such resource exists, and refusing it keeps the rule
+/// independent of server quirks.
+fn is_classrun_window(window: &[&str]) -> bool {
+    window[..4] == ["sap", "bc", "adt", "oo"] && window[4].starts_with("classrun")
+}
+
+/// Five path segments of the freestyle data preview (or a segment that begins with the word).
+fn is_freestyle_window(window: &[&str]) -> bool {
+    window[..4] == ["sap", "bc", "adt", "datapreview"] && window[4].starts_with("freestyle")
+}
+
+/// Whether the path, as written or with its dot segments resolved, holds a five-segment window
+/// that `window` accepts.
+fn has_window(path: &str, window: fn(&[&str]) -> bool) -> bool {
     let lower = path.to_ascii_lowercase().replace('\\', "/");
     let written: Vec<&str> = lower
         .split('/')
@@ -372,11 +403,9 @@ fn is_classrun_path(path: &str) -> bool {
 
     // The window may sit at any position, so a scheme, an authority, or a leading segment of an
     // absolute-form URI cannot hide it.
-    [&written, &resolved].into_iter().any(|segments| {
-        segments.windows(5).any(|window| {
-            window[..4] == ["sap", "bc", "adt", "oo"] && window[4].starts_with("classrun")
-        })
-    })
+    [&written, &resolved]
+        .into_iter()
+        .any(|segments| segments.windows(5).any(window))
 }
 
 fn percent_decoded(text: &str) -> String {
@@ -948,6 +977,12 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
             && query.is_some_and(|query| is_data_preview(query, &request.body));
     }
 
+    if path == FREESTYLE_URI {
+        return has_content_type(request, "text/plain")
+            && has_header(request, "Accept", "application/*")
+            && query.is_some_and(|query| is_freestyle(query, &request.body));
+    }
+
     if path == USAGE_REFERENCES {
         return query.is_some_and(|query| is_where_used_object(query, &request.body));
     }
@@ -1021,6 +1056,22 @@ fn is_data_preview(query: &str, body: &[u8]) -> bool {
     let decoded = entity.replace("%2F", "/");
 
     rows_valid && !entity.contains('/') && is_entity(&decoded) && reads_entity(body, &decoded)
+}
+
+/// `rowNumber=<1..5000>` and nothing else, with a body that is the exact canonical rendering of a
+/// statement of the `sql` grammar. SAP runs a freestyle body as written, so this boundary re-parses
+/// it; the deny list and the dictionary check belong to the operation layer.
+fn is_freestyle(query: &str, body: &[u8]) -> bool {
+    let Some(rows) = query.strip_prefix("rowNumber=") else {
+        return false;
+    };
+    let rows_valid = !rows.starts_with('0')
+        && rows.bytes().all(|byte| byte.is_ascii_digit())
+        && rows
+            .parse::<u32>()
+            .is_ok_and(|rows| (1..=MAX_PREVIEW_ROWS).contains(&rows));
+
+    rows_valid && std::str::from_utf8(body).is_ok_and(|text| validate_body(text).is_ok())
 }
 
 /// `NAME` or `/NAMESPACE/NAME` of letters, digits and `_`.

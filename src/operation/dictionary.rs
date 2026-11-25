@@ -14,6 +14,7 @@
 //! [`check_entities`] is pure: it only reads the rows a [`Dictionary`] returns. The data preview
 //! implementation is [`TransportDictionary`].
 
+use crate::backend::Failure;
 use crate::operation::read_table::{ReadTableError, TableData, identifier, lookup, rejected};
 use crate::policy::Policies;
 use crate::transport::SadtTransport;
@@ -89,12 +90,33 @@ impl<E: Display> Display for CheckError<E> {
 
 impl<E: Debug + Display> Error for CheckError<E> {}
 
-impl CheckError<ReadTableError> {
-    /// The `read-table` error: a refusal is a rejection that read nothing.
-    pub(crate) fn into_read_table(self) -> ReadTableError {
-        match self {
-            Self::Refused(message) => rejected(message),
-            Self::Lookup(error) => error,
+/// Why a data preview read stopped after its input passed the grammar.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PreviewError {
+    /// The dictionary check refused an entity (deny list, view over a denied table, CDS entity,
+    /// generated CDS SQL view, view without base tables, unknown name). A STOP.
+    Refused(String),
+    /// A dictionary lookup could not vouch for an entity: fail closed.
+    Rejected(String),
+    /// The backend failed; `failure` is the routing class.
+    Failed { failure: Failure, message: String },
+}
+
+impl From<ReadTableError> for PreviewError {
+    fn from(error: ReadTableError) -> Self {
+        match error {
+            ReadTableError::Rejected(message) => Self::Rejected(message),
+            ReadTableError::Failed { failure, message } => Self::Failed { failure, message },
+        }
+    }
+}
+
+impl PreviewError {
+    /// The error of a dictionary check; `outcome` says what the refusal kept from happening.
+    pub(crate) fn from_check(error: CheckError<ReadTableError>, outcome: &str) -> Self {
+        match error {
+            CheckError::Refused(message) => Self::Refused(format!("{message}; {outcome}")),
+            CheckError::Lookup(error) => error.into(),
         }
     }
 }

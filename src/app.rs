@@ -26,6 +26,7 @@ use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch, batch_unsent_failure};
 use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope, DeploySource};
 use crate::operation::deploy_ddic::{self, DdicDeploy};
+use crate::operation::dictionary::PreviewError;
 use crate::operation::doctor::Doctor;
 use crate::operation::inactive;
 use crate::operation::payload::Kind;
@@ -33,10 +34,11 @@ use crate::operation::quality;
 use crate::operation::read::{ReadProg, ReadTarget};
 use crate::operation::read_ddic::{self, DdicRead};
 use crate::operation::read_table::{
-    CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableError, ReadTableRequest,
+    CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableRequest, TableData,
 };
 use crate::operation::runner_tran::{self, TranCreate, TranRead};
 use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
+use crate::operation::sql::{self, Query as SqlQuery, TEXT_MAX};
 use crate::policy::{RunPolicy, Terminal};
 use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use crate::transport::http::{HttpConfig, HttpTransport};
@@ -47,6 +49,7 @@ use crate::transport::{Request, Response, SadtTransport, TransportError};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -387,6 +390,7 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::Deploy { conn, .. }
         | Command::Create { conn, .. }
         | Command::ReadTable { conn, .. }
+        | Command::Sql { conn, .. }
         | Command::Delete { conn, .. }
         | Command::Inactive { conn, .. }
         | Command::Activate { conn, .. }
@@ -394,6 +398,94 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::Run { conn, .. }
         | Command::Doctor { conn } => Some(conn),
         Command::Mcp => None,
+    }
+}
+
+/// The statement of `--file`: at most `TEXT_MAX` bytes are read, so a large or endless file is
+/// refused instead of loaded.
+fn read_statement(file: &Path) -> Result<String, String> {
+    let fail = |error: std::io::Error| format!("cannot read {}: {error}", file.display());
+    let mut bytes = Vec::new();
+
+    fs::File::open(file)
+        .map_err(fail)?
+        .take(TEXT_MAX as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(fail)?;
+
+    if bytes.len() > TEXT_MAX {
+        return Err(format!(
+            "{} is longer than {TEXT_MAX} characters",
+            file.display()
+        ));
+    }
+
+    String::from_utf8(bytes).map_err(|_| format!("{} is not UTF-8 text", file.display()))
+}
+
+/// A successful data preview: the table, cut at `MAX_OUTPUT_BYTES` with a warning for the rows
+/// left out.
+fn table_attempt(data: &TableData) -> Attempt {
+    let (stdout, omitted) = data.render(MAX_OUTPUT_BYTES);
+    let stderr = if omitted == 0 {
+        String::new()
+    } else {
+        format!("W: output cut at {MAX_OUTPUT_BYTES} bytes; {omitted} rows left out")
+    };
+
+    Attempt {
+        outcome: Outcome {
+            status: None,
+            exit: 0,
+            stdout,
+            stderr,
+        },
+        failure: None,
+        fallback_allowed: false,
+        detail: None,
+    }
+}
+
+/// A dictionary lookup that could not vouch for an entity: exit 1, no fallback.
+fn rejected_attempt(message: &str) -> Attempt {
+    Attempt {
+        outcome: Outcome {
+            status: None,
+            exit: 1,
+            stdout: String::new(),
+            stderr: format!("REJECTED: {message}"),
+        },
+        failure: None,
+        fallback_allowed: false,
+        detail: None,
+    }
+}
+
+/// A rule the input broke: exit 2, no fallback.
+fn stop_attempt(message: &str) -> Attempt {
+    let exit = stop(message);
+
+    Attempt {
+        outcome: Outcome {
+            status: None,
+            exit: exit.code,
+            stdout: exit.stdout,
+            stderr: exit.stderr,
+        },
+        failure: None,
+        fallback_allowed: false,
+        detail: None,
+    }
+}
+
+/// The attempt of a `read-table` or `sql` run: a refusal is a STOP, a lookup that could not
+/// answer is a rejection, and a failed backend keeps its routing class.
+pub(crate) fn read_attempt(read: Result<TableData, PreviewError>) -> Attempt {
+    match read {
+        Ok(data) => table_attempt(&data),
+        Err(PreviewError::Refused(message)) => stop_attempt(&message),
+        Err(PreviewError::Rejected(message)) => rejected_attempt(&message),
+        Err(PreviewError::Failed { failure, message }) => Attempt::failed(message, failure),
     }
 }
 
@@ -592,44 +684,40 @@ fn execute(
 
                     // A read holds no lock, so a failed session end is only a note.
                     let note = end_session(transport);
-                    let attempt = match read {
-                        Ok(data) => {
-                            let (stdout, omitted) = data.render(MAX_OUTPUT_BYTES);
-                            let stderr = if omitted == 0 {
-                                String::new()
-                            } else {
-                                format!(
-                                    "W: output cut at {MAX_OUTPUT_BYTES} bytes; {omitted} rows left out"
-                                )
-                            };
+                    let attempt = read_attempt(read);
 
-                            Attempt {
-                                outcome: Outcome {
-                                    status: None,
-                                    exit: 0,
-                                    stdout,
-                                    stderr,
-                                },
-                                failure: None,
-                                fallback_allowed: false,
-                                detail: None,
-                            }
-                        }
-                        Err(ReadTableError::Rejected(message)) => Attempt {
-                            outcome: Outcome {
-                                status: None,
-                                exit: 1,
-                                stdout: String::new(),
-                                stderr: format!("REJECTED: {message}"),
-                            },
-                            failure: None,
-                            fallback_allowed: false,
-                            detail: None,
-                        },
-                        Err(ReadTableError::Failed { failure, message }) => {
-                            Attempt::failed(message, failure)
-                        }
-                    };
+                    attempt.noted(note)
+                },
+            )
+        }
+        Command::Sql {
+            query, file, rows, ..
+        } => {
+            let text = match (query, file) {
+                (Some(text), None) => text,
+                (None, Some(file)) => match read_statement(&file) {
+                    Ok(text) => text,
+                    Err(message) => return stop(message),
+                },
+                _ => return stop("give either a statement or --file, not both"),
+            };
+            let query = match SqlQuery::new(&text, rows, CLI_MAX_ROWS, &connection.policies) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            route(
+                OperationKind::Sql,
+                None,
+                false,
+                connection,
+                factories,
+                |transport, _, _, _| {
+                    let read = sql::run(transport, query.clone(), &connection.policies);
+
+                    // A read holds no lock, so a failed session end is only a note.
+                    let note = end_session(transport);
+                    let attempt = read_attempt(read);
 
                     attempt.noted(note)
                 },

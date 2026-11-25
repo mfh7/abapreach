@@ -2242,7 +2242,7 @@ fn an_emptied_deny_list_lets_read_table_through_the_policy() {
 }
 
 #[test]
-fn a_view_over_a_denied_table_is_rejected_after_the_lookups_only() {
+fn a_view_over_a_denied_table_is_a_stop_after_the_lookups_only() {
     let (calls, adt) = shared(ScriptedTransport::replies(vec![
         dd02l("ZV_USERS", "VIEW", Some("D")),
         source(&common::preview(&[
@@ -2262,12 +2262,13 @@ fn a_view_over_a_denied_table_is_rejected_after_the_lookups_only() {
 
     let exit = read_table(&["zv_users", "--conn", "dev_100"], &mut fake);
 
-    assert_eq!(exit.code, 1);
-    assert!(exit.stderr.starts_with("REJECTED: "), "{}", exit.stderr);
+    assert_eq!(exit.code, 2);
+    assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+    assert!(exit.stderr.contains("nothing was read"), "{}", exit.stderr);
     assert!(exit.stderr.contains("USR02"), "{}", exit.stderr);
     assert_eq!(table_of(&exit), "");
     assert_eq!(calls.borrow().calls.len(), 3);
-    assert_eq!(fake.rfc_opened, 0, "a rejection never falls back");
+    assert_eq!(fake.rfc_opened, 0, "a refusal never falls back");
 }
 
 #[test]
@@ -2326,6 +2327,531 @@ fn an_rfc_only_connection_reads_over_a_fresh_rfc_connection() {
 
     assert_eq!(exit.code, 0, "{}", exit.stderr);
     assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+}
+
+// ---- sql -------------------------------------------------------------------------------------
+
+const SQL_JOIN: &str = "SELECT TADIR~OBJ_NAME, TDEVC~DLVUNIT FROM TADIR INNER JOIN TDEVC ON TADIR~DEVCLASS = TDEVC~DEVCLASS WHERE TADIR~OBJECT = 'CLAS' AND TADIR~OBJ_NAME LIKE 'CL_ABAP_TYPED%'";
+const FREESTYLE: &str = "/sap/bc/adt/datapreview/freestyle";
+const JOIN_TABLE: &str =
+    "OBJ_NAME\tDLVUNIT\nCL_ABAP_TYPEDESCR\tSAP_BASIS\nCL_ABAP_TYPED\tSAP_BASIS";
+
+fn sql(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "sql"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+fn join_rows() -> Result<Response, TransportError> {
+    source(&common::preview(&[
+        (
+            "OBJ_NAME",
+            &[Some("CL_ABAP_TYPEDESCR"), Some("CL_ABAP_TYPED")],
+        ),
+        ("DLVUNIT", &[Some("SAP_BASIS"), Some("SAP_BASIS")]),
+    ]))
+}
+
+/// The dictionary answers of a join of `TADIR` and `TDEVC`, then the freestyle rows.
+fn join_replies() -> Vec<Result<Response, TransportError>> {
+    vec![
+        dd02l("TADIR", "TRANSP", None),
+        dd02l("TDEVC", "TRANSP", None),
+        join_rows(),
+    ]
+}
+
+/// The dictionary answers that end in a refusal: a view over `USR02`.
+fn denied_view_replies() -> Vec<Result<Response, TransportError>> {
+    vec![
+        dd02l("ZV_USERS", "VIEW", Some("D")),
+        source(&common::preview(&[
+            ("DDLNAME", &[]),
+            ("OBJECTNAME", &[]),
+            ("OBJECTTYPE", &[]),
+        ])),
+        source(&common::preview(&[
+            ("VIEWNAME", &[Some("ZV_USERS")]),
+            ("TABNAME", &[Some("USR02")]),
+            ("TABPOS", &[Some("0001")]),
+        ])),
+    ]
+}
+
+/// Replies as the RFC endpoint returns them.
+fn rfc_replies(replies: &[Result<Response, TransportError>]) -> Vec<RfcEndpointResponse> {
+    replies
+        .iter()
+        .map(|reply| {
+            let response = reply.as_ref().expect("a reply");
+
+            RfcEndpointResponse {
+                status: response.status,
+                headers: BTreeMap::new(),
+                body: response.body.clone(),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn sql_accepts_a_statement_or_a_file_and_the_row_limits_of_read_table() {
+    let cli = |args: &[&str]| {
+        let mut full = vec!["abapreach", "sql"];
+
+        full.extend_from_slice(args);
+
+        Cli::try_parse_from(full)
+    };
+
+    match cli(&["SELECT * FROM T001", "--conn", "dev_100"])
+        .unwrap()
+        .command
+    {
+        Command::Sql {
+            query, file, rows, ..
+        } => {
+            assert_eq!(query.as_deref(), Some("SELECT * FROM T001"));
+            assert!(file.is_none());
+            assert_eq!(rows, 100);
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&["--file", "q.sql", "--rows", "5000", "--conn", "dev_100"])
+        .unwrap()
+        .command
+    {
+        Command::Sql {
+            query, file, rows, ..
+        } => {
+            assert!(query.is_none());
+            assert_eq!(file.as_deref(), Some(Path::new("q.sql")));
+            assert_eq!(rows, 5000);
+        }
+        other => panic!("{other:?}"),
+    }
+    for rows in ["0", "5001", "-1", "x"] {
+        assert!(
+            cli(&["SELECT * FROM T001", "--rows", rows, "--conn", "dev_100"]).is_err(),
+            "{rows}"
+        );
+        assert_stops_locally(&[
+            "abapreach",
+            "sql",
+            "SELECT * FROM T001",
+            "--rows",
+            rows,
+            "--conn",
+            "dev_100",
+        ]);
+    }
+    // Exactly one of the statement and `--file`, and a connection.
+    assert!(cli(&["--conn", "dev_100"]).is_err());
+    assert!(cli(&["SELECT * FROM T001"]).is_err());
+    assert!(
+        cli(&["SELECT * FROM T001", "--file", "q.sql", "--conn", "dev_100"]).is_err(),
+        "a statement and --file together"
+    );
+}
+
+#[test]
+fn sql_stops_locally_on_a_denied_table_or_a_statement_outside_the_grammar() {
+    for statement in [
+        "SELECT * FROM usr02",
+        "SELECT * FROM T001 AS A INNER JOIN USR02 AS B ON A~BUKRS = B~BNAME",
+        "SELECT * FROM T001 WHERE BUKRS IN ( SELECT BNAME FROM USR02 )",
+        "SELECT * FROM T001 UNION SELECT * FROM T000",
+        "SELECT * FROM T001 INTO TABLE @DATA(LT_X)",
+        "SELECT * FROM T001 UP TO 5 ROWS",
+        "SELECT * FROM T001 \"comment",
+        "SELECT * FROM T001 RIGHT OUTER JOIN T000 ON T001~BUKRS = T000~MANDT",
+        "DELETE FROM T001",
+        "",
+    ] {
+        let mut fake = Fake::default();
+        let exit = sql(&[statement, "--conn", "dev_100"], &mut fake);
+
+        assert_eq!(exit.code, 2, "{statement:?}: {}", exit.stderr);
+        assert!(
+            exit.stderr.starts_with("STOP: "),
+            "{statement:?}: {}",
+            exit.stderr
+        );
+        assert_eq!(table_of(&exit), "", "{statement:?}");
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0), "{statement:?}");
+    }
+
+    let mut fake = Fake::default();
+    let exit = sql(&["SELECT * FROM usr02", "--conn", "dev_100"], &mut fake);
+
+    assert!(exit.stderr.contains("USR02") && exit.stderr.contains("read_table_denied"));
+}
+
+#[test]
+fn sql_prints_a_tab_separated_table_over_adt_and_sends_the_canonical_body() {
+    let (calls, adt) = shared(ScriptedTransport::replies(join_replies()));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = sql(
+        &[
+            "select tadir~obj_name, tdevc~dlvunit from tadir inner join tdevc on tadir~devclass = tdevc~devclass where tadir~object = 'CLAS' and tadir~obj_name like 'CL_ABAP_TYPED%'",
+            "--rows",
+            "2",
+            "--conn",
+            "dev_100",
+        ],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), JOIN_TABLE);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert_eq!(calls.borrow().closes, 1);
+
+    let calls = calls.borrow();
+    let freestyle = &calls.calls[2];
+
+    assert_eq!(calls.calls.len(), 3);
+    assert_eq!(freestyle.uri, format!("{FREESTYLE}?rowNumber=2"));
+    assert_eq!(String::from_utf8(freestyle.body.clone()).unwrap(), SQL_JOIN);
+    assert_eq!(
+        freestyle.headers.get("Content-Type").map(String::as_str),
+        Some("text/plain")
+    );
+    assert_eq!(
+        freestyle.headers.get("Accept").map(String::as_str),
+        Some("application/*")
+    );
+}
+
+#[test]
+fn sql_reads_a_multi_line_statement_from_a_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("query.sql");
+
+    fs::write(
+        &file,
+        "SELECT tadir~obj_name,\n       tdevc~dlvunit\n  FROM tadir\n  INNER JOIN tdevc\n    ON tadir~devclass = tdevc~devclass\n WHERE tadir~object = 'CLAS'\n   AND tadir~obj_name LIKE 'CL_ABAP_TYPED%'\n",
+    )
+    .unwrap();
+
+    let (calls, adt) = shared(ScriptedTransport::replies(join_replies()));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = go(
+        &[
+            "abapreach",
+            "sql",
+            "--file",
+            file.to_str().unwrap(),
+            "--rows",
+            "2",
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        String::from_utf8(calls.borrow().calls[2].body.clone()).unwrap(),
+        SQL_JOIN
+    );
+
+    let mut fake = Fake::default();
+    let missing = directory.path().join("missing.sql");
+    let exit = go(
+        &[
+            "abapreach",
+            "sql",
+            "--file",
+            missing.to_str().unwrap(),
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2);
+    assert!(
+        exit.stderr.starts_with("STOP: cannot read "),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+#[test]
+fn sql_refuses_a_file_longer_than_the_statement_limit_without_a_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("big.sql");
+
+    // 4001 bytes: the limit is 4000.
+    fs::write(&file, format!("SELECT * FROM T001 {}", " ".repeat(3982))).unwrap();
+
+    let mut fake = Fake::default();
+    let exit = go(
+        &[
+            "abapreach",
+            "sql",
+            "--file",
+            file.to_str().unwrap(),
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert!(
+        exit.stderr.contains("is longer than 4000"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+#[test]
+fn sql_refuses_a_file_that_is_not_utf_8_without_a_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("latin1.sql");
+
+    fs::write(&file, b"SELECT * FROM T001 WHERE BUKRS = '\xE4'").unwrap();
+
+    let mut fake = Fake::default();
+    let exit = go(
+        &[
+            "abapreach",
+            "sql",
+            "--file",
+            file.to_str().unwrap(),
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+    assert!(exit.stderr.contains("is not UTF-8 text"), "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+#[test]
+fn sql_over_the_rfc_backend_passes_admission_with_the_fake() {
+    let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(rfc_replies(
+        &join_replies(),
+    ))));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(rfc);
+
+    let exit = sql(&[SQL_JOIN, "--rows", "2", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), JOIN_TABLE);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    // The two dictionary lookups and the freestyle POST left the process.
+    assert_eq!(api.borrow().api().counts().2, 3);
+
+    let api = api.borrow();
+    let last = api.api().last_request();
+
+    assert_eq!(last.uri, format!("{FREESTYLE}?rowNumber=2"));
+    assert_eq!(String::from_utf8(last.body.clone()).unwrap(), SQL_JOIN);
+}
+
+#[test]
+fn an_rfc_only_connection_runs_sql_over_a_fresh_rfc_connection() {
+    let mut fake = Fake::default();
+
+    fake.rfc.push_back(scripted(join_replies()));
+
+    let exit = sql(&[SQL_JOIN, "--conn", "qas_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+}
+
+#[test]
+fn sql_falls_back_to_rfc_only_before_anything_was_read() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(scripted(join_replies()));
+
+    let exit = sql(&[SQL_JOIN, "--rows", "2", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), JOIN_TABLE);
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn a_refused_entity_stops_with_exit_2_and_sends_no_freestyle_request_on_any_backend() {
+    let statements = [
+        // A view over a denied table.
+        ("SELECT * FROM ZV_USERS", denied_view_replies()),
+        // A generated CDS SQL view.
+        (
+            "SELECT * FROM IFICOUNTRY",
+            vec![
+                dd02l("IFICOUNTRY", "VIEW", Some("D")),
+                source(&common::preview(&[
+                    ("DDLNAME", &[Some("I_COUNTRY")]),
+                    ("OBJECTNAME", &[Some("IFICOUNTRY")]),
+                    ("OBJECTTYPE", &[Some("VIEW")]),
+                ])),
+            ],
+        ),
+        // A CDS name and an unknown name: the dictionary holds no active entry.
+        (
+            "SELECT * FROM I_COUNTRY",
+            vec![source(&common::preview(&[
+                ("TABNAME", &[]),
+                ("TABCLASS", &[]),
+                ("VIEWCLASS", &[]),
+            ]))],
+        ),
+    ];
+
+    for (statement, replies) in statements {
+        let lookups = replies.len();
+
+        // ADT HTTP.
+        let (calls, adt) = shared(ScriptedTransport::replies(replies.clone()));
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(adt);
+
+        let exit = sql(&[statement, "--conn", "dev_100"], &mut fake);
+
+        assert_eq!(exit.code, 2, "{statement}: {}", exit.stderr);
+        assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+        assert!(
+            exit.stderr.contains("no statement was sent"),
+            "{}",
+            exit.stderr
+        );
+        assert_eq!(table_of(&exit), "");
+        assert_eq!(calls.borrow().calls.len(), lookups, "{statement}");
+        assert!(
+            calls
+                .borrow()
+                .calls
+                .iter()
+                .all(|call| !call.uri.starts_with(FREESTYLE)),
+            "{statement}: freestyle sent over ADT HTTP"
+        );
+        assert_eq!(fake.rfc_opened, 0, "a refusal never falls back");
+
+        // RFC SADT: the library behind it (SAP GUI or NW RFC SDK) does not change the boundary.
+        let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(rfc_replies(
+            &replies,
+        ))));
+        let mut fake = Fake::default();
+
+        fake.rfc.push_back(rfc);
+
+        let exit = sql(&[statement, "--conn", "qas_100"], &mut fake);
+
+        assert_eq!(exit.code, 2, "{statement}: {}", exit.stderr);
+        assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+        assert_eq!(api.borrow().api().counts().2, lookups, "{statement}");
+        assert!(
+            !api.borrow().api().last_request().uri.starts_with(FREESTYLE),
+            "{statement}: freestyle sent over RFC SADT"
+        );
+    }
+}
+
+#[test]
+fn a_dictionary_lookup_that_cannot_answer_is_rejected_without_a_fallback() {
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(500, "boom"))]));
+
+    let exit = sql(&["SELECT * FROM T001", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(exit.stderr.starts_with("REJECTED: "), "{}", exit.stderr);
+    assert_eq!(fake.rfc_opened, 0, "a rejection never falls back");
+}
+
+#[test]
+fn a_failed_freestyle_read_is_an_error_without_fallback() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("T001", "TRANSP", None),
+        Ok(Response::text(400, "<exc:exception><localizedMessage>Unknown column name \"NOPE\"</localizedMessage></exc:exception>")),
+    ]));
+
+    let exit = sql(&["SELECT NOPE FROM T001", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(exit.stderr.starts_with("ERROR: "), "{}", exit.stderr);
+    assert!(
+        exit.stderr.contains("Unknown column name"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn sql_output_is_cut_at_one_mebibyte_and_scrubbed_of_secrets() {
+    let value = "x".repeat(4000);
+    let rows: Vec<Option<&str>> = (0..400).map(|_| Some(value.as_str())).collect();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("T001", "TRANSP", None),
+        source(&common::preview(&[("BIG", &rows)])),
+    ]));
+
+    let exit = sql(
+        &["SELECT BIG FROM T001", "--rows", "400", "--conn", "dev_100"],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(table_of(&exit).len() <= 1 << 20);
+    assert!(
+        exit.stderr.contains("output cut at 1048576 bytes"),
+        "{}",
+        exit.stderr
+    );
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("T001", "TRANSP", None),
+        source(&common::preview(&[("BUTXT", &[Some("pw is secret-pw")])])),
+    ]));
+
+    let exit = sql(&["SELECT BUTXT FROM T001", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(!exit.stdout.contains("secret-pw"), "{}", exit.stdout);
 }
 
 // ---- delete ----------------------------------------------------------------------------------

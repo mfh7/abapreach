@@ -4,8 +4,7 @@
 //! It is parsed into a [`Select`], and the only thing that may reach SAP is the single-line
 //! canonical rendering of that tree ([`Select::body`]). [`validate_body`] re-parses a body and
 //! refuses it unless it equals its own canonical rendering. The freestyle transport admission
-//! boundary will call it (wired in with the `sql` command), like
-//! `read_table::validate_preview_body`.
+//! boundary calls it, like `read_table::validate_preview_body`.
 //!
 //! Accepted:
 //!
@@ -28,14 +27,20 @@
 //! This module holds no dictionary rule: [`Query::verify`] runs the entities through
 //! `dictionary::check_entities` and only a [`VerifiedQuery`] exposes the body.
 
-use crate::operation::dictionary::{CheckError, Dictionary, check_entities};
+use crate::operation::dictionary::{
+    CheckError, Dictionary, PreviewError, TransportDictionary, check_entities,
+};
 use crate::operation::read_table::{
-    Operand, Parser, RESERVED, Scan, Token, field_name, identifier, parse_condition, tokenize_with,
+    Operand, Parser, Preview, RESERVED, Scan, TableData, Token, field_name, identifier,
+    parse_condition, send_preview, tokenize_with,
 };
 use crate::policy::Policies;
+use crate::transport::SadtTransport;
 use std::fmt::{self, Display, Write};
 
 const LABEL: &str = "sql";
+/// The freestyle data preview endpoint; only `POST <FREESTYLE_URI>?rowNumber=<n>` is admitted.
+pub const FREESTYLE_URI: &str = "/sap/bc/adt/datapreview/freestyle";
 /// The longest statement a caller may give.
 pub const TEXT_MAX: usize = 4000;
 /// The longest canonical body: every token may gain a space, so twice the input limit.
@@ -424,6 +429,25 @@ impl VerifiedQuery {
     pub fn rows(&self) -> u32 {
         self.rows
     }
+}
+
+/// Runs the dictionary check over every entity (data previews of `DD02L`, `DDLDEPENDENCY` and
+/// `DD26S`), then sends the canonical body to the freestyle data preview. No freestyle request
+/// leaves before the check passed: only a [`VerifiedQuery`] holds the body.
+pub fn run(
+    transport: &mut dyn SadtTransport,
+    query: Query,
+    policies: &Policies,
+) -> Result<TableData, PreviewError> {
+    let verified = query
+        .verify(&mut TransportDictionary::new(transport), policies)
+        .map_err(|error| PreviewError::from_check(error, "no statement was sent"))?;
+    let mut data = send_preview(transport, Preview::freestyle(&verified))?;
+
+    // The 750 release answers one row more than asked.
+    data.rows.truncate(verified.rows() as usize);
+
+    Ok(data)
 }
 
 fn error(message: &str) -> String {

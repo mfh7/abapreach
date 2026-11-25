@@ -1,0 +1,12 @@
+Runs one read-only SELECT with joins through the ADT freestyle data preview
+
+Usage: abapreach sql [OPTIONS] --conn <CONN> [QUERY]
+
+Arguments:
+  [QUERY]  The statement, as one argument; or use `--file`
+
+Options:
+      --file <FILE>  A file that holds the statement
+      --rows <ROWS>  1 to 5000; the data preview of the 740 release stops there [default: 100]
+      --conn <CONN>  
+  -h, --help         Print help

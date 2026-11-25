@@ -7,7 +7,8 @@
 
 use crate::backend::Failure;
 use crate::operation::deploy::leaf_texts;
-use crate::operation::dictionary::{CheckError, TransportDictionary, check_entities};
+use crate::operation::dictionary::{PreviewError, TransportDictionary, check_entities};
+use crate::operation::sql::{FREESTYLE_URI, VerifiedQuery};
 use crate::policy::Policies;
 use crate::transport::{Request, SadtTransport, TransportError};
 use quick_xml::escape::resolve_predefined_entity;
@@ -633,13 +634,18 @@ pub fn preview_request(entity: &str, body: &str, rows: u32) -> Result<Request, S
 
     validate_preview_body(entity, body)?;
 
-    let mut request = Request::post(
+    Ok(preview_post(
         format!(
             "{PREVIEW_URI}?rowNumber={rows}&ddicEntityName={}",
             entity.replace('/', "%2F")
         ),
-        body.as_bytes().to_vec(),
-    );
+        body,
+    ))
+}
+
+/// A data preview POST: the body as plain text, any `application/*` reply.
+fn preview_post(uri: String, body: &str) -> Request {
+    let mut request = Request::post(uri, body.as_bytes().to_vec());
 
     request
         .headers
@@ -648,7 +654,7 @@ pub fn preview_request(entity: &str, body: &str, rows: u32) -> Result<Request, S
         .headers
         .insert("Content-Type".to_owned(), "text/plain".to_owned());
 
-    Ok(request)
+    request
 }
 
 /// Splits a condition into lines of at most 72 characters for the `RFC_READ_TABLE` fallback;
@@ -792,19 +798,20 @@ pub struct ReadTable;
 
 impl ReadTable {
     /// Classifies the table through the dictionary (DD02L, DDLDEPENDENCY and DD26S for a view),
-    /// applies the deny list to it and to every base table, then reads. A connection never nears
-    /// the RFC limit of 36 requests: the check is bounded by `dictionary::MAX_LOOKUPS`.
+    /// applies the deny list to it and to every base table, then reads. A refusal is
+    /// [`PreviewError::Refused`] (a STOP). A connection never nears the RFC limit of 36 requests:
+    /// the check is bounded by `dictionary::MAX_LOOKUPS`.
     pub fn run(
         transport: &mut dyn SadtTransport,
         query: &Query,
         policies: &Policies,
-    ) -> Result<TableData, ReadTableError> {
+    ) -> Result<TableData, PreviewError> {
         check_entities(
             &mut TransportDictionary::new(transport),
             &[query.table().to_owned()],
             policies,
         )
-        .map_err(CheckError::into_read_table)?;
+        .map_err(|error| PreviewError::from_check(error, "nothing was read"))?;
 
         let mut data = fetch(transport, query.table(), query.body(), query.rows())?;
 
@@ -848,6 +855,30 @@ pub(crate) fn fetch(
 ) -> Result<TableData, ReadTableError> {
     let request = preview_request(entity, body, rows)
         .map_err(|message| ReadTableError::failed(Failure::Validation, message))?;
+
+    send_preview(transport, Preview(request))
+}
+
+/// A data preview request that was built after its checks. The field is private, so only the
+/// constructors below can make one and a raw `Request` cannot go through [`send_preview`].
+pub(super) struct Preview(Request);
+
+impl Preview {
+    /// The freestyle POST of a verified statement: the only way to make a freestyle preview.
+    pub(super) fn freestyle(query: &VerifiedQuery) -> Self {
+        Self(preview_post(
+            format!("{FREESTYLE_URI}?rowNumber={}", query.rows()),
+            query.body(),
+        ))
+    }
+}
+
+/// Sends a checked data preview request and reads the reply as a table. `fetch` (DDIC preview)
+/// and `sql::run` (freestyle preview) share it.
+pub(super) fn send_preview(
+    transport: &mut dyn SadtTransport,
+    Preview(request): Preview,
+) -> Result<TableData, ReadTableError> {
     let response = transport
         .request(request)
         .map_err(|error| ReadTableError::from_transport(&error))?;

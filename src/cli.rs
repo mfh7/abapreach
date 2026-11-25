@@ -141,6 +141,23 @@ pub enum Command {
         #[arg(long)]
         conn: String,
     },
+    /// Runs one read-only SELECT with joins through the ADT freestyle data preview.
+    Sql {
+        /// The statement, as one argument; or use `--file`.
+        #[arg(required_unless_present = "file", conflicts_with = "file")]
+        query: Option<String>,
+
+        /// A file that holds the statement.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// 1 to 5000; the data preview of the 740 release stops there.
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=5000))]
+        rows: u32,
+
+        #[arg(long)]
+        conn: String,
+    },
     /// Deletes objects from a plan written by `--simulate`.
     Delete {
         #[arg(required = true, value_name = "TYPE:NAME")]

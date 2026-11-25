@@ -398,6 +398,57 @@ fn a_denied_table_stops_before_any_connection() {
 }
 
 #[test]
+fn a_dictionary_refusal_is_a_stop_result_without_rows() {
+    let mut rig = rig();
+    let ok = |xml: String| Ok(Response::text(200, xml));
+
+    rig.adt(vec![
+        ok(preview(&[
+            ("TABNAME", &[Some("ZV_USERS")]),
+            ("TABCLASS", &[Some("VIEW")]),
+            ("VIEWCLASS", &[Some("D")]),
+        ])),
+        ok(preview(&[
+            ("DDLNAME", &[]),
+            ("OBJECTNAME", &[]),
+            ("OBJECTTYPE", &[]),
+        ])),
+        ok(preview(&[
+            ("VIEWNAME", &[Some("ZV_USERS")]),
+            ("TABNAME", &[Some("USR02")]),
+            ("TABPOS", &[Some("0001")]),
+        ])),
+    ]);
+
+    let result = rig.call(
+        "abap_read_table",
+        json!({"conn": "DEV_100", "table": "ZV_USERS"}),
+    );
+
+    assert!(result.is_error);
+    assert!(result.text.starts_with("STOP: "), "{}", result.text);
+    assert!(
+        result.text.contains("USR02") && result.text.contains("nothing was read"),
+        "{}",
+        result.text
+    );
+    assert!(
+        result.structured.get("rows").is_none(),
+        "{}",
+        result.structured
+    );
+    // The three dictionary lookups were sent; the data read never was.
+    assert_eq!(rig.sent.borrow().len(), 3);
+    assert!(
+        rig.sent
+            .borrow()
+            .iter()
+            .all(|request| !request.uri.contains("ddicEntityName=ZV_USERS")),
+        "the view was read"
+    );
+}
+
+#[test]
 fn a_payload_with_a_configured_secret_is_rejected_unaltered_in_no_field() {
     let mut rig = rig();
 
