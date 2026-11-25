@@ -14,6 +14,20 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-25
+
+### Changed
+- Fault-injection builds: `hold-post:<ms>` also prints `FAULT: classrun POST sending` on stderr right
+  before the classrun POST request starts (the POST session may still log on after it), so the live
+  Ctrl-C cells can press while the POST is in flight. Release builds are unchanged.
+
+### Fixed
+- Tests: the `hold-post` test sets its cancel flag from the fake POST handler instead of a fixed
+  1000 ms sleep; the source check of the `hold-post` call reads only `fn post(` and pins its order;
+  `hold_post` is proven to wait its time; `RFC_CLOSED` with the 758 screen dump text is a runtime
+  failure.
+- Docs: the doc comment of `is_runtime_error_body` names the 758 ADT page and its fixture.
+
 ## [0.17.0] - 2026-11-22
 
 ### Added
