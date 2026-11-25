@@ -601,7 +601,8 @@ stderr). The 7.50 data preview answers one row more than asked; ABAPReach drops 
 preview stops at 5000 rows. A configured secret in the output is masked.
 
 The 7.50 and 758 systems list the freestyle data preview in their ADT discovery. The 7.40 system
-has an empty HTTP discovery; TODO(rc.1): state whether it answers over ADT HTTP or only over RFC.
+has an empty HTTP discovery but still answers `sql` over ADT HTTP (checked live on the 7.40 test
+system).
 
 ## Search objects
 
@@ -634,8 +635,8 @@ every object whose name does not match the pattern, and says so on stderr:
 `W: the reply held objects of other types; N left out (the result may hold fewer than --max objects)`.
 A system without the search route answers `the object search answered HTTP 404: this system does
 not offer the object search on this route`. The 7.50 and 758 systems list the search in their ADT
-discovery. The 7.40 system has an empty HTTP discovery; TODO(rc.1): state whether it answers over
-ADT HTTP or only over RFC.
+discovery. The 7.40 system has an empty HTTP discovery but still answers the search over ADT HTTP
+(checked live on the 7.40 test system).
 
 ## Find where an object is used
 
