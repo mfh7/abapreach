@@ -5,7 +5,7 @@
 **Read and deploy ABAP source from the command line, over ADT HTTP or RFC, including
 systems you can only reach through SAProuter.**
 
-![version](https://img.shields.io/badge/version-0.17.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50_%7C_758-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
+![version](https://img.shields.io/badge/version-0.17.1-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50_%7C_758-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
 
 ```text
 $ abapreach deploy PROG ZDEMO ZDEMO.abap --base 63886692bf65... --conn A4H_001
@@ -184,7 +184,7 @@ the SAP system, but the user needs developer authorization for that class. See
 
 ## Platforms
 
-Release 0.17.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
+Release 0.17.1 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
 library lookup per OS, the release file checks, the Linux glibc baseline, the credential
 file permission rules and the test matrix are in
 [Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
@@ -205,8 +205,17 @@ systems (the Replay set on the rc.3 binary, the Extra set on the rc.4 binary), i
 53 and 64 PASS (0 FAIL) on the 7.40 system, 61 and 70 PASS on the 758 system (its one Replay FAIL is an outdated script expectation, not a product defect). Every test
 object was deleted and proved absent from a fresh session. Windows x64 and Linux arm64 had no live run in
 0.17.0 (as in 0.16.1); CI builds and checks their release files. Some paths have no live test and are
-covered offline only (for example Ctrl-C twice during `run` and the MCP policy matrix). See
+covered offline only (for example the MCP policy matrix). See
 [Behavior differences: 0.17.0 release checks](docs/behavior-differences.md#0170-release-checks-0170-rc1-to-rc4).
+
+0.17.1 is the test and fault-build follow-up of 0.17.0. Its checks ran on `v0.17.1-rc.1`, and the
+release binaries are the rc.1 binaries. The ordinary build behaves as in 0.17.0. CI is green on all
+four runners (macOS arm64, Linux x64, Linux arm64, Windows x64). The one new live cell, Ctrl-C twice
+during `run`, passed on the 7.50 system (all three paths) and on the 758 system (RFC SDK). The smoke
+set ran on the 7.50 system on all four platforms (no FAIL cell); this is the first live Windows x64
+and Linux arm64 run since 0.16.1, and smoke only, not the full matrix. The 7.40 system was not run
+for 0.17.1. See
+[Behavior differences: 0.17.1 release checks](docs/behavior-differences.md#0171-release-checks-0171-rc1).
 
 An explicit `ABAPREACH_RFC_LIBRARY` that cannot be loaded stops the command with an
 error. ABAPReach does not fall back to another library in that case.

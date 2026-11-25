@@ -398,6 +398,41 @@ off` with `mcp_run: confirm`, `mcp_run: off`, a name missing from `mcp_run_allow
 object outside the allow list); and the selection-variant cell (it needs a variant made once in SE38 on
 each system).
 
+### 0.17.1 release checks (0.17.1-rc.1)
+
+The runs are from 2026-11-25. 0.17.1 is the test and fault-build follow-up of 0.17.0, and the release
+binaries are `v0.17.1-rc.1` (a single release candidate). The ordinary build behaves as in 0.17.0. The
+fault-injection build's `hold-post:<ms>` also prints `FAULT: classrun POST sending` before the classrun POST
+request starts. CI on rc.1 is green on all four runners (macOS arm64, Linux x64, Linux arm64, Windows x64).
+
+| System | Path | Run | Result |
+| :--- | :--- | :--- | :--- |
+| 7.50 | ADT HTTP | Ctrl-C twice during `run` | PASS |
+| 7.50 | RFC SAP GUI library | Ctrl-C twice during `run` | PASS |
+| 7.50 | RFC SDK | Ctrl-C twice during `run` | PASS |
+| 758 | RFC SDK | Ctrl-C twice during `run` | PASS |
+
+The Ctrl-C cell ran from macOS arm64.
+
+| System | Host | Run | PASS | UNSUPPORTED | FAIL |
+| :--- | :--- | :--- | ---: | ---: | ---: |
+| 7.50 | macOS arm64 | smoke | 48 | 1 | 0 |
+| 7.50 | Linux x64 | smoke | 48 | 3 | 0 |
+| 7.50 | Linux arm64 | smoke | 33 | 18 | 0 |
+| 7.50 | Windows x64, native virtual machine | smoke | 48 | 1 | 0 |
+
+- Ctrl-C twice during `run` (the 0.17.0 section lists it as covered offline only). The cell runs the
+  snippet `WAIT UP TO 60 SECONDS` on the fault build. The first Ctrl-C comes on the POST marker, the second
+  15 seconds after the waiting text. On every path above the command exits with 130, prints one
+  `RUNNER_LEFTOVER: <class>` line with the two delete commands, and prints no outcome line. `doctor` lists
+  the class, and the two commands remove it. Limit: that the POST had reached SAP rests on the 15 second
+  delay (the POST session logon measured about 1 to 2 seconds), not on an observation.
+- The smoke runs are the first live Windows x64 and Linux arm64 runs since 0.16.1 (0.17.0 had none). They
+  are smoke only, not the full matrix. The UNSUPPORTED cells are structural: the ADT HTTP path loads no RFC
+  library, and the OS trust store is already installed. SAP GUI for Java runs on x86_64 only, so Linux
+  arm64 has no RFC SAP GUI library path.
+- The 7.40 system was not run for 0.17.1.
+
 ## `create PROG` operation (0.15.0)
 
 The create operation covers the `create PROG` cases of the reference test suite
