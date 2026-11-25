@@ -200,25 +200,79 @@ fn pattern_matches(pattern: &str, name: &str) -> bool {
     rest.ends_with(last)
 }
 
-/// One output line: `<TYPE> <NAME> package=<P> <description>`. Whitespace inside a field (the
-/// padded name of an authorization default, a wrapped description) becomes one space, so a line
-/// stays a line, and every other dropped character (see `text::is_dropped`) is removed.
-fn line(object: &ObjectRef) -> String {
-    let package = squeeze(object.package.as_deref().unwrap_or_default());
-    let package = if package.is_empty() { "?" } else { &package };
-    let line = format!(
-        "{} {} package={package} {}",
-        squeeze(&object.kind),
-        squeeze(&object.name),
-        squeeze(object.description.as_deref().unwrap_or_default())
-    );
-
-    line.trim_end().to_owned()
+/// One found object, the fields as the printed line shows them: whitespace inside a field (the
+/// padded name of an authorization default, a wrapped description) is one space, so a line stays a
+/// line, and every other dropped character (see `text::is_dropped`) is removed. A name may therefore
+/// hold a space; the line is for reading and the fields are for programs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Entry {
+    pub kind: String,
+    pub name: String,
+    /// `None` where the reply names no package.
+    pub package: Option<String>,
+    pub description: String,
 }
 
-/// The `search` command: one line per object, then `SEARCH: <n> objects`. A release that ignores
-/// the type filter answers objects of other types; they are dropped here and the run says so.
-pub fn run(transport: &mut dyn SadtTransport, query: &Query) -> Result<Outcome, QualityError> {
+impl Entry {
+    fn of(object: &ObjectRef) -> Self {
+        Self {
+            kind: squeeze(&object.kind),
+            name: squeeze(&object.name),
+            package: Some(squeeze(object.package.as_deref().unwrap_or_default()))
+                .filter(|package| !package.is_empty()),
+            description: squeeze(object.description.as_deref().unwrap_or_default()),
+        }
+    }
+
+    /// `<TYPE> <NAME> package=<P> <description>`; `?` stands for a package the reply lacks.
+    pub fn line(&self) -> String {
+        format!(
+            "{} {} package={} {}",
+            self.kind,
+            self.name,
+            self.package.as_deref().unwrap_or("?"),
+            self.description
+        )
+        .trim_end()
+        .to_owned()
+    }
+}
+
+/// What a `search` found: the objects and the warnings. The printed text and any other view are
+/// made from these entries, so they cannot disagree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Found {
+    pub entries: Vec<Entry>,
+    pub warnings: Vec<String>,
+}
+
+impl Found {
+    /// One line per object, then `SEARCH: <n> objects`.
+    pub fn text(&self) -> String {
+        let mut lines: Vec<String> = self.entries.iter().map(Entry::line).collect();
+
+        lines.push(match self.entries.len() {
+            1 => "SEARCH: 1 object".to_owned(),
+            count => format!("SEARCH: {count} objects"),
+        });
+
+        lines.join("\n")
+    }
+
+    /// The outcome the command prints.
+    pub fn outcome(&self) -> Outcome {
+        Outcome {
+            status: None,
+            exit: 0,
+            stdout: self.text(),
+            stderr: self.warnings.join("\n"),
+        }
+    }
+}
+
+/// The `search` command: the objects found. A release that ignores the type filter answers
+/// objects of other types; they are dropped here and the run says so.
+pub fn list(transport: &mut dyn SadtTransport, query: &Query) -> Result<Found, QualityError> {
     let response = transport
         .request(Request::get(query.uri()))
         .map_err(|error| QualityError::from_transport(&error))?;
@@ -279,21 +333,27 @@ pub fn run(transport: &mut dyn SadtTransport, query: &Query) -> Result<Outcome, 
         "objects whose name does not match the pattern",
     );
 
-    let stderr = warnings.join("\n");
-
     objects.truncate(query.max as usize);
 
-    let mut lines: Vec<String> = objects.iter().map(line).collect();
+    let before = objects.len();
+    let mut entries: Vec<Entry> = objects.iter().map(Entry::of).collect();
 
-    lines.push(match objects.len() {
-        1 => "SEARCH: 1 object".to_owned(),
-        count => format!("SEARCH: {count} objects"),
-    });
+    entries.retain(|entry| !entry.kind.is_empty() && !entry.name.is_empty());
 
-    Ok(Outcome {
-        status: None,
-        exit: 0,
-        stdout: lines.join("\n"),
-        stderr,
-    })
+    if entries.len() < before {
+        let left_out = before - entries.len();
+
+        warnings.push(format!(
+            "W: {left_out} {} without a usable type or name {} left out",
+            if left_out == 1 { "object" } else { "objects" },
+            if left_out == 1 { "was" } else { "were" }
+        ));
+    }
+
+    Ok(Found { entries, warnings })
+}
+
+/// The `search` command as the CLI prints it.
+pub fn run(transport: &mut dyn SadtTransport, query: &Query) -> Result<Outcome, QualityError> {
+    list(transport, query).map(|found| found.outcome())
 }

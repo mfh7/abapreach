@@ -4,7 +4,7 @@ use crate::config::{
     Config, ConfigPaths, Connection, LocalCredentialsPermission, local_credentials_permission,
     scrub, tls_warning,
 };
-use crate::domain::Outcome;
+use crate::domain::{Origin, Outcome};
 use crate::extension::{
     CreateRequest, ExtensionDelete, ExtensionKind, ExtensionOp, ExtensionOptions, MixedDelete,
     ReadRequest, Registry, RunContext, SharedFactories, adt_label, adt_pin,
@@ -498,7 +498,7 @@ pub(crate) fn read_attempt(read: Result<TableData, PreviewError>) -> Attempt {
 }
 
 /// The attempt of a run that reads through the data preview and prints its own outcome.
-fn outcome_attempt(result: Result<Outcome, PreviewError>) -> Attempt {
+pub(crate) fn outcome_attempt(result: Result<Outcome, PreviewError>) -> Attempt {
     match result {
         Ok(outcome) => Attempt {
             outcome,
@@ -520,7 +520,7 @@ fn preview_error_attempt(error: PreviewError) -> Attempt {
 
 /// The attempt of a `dumps` or `dump` run: the text it printed, or why it stopped, as for a
 /// data preview read.
-fn text_attempt(read: Result<String, PreviewError>) -> Attempt {
+pub(crate) fn text_attempt(read: Result<String, PreviewError>) -> Attempt {
     match read {
         Ok(stdout) => Attempt {
             outcome: Outcome {
@@ -537,6 +537,213 @@ fn text_attempt(read: Result<String, PreviewError>) -> Attempt {
         Err(PreviewError::Rejected(message)) => rejected_attempt(&message),
         Err(PreviewError::Failed { failure, message }) => Attempt::failed(message, failure),
     }
+}
+
+// ---- the read commands of 0.18.0, shared by the CLI and the MCP tools ----------------------------
+
+/// `sql`: the statement through the freestyle data preview. `found` receives the rows of a run
+/// that answered, so a caller that wants the data reads them there and not from the text.
+pub(crate) fn run_sql(
+    connection: &Connection,
+    factories: &mut dyn Factories,
+    query: &SqlQuery,
+    found: &mut Option<TableData>,
+) -> Exit {
+    route(
+        OperationKind::Sql,
+        None,
+        false,
+        connection,
+        factories,
+        |transport, _, _, _| {
+            let read = sql::run(transport, query.clone(), &connection.policies);
+
+            // A read holds no lock, so a failed session end is only a note.
+            let note = end_session(transport);
+            let attempt = match read {
+                Ok(data) => {
+                    let attempt = table_attempt(&data);
+
+                    *found = Some(data);
+
+                    attempt
+                }
+                Err(error) => preview_error_attempt(error),
+            };
+
+            attempt.noted(note)
+        },
+    )
+}
+
+/// `search`: the objects whose name matches. `found` receives them.
+pub(crate) fn run_search(
+    connection: &Connection,
+    factories: &mut dyn Factories,
+    query: &SearchQuery,
+    found: &mut Option<search::Found>,
+) -> Exit {
+    route(
+        OperationKind::Search,
+        None,
+        false,
+        connection,
+        factories,
+        |transport, _, _, _| {
+            let result = search::list(transport, query).map(|list| {
+                let outcome = list.outcome();
+
+                *found = Some(list);
+
+                outcome
+            });
+
+            // A read holds no lock, so a failed session end is only a note.
+            quality::attempt(result, end_session(transport))
+        },
+    )
+}
+
+/// `where-used`: the objects that use one object. `found` receives them.
+pub(crate) fn run_where_used(
+    connection: &Connection,
+    factories: &mut dyn Factories,
+    query: &WhereUsedQuery,
+    found: &mut Option<where_used::Listing>,
+) -> Exit {
+    route(
+        OperationKind::WhereUsed,
+        None,
+        false,
+        connection,
+        factories,
+        |transport, _, _, _| {
+            let result = where_used::list(transport, query, &connection.policies).map(|list| {
+                let outcome = list.outcome();
+
+                *found = Some(list);
+
+                outcome
+            });
+
+            // A read holds no lock, so a failed session end is only a note.
+            let note = end_session(transport);
+
+            outcome_attempt(result).noted(note)
+        },
+    )
+}
+
+/// `ping`: the system and the instance that answered. `found` receives the reading.
+pub(crate) fn run_ping(
+    connection: &Connection,
+    backend: Option<BackendKind>,
+    factories: &mut dyn Factories,
+    found: &mut Option<ping::Pinged>,
+) -> Exit {
+    route(
+        OperationKind::Ping,
+        backend,
+        false,
+        connection,
+        factories,
+        |transport, selection, _, _| {
+            let reading = ping::read(transport, selection.backend, &connection.secrets());
+            let result = reading
+                .map(|reading| {
+                    let pinged = ping::Pinged {
+                        backend: selection.backend,
+                        reading,
+                    };
+                    let outcome = pinged.reading.outcome(pinged.backend);
+
+                    *found = Some(pinged);
+
+                    outcome
+                })
+                .map_err(|failure| failure.error);
+
+            // A read holds no lock, so a failed session end is only a note.
+            quality::attempt(result, end_session(transport))
+        },
+    )
+}
+
+/// `dumps`: the list of the short dumps. `found` receives the rows.
+pub(crate) fn run_dumps(
+    connection: &Connection,
+    backend: Option<BackendKind>,
+    factories: &mut dyn Factories,
+    query: &ListQuery,
+    found: &mut Option<dumps::Listing>,
+) -> Exit {
+    route(
+        OperationKind::Dumps,
+        backend,
+        false,
+        connection,
+        factories,
+        |transport, selection, _, _| {
+            let list = dumps::run_list(transport, selection.backend, query, &connection.policies);
+
+            // A read holds no lock, so a failed session end is only a note.
+            let note = end_session(transport);
+            let warning = list.as_ref().ok().and_then(|l| l.warning.clone());
+            let attempt = match list {
+                Ok(listing) => {
+                    let attempt = text_attempt(Ok(listing.text.clone()));
+
+                    *found = Some(listing);
+
+                    attempt
+                }
+                Err(error) => text_attempt(Err(error)),
+            };
+
+            attempt.noted(warning).noted(note)
+        },
+    )
+}
+
+/// `dump`: one short dump. `found` receives it.
+pub(crate) fn run_dump(
+    connection: &Connection,
+    backend: Option<BackendKind>,
+    factories: &mut dyn Factories,
+    query: &DumpQuery,
+    found: &mut Option<dumps::Dump>,
+) -> Exit {
+    route(
+        OperationKind::Dump,
+        backend,
+        false,
+        connection,
+        factories,
+        |transport, selection, _, _| {
+            let shown = dumps::read_dump(
+                transport,
+                selection.backend,
+                query,
+                &connection.policies,
+                &connection.lang,
+            );
+
+            // A read holds no lock, so a failed session end is only a note.
+            let note = end_session(transport);
+            let attempt = match shown {
+                Ok(dump) => {
+                    let attempt = text_attempt(Ok(dump.text()));
+
+                    *found = Some(dump);
+
+                    attempt
+                }
+                Err(error) => text_attempt(Err(error)),
+            };
+
+            attempt.noted(note)
+        },
+    )
 }
 
 /// `mcp` loads every policy once, then serves stdio until EOF. Each tool call re-reads the
@@ -705,22 +912,9 @@ fn execute(
                 stderr: String::new(),
             }
         }
-        Command::Ping { backend, .. } => route(
-            OperationKind::Ping,
-            backend.map(backend_kind),
-            false,
-            connection,
-            factories,
-            |transport, selection, _, _| {
-                let reading = ping::read(transport, selection.backend, &connection.secrets());
-                let result = reading
-                    .map(|reading| reading.outcome(selection.backend))
-                    .map_err(|failure| failure.error);
-
-                // A read holds no lock, so a failed session end is only a note.
-                quality::attempt(result, end_session(transport))
-            },
-        ),
+        Command::Ping { backend, .. } => {
+            run_ping(connection, backend.map(backend_kind), factories, &mut None)
+        }
         Command::ReadTable {
             table,
             fields,
@@ -772,22 +966,7 @@ fn execute(
                 Err(message) => return stop(message),
             };
 
-            route(
-                OperationKind::Sql,
-                None,
-                false,
-                connection,
-                factories,
-                |transport, _, _, _| {
-                    let read = sql::run(transport, query.clone(), &connection.policies);
-
-                    // A read holds no lock, so a failed session end is only a note.
-                    let note = end_session(transport);
-                    let attempt = read_attempt(read);
-
-                    attempt.noted(note)
-                },
-            )
+            run_sql(connection, factories, &query, &mut None)
         }
         Command::Search {
             pattern,
@@ -800,19 +979,7 @@ fn execute(
                 Err(message) => return stop(message),
             };
 
-            route(
-                OperationKind::Search,
-                None,
-                false,
-                connection,
-                factories,
-                |transport, _, _, _| {
-                    let result = search::run(transport, &query);
-
-                    // A read holds no lock, so a failed session end is only a note.
-                    quality::attempt(result, end_session(transport))
-                },
-            )
+            run_search(connection, factories, &query, &mut None)
         }
         Command::Dumps {
             date,
@@ -838,25 +1005,12 @@ fn execute(
                 Err(message) => return stop(message),
             };
 
-            route(
-                OperationKind::Dumps,
-                backend.map(backend_kind),
-                false,
+            run_dumps(
                 connection,
+                backend.map(backend_kind),
                 factories,
-                |transport, selection, _, _| {
-                    let list =
-                        dumps::run_list(transport, selection.backend, &query, &connection.policies);
-
-                    // A read holds no lock, so a failed session end is only a note.
-                    let note = end_session(transport);
-
-                    let warning = list.as_ref().ok().and_then(|l| l.warning.clone());
-
-                    text_attempt(list.map(|listing| listing.text))
-                        .noted(warning)
-                        .noted(note)
-                },
+                &query,
+                &mut None,
             )
         }
         Command::Dump {
@@ -867,26 +1021,12 @@ fn execute(
                 Err(message) => return stop(message),
             };
 
-            route(
-                OperationKind::Dump,
-                backend.map(backend_kind),
-                false,
+            run_dump(
                 connection,
+                backend.map(backend_kind),
                 factories,
-                |transport, selection, _, _| {
-                    let shown = dumps::run_dump(
-                        transport,
-                        selection.backend,
-                        &query,
-                        &connection.policies,
-                        &connection.lang,
-                    );
-
-                    // A read holds no lock, so a failed session end is only a note.
-                    let note = end_session(transport);
-
-                    text_attempt(shown).noted(note)
-                },
+                &query,
+                &mut None,
             )
         }
         Command::WhereUsed {
@@ -900,21 +1040,7 @@ fn execute(
                 Err(message) => return stop(message),
             };
 
-            route(
-                OperationKind::WhereUsed,
-                None,
-                false,
-                connection,
-                factories,
-                |transport, _, _, _| {
-                    let result = where_used::run(transport, &query, &connection.policies);
-
-                    // A read holds no lock, so a failed session end is only a note.
-                    let note = end_session(transport);
-
-                    outcome_attempt(result).noted(note)
-                },
-            )
+            run_where_used(connection, factories, &query, &mut None)
         }
         Command::Delete {
             targets,
@@ -1370,6 +1496,7 @@ fn execute(
                 simulate,
                 subc: subc.unwrap_or(Subc::Program),
                 source,
+                origin: Origin::Cli,
             };
 
             route(
@@ -1434,6 +1561,7 @@ fn execute(
                             tr: tr.as_deref(),
                             simulation: Simulation::Deploy {
                                 base: base.as_deref(),
+                                origin: Origin::Cli,
                             },
                         };
 
@@ -1456,6 +1584,7 @@ fn execute(
                             xml: &xml,
                             tr: tr.as_deref(),
                             base: base.as_deref(),
+                            origin: Origin::Cli,
                         };
 
                         return deploy_ddic::deploy(

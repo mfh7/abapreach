@@ -27,6 +27,7 @@
 use crate::app::{Exit, Factories, stop};
 use crate::backend::BackendKind;
 use crate::config::Connection;
+use crate::domain::Origin;
 use crate::hash::{local_source_lines, normalize, source_hash};
 use crate::operation::deploy::CancelFlag;
 use crate::operation::payload::{Kind, Mode, Request, encode};
@@ -59,6 +60,7 @@ pub struct DdicDeploy<'a> {
     pub xml: &'a str,
     pub tr: Option<&'a str>,
     pub base: Option<&'a str>,
+    pub origin: Origin,
 }
 
 pub fn deploy(
@@ -136,7 +138,10 @@ fn deploy_gated_with(
         name: &name,
         xml: request.xml,
         tr: request.tr,
-        simulation: Simulation::Deploy { base: request.base },
+        simulation: Simulation::Deploy {
+            base: request.base,
+            origin: request.origin,
+        },
     };
 
     // Both payloads refuse a value, and a base that is no hash, before any connection is opened.
@@ -294,7 +299,14 @@ fn write(
             print,
         ),
         other => {
-            let mut done = print.ended(&second, other, Simulation::Deploy { base: None });
+            let mut done = print.ended(
+                &second,
+                other,
+                Simulation::Deploy {
+                    base: None,
+                    origin: deploy.origin,
+                },
+            );
 
             // Run 1 has been sent: a router fallback would repeat it on RFC.
             done.fallback = None;

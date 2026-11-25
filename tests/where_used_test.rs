@@ -1615,20 +1615,67 @@ fn a_hit_that_prints_the_same_counts_once_after_the_cleaning() {
         <referencedObject uri=\"/a/3\"><adtObject adtcore:name=\"Z\u{202e} A\" adtcore:type=\"PROG/P\"/></referencedObject>\
         <referencedObject uri=\"/a/4\"><adtObject adtcore:name=\"\u{200b}\" adtcore:type=\"PROG/P\"/></referencedObject>\
         </r>";
-    let (stdout, _, _) = succeeded(&query("PROG", "ZP"), vec![ok(xml)]);
+    let (stdout, stderr, _) = succeeded(&query("PROG", "ZP"), vec![ok(xml)]);
 
     // `ZA` once, with the package of the entry that names one; `Z A` is another name; the
-    // entry that is nothing but a format character has no name and is dropped.
+    // entry that is nothing but a format character has no name and is left out, with a warning.
     assert_eq!(
         stdout,
         "USED-BY PROG Z A package=? via=ADT\nUSED-BY PROG ZA package=ZP via=ADT\nWHERE-USED: 2"
     );
+    assert_eq!(stderr, "W: 1 object without a usable name was left out");
 
     let query = Query::new("PROG", "ZP", 1).unwrap();
     let (stdout, stderr, _) = succeeded(&query, vec![ok(xml)]);
 
     assert_eq!(stdout, "USED-BY PROG Z A package=? via=ADT\nWHERE-USED: 1");
-    assert_eq!(stderr, "W: 2 objects found; the first 1 are shown (--max)");
+    assert_eq!(
+        stderr,
+        "W: 1 object without a usable name was left out\nW: 2 objects found; the first 1 are shown (--max)"
+    );
+}
+
+#[test]
+fn objects_left_out_for_want_of_a_name_are_counted_in_the_plural() {
+    let xml = "<r xmlns:adtcore=\"c\">\
+        <referencedObject uri=\"/a/1\"><adtObject adtcore:name=\"ZA\" adtcore:type=\"PROG/P\"/></referencedObject>\
+        <referencedObject uri=\"/a/2\"><adtObject adtcore:name=\"\u{200b}\" adtcore:type=\"PROG/P\"/></referencedObject>\
+        <referencedObject uri=\"/a/3\"><adtObject adtcore:name=\"\u{202e}\" adtcore:type=\"PROG/P\"/></referencedObject>\
+        </r>";
+    let (stdout, stderr, _) = succeeded(&query("PROG", "ZP"), vec![ok(xml)]);
+
+    assert_eq!(stdout, "USED-BY PROG ZA package=? via=ADT\nWHERE-USED: 1");
+    assert_eq!(stderr, "W: 2 objects without a usable name were left out");
+}
+
+#[test]
+fn a_package_of_the_cross_reference_tables_is_cleaned_like_the_other_fields() {
+    let mut transport = ScriptedTransport::replies(vec![
+        ok(discovery(&["/sap/bc/adt/ddic/dataelements"])),
+        Ok(Response::text(404, "<exc/>")),
+        dd02l("WBCROSSGT"),
+        column("INCLUDE", &[]),
+        dd02l("DD03L"),
+        column("TABNAME", &["ZSTRUCT"]),
+        dd02l("TADIR"),
+        tadir(&[("TABL", "ZSTRUCT", "Z\u{202e}  P\u{200b}K")]),
+    ]);
+    let listing = abapreach::operation::where_used::list(
+        &mut transport,
+        &query("DTEL", "ZDE_A"),
+        &Policies::default(),
+    )
+    .unwrap();
+
+    // The data holds what the text prints: no format character, one space.
+    assert_eq!(listing.hits[0].package.as_deref(), Some("Z PK"));
+    assert!(
+        listing
+            .text()
+            .starts_with("USED-BY TABL ZSTRUCT package=Z PK via=DD03L"),
+        "{}",
+        listing.text()
+    );
 }
 
 #[test]

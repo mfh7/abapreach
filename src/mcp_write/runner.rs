@@ -13,7 +13,7 @@ use super::{
 use crate::app::Exit;
 use crate::cli::{DeleteKind, DeleteTarget, RUNNER_KINDS, Subc};
 use crate::config::Connection;
-use crate::domain::Status;
+use crate::domain::{Origin, Status};
 use crate::hash::source_hash;
 use crate::mcp::{Session, ToolResult};
 use crate::mcp_read::{SECRET_REJECTED, holds_secret, optional, required};
@@ -308,7 +308,10 @@ impl<G: WriteGate> McpTools<'_, G> {
             name: &upper,
             xml,
             tr,
-            simulation: Simulation::Deploy { base: None },
+            simulation: Simulation::Deploy {
+                base: None,
+                origin: Origin::Mcp,
+            },
         };
 
         simulate_ddic::check(&request, &upper)?;
@@ -344,6 +347,7 @@ impl<G: WriteGate> McpTools<'_, G> {
                     xml,
                     tr,
                     base: stored.base.as_deref(),
+                    origin: Origin::Mcp,
                 };
                 let mut gate = |preview: &Preview<'_>| -> Result<(), String> {
                     if !confirm {

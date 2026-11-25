@@ -365,6 +365,8 @@ Since 0.18.0, `doctor` also prints one `instance ...` line: the application serv
 answered, read on the session that passed (ADT HTTP, else RFC). On a release without
 `/system/information` (the 7.40 system over ADT HTTP) it prints
 `instance unknown (no /system/information on this release)`. The line never changes the verdict.
+`doctor` masks the host part of the name: `instance ***_<SID>_<NN>`, or `instance ***` for a name that
+does not have the form `<host>_<SID>_<NN>`.
 See [Ping the system](#ping-the-system).
 
 ## Read an existing program
@@ -777,15 +779,16 @@ answered; otherwise the usual connection failure.
 
 The 7.40 system has no `/system/information` (HTTP 404). `ping` over ADT HTTP then prints
 `instance unknown (no /system/information on this release)` and still exits 0; use
-`--backend rfc` to see the instance. HTTP 406 gives `instance unknown (/system/information answered HTTP
-406)`. The host address and the database server of the reply are never printed.
+`--backend rfc` to see the instance. HTTP 406 gives `instance unknown (HTTP 406)`. The host address
+and the database server of the reply are never printed.
 
-`doctor` prints the same `instance ...` line, taken from the one session that answered; a
-failed reading shows `instance unknown (<reason>)` and does not change the verdict.
-
-TODO(masking): the instance name carries the host (`<host>_<SID>_<NN>`). State here which part of the
-`instance` line `ping` and `doctor` mask once the masking rule is decided; today a configured host
-name in the output is replaced by `***`.
+`ping` prints the instance name in clear, exactly as SAP reports it (`<host>_<SID>_<NN>`, with the
+host). `doctor` prints the same reading from the one session that answered, with the host masked:
+`instance ***_<SID>_<NN>`, or `instance ***` for a name that does not have that form. A failed
+reading shows `instance unknown (<reason>)` in both and does not change the verdict of `doctor`.
+The reason is one of a fixed set: `no /system/information on this release`, `HTTP 406`, `HTTP <status>`, `request failed`, `no answer`, `not authorized` or `unreadable reply`; it is never the text
+of an error. Over MCP, `abap_ping` prints the name in clear like `ping`; see
+[MCP](mcp.md#new-read-tools-0180).
 
 ## Inactive objects, activation and ABAP Unit
 

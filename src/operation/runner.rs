@@ -1,6 +1,7 @@
 use crate::adt::{ActivationBody, classify_activation, parse_messages};
 use crate::backend::{BackendKind, Failure};
 use crate::cli::{CreateKind, Subc};
+use crate::domain::Origin;
 use crate::hash::{local_source_lines, source_hash};
 use crate::object::PackageScope;
 use crate::operation::create::{CreateInput, creation_body};
@@ -791,6 +792,7 @@ impl Cycle<'_> {
             simulate: false,
             subc: Subc::Program,
             source: None,
+            origin: Origin::Cli,
         };
         let body = match creation_body(&create, "$TMP", self.input.user, self.input.language) {
             Ok(body) => body,

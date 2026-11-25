@@ -7,6 +7,30 @@ use abapreach::mcp::{
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
+/// The tools that only read, by name: the hints are checked against this list, not against the
+/// list the server derives its own behavior from.
+const READ_ONLY_TOOLS: [&str; 8] = [
+    "abap_read_table",
+    "abap_inactive",
+    "abap_sql",
+    "abap_search",
+    "abap_where_used",
+    "abap_dumps",
+    "abap_dump",
+    "abap_ping",
+];
+/// The tools that write, by name. `abap_read_source` is neither: it can create a temporary class.
+const WRITE_TOOLS_LISTED: [&str; 8] = [
+    "abap_simulate",
+    "abap_deploy",
+    "abap_create_simulate",
+    "abap_create",
+    "abap_delete_simulate",
+    "abap_delete",
+    "abap_activate_simulate",
+    "abap_activate",
+];
+
 /// A handler that panics for one tool, to prove the server survives a bug in a tool.
 struct Panicking;
 
@@ -326,7 +350,7 @@ fn tools(write_offered: bool) -> Vec<Value> {
 }
 
 #[test]
-fn tools_list_offers_the_three_read_tools_when_no_server_allows_writes() {
+fn tools_list_offers_the_eight_read_tools_when_no_server_allows_writes() {
     let names = tools(false)
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
@@ -334,12 +358,22 @@ fn tools_list_offers_the_three_read_tools_when_no_server_allows_writes() {
 
     assert_eq!(
         names,
-        ["abap_read_source", "abap_read_table", "abap_inactive"]
+        [
+            "abap_read_source",
+            "abap_read_table",
+            "abap_inactive",
+            "abap_sql",
+            "abap_search",
+            "abap_where_used",
+            "abap_dumps",
+            "abap_dump",
+            "abap_ping",
+        ]
     );
 }
 
 #[test]
-fn tools_list_offers_all_eleven_contract_tools_when_a_server_allows_writes() {
+fn tools_list_offers_all_seventeen_contract_tools_when_a_server_allows_writes() {
     let names = tools(true)
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())
@@ -355,10 +389,16 @@ fn tools_list_offers_all_eleven_contract_tools_when_a_server_allows_writes() {
             "abap_delete",
             "abap_delete_simulate",
             "abap_deploy",
+            "abap_dump",
+            "abap_dumps",
             "abap_inactive",
+            "abap_ping",
             "abap_read_source",
             "abap_read_table",
+            "abap_search",
             "abap_simulate",
+            "abap_sql",
+            "abap_where_used",
         ]
         .map(str::to_owned)
         .into()
@@ -397,18 +437,20 @@ fn every_tool_has_a_short_name_a_complete_schema_and_advisory_annotations() {
             "{name}"
         );
 
-        let read =
-            name == "abap_read_source" || name == "abap_read_table" || name == "abap_inactive";
         let annotations = &tool["annotations"];
 
         // Reading a DDIC or transaction type creates a temporary class (M6): only the table read
         // is read-only, and no read tool is destructive.
         assert_eq!(
             annotations["readOnlyHint"],
-            name == "abap_read_table" || name == "abap_inactive",
+            READ_ONLY_TOOLS.contains(&name),
             "{name}"
         );
-        assert_eq!(annotations["destructiveHint"], !read, "{name}");
+        assert_eq!(
+            annotations["destructiveHint"],
+            WRITE_TOOLS_LISTED.contains(&name),
+            "{name}"
+        );
         assert_eq!(annotations["openWorldHint"], false, "{name}");
         // A write tool takes its plan token only where the contract says so.
         assert_eq!(

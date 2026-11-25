@@ -5,7 +5,7 @@
 use abapreach::backend::{BackendKind, Failure, Selection, SelectionReason};
 use abapreach::cli::{CreateKind, Subc};
 use abapreach::config::Connection;
-use abapreach::domain::Status;
+use abapreach::domain::{Origin, Status};
 use abapreach::object::PackageScope;
 use abapreach::operation::create::{CreateInput, CreateProg};
 use abapreach::operation::deploy::{
@@ -184,6 +184,7 @@ fn input(kind: CreateKind, package: Option<&str>, tr: Option<&str>, simulate: bo
         simulate,
         subc: Subc::Program,
         source: None,
+        origin: Origin::Cli,
     }
 }
 

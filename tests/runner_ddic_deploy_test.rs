@@ -22,6 +22,7 @@ mod common;
 
 use abapreach::backend::BackendKind;
 use abapreach::config::Connection;
+use abapreach::domain::Origin;
 use abapreach::hash::{normalize, source_hash};
 use abapreach::operation::deploy::{CancelFlag, InterruptAction};
 use abapreach::operation::deploy_ddic::{DdicDeploy, deploy_with};
@@ -617,6 +618,11 @@ impl Case {
     /// Runs the deploy through the library entry with a virtual clock, so that a reconciliation
     /// does not wait.
     fn go_virtual(self, base: Option<&str>, tr: Option<&str>) -> Done {
+        self.go_as(base, tr, Origin::Cli)
+    }
+
+    /// The same run for the given origin: an MCP call words its stops without flags and hashes.
+    fn go_as(self, base: Option<&str>, tr: Option<&str>, origin: Origin) -> Done {
         let seen: Seen = Rc::default();
         let mut fake = self.fake(&seen);
         let request = DdicDeploy {
@@ -630,6 +636,7 @@ impl Case {
             xml: &self.file,
             tr,
             base,
+            origin,
         };
         let mut clock = FakeClock {
             now: Rc::new(Cell::new(Duration::ZERO)),
@@ -870,6 +877,22 @@ fn the_four_types_deploy_on_adt_http_and_on_rfc_sadt() {
 }
 
 // ---- --base and no changes: one run only --------------------------------------------------------------
+
+#[test]
+fn an_mcp_deploy_whose_base_moved_says_so_without_the_flag_and_the_hashes() {
+    let (_, xml, ..) = FIXTURES[0];
+    let case = passing_case(0);
+    let done = case.go_as(Some(OTHER_BASE), None, Origin::Mcp);
+
+    assert_eq!(done.exit.code, 2);
+    assert_eq!(
+        done.exit.stderr,
+        "STOP: live changed since your read: base does not match"
+    );
+    assert!(!done.exit.stderr.contains("--base"));
+    assert!(!done.exit.stderr.contains(&live_hash(xml)));
+    assert_eq!(done.modes(), ["SIMULATE"]);
+}
 
 #[test]
 fn a_base_that_differs_from_the_live_hash_is_a_stop_after_the_first_run() {

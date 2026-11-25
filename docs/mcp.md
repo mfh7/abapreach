@@ -40,7 +40,7 @@ The other keys of the file are omitted here. Add the server entries as described
 
 | Value | Meaning |
 | :--- | :--- |
-| `off` | Default when the key is absent. Only the read tools are listed. Observed: the tool list shows `abap_read_source`, `abap_read_table` and `abap_inactive` (and `abap_run` and `abap_aunit` where `mcp_run` allows them). `abap_read_source` refuses the DDIC and transaction types (see [DDIC and `TRAN`](#ddic-and-tran-types)). |
+| `off` | Default when the key is absent. Only the read tools are listed. Observed: the tool list shows `abap_read_source`, `abap_read_table`, `abap_inactive`, `abap_sql`, `abap_search`, `abap_where_used`, `abap_dumps`, `abap_dump` and `abap_ping` (and `abap_run` and `abap_aunit` where `mcp_run` allows them). `abap_read_source` refuses the DDIC and transaction types (see [DDIC and `TRAN`](#ddic-and-tran-types)). |
 | `token` | Write tools are listed. A simulate returns a `plan_token`; a write runs only with that token. |
 | `confirm` | Write tools are listed. Every write also needs a human answer through an elicitation form. |
 
@@ -147,6 +147,8 @@ Read tools (always listed):
 - `abap_inactive`: lists the inactive objects of the logon user, same as `inactive`. Argument `all`
   (boolean) asks for every user's entries. The result carries `objects` (`type`, `name`, `user`, `main`)
   and `count`.
+- `abap_sql`, `abap_search`, `abap_where_used`, `abap_dumps`, `abap_dump`, `abap_ping`: the read tools of
+  0.18.0, same as `sql`, `search`, `where-used`, `dumps`, `dump` and `ping`: see [New read tools (0.18.0)](#new-read-tools-0180).
 
 Write tools (listed only when `mcp_write` is `token` or `confirm`):
 
@@ -300,21 +302,74 @@ SAProuter string is refused over MCP, although it holds no secret. Use the CLI f
 
 ### New read tools (0.18.0)
 
-0.18.0 adds six read tools, one for each new command of the CLI. They are always listed, also under
-`mcp_write: off`, and they run with the same guards as the command.
+0.18.0 adds six read tools, one for each new command of the CLI that has an MCP tool. They are always listed, also under `mcp_write: off`, and they run
+the operation of the command, so every guard of the command applies.
 
 | Tool | Same as | Arguments |
 | :--- | :--- | :--- |
-| `abap_sql` | `sql` | TODO(T10a) |
-| `abap_search` | `search` | TODO(T10a) |
-| `abap_where_used` | `where-used` | TODO(T10a) |
-| `abap_dumps` | `dumps` | TODO(T10a) |
-| `abap_dump` | `dump` | TODO(T10a) |
-| `abap_ping` | `ping` | TODO(T10a) |
+| `abap_sql` | `sql` | `conn`, `query` (required); `rows` (default 100, maximum 1000) |
+| `abap_search` | `search` | `conn`, `pattern` (required); `type`; `max` (default 50, 1 to 1000) |
+| `abap_where_used` | `where-used` | `conn`, `type`, `name` (required); `max` (default 200, 1 to 5000) |
+| `abap_dumps` | `dumps` | `conn` (required); `date` (`YYYYMMDD`); `user`; `all` (boolean); `rows` (default 20, 1 to 1000) |
+| `abap_dump` | `dump` | `conn`, `id` (required); `all` (boolean) |
+| `abap_ping` | `ping` | `conn` (required) |
 
-`abap_sql`, `abap_dumps` and `abap_dump` honor `read_table_denied`. There is no new policy key.
-`abap_dumps` and `abap_dump` take the same `all` argument as `--all` on the CLI. The command
-descriptions are in [Getting started](getting-started.md#run-sql-with-joins).
+The text of a result is what the command prints. The structured result carries the same data:
+
+| Tool | Structured result |
+| :--- | :--- |
+| `abap_sql` | `columns`, `rows`, `row_count`, `truncated`, `omitted`, as `abap_read_table` |
+| `abap_search` | `count` and `objects` (`type`, `name`, `package`, `description`) |
+| `abap_where_used` | `count` and `used_by` (`type`, `name`, `package`, `via`) |
+| `abap_dumps` | `count` and `dumps` (`date`, `time`, `user`, `client`, `error`, `program`, `include`, `line`, `id`) |
+| `abap_dump` | `error`, `program`, `include`, `line`, `user`, `client`, `short_text` (lines) and `source` (lines) |
+| `abap_ping` | `backend`, `instance`, `instance_unknown`, `system_id`, `release`, `kernel`, `database`, `os`, `round_trip_ms`, `includes_logon` |
+
+The text and the structured result are made from the same rows, so `count` is the number of lines of
+the text. Read the fields, not the text: a name can hold a space (`Z AUTH DEFAULT`) and a dump value
+can look like a field (`user=X`). A package, a user, a client or a tag that is not known is `null`
+(`package=?` in the text). A row that cannot be used is left out with a `W:` line, never silently.
+`W:` lines of the command are in `notes`. Like the other read tools, none of them takes a `backend`
+argument.
+
+Rules:
+
+- `abap_sql`, `abap_dumps` and `abap_dump` honor `read_table_denied` through the same code as the CLI:
+  `STOP: table USR02 is on the read_table_denied list`, also for a join, and `SNAP` on the list stops
+  `abap_dumps` and `abap_dump`. There is no new policy key.
+- `abap_dumps` lists the dumps of the logon user. `all` lists every user's dumps and `user` names one
+  user; both together are `STOP: --all and --user cannot be used together`. `abap_dump` of another
+  user's dump needs `all` (`STOP: the dump belongs to user ..., not to the logon user; a dump of another
+  user needs --all`). `all` is a display filter, not an access boundary: see
+  [Getting started](getting-started.md#short-dumps).
+- The messages name the CLI flags (`--all`, `--user`, `--date`, `--max`). Each flag maps to the
+  argument of the same name without the leading `--` (`--all` is `all`).
+- An argument the tool does not know is ignored, as with the other read tools.
+- A refusal (`STOP`, exit 2 on the CLI) and a rejection (`REJECTED`, exit 1) are an error result with
+  the text of the CLI.
+- A result that holds a configured secret is replaced by `REJECTED: payload contains a configured secret`.
+  A dump can hold variable values, so this applies to `abap_dump` and to every other tool above. For
+  `abap_sql` every cell is checked as SAP sent it, also the rows past the 1 MiB output cut.
+- The text of a table result (`abap_sql`, `abap_read_table`) replaces a tab, a CR and an LF inside a
+  value with a space, so that a row stays a line. The structured `rows` keep the raw value.
+- Every result of a read tool passes the secret scrub of its connection once more before it leaves
+  the server: an error, which can quote what the client sent, loses the password, the route and its
+  hosts in the text and in the structured message, in any letter case.
+- `abap_ping` takes only `conn` and runs the reading of `ping`. It prints the instance name in clear,
+  host included, as the CLI does; only `doctor` masks the host. On a release without
+  `/system/information` (HTTP 404, or HTTP 406) the result is not an error: `instance` is `null` and
+  `instance_unknown` holds the fixed reason (`no /system/information on this release` or `HTTP 406`).
+  Every value is scrubbed of the password and the route before it is cut, and the result passes the
+  scrub of the connection like every read tool.
+- A `conn` that names no configured system and client is refused with a fixed text,
+  `STOP: unknown connection id; use <SID>_<client> of a configured system and client`, which does
+  not quote the value. This holds for every MCP tool; the CLI names the id, since the user typed it.
+- These tools give the same access as `read-table`: with the logon user's authorizations, the rows
+  of every table that is not on `read_table_denied`. `SNAP` is not on the default list, so
+  `abap_dumps`, `abap_dump` and `abap_sql` read the dumps of every user, and a dump can hold variable
+  values. On a system where those values are sensitive, add `SNAP` to `read_table_denied`.
+
+The command descriptions are in [Getting started](getting-started.md#run-sql-with-joins).
 
 ## Trust boundaries
 

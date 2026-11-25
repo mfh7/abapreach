@@ -8,6 +8,7 @@ mod replay;
 use abapreach::backend::{BackendKind, Selection, SelectionReason};
 use abapreach::cli::{CreateKind, Subc};
 use abapreach::config::Connection;
+use abapreach::domain::Origin;
 use abapreach::fault::{Fault, Target};
 use abapreach::operation::create::{CreateInput, CreateProg, program_creation_body};
 use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeploySource};
@@ -419,6 +420,7 @@ fn clas_create() -> CreateInput {
         simulate: false,
         subc: Subc::Program,
         source: None,
+        origin: Origin::Cli,
     }
 }
 
@@ -503,6 +505,7 @@ fn include_create() -> CreateInput {
         simulate: false,
         subc: Subc::Include,
         source: None,
+        origin: Origin::Cli,
     }
 }
 

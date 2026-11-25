@@ -535,6 +535,20 @@ impl Config {
         }))
     }
 
+    /// Whether `connection_id` names a configured system and one of its clients. It reads no
+    /// credential, so a caller that must not echo a bad id can test before it resolves.
+    pub fn is_configured(&self, connection_id: &str) -> bool {
+        Self::parse_id(connection_id).is_ok_and(|(system_id, client)| {
+            self.servers.iter().any(|server| {
+                server.system_id == system_id
+                    && server
+                        .clients
+                        .iter()
+                        .any(|configured| configured == &client)
+            })
+        })
+    }
+
     pub fn parse_id(connection_id: &str) -> Result<(String, String), String> {
         let (system_id, client) = connection_id
             .rsplit_once('_')

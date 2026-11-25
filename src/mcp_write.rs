@@ -13,7 +13,7 @@ use crate::app::{
 use crate::backend::{BackendKind, Failure, OperationKind, Selection, SelectionReason};
 use crate::cli::{CreateKind, DeleteKind, DeleteTarget, IncludeKind, ObjectKind, Subc, TypeArg};
 use crate::config::{Connection, scrub};
-use crate::domain::{Outcome, Status};
+use crate::domain::{Origin, Outcome, Status};
 use crate::edit::{EditPlan, edits_sha256, parse_edits};
 use crate::extension::{
     CreateRequest, ExtensionDelete, ExtensionKind, ExtensionOp, ExtensionOptions, MixedDelete,
@@ -667,6 +667,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             .main(main)
             .expected_main(expected_main)
             .guard_secrets(true)
+            .origin(Origin::Mcp)
             .expected_result(
                 stored
                     .as_ref()
@@ -948,6 +949,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                     simulate: !execute,
                     subc: subc.unwrap_or(Subc::Program),
                     source: None,
+                    origin: Origin::Mcp,
                 };
 
                 route(

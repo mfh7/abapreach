@@ -20,7 +20,7 @@ use crate::operation::read_table::{
     CLI_MAX_ROWS, Query as PreviewQuery, ReadTableRequest, TableData, fetch, identifier,
 };
 use crate::operation::search::TYPES;
-use crate::operation::text::is_dropped;
+use crate::operation::text::squeeze;
 use crate::policy::Policies;
 use crate::transport::{Request, Response, SadtTransport, TransportError};
 use std::cell::Cell;
@@ -239,13 +239,17 @@ fn check_plain_name(kind: Kind, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// One printed line before its text: where a user was found.
+/// One using object and where it was found. The fields are cleaned as the printed line shows
+/// them (see [`merged`]); a name or type may hold a space, so a program reads the fields and not
+/// the line.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct Hit {
-    kind: String,
-    name: String,
-    via: String,
-    package: Option<String>,
+pub struct Hit {
+    pub kind: String,
+    pub name: String,
+    /// `ADT`, or the cross-reference table that listed it.
+    pub via: String,
+    /// `None` where no package is known (printed as `?`).
+    pub package: Option<String>,
 }
 
 impl Hit {
@@ -274,8 +278,46 @@ enum Usage {
     Unavailable(u16),
 }
 
-/// The `where-used` command: one line per using object, then `WHERE-USED: <n>`. The lines are
-/// sorted and each is printed once; `--max` cuts the list after sorting, with a warning.
+/// What a `where-used` found: the using objects, sorted and each once, and the warnings. The
+/// printed text and any other view are made from these hits, so they cannot disagree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Listing {
+    pub hits: Vec<Hit>,
+    pub warnings: Vec<String>,
+}
+
+impl Listing {
+    /// One line per using object, then `WHERE-USED: <n>`.
+    pub fn text(&self) -> String {
+        let mut lines: Vec<String> = self.hits.iter().map(line).collect();
+
+        lines.push(format!("WHERE-USED: {}", self.hits.len()));
+
+        lines.join("\n")
+    }
+
+    /// The outcome the command prints.
+    pub fn outcome(&self) -> Outcome {
+        Outcome {
+            status: None,
+            exit: 0,
+            stdout: self.text(),
+            stderr: self.warnings.join("\n"),
+        }
+    }
+}
+
+/// The `where-used` command: the using objects, sorted and each once; `--max` cuts the list after
+/// sorting, with a warning.
+pub fn list(
+    transport: &mut dyn SadtTransport,
+    query: &Query,
+    policies: &Policies,
+) -> Result<Listing, PreviewError> {
+    list_within(transport, query, policies, REQUEST_BUDGET)
+}
+
+/// The `where-used` command as the CLI prints it.
 pub fn run(
     transport: &mut dyn SadtTransport,
     query: &Query,
@@ -334,6 +376,16 @@ pub fn run_within(
     policies: &Policies,
     limit: usize,
 ) -> Result<Outcome, PreviewError> {
+    list_within(transport, query, policies, limit).map(|listing| listing.outcome())
+}
+
+/// [`list`] with another request budget.
+pub fn list_within(
+    transport: &mut dyn SadtTransport,
+    query: &Query,
+    policies: &Policies,
+    limit: usize,
+) -> Result<Listing, PreviewError> {
     let budget = Budget {
         used: Rc::new(Cell::new(0)),
         exceeded: Rc::new(Cell::new(false)),
@@ -359,7 +411,7 @@ fn run_counted(
     query: &Query,
     policies: &Policies,
     budget: &Budget,
-) -> Result<Outcome, PreviewError> {
+) -> Result<Listing, PreviewError> {
     let mut warnings = Vec::new();
     let mut route = route_of(transport, query, &mut warnings)?;
     let mut hits = None;
@@ -385,7 +437,16 @@ fn run_counted(
             cross_reference_hits(&mut tables, query)?
         }
     };
-    let mut hits = merged(hits);
+    let (mut hits, nameless) = merged(hits);
+
+    if nameless > 0 {
+        warnings.push(format!(
+            "W: {nameless} {} without a usable name {} left out",
+            if nameless == 1 { "object" } else { "objects" },
+            if nameless == 1 { "was" } else { "were" }
+        ));
+    }
+
     let found = hits.len();
     let max = usize::try_from(query.max).unwrap_or(usize::MAX);
 
@@ -407,21 +468,12 @@ fn run_counted(
         if let Some(error) = failure {
             warnings.push(format!(
                 "W: the packages could not be read ({}); package=?",
-                clean(&reason(&error))
+                squeeze(&reason(&error))
             ));
         }
     }
 
-    let mut lines: Vec<String> = hits.iter().map(line).collect();
-
-    lines.push(format!("WHERE-USED: {}", hits.len()));
-
-    Ok(Outcome {
-        status: None,
-        exit: 0,
-        stdout: lines.join("\n"),
-        stderr: warnings.join("\n"),
-    })
+    Ok(Listing { hits, warnings })
 }
 
 /// The hits sorted, each (type, name, table) once; of repeats that differ only in the package, the
@@ -429,21 +481,25 @@ fn run_counted(
 ///
 /// The fields are cleaned first, because the printed text is what makes two hits the same: `ZA`
 /// and `Z` + a zero-width space + `A` print one line and count once. A hit left without a name is
-/// dropped.
-fn merged(hits: Vec<Hit>) -> Vec<Hit> {
+/// left out, and the run says so.
+fn merged(hits: Vec<Hit>) -> (Vec<Hit>, usize) {
     let mut hits: Vec<Hit> = hits
         .into_iter()
         .map(|hit| Hit {
-            kind: clean(&hit.kind),
-            name: clean(&hit.name),
-            via: clean(&hit.via),
+            kind: squeeze(&hit.kind),
+            name: squeeze(&hit.name),
+            via: squeeze(&hit.via),
             package: hit
                 .package
-                .map(|package| clean(&package))
+                .map(|package| squeeze(&package))
                 .filter(|package| !package.is_empty()),
         })
-        .filter(|hit| !hit.name.is_empty())
         .collect();
+    let all = hits.len();
+
+    hits.retain(|hit| !hit.name.is_empty());
+
+    let nameless = all - hits.len();
 
     hits.sort();
 
@@ -460,18 +516,7 @@ fn merged(hits: Vec<Hit>) -> Vec<Hit> {
         }
     }
 
-    kept
-}
-
-/// A field of a printed line keeps neither a control character nor a Unicode format character,
-/// and whitespace inside it becomes a single space, so a line stays a line.
-fn clean(text: &str) -> String {
-    text.chars()
-        .filter(|character| character.is_whitespace() || !is_dropped(*character))
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    (kept, nameless)
 }
 
 fn reason(error: &PreviewError) -> String {
@@ -483,14 +528,14 @@ fn reason(error: &PreviewError) -> String {
 
 /// `USED-BY <TYPE> <NAME> package=<P> via=<ADT|table>`.
 fn line(hit: &Hit) -> String {
-    let package = clean(hit.package.as_deref().unwrap_or_default());
+    let package = squeeze(hit.package.as_deref().unwrap_or_default());
     let package = if package.is_empty() { "?" } else { &package };
 
     format!(
         "USED-BY {} {} package={package} via={}",
-        clean(&hit.kind),
-        clean(&hit.name),
-        clean(&hit.via)
+        squeeze(&hit.kind),
+        squeeze(&hit.name),
+        squeeze(&hit.via)
     )
 }
 
@@ -584,7 +629,7 @@ fn discovery_hrefs(transport: &mut dyn SadtTransport) -> Result<Vec<String>, Pre
         discovery_collections(&String::from_utf8_lossy(&response.body)).map_err(|message| {
             PreviewError::Rejected(format!(
                 "cannot read the ADT discovery: {}",
-                clean(&message)
+                squeeze(&message)
             ))
         })?;
 
@@ -670,7 +715,7 @@ fn adt_hits(
         parse_usage_objects(&String::from_utf8_lossy(&response.body)).map_err(|message| {
             PreviewError::Rejected(format!(
                 "cannot read the where-used reply: {}",
-                clean(&message)
+                squeeze(&message)
             ))
         })?;
 
@@ -1105,7 +1150,7 @@ fn fill_packages(tables: &mut Tables<'_>, hits: &mut [Hit]) -> Result<(), Previe
     for hit in hits {
         hit.package = packages
             .get(&(hit.kind.clone(), hit.name.clone()))
-            .cloned()
+            .map(|package| squeeze(package))
             .filter(|package| !package.is_empty());
     }
 

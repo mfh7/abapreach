@@ -187,6 +187,30 @@ fn minus_tran(old: &str) -> String {
     text
 }
 
+/// The tools that only read, by name: the hints are checked against this list, not against the
+/// list the server derives its own behavior from.
+const READ_ONLY_TOOLS: [&str; 8] = [
+    "abap_read_table",
+    "abap_inactive",
+    "abap_sql",
+    "abap_search",
+    "abap_where_used",
+    "abap_dumps",
+    "abap_dump",
+    "abap_ping",
+];
+/// The tools that write, by name. `abap_read_source` is neither: it can create a temporary class.
+const WRITE_TOOLS_LISTED: [&str; 8] = [
+    "abap_simulate",
+    "abap_deploy",
+    "abap_create_simulate",
+    "abap_create",
+    "abap_delete_simulate",
+    "abap_delete",
+    "abap_activate_simulate",
+    "abap_activate",
+];
+
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
 
@@ -262,7 +286,12 @@ fn the_mcp_tool_list_is_the_golden_schema_of_the_m6_contract() {
 
         assert_eq!(
             tool["annotations"]["readOnlyHint"],
-            name == "abap_read_table" || name == "abap_inactive",
+            READ_ONLY_TOOLS.contains(&name),
+            "{name}"
+        );
+        assert_eq!(
+            tool["annotations"]["destructiveHint"],
+            WRITE_TOOLS_LISTED.contains(&name),
             "{name}"
         );
     }

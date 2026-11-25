@@ -61,9 +61,18 @@ internal repository where that implementation was developed. See the
 - `ping [--backend adt|rfc]` shows the system, the application server instance that answered and the
   round trip time, from `/system/information` over ADT HTTP and `RFC_SYSTEM_INFO` over RFC. On the
   7.40 system, which has no `/system/information`, the instance is `unknown` over ADT HTTP and the
-  exit code is 0. `doctor` prints the same `instance ...` line.
-- MCP read tools `abap_sql`, `abap_search`, `abap_where_used`, `abap_dumps`, `abap_dump` and
-  `abap_ping` (arguments: TODO(T10a)).
+  exit code is 0. `ping` prints the instance name in clear, as SAP reports it. `doctor` prints the same
+  reading with the host masked: `instance ***_<SID>_<NN>`, or `instance ***` for a name of another shape.
+  An instance that cannot be shown gives `instance unknown (<reason>)`, where the reason is one of a
+  fixed set of categories (never error text).
+- MCP read tools `abap_sql` (`conn`, `query`, `rows`), `abap_search` (`conn`, `pattern`, `type`, `max`),
+  `abap_where_used` (`conn`, `type`, `name`, `max`), `abap_dumps` (`conn`, `date`, `user`, `all`, `rows`)
+  and `abap_dump` (`conn`, `id`, `all`). They are listed under `mcp_write: off`, honor
+  `read_table_denied` as the commands do, and replace a result that holds a configured secret with
+  `REJECTED: payload contains a configured secret`.
+- MCP read tool `abap_ping` (`conn`): the same reading as `ping`, with the instance name in clear.
+  The structured result has `backend`, `instance`, `instance_unknown`, `system_id`, `release`,
+  `kernel`, `database`, `os`, `round_trip_ms` and `includes_logon`. It is listed under `mcp_write: off`.
 - RFC admission: exact shapes for the freestyle data preview, the object search, the where-used
   search and `/system/information`; each refuses a broader shape. The search shape is also the one
   the function group lookup and the `doctor` leftover search use. The RFC transports gain typed
@@ -81,6 +90,21 @@ internal repository where that implementation was developed. See the
   comes before any base check, edit, diff or hash, and the re-read under the lock is guarded the same
   way. A source that holds the same literal as a router host fragment is refused over MCP too; use
   the CLI for it. The CLI is unchanged.
+- An MCP `abap_deploy` of a full source whose live source moved since the simulation stops with
+  `STOP: live changed since your read: base does not match`, the text of a deploy by edits, instead of
+  naming `--base` and the live hash. The CLI text is unchanged.
+- The same applies to an MCP deploy of a DDIC type (`abap_deploy` with an XML source).
+- `abap_read_table` checks every cell for a configured secret as SAP sent it, including the rows past
+  the 1 MiB output cut; a secret in a row that was cut from the text now gives
+  `REJECTED: payload contains a configured secret`.
+- An MCP call with a `conn` that names no configured system and client gets
+  `STOP: unknown connection id; use <SID>_<client> of a configured system and client` and no longer
+  has its value quoted back. The CLI text is unchanged.
+- Every result of an MCP read tool, an argument error included, is scrubbed of the secrets of the
+  connection at one place before it is returned. `dumps` and `dump` drop Unicode format characters
+  from every field, as `search` and `where-used` do.
+- `search` and `where-used` print a `W:` line when objects without a usable name were left out, and
+  `dumps` prints `-` for an empty user or client.
 
 ### Fixed
 - `read-table` no longer reads a DDIC view over a table on the `read_table_denied` list: the deny

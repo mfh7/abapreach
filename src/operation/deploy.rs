@@ -6,7 +6,7 @@ use crate::adt::{
 use crate::backend::{Failure, Selection, SelectionReason};
 use crate::cli::{IncludeKind, ObjectKind};
 use crate::config::{Connection, tls_warning};
-use crate::domain::{Outcome, Status};
+use crate::domain::{Origin, Outcome, Status};
 use crate::edit::{EditPlan, apply_edits};
 use crate::hash::{normalize, source_hash};
 use crate::object::{check_deploy_source, check_request, context_uri};
@@ -85,6 +85,8 @@ pub struct DeployScope {
     /// shows only the lines around a change) would all tell something about text the client was
     /// never allowed to read. The CLI prints sources as they are.
     pub guard_secrets: bool,
+    /// Who runs the deploy: it decides how a stop names the base and the hashes.
+    pub origin: Origin,
 }
 
 impl DeployScope {
@@ -99,7 +101,14 @@ impl DeployScope {
             expected_main: None,
             expected_result: None,
             guard_secrets: false,
+            origin: Origin::Cli,
         }
+    }
+
+    pub fn origin(mut self, origin: Origin) -> Self {
+        self.origin = origin;
+
+        self
     }
 
     pub fn cancel_before_lock(mut self, stop: bool) -> Self {
@@ -530,6 +539,7 @@ impl DeployProg {
             include_main: None,
             expected_result: scope.expected_result,
             secret_guard: connection.filter(|_| scope.guard_secrets).cloned(),
+            origin: scope.origin,
             secret_rejected: false,
             result_hash: None,
         };
@@ -909,6 +919,7 @@ struct Run<'a> {
     /// The connection whose secrets an MCP deploy (full source or edits) must not reveal; set only
     /// for the MCP.
     secret_guard: Option<Connection>,
+    origin: Origin,
     secret_rejected: bool,
     /// The hash of the full source this run would write.
     result_hash: Option<String>,
@@ -999,9 +1010,10 @@ impl Run<'_> {
             return Err(Finish::stop("payload contains a configured secret"));
         }
 
-        // The CLI names its flag and shows the hashes. A deploy by edits is an MCP call whose
-        // client never saw the live hash of a source it may not read in full, so its text carries
-        // neither hash.
+        // The CLI names its flag and shows the hashes. An MCP call (edits, or the execute of a full
+        // source whose base is the one its simulation saw) has no `--base` flag, and its client
+        // may not read the source in full, so its text names neither the flag nor a hash.
+        let mcp = self.origin == Origin::Mcp;
         let edit_base = match &input.source {
             DeploySource::Edits(plan) => Some(&plan.base),
             DeploySource::Full(_) => None,
@@ -1009,7 +1021,7 @@ impl Run<'_> {
 
         for base in input.base.iter().chain(edit_base) {
             if *base != live_hash {
-                return Err(Finish::stop(if edit_base.is_some() {
+                return Err(Finish::stop(if edit_base.is_some() || mcp {
                     "live changed since your read: base does not match".to_owned()
                 } else {
                     format!("live changed: live hash {live_hash} != --base {base}")
@@ -1670,7 +1682,7 @@ impl Run<'_> {
 
         if reread != live_hash {
             // The MCP never shows a live hash of a source its client may not read in full.
-            return Locked::Finished(Finish::stop(if self.secret_guard.is_some() {
+            return Locked::Finished(Finish::stop(if self.origin == Origin::Mcp {
                 "live changed since initial read".to_owned()
             } else {
                 format!("live changed since initial read: live hash {reread} != {live_hash}")

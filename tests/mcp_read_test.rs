@@ -18,6 +18,18 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::rc::Rc;
 
+/// The tools that only read, by name: the hints are checked against this list, not against the
+/// list the server derives its own behavior from.
+const READ_ONLY_TOOLS: [&str; 8] = [
+    "abap_read_table",
+    "abap_inactive",
+    "abap_sql",
+    "abap_search",
+    "abap_where_used",
+    "abap_dumps",
+    "abap_dump",
+    "abap_ping",
+];
 const PASSWORD: &str = "secret-pw";
 const HOST: &str = "example.com";
 
@@ -534,7 +546,9 @@ fn the_read_tools_say_their_results_are_untrusted_and_are_read_only() {
         // `abap_read_source` creates a temporary class for a DDIC or transaction type (M6).
         assert_eq!(
             tool["annotations"]["readOnlyHint"],
-            tool["name"] == "abap_read_table" || tool["name"] == "abap_inactive"
+            tool["name"]
+                .as_str()
+                .is_some_and(|name| READ_ONLY_TOOLS.contains(&name))
         );
     }
 }

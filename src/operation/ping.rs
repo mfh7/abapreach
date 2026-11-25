@@ -204,6 +204,20 @@ impl SystemFacts {
     }
 }
 
+/// A reading with the backend that answered it: what `ping` prints and what the MCP tool returns.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Pinged {
+    pub backend: BackendKind,
+    pub reading: Reading,
+}
+
+impl Pinged {
+    /// The text of `ping`.
+    pub fn text(&self) -> String {
+        self.reading.outcome(self.backend).stdout
+    }
+}
+
 /// One answered reading: the facts and the time of the call that fetched them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Reading {

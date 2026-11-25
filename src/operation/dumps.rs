@@ -17,6 +17,7 @@ use crate::operation::read::{ReadProg, ReadTarget};
 use crate::operation::read_table::{
     CLI_MAX_ROWS, Query, ReadTable, ReadTableRequest, TableData, identifier,
 };
+use crate::operation::text::is_dropped;
 use crate::policy::Policies;
 use crate::transport::{SadtTransport, TableCall, TransportError};
 use std::collections::BTreeMap;
@@ -117,21 +118,29 @@ fn first(tags: &[Tag], id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A value of a dump as it is printed and returned: a control character is a space, and every
+/// other character no printed field keeps (a Unicode format character such as a bidi override, see
+/// `text::is_dropped`) is removed, so that a dump value cannot reorder or hide the text around it.
 fn clean(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .filter_map(|c| {
+            if c.is_control() {
+                Some(' ')
+            } else if is_dropped(c) {
+                None
+            } else {
+                Some(c)
+            }
+        })
         .collect::<String>()
         .trim_end()
         .to_owned()
 }
 
-fn or_dash(value: String) -> String {
-    if value.is_empty() {
-        "-".to_owned()
-    } else {
-        value
-    }
+/// A value the dump holds: `None` for an empty one.
+fn some(value: String) -> Option<String> {
+    (!value.is_empty()).then_some(value)
 }
 
 // ---- dates ------------------------------------------------------------------------------------
@@ -240,11 +249,90 @@ pub struct ListQuery {
     user: Option<String>,
 }
 
-/// What `dumps` prints: the lines, and a warning for the stderr when rows had to be dropped.
+/// One dump of the list. A field the dump does not hold is `None` (printed as `-`); a value may
+/// hold a space or `=`, so a program reads these fields and not the printed line.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DumpRow {
+    pub date: Option<String>,
+    pub time: Option<String>,
+    pub user: Option<String>,
+    pub client: Option<String>,
+    pub error: Option<String>,
+    pub program: Option<String>,
+    pub include: Option<String>,
+    pub line: Option<String>,
+    /// The id `dump` takes; `None` for a row it would refuse (printed as `unusable`).
+    pub id: Option<String>,
+}
+
+impl DumpRow {
+    /// `DATUM UZEIT UNAME MANDT error= program= include= line= id=`.
+    pub fn line(&self) -> String {
+        let shown = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".to_owned());
+
+        format!(
+            "{} {} {} {} error={} program={} include={} line={} id={}",
+            shown(&self.date),
+            shown(&self.time),
+            shown(&self.user),
+            shown(&self.client),
+            shown(&self.error),
+            shown(&self.program),
+            shown(&self.include),
+            shown(&self.line),
+            self.id.as_deref().unwrap_or("unusable"),
+        )
+    }
+}
+
+/// What `dumps` found: the dumps, the lines printed from them, and a warning for the stderr when
+/// rows had to be dropped. `text` is made from `rows`, so the two cannot disagree.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Listing {
+    pub rows: Vec<DumpRow>,
     pub text: String,
     pub warning: Option<String>,
+}
+
+/// One dump as `dump` shows it. The short text and the source lines are printed as they are; a
+/// line of either can look like anything, so they stay separate from the fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Dump {
+    pub error: Option<String>,
+    pub program: Option<String>,
+    pub include: Option<String>,
+    pub line: Option<String>,
+    pub user: String,
+    pub client: Option<String>,
+    /// `None` where the release has no text for the error.
+    pub short_text: Option<Vec<String>>,
+    /// The lines printed after the short text: the header and the lines of the source around the
+    /// failing line, or the note why it was not read; empty when nothing is shown.
+    pub source: Vec<String>,
+}
+
+impl Dump {
+    /// The text `dump` prints.
+    pub fn text(&self) -> String {
+        let shown = |value: &Option<String>| value.clone().unwrap_or_else(|| "-".to_owned());
+        let mut out = vec![
+            format!("error: {}", shown(&self.error)),
+            format!("program: {}", shown(&self.program)),
+            format!("include: {}", shown(&self.include)),
+            format!("line: {}", shown(&self.line)),
+            format!("user: {}", self.user),
+            format!("client: {}", shown(&self.client)),
+        ];
+
+        if let Some(text) = &self.short_text {
+            out.push("short text:".to_owned());
+            out.extend(text.iter().cloned());
+        }
+
+        out.extend(self.source.iter().cloned());
+
+        out.join("\n")
+    }
 }
 
 impl ListQuery {
@@ -560,12 +648,12 @@ pub fn run_list(
         key(b).cmp(&key(a))
     });
 
-    let lines: Vec<String> = rows
+    let rows: Vec<DumpRow> = rows
         .iter()
         .take(query.rows as usize)
         .map(|row| {
             let raw = |index: usize| row[index].trim();
-            let shown = |index: usize| clean(raw(index));
+            let shown = |index: usize| some(clean(raw(index)));
             let tags = decode_tags(&format!("{:<FLIST_WIDTH$}", row[flist]));
             // `dump` takes only an id it can parse, so a row it would refuse says so.
             let id = DumpId::parse(&format!(
@@ -576,28 +664,34 @@ pub fn run_list(
                 raw(user),
                 raw(modno)
             ))
-            .map_or_else(|_| "unusable".to_owned(), |id| id.render());
+            .ok()
+            .map(|id| id.render());
 
-            format!(
-                "{} {} {} {} error={} program={} include={} line={} id={id}",
-                shown(date),
-                shown(time),
-                shown(user),
-                shown(client),
-                or_dash(first(&tags, "FC")),
-                or_dash(first(&tags, "AP")),
-                or_dash(first(&tags, "AI")),
-                or_dash(first(&tags, "AL")),
-            )
+            DumpRow {
+                date: shown(date),
+                time: shown(time),
+                user: shown(user),
+                client: shown(client),
+                error: some(first(&tags, "FC")),
+                program: some(first(&tags, "AP")),
+                include: some(first(&tags, "AI")),
+                line: some(first(&tags, "AL")),
+                id,
+            }
         })
         .collect();
+    let text = if rows.is_empty() {
+        "(no dumps)".to_owned()
+    } else {
+        rows.iter()
+            .map(DumpRow::line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
     Ok(Listing {
-        text: if lines.is_empty() {
-            "(no dumps)".to_owned()
-        } else {
-            lines.join("\n")
-        },
+        rows,
+        text,
         warning,
     })
 }
@@ -677,6 +771,17 @@ pub fn run_dump(
     policies: &Policies,
     language: &str,
 ) -> Result<String, PreviewError> {
+    read_dump(transport, backend, query, policies, language).map(|dump| dump.text())
+}
+
+/// The dump of the query: its fields, the short text and the source around the failing line.
+pub fn read_dump(
+    transport: &mut dyn SadtTransport,
+    backend: BackendKind,
+    query: &DumpQuery,
+    policies: &Policies,
+    language: &str,
+) -> Result<Dump, PreviewError> {
     let mut groups: Vec<Vec<&str>> = vec![vec!["SEQNO", "MANDT", "FLIST"]];
 
     groups.extend(FLIST_FIELDS[1..].iter().map(|field| vec!["SEQNO", *field]));
@@ -705,28 +810,26 @@ pub fn run_dump(
     let error = first(&tags, "FC");
     let include = first(&tags, "AI");
     let line = first(&tags, "AL");
-    let mut out = vec![
-        format!("error: {}", or_dash(error.clone())),
-        format!("program: {}", or_dash(first(&tags, "AP"))),
-        format!("include: {}", or_dash(include.clone())),
-        format!("line: {}", or_dash(line.clone())),
-        format!("user: {}", query.id.user()),
-        format!("client: {}", or_dash(clean(&rows.client))),
-    ];
-
-    if let Some(text) = short_text(transport, backend, policies, &error, language) {
-        out.push("short text:".to_owned());
-        out.extend(text);
-    }
-
-    if !include.is_empty()
+    let short_text = short_text(transport, backend, policies, &error, language);
+    let source = if !include.is_empty()
         && let Ok(at) = line.parse::<usize>()
         && at > 0
     {
-        out.extend(source_excerpt(transport, &include, at));
-    }
+        source_excerpt(transport, &include, at)
+    } else {
+        Vec::new()
+    };
 
-    Ok(out.join("\n"))
+    Ok(Dump {
+        error: some(error),
+        program: some(first(&tags, "AP")),
+        include: some(include),
+        line: some(line),
+        user: query.id.user().to_owned(),
+        client: some(clean(&rows.client)),
+        short_text,
+        source,
+    })
 }
 
 /// The SAP language key of an ISO language code: the one-character key `SNAPT` holds.
