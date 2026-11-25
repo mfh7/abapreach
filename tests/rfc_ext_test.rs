@@ -21,9 +21,10 @@ static DESTROYS: AtomicU32 = AtomicU32::new(0);
 static SETS: AtomicU32 = AtomicU32::new(0);
 static FAIL_CREATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static BODY: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
-// Which stage of RFC_SYSTEM_INFO fails: 1 invoke, 2 get structure, 3 get string of RFCSAPRL,
-// 4 get string of RFCHOST, 5 get string length of RFCKERNRL. 0 none.
+// Which stage of RFC_SYSTEM_INFO fails: 1 invoke, 2 get structure, 3 get chars of RFCSAPRL,
+// 4 get chars of RFCHOST. 0 none.
 static SYSINFO_FAIL: AtomicU32 = AtomicU32::new(0);
+static CHARS_GETS: AtomicU32 = AtomicU32::new(0);
 static STRING_GETS: AtomicU32 = AtomicU32::new(0);
 static STRING_LENGTHS: AtomicU32 = AtomicU32::new(0);
 static STRUCTURE_GETS: AtomicU32 = AtomicU32::new(0);
@@ -33,6 +34,7 @@ static STRUCTURE_GETS: AtomicU32 = AtomicU32::new(0);
 #[no_mangle] pub extern "C" fn fake_sets() -> u32 { SETS.load(Ordering::SeqCst) }
 #[no_mangle] pub extern "C" fn fake_fail_next_create() -> u32 { FAIL_CREATE.store(true, Ordering::SeqCst); 0 }
 #[no_mangle] pub extern "C" fn fake_sysinfo_fail(stage: u32) -> u32 { SYSINFO_FAIL.store(stage, Ordering::SeqCst); 0 }
+#[no_mangle] pub extern "C" fn fake_chars_gets() -> u32 { CHARS_GETS.load(Ordering::SeqCst) }
 #[no_mangle] pub extern "C" fn fake_string_gets() -> u32 { STRING_GETS.load(Ordering::SeqCst) }
 #[no_mangle] pub extern "C" fn fake_string_lengths() -> u32 { STRING_LENGTHS.load(Ordering::SeqCst) }
 #[no_mangle] pub extern "C" fn fake_structure_gets() -> u32 { STRUCTURE_GETS.load(Ordering::SeqCst) }
@@ -249,15 +251,9 @@ pub unsafe extern "C" fn RfcSetXString(_: *mut c_void, _: *const c_void, value: 
 #[no_mangle]
 pub unsafe extern "C" fn RfcGetStringLength(container: *mut c_void, name: *const c_void, length: *mut c_uint, info: *mut c_void) -> c_int {
     if at(container).function == FN_SYSINFO {
+        // The RFCSI_EXPORT fields are CHAR: the SDK refuses a string read of one with code 20.
         STRING_LENGTHS.fetch_add(1, Ordering::SeqCst);
-        let name = read(name);
-        if at(container).kind != 1 || (name == "RFCKERNRL" && SYSINFO_FAIL.load(Ordering::SeqCst) == 5) {
-            return fail(info, 20, "bad length container");
-        }
-        return match at(container).fields.get(&name) {
-            Some(Value::Text(text)) => { *length = text.chars().count() as c_uint; 0 }
-            _ => fail(info, 20, "bad length name"),
-        };
+        return fail(info, 20, "Field not of type STRING or XSTRING");
     }
     match read(name).as_str() {
         "STATUS_CODE" => { *length = 3; 0 }
@@ -270,20 +266,7 @@ pub unsafe extern "C" fn RfcGetStringLength(container: *mut c_void, name: *const
 pub unsafe extern "C" fn RfcGetString(container: *mut c_void, name: *const c_void, buffer: *mut c_void, size: c_uint, written: *mut c_uint, info: *mut c_void) -> c_int {
     if at(container).function == FN_SYSINFO {
         STRING_GETS.fetch_add(1, Ordering::SeqCst);
-        let name = read(name);
-        let stage = SYSINFO_FAIL.load(Ordering::SeqCst);
-        if at(container).kind != 1 || (name == "RFCSAPRL" && stage == 3) || (name == "RFCHOST" && stage == 4) {
-            return fail(info, 20, "bad get string");
-        }
-        let text = match at(container).fields.get(&name) {
-            Some(Value::Text(text)) => text.clone(),
-            _ => return fail(info, 20, "bad get string name"),
-        };
-        // The buffer is the length the library reported for this field, plus the terminator.
-        if size as usize != text.chars().count() + 1 { return fail(info, 13, "bad buffer size"); }
-        write(buffer, &text);
-        *written = text.chars().count() as c_uint;
-        return 0;
+        return fail(info, 20, "Field not of type STRING or XSTRING");
     }
     if read(name) != "STATUS_CODE" || size < 4 { return fail(info, 20, "bad get string"); }
     write(buffer, "200");
@@ -499,6 +482,18 @@ pub unsafe extern "C" fn RfcGetInt(container: *mut c_void, name: *const c_void, 
 #[no_mangle]
 pub unsafe extern "C" fn RfcGetChars(container: *mut c_void, name: *const c_void, buffer: *mut c_void, length: c_uint, info: *mut c_void) -> c_int {
     let name = read(name);
+    if at(container).function == FN_SYSINFO {
+        CHARS_GETS.fetch_add(1, Ordering::SeqCst);
+        let stage = SYSINFO_FAIL.load(Ordering::SeqCst);
+        if at(container).kind != 1 || (name == "RFCSAPRL" && stage == 3) || (name == "RFCHOST" && stage == 4) {
+            return fail(info, 20, "bad get chars");
+        }
+        // The buffer is exactly the width of the CHAR field.
+        match at(container).fields.get(&name) {
+            Some(Value::Text(text)) if text.chars().count() == length as usize => {}
+            _ => return fail(info, 13, "bad buffer size"),
+        }
+    }
     if name == "WA" && length != 512 { return fail(info, 13, "the data row is 512 characters wide"); }
     if name == "WA" && at(container).fail_read { return fail(info, 22, "conversion failure"); }
     let text = match at(container).fields.get(&name) {
@@ -1399,18 +1394,22 @@ fn the_system_info_call_names_the_function_and_the_structure_and_trims_the_field
         assert!(info.invoke_time.is_some(), "wide: {wide}");
         assert_eq!(fixture.counter(b"fake_creates\0"), 1, "wide: {wide}");
         assert_eq!(fixture.counter(b"fake_destroys\0"), 1, "wide: {wide}");
-        // One structure read, and each of the six fields sized once and read once.
+        // The call pattern: one structure read and each of the six CHAR fields read once with
+        // `RfcGetChars`. The fake refuses a string read of a CHAR field with code 20, as the
+        // SDK does, so a regression to `RfcGetString` fails here; the counters pin it too.
         assert_eq!(fixture.counter(b"fake_structure_gets\0"), 1, "wide: {wide}");
-        assert_eq!(fixture.counter(b"fake_string_lengths\0"), 6, "wide: {wide}");
-        assert_eq!(fixture.counter(b"fake_string_gets\0"), 6, "wide: {wide}");
+        assert_eq!(fixture.counter(b"fake_chars_gets\0"), 6, "wide: {wide}");
+        assert_eq!(fixture.counter(b"fake_string_lengths\0"), 0, "wide: {wide}");
+        assert_eq!(fixture.counter(b"fake_string_gets\0"), 0, "wide: {wide}");
         // No parameter was set: the call sends nothing of its own.
         assert_eq!(fixture.counter(b"fake_sets\0"), 0, "wide: {wide}");
     }
 }
 
 #[test]
-fn the_system_info_buffers_are_the_reported_length_plus_the_terminator_in_either_width() {
-    // The fake refuses a buffer of any other size, so a successful read is the proof; a second
+fn the_system_info_buffers_are_the_field_width_in_either_width() {
+    // The fake refuses a buffer of any other size than the field width, so a successful read is
+    // the proof; a second
     // call on the same connection reads the same values and keeps the handles balanced.
     for wide in WIDTHS {
         let mut fixture = Fixture::new(wide, &[]);
@@ -1430,12 +1429,11 @@ fn the_system_info_buffers_are_the_reported_length_plus_the_terminator_in_either
 #[test]
 fn a_system_info_call_that_fails_at_any_stage_is_an_error_and_leaves_no_function_behind() {
     for wide in WIDTHS {
-        // The invoke, the structure, a string read and a string length each fail on their own.
+        // The invoke, the structure and a character read each fail on their own.
         for (stage, needle) in [
             (1, "RfcInvoke: system info invoke failed"),
             (2, "RfcGetStructure"),
-            (3, "RfcGetString"),
-            (5, "RfcGetStringLength"),
+            (3, "RfcGetChars: bad get chars"),
         ] {
             let mut fixture = Fixture::new(wide, &[]);
 
@@ -1492,16 +1490,16 @@ fn a_host_that_cannot_be_read_only_drops_the_host() {
 }
 
 #[test]
-fn the_system_info_call_needs_no_optional_symbol() {
+fn a_library_without_rfc_get_chars_reports_it_before_the_invoke() {
     for wide in WIDTHS {
-        let all = RfcSymbols::optional_names();
-        let mut fixture = Fixture::new(wide, &all);
-        let info = fixture
-            .api
-            .system_info()
-            .unwrap_or_else(|error| panic!("wide {wide}: {error}"));
+        let mut fixture = Fixture::new(wide, &["RfcGetChars"]);
+        let error = fixture.api.system_info().unwrap_err();
 
-        assert_eq!(info.system_id, "HD1", "wide: {wide}");
+        assert!(
+            error.to_string().contains("RfcGetChars"),
+            "wide {wide}: {error}"
+        );
+        assert_eq!(fixture.counter(b"fake_chars_gets\0"), 0, "wide: {wide}");
         assert_clean(&fixture, &format!("wide {wide}"));
     }
 }

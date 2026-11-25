@@ -857,6 +857,17 @@ fn table_rows(result: &FunctionResult) -> Result<TableRows, TransportError> {
     Ok(TableRows { columns, rows })
 }
 
+/// The length in characters of an `RFCSI_EXPORT` field that [`SystemInfo`] reads, as `RFCSI`
+/// defines it. `RfcGetChars` needs the length of the field.
+fn system_info_field_chars(name: &str) -> usize {
+    match name {
+        "RFCDEST" => 32,
+        "RFCDBSYS" => 10,
+        "RFCHOST" | "RFCSYSID" => 8,
+        _ => 4,
+    }
+}
+
 /// The part of `RFCSI_EXPORT` that `ping` and `doctor` print, each field with trailing blanks
 /// dropped. `host` is the short application server host the library reports. It is never printed,
 /// and a failed read only leaves it empty.
@@ -2021,13 +2032,15 @@ impl DynamicRfcApi {
         Ok(function)
     }
 
-    /// Invokes `RFC_SYSTEM_INFO` and reads the character fields of `RFCSI_EXPORT`. It reads them
-    /// as strings, which every library of the loader exports, so no optional symbol is needed.
+    /// Invokes `RFC_SYSTEM_INFO` and reads the character fields of `RFCSI_EXPORT` with
+    /// `RfcGetChars`, an optional symbol: a library without it reports the missing names before
+    /// the invoke.
     fn read_system_info(
         &self,
         connection: RfcHandle,
         function: RfcHandle,
     ) -> Result<SystemInfo, TransportError> {
+        let symbols = self.loaded_symbols()?;
         let mut error = RfcErrorInfo::default();
         // The logon and the function description are done: only the invoke is timed.
         let started = std::time::Instant::now();
@@ -2040,10 +2053,22 @@ impl DynamicRfcApi {
         check(self.width, RfcPhase::Invoke, "RfcInvoke", result, &error)?;
 
         let export = self.structure(RfcPhase::Invoke, function, SYSTEM_INFO_STRUCTURE)?;
-        // `get_string` sizes its buffer from `RfcGetStringLength` of the same field and decodes
-        // only what the library wrote. `export` belongs to the invoked `function`, which the
-        // caller destroys only after this returns.
-        let mut info = SystemInfo::from_fields(|name| self.get_string(export, name))?;
+        // The fields are CHAR, so `RfcGetChars` reads them with the width of each field; the
+        // string getters refuse a CHAR field with RFC code 20. `export` belongs to the invoked
+        // `function`, which the caller destroys only after this returns.
+        let mut info = SystemInfo::from_fields(|name| {
+            let column = ColumnRead {
+                name: name.to_owned(),
+                kind: CellKind::Chars(system_info_field_chars(name)),
+            };
+
+            match self.read_cell(&symbols, export, &column)? {
+                Cell::Text(text) => Ok(text),
+                Cell::Int(_) => Err(TransportError::Protocol(format!(
+                    "RFCSI_EXPORT field {name} is not a character field"
+                ))),
+            }
+        })?;
 
         info.invoke_time = Some(invoke_time);
 
