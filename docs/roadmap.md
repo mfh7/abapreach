@@ -20,6 +20,7 @@ release (0.12.0, 0.13.0, ...); 1.0.0 follows when every feature below is release
 | 0.16.0 | DDIC: data elements, domains, tables (transparent tables and structures), table types; transaction codes (`TRAN`): read, simulate, create and delete, through classrun on the 7.50 and 7.40 systems (released) |
 | 0.16.1 | `--tr` for objects no open request holds; classrun on newer releases (tested on a S/4HANA 758 system); classrun POST from a new session; runner cleanup proof against `TADIR`; MCP re-reads connections per call (released) |
 | 0.17.0 | `inactive`, `activate`, `aunit` (ABAP Unit) and `run` (class, report with ALV capture, code snippet), with MCP tools; defaults: `run: plan`, `mcp_run: off`, `mcp_run_snippet: off`; tested on the 7.50, 7.40 and S/4HANA 758 systems (released) |
+| 0.17.1 | Test and fault-build follow-ups of 0.17.0: a live cell for Ctrl-C twice during `run`, and a `FAULT: classrun POST sending` marker in the fault-injection build; the ordinary build is unchanged (released) |
 | later | The remaining features below, one milestone at a time |
 
 Platforms come before new features, so every feature after 0.12.0 is built and tested on

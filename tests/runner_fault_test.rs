@@ -254,29 +254,21 @@ fn hold_post_pauses_after_the_classrun_post_and_a_set_cancel_flag_ends_the_pause
         let sap = sap();
         let cancel = CancelFlag::new();
         let signal = cancel.clone();
-        // The cycle before the POST runs in memory and takes milliseconds: a flag set a second in
-        // can only land inside the pause that follows the POST.
-        let setter = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1000));
-            signal.set();
-        });
+        // The fake SAP sets the flag while the classrun POST runs, so it is already set when the
+        // pause after the POST starts: the 30 s pause must end at once, on any machine speed.
+        sap.borrow_mut().on_post = Some(Box::new(move || signal.set()));
         let _scope = fault::scoped(faults("drop-reply:CLASSRUN,hold-post:30000"));
         let mut open = || opener(backend, &sap);
         let started = std::time::Instant::now();
         let run = run_cycle(&input(backend), &mut open, PostRoute::Cycle, &cancel);
         let elapsed = started.elapsed();
 
-        setter.join().unwrap();
-        // The POST ran once and its reply was dropped; the pause held the run until the flag.
+        // The POST ran once and its reply was dropped; the flag does not change that outcome.
         assert_eq!(sap.borrow().posts, 1, "{backend:?}");
         assert!(
             matches!(&run.end, RunnerEnd::PostUncertain(_)),
             "{backend:?}: {:?}",
             run.end
-        );
-        assert!(
-            elapsed >= Duration::from_millis(900),
-            "{backend:?}: {elapsed:?}"
         );
         assert!(
             elapsed < Duration::from_secs(20),

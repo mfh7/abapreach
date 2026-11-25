@@ -36,20 +36,36 @@ fn the_skip_activate_stop_is_compiled_only_with_the_fault_injection_feature() {
 #[test]
 fn the_hold_post_pause_is_compiled_only_with_the_fault_injection_feature() {
     let runner = include_str!("../src/operation/runner.rs").replace("\r\n", "\n");
-    let call = runner
+    let start = runner.find("fn post(").expect("fn post");
+    let end = runner[start..]
+        .find("\n    fn ")
+        .map_or(runner.len(), |offset| start + offset);
+    let post = &runner[start..end];
+    let call = post
         .find("crate::fault::hold_post(self.cancel);")
         .expect("call site");
+    let mark = post
+        .find("crate::fault::mark_post();")
+        .expect("marker call site");
 
     assert!(
-        runner[..call]
+        post[..call]
             .trim_end()
             .ends_with("#[cfg(feature = \"fault-injection\")]")
     );
-    // The pause follows the classrun POST and precedes the mapping of its outcome.
-    assert!(runner[..call].rfind("session.request(request)").is_some());
     assert!(
-        runner[call..]
-            .find("Ok(response) => RunnerEnd::Posted(response)")
-            .is_some()
+        post[..mark]
+            .trim_end()
+            .ends_with("#[cfg(feature = \"fault-injection\")]")
     );
+    // The pause follows the classrun POST and precedes the mapping of its outcome; the marker
+    // follows the run guard and precedes the POST request.
+    let running = post.find("hold_run_leaving").expect("run guard");
+    let request = post.find("session.request(request)").expect("POST request");
+    let outcome = call + post[call..].find("match result {").expect("outcome match");
+
+    assert!(running < mark, "the marker comes after the run guard");
+    assert!(mark < request, "the marker comes before the POST");
+    assert!(request < call, "the pause comes after the POST");
+    assert!(call < outcome, "the pause comes before the outcome match");
 }

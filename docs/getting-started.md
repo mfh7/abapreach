@@ -817,9 +817,9 @@ screen of report <REPORT> cannot be read`, and a run without parameters is not a
 cases do not cover which grid is captured when a report shows more than one. An HTTP 500 body marks a
 runtime error (`RUN_FAILED`) when it matches the text `runtime error`, `short dump` or `ST22`, or the
 short text of a known dump (a report that sends a screen: `Screen output without connection to user`
-on the 7.50 system, or on the ADT page of the 758 system `Sending of dynpro <program> <screen> not
-possible: No window system type specified`; seen live with an English logon language); any other
-500 counts as `RUN_UNKNOWN`.
+on the 7.50 system, or on the ADT page of the 758 system
+`Sending of dynpro <program> <screen> not possible: No window system type specified`; seen live with
+an English logon language); any other 500 counts as `RUN_UNKNOWN`.
 
 ## Tested environment
 
@@ -852,6 +852,10 @@ system. The final runs have no FAIL cell, and no test object was left on any sys
 Windows x64 and Linux arm64 had no live run in 0.17.0 (as in 0.16.1); CI builds and checks their release
 files. The runs are listed per system in
 [Behavior differences: 0.17.0 release checks](behavior-differences.md#0170-release-checks-0170-rc1-to-rc4).
+
+The 0.17.1 release checks ran on `v0.17.1-rc.1` (the release binaries). The smoke set ran live on the 7.50
+system on all four platforms, which is the first live Windows x64 and Linux arm64 run since 0.16.1. The
+results are in [Results of the 0.17.1 release checks](#results-of-the-0171-release-checks).
 
 Each cell has one of three results:
 
@@ -923,6 +927,36 @@ Not run live in 0.17.0 (offline tests cover them): Ctrl-C twice during `run`, th
 check, `RUN_UNKNOWN` from an ICM 5xx, the output budget with one-character lines and non-ASCII text, an
 expired payload re-posted, a snippet with `ENDMETHOD` or `INCLUDE` in a colon chain, a non-Z/Y name
 without `--allow-standard`, a plan mismatch, the MCP policy matrix and the selection-variant cell.
+0.17.1 ran Ctrl-C twice during `run` live (next section); the other cases are still offline only.
+
+### Results of the 0.17.1 release checks
+
+0.17.1 is the test and fault-build follow-up of 0.17.0. The release binaries are `v0.17.1-rc.1` (a single
+release candidate). The ordinary build behaves as in 0.17.0. The fault-injection build's `hold-post:<ms>`
+now also prints `FAULT: classrun POST sending` before the classrun POST request starts (see
+[Fault injection](#fault-injection)). CI on rc.1 is green on all four runners (macOS arm64, Linux x64,
+Linux arm64, Windows x64). The 7.40 system was not run for 0.17.1.
+
+**Live cell, 2026-11-25.** The new cell "Ctrl-C twice during `run`" ran from macOS arm64 on the rc.1 fault build
+with the snippet `WAIT UP TO 60 SECONDS`. The first Ctrl-C comes on the POST marker, the second 15 seconds after
+the waiting text. It passed on the 7.50 system over ADT HTTP, RFC (SAP GUI library) and RFC (NW RFC
+SDK), and on the 758 system over the RFC SDK. Each run exited with 130 and printed one
+`RUNNER_LEFTOVER: <class>` line with the two delete commands and no outcome line; `doctor` listed the
+class, and the two commands removed it. Limit: that the POST had reached SAP rests on the 15 second
+delay (the POST session logon measured about 1 to 2 seconds), not on an observation.
+
+**Smoke set on the 7.50 system, rc.1.**
+
+| Host | PASS | UNSUPPORTED | FAIL |
+| :--- | ---: | ---: | ---: |
+| macOS arm64 | 48 | 1 | 0 |
+| Linux x64 | 48 | 3 | 0 |
+| Linux arm64 | 33 | 18 | 0 |
+| Windows x64, native virtual machine | 48 | 1 | 0 |
+
+The UNSUPPORTED cells are structural: the ADT HTTP path loads no RFC library, and the OS trust store is
+already installed. SAP GUI for Java runs on x86_64 only, so Linux arm64 has no RFC SAP GUI library path.
+This is smoke only, not the full matrix.
 
 ### Unsupported cells
 
@@ -987,7 +1021,9 @@ reply drop, so it does not change the results in the table above.
 `hold-post:<ms>` (same bounds) pauses the runner right after the classrun POST has returned, before
 its outcome is mapped, and prints `FAULT: classrun POST done, pausing N ms` on stderr; it exists
 only for the live Ctrl-C cells and, like `hold-lock`, drops no reply. As with `hold-lock`, the pause ends
-early when Ctrl-C arrives. There is no pause when the POST session cannot be opened (the run ends in
+early when Ctrl-C arrives. Right before the POST request starts it also prints
+`FAULT: classrun POST sending` on stderr (the POST session may still log on after it), which the
+Ctrl-C cells wait for. There is no pause when the POST session cannot be opened (the run ends in
 `REJECTED: runner POST failed: cannot open the POST session` before any POST).
 
 ### Carve-outs
