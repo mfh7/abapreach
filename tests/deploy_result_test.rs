@@ -8,7 +8,8 @@ mod replay;
 use abapreach::cli::ObjectKind;
 use abapreach::hash::source_hash;
 use abapreach::operation::deploy::{
-    CancelFlag, DeployInput, DeployProg, DeployScope, EXCERPT_LINES, known_lock_handles,
+    CancelFlag, DeployInput, DeployProg, DeployScope, DeploySource, EXCERPT_LINES,
+    known_lock_handles,
 };
 use replay::{fx, no_inactive, replay};
 
@@ -17,7 +18,7 @@ const FIXTURE: &str = "dev-750-rfc.json";
 fn input(source: &[&str], simulate: bool) -> DeployInput {
     DeployInput {
         name: "YTEST_ABAPREACH01".to_owned(),
-        source: source.iter().map(|line| (*line).to_owned()).collect(),
+        source: DeploySource::Full(source.iter().map(|line| (*line).to_owned()).collect()),
         base: None,
         simulate,
         tr: None,

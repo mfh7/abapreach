@@ -988,7 +988,27 @@ fn build_tools(
         "string",
         "plan_token from the matching simulate call with identical arguments",
     );
-    let source = property("string", "Full source, sent as is");
+    let source = property(
+        "string",
+        "Full source, sent as is (exactly one of source or edits)",
+    );
+    let edits = json!({
+        "type": "array",
+        "description": "Edits of the live source instead of a full source (PROG, FUNC, CLAS, INTF; DDIC types and TRAN refuse edits; exactly one of source or edits). Each old must match exactly once in the source abap_read_source returns; edits apply in order, each to the result of the one before. Needs base",
+        "items": {
+            "type": "object",
+            "properties": {
+                "old": {"type": "string", "description": "Text to replace; must be unique in the live source"},
+                "new": {"type": "string", "description": "Replacement text (empty deletes)"},
+            },
+            "required": ["old", "new"],
+            "additionalProperties": false,
+        },
+    });
+    let base = property(
+        "string",
+        "Live hash from a full or partial abap_read_source that the edits are based on (required with edits); a source that moved on is refused",
+    );
     let create_include = property(
         "boolean",
         "Create the include of a program if it does not exist",
@@ -1025,6 +1045,7 @@ fn build_tools(
     });
     let deploy_properties = json!({
         "conn": conn, "type": object_type(&source_kinds), "name": name, "source": source,
+        "edits": edits, "base": base,
         "tr": tr, "include": include, "fugr": fugr, "create_include": create_include,
         "main": main,
     });
@@ -1059,7 +1080,7 @@ fn build_tools(
             json!({
                 "conn": conn, "type": object_type(&source_kinds), "name": name,
                 "include": include, "fugr": fugr, "main": main,
-                "lines": property("string", "Line range A-B (one-based, inclusive); returns a partial excerpt without hash"),
+                "lines": property("string", "Line range A-B (one-based, inclusive); returns a partial excerpt and the hash of the whole source"),
             }),
             &["conn", "type", "name"],
         ),
@@ -1098,15 +1119,15 @@ fn build_tools(
         tools.extend([
             write_tool(
                 "abap_simulate",
-                "Simulate a source or XML deploy (diff and checks). For DTEL, DOMA, TABL and TTYP it creates and deletes a temporary class in $TMP (no definition is written). Issues a plan_token only if the simulation is OK.",
+                "Simulate a source or XML deploy, or an edits deploy (diff and checks). For DTEL, DOMA, TABL and TTYP it creates and deletes a temporary class in $TMP (no definition is written). Issues a plan_token only if the simulation is OK.",
                 deploy_properties.clone(),
-                &["conn", "type", "name", "source"],
+                &["conn", "type", "name"],
             ),
             write_tool(
                 "abap_deploy",
-                "Deploy source or XML to SAP (WRITE). TRAN has no deploy. Needs a plan_token from abap_simulate with identical arguments; single use, 15 minutes.",
+                "Deploy source, XML or edits to SAP (WRITE). TRAN has no deploy. Needs a plan_token from abap_simulate with identical arguments; single use, 15 minutes.",
                 with_token(&deploy_properties),
-                &["conn", "type", "name", "source", "plan_token"],
+                &["conn", "type", "name", "plan_token"],
             ),
             write_tool(
                 "abap_create_simulate",

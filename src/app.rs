@@ -24,7 +24,7 @@ use crate::operation::create_ddic::{self, DdicCreate};
 use crate::operation::delete::{self, Context};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch, batch_unsent_failure};
-use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
+use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope, DeploySource};
 use crate::operation::deploy_ddic::{self, DdicDeploy};
 use crate::operation::doctor::Doctor;
 use crate::operation::inactive;
@@ -1226,7 +1226,7 @@ fn execute(
                 .main(main.as_deref());
             let input = DeployInput {
                 name,
-                source,
+                source: DeploySource::Full(source),
                 base,
                 simulate,
                 tr,

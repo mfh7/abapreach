@@ -4,7 +4,7 @@ mod replay;
 use abapreach::backend::{BackendKind, Selection, SelectionReason};
 use abapreach::config::Connection;
 use abapreach::domain::{Outcome, Status};
-use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg};
+use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeploySource};
 use abapreach::policy::{Confirmer, ForeignInactive, Policies};
 use abapreach::transport::{Request, Response};
 use replay::{
@@ -47,11 +47,11 @@ const CDATA_FOREIGN_INACTIVE_FEED: &str = concat!(
 fn input(simulate: bool) -> DeployInput {
     DeployInput {
         name: "YTEST_ABAPREACH01".to_owned(),
-        source: vec![
+        source: DeploySource::Full(vec![
             "REPORT ytest_abapreach01.".to_owned(),
             String::new(),
             "WRITE / 'v2'.".to_owned(),
-        ],
+        ]),
         base: None,
         simulate,
         tr: None,

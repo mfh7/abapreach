@@ -27,7 +27,7 @@
           "type": "string"
         },
         "lines": {
-          "description": "Line range A-B (one-based, inclusive); returns a partial excerpt without hash",
+          "description": "Line range A-B (one-based, inclusive); returns a partial excerpt and the hash of the whole source",
           "type": "string"
         },
         "main": {

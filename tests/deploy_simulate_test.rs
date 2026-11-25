@@ -4,7 +4,7 @@ mod replay;
 use abapreach::backend::Failure;
 use abapreach::domain::Status;
 use abapreach::operation::deploy::{
-    CancelFlag, DeployInput, DeployProg, checkrun_xml, format_messages,
+    CancelFlag, DeployInput, DeployProg, DeploySource, checkrun_xml, format_messages,
 };
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use common::Fixture;
@@ -24,11 +24,11 @@ const VALID_CHECK_BODY: &str = concat!(
 fn input(last_line: &str) -> DeployInput {
     DeployInput {
         name: "YTEST_ABAPREACH01".to_owned(),
-        source: vec![
+        source: DeploySource::Full(vec![
             "REPORT ytest_abapreach01.".to_owned(),
             String::new(),
             last_line.to_owned(),
-        ],
+        ]),
         base: None,
         simulate: true,
         tr: None,
@@ -371,7 +371,9 @@ fn simulate_with_a_failed_unlock_is_partial() {
 fn checkrun_request_matches_the_recording_and_pads_base64() {
     let text = fs::read_to_string(common::fixture_path(FIXTURE)).unwrap();
     let fixture: Fixture = serde_json::from_str(&text).unwrap();
-    let lines = valid().source;
+    let DeploySource::Full(lines) = valid().source else {
+        unreachable!("valid is a full source")
+    };
 
     assert_eq!(
         checkrun_xml("YTEST_ABAPREACH01", &lines),

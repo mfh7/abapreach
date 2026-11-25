@@ -5,7 +5,9 @@ use abapreach::backend::Failure;
 use abapreach::config::Connection;
 use abapreach::domain::Status;
 use abapreach::hash::source_hash;
-use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, encode_lock_handle};
+use abapreach::operation::deploy::{
+    CancelFlag, DeployInput, DeployProg, DeploySource, encode_lock_handle,
+};
 use abapreach::transport::{Response, TransportError};
 use replay::{Step, fx, no_inactive, replay};
 
@@ -15,7 +17,7 @@ const V1_HASH: &str = "63886692bf652fa419147f746d6b7760d6c991606fa9603d8ade3caf0
 fn input(source: &[&str], base: Option<&str>) -> DeployInput {
     DeployInput {
         name: "YTEST_ABAPREACH01".to_owned(),
-        source: source.iter().map(|line| (*line).to_owned()).collect(),
+        source: DeploySource::Full(source.iter().map(|line| (*line).to_owned()).collect()),
         base: base.map(str::to_owned),
         simulate: true,
         tr: None,
@@ -39,7 +41,11 @@ fn no_change_replays_fixture_v1_and_includes_tls_warning() {
     let mut transport = replay(FIXTURE, vec![fx(6)]);
     let outcome = DeployProg::run(&mut transport, v1(None), Some(&Connection::test_insecure()));
 
-    assert_eq!(source_hash(&v1(None).source), V1_HASH);
+    let DeploySource::Full(source) = v1(None).source else {
+        unreachable!("v1 is a full source")
+    };
+
+    assert_eq!(source_hash(&source), V1_HASH);
     assert_eq!(outcome.exit, 0);
     assert_eq!(outcome.status, None);
     assert_eq!(

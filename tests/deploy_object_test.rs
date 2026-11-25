@@ -9,9 +9,10 @@ use abapreach::backend::Failure;
 use abapreach::cli::{IncludeKind, ObjectKind};
 use abapreach::config::Connection;
 use abapreach::domain::Status;
+use abapreach::edit::{Edit, EditPlan};
 use abapreach::hash::source_hash;
 use abapreach::operation::deploy::{
-    CancelFlag, DeployInput, DeployProg, DeployResult, DeployScope,
+    CancelFlag, DeployInput, DeployProg, DeployResult, DeployScope, DeploySource,
 };
 use abapreach::policy::{ForeignInactive, Policies};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
@@ -197,7 +198,7 @@ const MESSAGES_W: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="W" line="1"
 fn input(source: &[String], simulate: bool, tr: Option<&str>) -> DeployInput {
     DeployInput {
         name: String::new(),
-        source: source.to_vec(),
+        source: DeploySource::Full(source.to_vec()),
         base: None,
         simulate,
         tr: tr.map(str::to_owned),
@@ -2111,4 +2112,240 @@ fn without_tr_the_stop_stays_and_names_the_way_out() {
     );
     assert_eq!(fake.count("POST", "datapreview"), 0);
     assert_eq!(fake.count("PUT", ""), 0);
+}
+
+// ---------------------------------------------------------------- deploy by edits
+
+fn by_edits(live: &str, old: &str, new: &str) -> DeployInput {
+    DeployInput {
+        name: String::new(),
+        source: DeploySource::Edits(EditPlan {
+            base: source_hash(&lines(live)),
+            edits: vec![Edit {
+                old: old.to_owned(),
+                new: new.to_owned(),
+            }],
+        }),
+        base: None,
+        simulate: false,
+        tr: None,
+    }
+}
+
+fn put_body(fake: &Fake) -> String {
+    String::from_utf8_lossy(&fake.calls[fake.position("PUT", "/source/main")].body).into_owned()
+}
+
+#[test]
+fn a_func_deploy_by_edits_writes_the_result_and_activates_it() {
+    let live = func_rendered("v1");
+    let rendered = func_rendered("v2");
+    let mut fake = func_locked_phase(func_before_lock(&live, &empty_worklist()), &live)
+        .put(
+            &format!("{FM_URI}/source/main?{HANDLE_QUERY}"),
+            200,
+            &rendered,
+        )
+        .post(&format!("{FM_URI}?_action=UNLOCK&{HANDLE_QUERY}"), 200, "")
+        .post(ACTIVATE, 200, "")
+        .get(
+            &format!("{FM_URI}/source/main?version=active"),
+            200,
+            &rendered,
+        );
+    let result = run(
+        &mut fake,
+        FM,
+        func_scope(),
+        by_edits(&live, "'v1'", "'v2'"),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(
+        result.outcome.status,
+        Some(Status::Active),
+        "{:?}",
+        result.outcome
+    );
+    assert!(put_body(&fake).contains("'v2'"));
+    assert_eq!(fake.unlocks(), 1);
+    fake.assert_finished();
+}
+
+#[test]
+fn a_class_include_deploy_by_edits_writes_the_result_of_the_include() {
+    let include = IncludeKind::Ccimp;
+    let source = include_uri(include);
+    let own_feed = format!("{source}/versions");
+    let live = text_of(&include_source("v1"));
+    let file = include_source("v2");
+    let fake = clas_through_check(&source, &live, "", true, &[&own_feed, &main_feed()]).put(
+        &format!("{source}?{HANDLE_QUERY}"),
+        200,
+        "",
+    );
+    let mut fake = clas_activation_tail(fake, &source, &text_of(&file));
+    let result = run(
+        &mut fake,
+        CLAS,
+        clas_scope(Some(include)),
+        by_edits(&live, "v1", "v2"),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(
+        result.outcome.status,
+        Some(Status::Active),
+        "{:?}",
+        result.outcome
+    );
+    assert!(
+        result
+            .outcome
+            .stdout
+            .ends_with(&format!("ACTIVE\nhash {}", source_hash(&file))),
+        "{}",
+        result.outcome.stdout
+    );
+    fake.assert_finished();
+}
+
+const INTF_LIVE: &str = "INTERFACE ytest_abapreach_if PUBLIC.\nENDINTERFACE.";
+
+#[test]
+fn an_interface_deploy_by_edits_writes_the_result() {
+    let source = format!("{INTF_URI}/source/main");
+    let feed_uri = format!("{source}/versions");
+    let file = lines("INTERFACE ytest_abapreach_if PUBLIC.\n  METHODS run.\nENDINTERFACE.");
+    let mut fake = Fake::new()
+        .get(&format!("{source}?version=active"), 200, INTF_LIVE)
+        .get(&feed_uri, 200, &no_inactive())
+        .get(&feed_uri, 200, &no_inactive())
+        .post(
+            &format!("{INTF_URI}?_action=LOCK&accessMode=MODIFY"),
+            200,
+            &lock_body("", true),
+        )
+        .get(&format!("{source}?version=active"), 200, INTF_LIVE)
+        .post(CHECKRUNS, 200, CLEAN)
+        .put(&format!("{source}?{HANDLE_QUERY}"), 200, "")
+        .post(
+            &format!("{INTF_URI}?_action=UNLOCK&{HANDLE_QUERY}"),
+            200,
+            "",
+        )
+        .post(ACTIVATE, 200, "")
+        .get(&format!("{source}?version=active"), 200, &text_of(&file));
+    let result = run(
+        &mut fake,
+        INTF,
+        DeployScope::new(ObjectKind::Intf),
+        by_edits(INTF_LIVE, "PUBLIC.\n", "PUBLIC.\n  METHODS run.\n"),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(
+        result.outcome.status,
+        Some(Status::Active),
+        "{:?}",
+        result.outcome
+    );
+    assert!(put_body(&fake).contains("METHODS run."));
+    fake.assert_finished();
+}
+
+#[test]
+fn an_execute_by_edits_refuses_a_result_with_a_long_line_before_the_lock() {
+    let source = format!("{INTF_URI}/source/main");
+    // Only the first read is scripted: any lock request would fail the test as unscripted.
+    let mut fake = Fake::new().get(&format!("{source}?version=active"), 200, INTF_LIVE);
+    let result = run(
+        &mut fake,
+        INTF,
+        DeployScope::new(ObjectKind::Intf),
+        by_edits(
+            INTF_LIVE,
+            "PUBLIC.",
+            &format!("PUBLIC. \" {}", "x".repeat(300)),
+        ),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(result.outcome.exit, 2);
+    assert!(
+        result.outcome.stderr.contains("> 255 characters"),
+        "{}",
+        result.outcome.stderr
+    );
+    assert_eq!(fake.count("POST", "_action=LOCK"), 0);
+    fake.assert_finished();
+}
+
+#[test]
+fn a_deploy_by_edits_never_writes_an_empty_source() {
+    let source = format!("{INTF_URI}/source/main");
+    // The edit deletes the whole live source: the empty result is refused before any lock, and
+    // nothing in the run falls back to an empty source.
+    let mut fake = Fake::new().get(&format!("{source}?version=active"), 200, INTF_LIVE);
+    let result = run(
+        &mut fake,
+        INTF,
+        DeployScope::new(ObjectKind::Intf),
+        by_edits(INTF_LIVE, INTF_LIVE, ""),
+        ForeignInactive::Reject,
+    );
+
+    assert_eq!(result.outcome.exit, 2);
+    assert!(
+        result.outcome.stderr.contains("source file is empty"),
+        "{}",
+        result.outcome.stderr
+    );
+    assert_eq!(fake.count("PUT", ""), 0);
+    assert_eq!(fake.count("POST", "_action=LOCK"), 0);
+    fake.assert_finished();
+}
+
+#[test]
+fn a_live_source_that_moves_after_the_edits_were_applied_stops_after_the_lock_and_unlocks() {
+    let source = format!("{INTF_URI}/source/main");
+    let feed_uri = format!("{source}/versions");
+    let mut fake = Fake::new()
+        .get(&format!("{source}?version=active"), 200, INTF_LIVE)
+        .get(&feed_uri, 200, &no_inactive())
+        .post(
+            &format!("{INTF_URI}?_action=LOCK&accessMode=MODIFY"),
+            200,
+            &lock_body("", true),
+        )
+        // The re-read under the lock finds a source that someone else changed.
+        .get(
+            &format!("{source}?version=active"),
+            200,
+            "INTERFACE ytest_abapreach_if PUBLIC.\n  METHODS other.\nENDINTERFACE.",
+        )
+        .post(
+            &format!("{INTF_URI}?_action=UNLOCK&{HANDLE_QUERY}"),
+            200,
+            "",
+        );
+    let result = run(
+        &mut fake,
+        INTF,
+        DeployScope::new(ObjectKind::Intf),
+        by_edits(INTF_LIVE, "PUBLIC.\n", "PUBLIC.\n  METHODS run.\n"),
+        ForeignInactive::Reject,
+    );
+
+    assert!(
+        result
+            .outcome
+            .stderr
+            .contains("live changed since initial read"),
+        "{}",
+        result.outcome.stderr
+    );
+    assert_eq!(fake.count("PUT", ""), 0);
+    assert_eq!(fake.unlocks(), 1);
+    fake.assert_finished();
 }

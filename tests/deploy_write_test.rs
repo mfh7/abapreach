@@ -4,7 +4,9 @@ mod replay;
 use abapreach::backend::Failure;
 use abapreach::domain::Status;
 use abapreach::hash::source_hash;
-use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, activation_status};
+use abapreach::operation::deploy::{
+    CancelFlag, DeployInput, DeployProg, DeploySource, activation_status,
+};
 use abapreach::transport::rfc::{RfcPhase, classify_rfc_error};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use replay::{Replay, Step, fx, no_inactive, replay};
@@ -19,11 +21,11 @@ const ROLLBACK: &str = "ROLLBACK: the inactive version belongs to you; GET witho
 fn input(last_line: &str, simulate: bool, tr: Option<&str>) -> DeployInput {
     DeployInput {
         name: "YTEST_ABAPREACH01".to_owned(),
-        source: vec![
+        source: DeploySource::Full(vec![
             "REPORT ytest_abapreach01.".to_owned(),
             String::new(),
             last_line.to_owned(),
-        ],
+        ]),
         base: None,
         simulate,
         tr: tr.map(str::to_owned),
@@ -96,7 +98,10 @@ fn recorded_deploy_activates_and_reports_the_new_hash() {
         let steps = then(through_put(), vec![fx(18), fx(19), fx(20)]);
         let mut transport = replay(name, steps);
         let outcome = DeployProg::run(&mut transport, v2(None), None);
-        let hash = source_hash(&v2(None).source);
+        let DeploySource::Full(source) = v2(None).source else {
+            unreachable!("v2 is a full source")
+        };
+        let hash = source_hash(&source);
 
         assert_eq!(outcome.status, Some(Status::Active), "{name}");
         assert_eq!((outcome.exit, outcome.stderr.as_str()), (0, ""), "{name}");

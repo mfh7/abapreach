@@ -288,7 +288,15 @@ impl<G: WriteGate> McpTools<'_, G> {
         reject_options(
             arguments,
             kind,
-            &["lines", "include", "fugr", "main", "create_include"],
+            &[
+                "lines",
+                "include",
+                "fugr",
+                "main",
+                "create_include",
+                "edits",
+                "base",
+            ],
         )?;
         // A transaction has no deploy: this refuses it, and checks the name and the request.
         runner_cli::check_deploy(kind, name, tr, &SourceOptions::default())?;

@@ -11,7 +11,8 @@ use crate::object::{
     DEFAULT_PACKAGE, PackageScope, program_creation_request_uri, program_validation_uri,
 };
 use crate::operation::deploy::{
-    CancelFlag, DeployInput, DeployProg, DeployResult, DeployScope, INTERRUPT_EXIT_CODE, leaf_texts,
+    CancelFlag, DeployInput, DeployProg, DeployResult, DeployScope, DeploySource,
+    INTERRUPT_EXIT_CODE, leaf_texts,
 };
 use crate::operation::include::{Located, ProgKind, ResolveError, locate};
 use crate::operation::read::OBJECT_STRUCTURE;
@@ -298,6 +299,7 @@ impl CreateProg {
             group: None,
             base: None,
             change: None,
+            result_hash: None,
             main: None,
         }
     }
@@ -784,7 +786,7 @@ impl Run<'_> {
             &mut *self.transport,
             DeployInput {
                 name: self.input.name.clone(),
-                source,
+                source: DeploySource::Full(source),
                 base: None,
                 simulate: true,
                 tr: self.input.tr.clone(),

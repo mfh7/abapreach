@@ -454,6 +454,8 @@ fn tool_arguments_follow_the_contract() {
             "type",
             "name",
             "source",
+            "edits",
+            "base",
             "tr",
             "include",
             "fugr",
