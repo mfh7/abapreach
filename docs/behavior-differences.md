@@ -108,6 +108,52 @@ A changed `FUNC` interface lists at most 50 callers, then `WHERE-USED ... <n> mo
 the 50-caller cap. The matrix (`func-signature-change`) checks on one caller that the list holds only
 caller kinds and that no `more` line appears.
 
+### 12. `where-used` goes through ADT first (0.18.0)
+
+The reference `where-used` reads the standard cross-reference tables (`WBCROSSGT`, `WBCROSSI`) through
+the internal data preview for every type. ABAPReach asks the ADT `usageReferences` search first and
+tags each line `via=ADT`. Only for a DDIC type whose collection the release does not list, or that
+answers HTTP 404 or 500, does it read the cross-reference tables (`WBCROSSGT`, plus `DD03L` for a data
+element and `DD04L` for a domain), tags the line with the table (`via=<table>`) and prints a `W:` line
+on stderr. A `TABL` takes the `tables` or the `structures` collection by its table class. The line
+format is the reference one (`USED-BY <TYPE> <NAME> package=<P>`, sorted, each once, then
+`WHERE-USED: <n>`) with the added `via=` field. It lists objects only, not lines of code. `MSAG`
+(planned for 0.19.0) and `TRAN` stop, and a reply over 64 MiB is refused. `delete --simulate` keeps its own where-used (difference 11).
+Matrix: TODO(rc.1).
+
+### 13. `dumps` reads `FLIST` to `FLIST08` and lists one user by default (0.18.0)
+
+The reference reads the dump text from `FLIST` to `FLIST05` of table `SNAP`. ABAPReach reads
+`FLIST` to `FLIST08`, so a dump whose tag stream is longer than `FLIST05` is complete. `dump` prints only the decoded tags (error, program, include, line), the user and
+client, the short text from `SNAPT` and a source excerpt, never the raw stream. The reference lists
+the dumps of every user. `dumps` lists the logon user's dumps unless `--all` or `--user` is given,
+and `dump` of another user's dump needs `--all`. `--all` is a display filter: `SNAP` is not on the
+`read_table_denied` list, so `read-table` and `sql` can read it where the data preview allows. On the
+7.50 system the data preview refuses `SNAP`; the RFC paths then read it through `RFC_READ_TABLE`
+(needs an English logon), and ADT HTTP stops with the hint `--backend rfc`. Matrix: TODO(rc.1).
+
+### 14. `sql` is a closed grammar (0.18.0)
+
+There is no reference command: the earlier tooling reads one table at a time. The ADT freestyle data
+preview runs open SQL as written, so ABAPReach does not pass your text on. It accepts one `SELECT`
+(joins, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, five aggregates), parses it, and sends only its
+canonical single-line rendering; the freestyle request is refused at the transport boundary
+unless it equals the canonical rendering of its own parse. Subqueries, `UNION`, `EXISTS`, `WITH`,
+`INTO`, `UP TO`, host variables, path expressions, comments, `RIGHT` and `CROSS` joins and the client
+options are refused with `STOP` (exit 2). Every entity in `FROM` and `JOIN` passes the
+`read_table_denied` list and the dictionary check of difference 15. Matrix: TODO(rc.1).
+
+### 15. `read-table` fails closed on dictionary refusals (0.18.0)
+
+Before 0.18.0 `read-table` checked the deny list against the named table only, so a DDIC view over a
+denied table passed. Now the named entity goes through the dictionary: a table of class `TRANSP`,
+`CLUSTER` or `POOL` is read; a DDIC database view is read only when `DD26S` lists its base tables
+and each one passes in turn; a CDS entity, a generated CDS SQL view (`DDLDEPENDENCY`), a view without
+base tables, a structure and an unknown name are refused. A refusal is `STOP` with exit 2; it was
+`REJECTED` with exit 1. A dictionary lookup that fails stays `REJECTED` with exit 1. The check costs up
+to 24 dictionary lookups, so a view with more than about 21 base tables is refused. This is a
+behavior change from 0.17.x. Matrix: TODO(rc.1).
+
 ## `create PROG` grammar (0.15.0)
 
 The 0.15.0 grammar covers the create and delete cases of the reference test suite

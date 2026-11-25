@@ -340,6 +340,10 @@ live test.
     <td align="left"><b>0.16.1</b> <code>--tr</code> adds an object that no open request holds; the classrun runner works on newer releases (the <code>OUT</code> type comes from <code>SEOSUBCODF</code>, with <code>IF_OO_ADT_CLASSRUN_OUT</code>) and the classrun POST starts from a new session; the runner cleanup proof checks <code>TADIR</code> and <code>doctor</code> lists orphans; <code>read</code> creates the output parent directory; the MCP server re-reads connections on every call (policies stay frozen); RFC SADT requests get a default <code>Accept</code> (<code>*/*</code>) and source PUTs send <code>Accept: text/plain</code></td>
   </tr>
   <tr>
+    <td align="left">Read-only SQL with joins, object search, where-used, short dumps (ST22), ping and the application server instance</td>
+    <td align="left"><b>0.18.0</b> <code>sql</code>, <code>search</code>, <code>where-used</code>, <code>dumps</code>, <code>dump</code>, <code>ping</code>, the <code>instance</code> line of <code>doctor</code>, and MCP read tools for each</td>
+  </tr>
+  <tr>
     <td align="left">Messages, text pools, CDS, enhancements</td>
     <td align="left">planned</td>
   </tr>
@@ -352,12 +356,12 @@ live test.
     <td align="left">planned</td>
   </tr>
   <tr>
-    <td align="left">Export, drift, where-used, dumps, locks</td>
+    <td align="left">Export, drift, locks</td>
     <td align="left">planned</td>
   </tr>
   <tr>
     <td align="left">MCP server</td>
-    <td align="left"><b>0.14.0</b> (stdio; read tools, token and confirm write policies); <b>0.15.0</b> <code>subc</code> and <code>main</code> arguments; <b>0.16.0</b> DDIC and transaction code types; see <a href="docs/mcp.md">MCP server</a></td>
+    <td align="left"><b>0.14.0</b> (stdio; read tools, token and confirm write policies); <b>0.15.0</b> <code>subc</code> and <code>main</code> arguments; <b>0.16.0</b> DDIC and transaction code types; <b>0.18.0</b> deploy by <code>edits</code> and <code>base</code>, the whole-source hash of a partial read; see <a href="docs/mcp.md">MCP server</a></td>
   </tr>
   <tr>
     <td align="left">Windows x64, Linux x64 and arm64 binaries</td>
@@ -385,6 +389,12 @@ abapreach run CLAS|PROG|SNIPPET <NAME|FILE> [--simulate] [--plan <FILE>] [--para
     [--variant <V>] [--alv on|off] [--alv-columns visible|all] [--allow-standard] [--timeout <s>]
     [--max-output <bytes>] [--backend adt|rfc] --conn <SID>_<client>
 abapreach read-table <TABLE> [--fields <A,B>] [--where '<condition>'] [--rows 1-5000] --conn <SID>_<client>
+abapreach sql '<SELECT ...>' | --file <FILE> [--rows 1-5000] --conn <SID>_<client>
+abapreach search <PATTERN> [--type <TYPE>] [--max 1-1000] --conn <SID>_<client>
+abapreach where-used PROG|FUNC|FUGR|CLAS|INTF|DTEL|DOMA|TABL|TTYP <NAME> [--max 1-5000] --conn <SID>_<client>
+abapreach dumps [--date <YYYYMMDD>] [--user <USER> | --all] [--rows 1-1000] [--backend adt|rfc] --conn <SID>_<client>
+abapreach dump <DATUM/UZEIT/AHOST/UNAME/MODNO> [--all] [--backend adt|rfc] --conn <SID>_<client>
+abapreach ping [--backend adt|rfc] --conn <SID>_<client>
 abapreach inactive [--all] --conn <SID>_<client>
 abapreach activate TYPE/SUBTYPE:NAME... [--simulate] --conn <SID>_<client>
 abapreach aunit PROG|CLAS|FUGR <NAME> | --package <PACKAGE> | --tr <request> --conn <SID>_<client>
@@ -397,7 +407,8 @@ must be `-` (stdout). `--base` and `--backend` both pin the backend, so a failed
 switches to the other one. `--include` and `--create-include` apply to `CLAS` only. `--main` applies to
 a `PROG` include only. `--subc` applies to `PROG` only. `--prog` is required for `TRAN` and applies to
 `TRAN` only. `--text` is required except for `DTEL`, `DOMA`, `TABL` and `TTYP`, whose description is in
-the XML file. `inactive`, `activate` and `aunit` are described in
+the XML file. `sql`, `search`, `where-used`, `dumps`, `dump` and `ping` (0.18.0) are read-only; see
+[Getting started](docs/getting-started.md#run-sql-with-joins). `inactive`, `activate` and `aunit` are described in
 [Getting started](docs/getting-started.md#inactive-objects-activation-and-abap-unit). `run` is not a
 dry run: see [Getting started](docs/getting-started.md#run-a-class-a-report-or-a-snippet). `run PROG`
 and `run SNIPPET` use a temporary runner class and so work on development systems only.

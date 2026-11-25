@@ -14,6 +14,78 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
+### Added
+- MCP deploy by edits: `abap_simulate` and `abap_deploy` take `edits` (an array of `{old, new}`, each
+  `old` matching exactly once in the live source, applied in order) and `base` (the live hash)
+  instead of `source`. Pass exactly one of `source` and `edits`. The checks, the diff and the syntax
+  check run on the resulting full source. A bad edit stops with `edit N: old not found`,
+  `edit N: old matches K times; add context` or `edit N: old is empty`, and nothing is written. The
+  `plan_token` binds `base` and the hash of the edits in place of the source hash, and the deploy
+  stops without writing when its result differs from the simulated one. `PROG`, `FUNC`, `CLAS` (with
+  local includes) and `INTF`; not the DDIC types, `TRAN` or `create_include`.
+- `abap_read_source` with `lines` also returns `hash`, the hash of the whole source, so a client can
+  send edits without a full read. A partial read without `hash` means the source holds a configured
+  secret.
+- `sql [--rows N] (QUERY | --file F)` runs one read-only `SELECT` with joins through the ADT
+  freestyle data preview: `INNER` and `LEFT [OUTER]` joins, `WHERE`, `GROUP BY`, `HAVING`,
+  `ORDER BY`, `DISTINCT` and the aggregates `COUNT`, `SUM`, `MIN`, `MAX` and `AVG`. The grammar is
+  closed: ABAPReach parses the statement and sends only its canonical single-line rendering, and the
+  RFC admission boundary refuses a freestyle body that is not canonical. Subqueries, `UNION`,
+  `EXISTS`, `WITH`, `INTO`, `UP TO`, host variables, path expressions, comments, `RIGHT` and `CROSS`
+  joins and the client options are refused with `STOP` (exit 2) before anything is sent. The
+  `read_table_denied` list applies to every table and view in `FROM` and `JOIN`, and a view is read
+  only when `DD26S` lists its base tables and all of them are allowed (CDS entities, generated CDS
+  SQL views and unknown names are refused). The output has the shape and the 1 MiB cut of
+  `read-table`.
+- `search PATTERN [--type T] [--max N]` finds objects by name through the ADT object search
+  (`quickSearch`). `*` is the only wildcard. One line `<ADT type> <name> package=<P> <description>`
+  per object, then `SEARCH: <n> objects`; exit 0 also without a hit. `--type` takes `PROG`, `FUNC`,
+  `FUGR`, `CLAS`, `INTF`, `DTEL`, `DOMA`, `TABL` (transparent tables), `TTYP`, `TRAN`, `DDLS` or
+  `MSAG`; a release that ignores the filter is filtered locally, with a `W:` line. `--max` takes 1 to
+  1000 (default 50).
+- `where-used TYPE NAME [--max N]` lists the objects that use `PROG`, `FUNC`, `FUGR`, `CLAS`,
+  `INTF`, `DTEL`, `DOMA`, `TABL` or `TTYP`, one line `USED-BY <TYPE> <NAME> package=<P> via=<ADT|table>`
+  each, then `WHERE-USED: <n>`. It asks the ADT `usageReferences` search first. For a DDIC type whose
+  collection the release does not list (or that answers 404 or 500) it reads the cross-reference
+  tables `WBCROSSGT`, `DD03L` and `DD04L` instead, tags the lines with the table and prints a `W:`
+  line. A `TABL` uses the `tables` or the `structures` collection by its table class. A reply over
+  64 MiB is refused (`--max` only cuts the printed list). Objects only, not lines of code; `MSAG`
+  and `TRAN` stop.
+- `dumps [--date YYYYMMDD] [--user U | --all] [--rows N]` lists the ST22 short dumps from table
+  `SNAP`, newest first (default: the logon user, the last 7 days, 20 rows), and `dump <id>` shows the
+  error, program, include, line, user, client, the short text and the source around the failing line.
+  The dump text is read from `FLIST` to `FLIST08`. `--all` shows every user's dumps; it is a display
+  filter, not an access boundary (`SNAP` is not on the `read_table_denied` list). On the 7.50 system the
+  data preview refuses `SNAP`: ADT HTTP stops with the hint `--backend rfc`, and the RFC paths read it
+  through `RFC_READ_TABLE` (this needs an English logon).
+- `ping [--backend adt|rfc]` shows the system, the application server instance that answered and the
+  round trip time, from `/system/information` over ADT HTTP and `RFC_SYSTEM_INFO` over RFC. On the
+  7.40 system, which has no `/system/information`, the instance is `unknown` over ADT HTTP and the
+  exit code is 0. `doctor` prints the same `instance ...` line.
+- MCP read tools `abap_sql`, `abap_search`, `abap_where_used`, `abap_dumps`, `abap_dump` and
+  `abap_ping` (arguments: TODO(T10a)).
+- RFC admission: exact shapes for the freestyle data preview, the object search, the where-used
+  search and `/system/information`; each refuses a broader shape. The search shape is also the one
+  the function group lookup and the `doctor` leftover search use. The RFC transports gain typed
+  `RFC_SYSTEM_INFO` and `RFC_READ_TABLE` calls (the latter only for the 7.50 `SNAP` fallback).
+
+### Changed
+- `read-table` asks the ABAP dictionary about the table before it reads it (`DD02L`,
+  `DDLDEPENDENCY`, `DD26S`), with the rules of `sql`. A dictionary refusal (a view over a denied
+  table, a generated CDS SQL view, a CDS entity, a structure, an unknown name) is now `STOP` with
+  exit 2; it was `REJECTED` with exit 1. A lookup that fails stays `REJECTED` with exit 1. The check
+  needs up to 24 lookups, so a view with more than about 21 base tables is refused.
+- Every MCP deploy (`abap_simulate` and `abap_deploy`, with `source` or with `edits`) is refused with
+  `REJECTED: payload contains a configured secret` when the live source of the object holds a
+  configured secret (the logon password, the SAProuter string or its host fragments). The refusal
+  comes before any base check, edit, diff or hash, and the re-read under the lock is guarded the same
+  way. A source that holds the same literal as a router host fragment is refused over MCP too; use
+  the CLI for it. The CLI is unchanged.
+
+### Fixed
+- `read-table` no longer reads a DDIC view over a table on the `read_table_denied` list: the deny
+  list was checked against the named table only.
+
 ## [0.17.1] - 2026-11-25
 
 ### Changed

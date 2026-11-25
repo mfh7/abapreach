@@ -19,6 +19,11 @@ hash. `--base` checks that the active source still has the expected hash,
 including after the lock. `--backend adt|rfc` selects a backend explicitly;
 either `--backend` or `--base` prevents automatic fallback to another backend.
 
+An MCP deploy by `edits` (0.18.0) keeps the base check and the `plan_token` binding (`base` and the
+hash of the edits), and every MCP deploy has a secret guard: it is refused with
+`REJECTED: payload contains a configured secret` when the live source holds one. See
+[MCP server: Deploy by edits](mcp.md#deploy-by-edits-and-the-hash-of-a-partial-read-0180).
+
 Once the lock is held, every exit path releases it in the same session: a
 stop, a rejected check, a failed PUT, and Ctrl-C. If the release fails or its
 result is unknown, the run stops before activation, names the lock that may
