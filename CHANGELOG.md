@@ -14,6 +14,8 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-25
+
 ### Added
 - MCP deploy by edits: `abap_simulate` and `abap_deploy` take `edits` (an array of `{old, new}`, each
   `old` matching exactly once in the live source, applied in order) and `base` (the live hash)
