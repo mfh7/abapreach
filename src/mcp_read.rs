@@ -77,6 +77,8 @@ pub struct ReadTools<'a> {
     reload: Option<Reload>,
     /// The stderr lines of the calls so far; `take_warnings` hands them to the session log.
     warnings: RefCell<Vec<String>>,
+    /// The connection the running call resolved, so that `seal` does not resolve it again.
+    resolved: RefCell<Option<Connection>>,
     env: BTreeMap<String, String>,
     factories: &'a mut dyn Factories,
     /// The extension types the tools refuse by name; none without a registry.
@@ -93,6 +95,7 @@ impl<'a> ReadTools<'a> {
             config,
             reload: None,
             warnings: RefCell::default(),
+            resolved: RefCell::default(),
             env,
             factories,
             registry: None,
@@ -133,6 +136,14 @@ impl<'a> ReadTools<'a> {
     }
 
     pub(crate) fn connection(&self, arguments: &Map<String, Value>) -> Result<Connection, String> {
+        let connection = self.resolve(arguments)?;
+
+        *self.resolved.borrow_mut() = Some(connection.clone());
+
+        Ok(connection)
+    }
+
+    fn resolve(&self, arguments: &Map<String, Value>) -> Result<Connection, String> {
         let id = required(arguments, "conn")?;
         let Some(reload) = &self.reload else {
             if !self.config.is_configured(id) {
@@ -464,6 +475,8 @@ impl ReadTools<'_> {
 
 impl ToolHandler for ReadTools<'_> {
     fn call(&mut self, name: &str, arguments: &Map<String, Value>) -> ToolResult {
+        *self.resolved.borrow_mut() = None;
+
         let result = match name {
             "abap_read_source" => self.read_source(arguments),
             "abap_read_table" => self.read_table(arguments),
@@ -498,7 +511,9 @@ impl ReadTools<'_> {
     /// text check did not see. Hosts and cases are left alone there: source and rows are never
     /// rewritten.
     fn seal(&self, arguments: &Map<String, Value>, result: ToolResult) -> ToolResult {
-        let Ok(connection) = self.connection(arguments) else {
+        // The tool resolved the connection unless it refused an argument first.
+        let resolved = self.resolved.borrow_mut().take();
+        let Some(connection) = resolved.or_else(|| self.connection(arguments).ok()) else {
             // No connection, so no secret to name; a lock handle never leaves the process.
             if !result.is_error {
                 return result;

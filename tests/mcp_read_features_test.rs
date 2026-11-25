@@ -10,6 +10,7 @@ use abapreach::mcp::{
 };
 use abapreach::mcp_read::ReadTools;
 use abapreach::operation::deploy::CancelFlag;
+use abapreach::transport::rfc::{FakeRfcApi, RfcEndpointResponse, RfcTransport};
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use abapreach::{Factories, RfcLibraryInfo};
 use common::{fixture_path_in, preview};
@@ -48,6 +49,7 @@ impl SadtTransport for Recording {
 #[derive(Default)]
 struct Fake {
     adt: VecDeque<Opened>,
+    rfc: VecDeque<Opened>,
     opened: Rc<Cell<usize>>,
 }
 
@@ -62,9 +64,11 @@ impl Factories for Fake {
     }
 
     fn rfc(&mut self, _: &Connection) -> Opened {
-        Err(TransportError::PreSendConnectivity(
-            "no RFC transport scripted".to_owned(),
-        ))
+        self.rfc.pop_front().unwrap_or_else(|| {
+            Err(TransportError::PreSendConnectivity(
+                "no RFC transport scripted".to_owned(),
+            ))
+        })
     }
 
     fn rfc_library(&mut self, _: &Connection) -> Result<RfcLibraryInfo, String> {
@@ -593,6 +597,111 @@ fn abap_where_used_refuses_what_the_cli_refuses() {
     }
 
     assert_eq!(rig.opened(), 0);
+}
+
+// ---- SNAP refused by the data preview of 7.50 ------------------------------------------------------
+
+/// The reply of the 7.50 data preview that refuses `SNAP`.
+fn snap_refused() -> Reply {
+    Ok(Response::text(400, fixture("snap-list-750-400.xml")))
+}
+
+fn endpoint(reply: Reply) -> RfcEndpointResponse {
+    let response = reply.unwrap();
+
+    RfcEndpointResponse {
+        status: response.status,
+        headers: BTreeMap::new(),
+        body: response.body,
+    }
+}
+
+#[test]
+fn abap_dumps_and_dump_fall_back_to_rfc_when_adt_refuses_snap_and_rfc_is_configured() {
+    let list_widths = [
+        ("DATUM", 8),
+        ("UZEIT", 6),
+        ("AHOST", 32),
+        ("UNAME", 12),
+        ("MANDT", 3),
+        ("MODNO", 3),
+        ("SEQNO", 3),
+        ("FLIST", 200),
+    ];
+    let row = "FC019MESSAGE_TYPE_X_TEXTAP005ZPROGAI006ZINCL AL0023 ";
+    let mut rig = rig_routed();
+
+    rig.session(vec![transparent("SNAP"), snap_refused()]);
+    rig.fake.rfc.push_back(Ok(Box::new(RfcTransport::new(
+        FakeRfcApi::with_responses(vec![
+            endpoint(transparent("SNAP")),
+            endpoint(snap_refused()),
+        ])
+        .with_table_replies(vec![Ok(common::read_table_reply(
+            &list_widths,
+            &[vec![
+                "20261103", "053724", "apphost", "TESTUSER", "110", "21", "000", row,
+            ]],
+        ))]),
+    ))));
+
+    let result = rig.call("abap_dumps", json!({"conn": "DEV_100"}));
+
+    assert!(!result.is_error, "{}", result.text);
+    assert_eq!(result.structured["count"], 1);
+    assert_eq!(
+        result.structured["dumps"][0]["id"],
+        "20261103/053724/apphost/TESTUSER/21"
+    );
+
+    let widths = [("SEQNO", 3), ("MANDT", 3), ("FLIST", 200)];
+    let mut rig = rig_routed();
+
+    rig.session(vec![transparent("SNAP"), snap_refused()]);
+    rig.fake.rfc.push_back(Ok(Box::new(RfcTransport::new(
+        FakeRfcApi::with_responses(vec![
+            endpoint(transparent("SNAP")),
+            endpoint(snap_refused()),
+            endpoint(transparent("SNAPT")),
+            endpoint(Ok(Response::empty(404))),
+        ])
+        .with_table_replies(
+            std::iter::once(Ok(common::read_table_reply(
+                &widths,
+                &[vec!["000", "110", "FC007X_ERRORAP005ZPROG"]],
+            )))
+            .chain((0..7).map(|_| {
+                Err(TransportError::PostSendUncertain(
+                    "RfcInvoke [FIELD_NOT_VALID]".to_owned(),
+                ))
+            }))
+            .collect(),
+        ),
+    ))));
+
+    let result = rig.call("abap_dump", json!({"conn": "DEV_100", "id": OWN_DUMP}));
+
+    assert!(!result.is_error, "{}", result.text);
+    assert!(result.text.contains("error: X_ERROR"), "{}", result.text);
+}
+
+#[test]
+fn abap_dumps_and_dump_stop_with_the_hint_when_only_adt_is_configured() {
+    for (tool, arguments) in [
+        ("abap_dumps", json!({"conn": "DEV_100"})),
+        ("abap_dump", json!({"conn": "DEV_100", "id": OWN_DUMP})),
+    ] {
+        let mut rig = rig();
+
+        rig.session(vec![transparent("SNAP"), snap_refused()]);
+
+        let result = rig.call(tool, arguments);
+
+        assert!(result.is_error, "{tool}: {}", result.text);
+        assert!(result.text.starts_with("STOP: "), "{}", result.text);
+        assert!(result.text.contains("--backend rfc"), "{}", result.text);
+        assert_eq!(rig.opened(), 1, "{tool}");
+    }
 }
 
 // ---- abap_dumps ---------------------------------------------------------------------------------

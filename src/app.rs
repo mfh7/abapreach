@@ -539,6 +539,25 @@ pub(crate) fn text_attempt(read: Result<String, PreviewError>) -> Attempt {
     }
 }
 
+/// [`text_attempt`] of a run that may still move to RFC (`may_fall_back`): the refusal of `SNAP`
+/// over ADT HTTP then lets the router go on, and the STOP with the hint stays for a run that
+/// cannot.
+fn snap_attempt(read: Result<String, PreviewError>, may_fall_back: bool) -> Attempt {
+    match read {
+        Err(error) if may_fall_back && dumps::is_preview_refusal(&error) => {
+            let PreviewError::Refused(message) = error else {
+                unreachable!("only a refusal is a preview refusal")
+            };
+
+            Attempt {
+                fallback_allowed: true,
+                ..Attempt::failed(message, Failure::CapabilityUnavailable)
+            }
+        }
+        other => text_attempt(other),
+    }
+}
+
 // ---- the read commands of 0.18.0, shared by the CLI and the MCP tools ----------------------------
 
 /// `sql`: the statement through the freestyle data preview. `found` receives the rows of a run
@@ -685,6 +704,9 @@ pub(crate) fn run_dumps(
         factories,
         |transport, selection, _, _| {
             let list = dumps::run_list(transport, selection.backend, query, &connection.policies);
+            let may_fall_back = backend.is_none()
+                && selection.backend == BackendKind::AdtHttp
+                && connection.rfc.is_some();
 
             // A read holds no lock, so a failed session end is only a note.
             let note = end_session(transport);
@@ -697,7 +719,7 @@ pub(crate) fn run_dumps(
 
                     attempt
                 }
-                Err(error) => text_attempt(Err(error)),
+                Err(error) => snap_attempt(Err(error), may_fall_back),
             };
 
             attempt.noted(warning).noted(note)
@@ -727,6 +749,9 @@ pub(crate) fn run_dump(
                 &connection.policies,
                 &connection.lang,
             );
+            let may_fall_back = backend.is_none()
+                && selection.backend == BackendKind::AdtHttp
+                && connection.rfc.is_some();
 
             // A read holds no lock, so a failed session end is only a note.
             let note = end_session(transport);
@@ -738,7 +763,7 @@ pub(crate) fn run_dump(
 
                     attempt
                 }
-                Err(error) => text_attempt(Err(error)),
+                Err(error) => snap_attempt(Err(error), may_fall_back),
             };
 
             attempt.noted(note)

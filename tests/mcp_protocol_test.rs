@@ -350,7 +350,7 @@ fn tools(write_offered: bool) -> Vec<Value> {
 }
 
 #[test]
-fn tools_list_offers_the_eight_read_tools_when_no_server_allows_writes() {
+fn tools_list_offers_the_nine_read_tools_when_no_server_allows_writes() {
     let names = tools(false)
         .iter()
         .map(|tool| tool["name"].as_str().unwrap().to_owned())

@@ -42,6 +42,9 @@ use similar::TextDiff;
 pub(crate) const CHECK_NONCE: &str = "00000000000000000000000000000000";
 /// The row of a transparent table in the XML file; the class decides a verdict for such a table.
 const TRANSPARENT_ROW: &str = "<TABCLASS>TRANSP</TABCLASS>";
+/// The stop of an MCP deploy whose live definition holds a configured secret. The MCP adapter
+/// recognises this exact line and answers with its own fixed refusal.
+pub(crate) const SECRET_STOP: &str = "STOP: payload contains a configured secret";
 
 /// Which simulate runs and the values only it takes.
 #[derive(Clone, Copy, Debug)]
@@ -621,6 +624,19 @@ fn deploy_report(
             return Flow::Done(print.finish(run, 1));
         }
     };
+
+    // An MCP deploy of a definition that holds a secret of the connection ends before the base
+    // compare, the diff, `no changes` or the hash: each would tell something about text the client
+    // may not read.
+    if origin == Origin::Mcp
+        && live
+            .as_ref()
+            .is_some_and(|live| attempt.connection.holds_secret(&join(&live.rows)))
+    {
+        print.stderr.push(SECRET_STOP.to_owned());
+
+        return Flow::Done(print.finish(run, 2));
+    }
 
     // M1: a base that is not the live hash ends the command before anything else is shown.
     if let (Some(base), Some(live)) = (base, &live)

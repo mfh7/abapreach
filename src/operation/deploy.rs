@@ -1054,9 +1054,14 @@ impl Run<'_> {
         if let Some(expected) = &self.expected_result
             && *expected != result_hash
         {
-            return Err(Finish::stop(format!(
-                "result changed since the simulation: result hash {result_hash} != {expected}"
-            )));
+            // The MCP never shows a hash of a source its client may not read in full.
+            return Err(Finish::stop(if self.origin == Origin::Mcp {
+                "result changed since the simulation".to_owned()
+            } else {
+                format!(
+                    "result changed since the simulation: result hash {result_hash} != {expected}"
+                )
+            }));
         }
 
         if result_hash == live_hash {

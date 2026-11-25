@@ -513,6 +513,15 @@ impl DumpQuery {
 
 // ---- reading SNAP -----------------------------------------------------------------------------
 
+/// The start of the STOP that ADT HTTP gives when SAP refuses `SNAP` in the data preview.
+const PREVIEW_REFUSAL_LEAD: &str = "SAP does not show";
+
+/// Whether `error` is the refusal of `SNAP` over ADT HTTP. A run that pinned no backend and has an
+/// RFC backend configured does not stop there: the router moves on to RFC.
+pub(crate) fn is_preview_refusal(error: &PreviewError) -> bool {
+    matches!(error, PreviewError::Refused(message) if message.starts_with(PREVIEW_REFUSAL_LEAD))
+}
+
 fn failed(error: &TransportError) -> PreviewError {
     PreviewError::Failed {
         failure: Failure::from(error),
@@ -554,7 +563,7 @@ fn read_snap(
 
     if backend != BackendKind::RfcSadt {
         return Err(PreviewError::Refused(format!(
-            "SAP does not show {table} in the data preview of this release; use --backend rfc to read it through RFC_READ_TABLE"
+            "{PREVIEW_REFUSAL_LEAD} {table} in the data preview of this release; use --backend rfc to read it through RFC_READ_TABLE"
         )));
     }
 
@@ -642,10 +651,12 @@ pub fn run_list(
     }
 
     // The newest first; the host and the number only order dumps of the same second.
-    rows.sort_by(|a, b| {
-        let key = |row: &Vec<String>| [date, time, host, modno].map(|index| row[index].clone());
+    let key = [date, time, host, modno];
 
-        key(b).cmp(&key(a))
+    rows.sort_by(|a, b| {
+        key.iter()
+            .map(|&index| b[index].as_str())
+            .cmp(key.iter().map(|&index| a[index].as_str()))
     });
 
     let rows: Vec<DumpRow> = rows

@@ -56,8 +56,9 @@ internal repository where that implementation was developed. See the
   error, program, include, line, user, client, the short text and the source around the failing line.
   The dump text is read from `FLIST` to `FLIST08`. `--all` shows every user's dumps; it is a display
   filter, not an access boundary (`SNAP` is not on the `read_table_denied` list). On the 7.50 system the
-  data preview refuses `SNAP`: ADT HTTP stops with the hint `--backend rfc`, and the RFC paths read it
-  through `RFC_READ_TABLE` (this needs an English logon).
+  data preview refuses `SNAP`: the RFC paths read it through `RFC_READ_TABLE` (this needs an English
+  logon). Without `--backend` and with RFC configured, ADT HTTP moves on to RFC (the MCP tools have no
+  `backend` argument); with `--backend adt` or without RFC it stops with the hint `--backend rfc`.
 - `ping [--backend adt|rfc]` shows the system, the application server instance that answered and the
   round trip time, from `/system/information` over ADT HTTP and `RFC_SYSTEM_INFO` over RFC. On the
   7.40 system, which has no `/system/information`, the instance is `unknown` over ADT HTTP and the
@@ -107,8 +108,10 @@ internal repository where that implementation was developed. See the
   `dumps` prints `-` for an empty user or client.
 
 ### Fixed
-- `read-table` no longer reads a DDIC view over a table on the `read_table_denied` list: the deny
-  list was checked against the named table only.
+- `read-table` checks the base tables of a view against the `read_table_denied` list (0.17.1 already
+  checked the direct `DD26S` bases). New in 0.18: the check follows views over views, refuses a
+  generated CDS SQL view (found through `DDLDEPENDENCY`) and an unknown entity, and a refusal is
+  `STOP` with exit 2.
 
 ## [0.17.1] - 2026-11-25
 

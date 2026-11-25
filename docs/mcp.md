@@ -284,9 +284,10 @@ Rules:
   `TRAN` and for `create_include`: there is no live text to edit.
 - The `plan_token` binds `base` and a hash of the edits (`edits_sha256`) where a full source binds
   `source_sha256`, and every other bound field as before. The simulate also keeps the hash of the
-  result it reached. The deploy re-reads the live source under the lock, applies the edits again and
-  stops without writing if the result differs from the simulated one
-  (`STOP: result changed since the simulation: result hash ... != ...`).
+  result it reached. The deploy applies the edits once, to the live source it reads before the
+  lock, and stops without writing if the hash of the result differs from the simulated one
+  (`STOP: result changed since the simulation`, with no hash). Under the lock it only re-reads the
+  live source and compares its hash (`STOP: live changed since initial read`).
 - Under `mcp_write: confirm` the form shows the diff, never the raw edits.
 
 **Secret guard on every MCP deploy.** `abap_simulate` and `abap_deploy` refuse with
@@ -294,7 +295,10 @@ Rules:
 object holds a configured secret: the logon password, the SAProuter string or its host fragments.
 This holds for a full source and for edits. The refusal comes before the base check, the edits, the
 diff and any hash, and the re-read under the lock is guarded the same way, so a refused call reveals
-nothing about the source (not even `no changes` or `old not found`). The CLI is unchanged.
+nothing about the source (not even `no changes` or `old not found`). For `DTEL`, `DOMA`, `TABL` and
+`TTYP` the guard checks the live definition XML that the first run returns, before the base check,
+the diff and `no changes`; the second run only compares a hash inside SAP and returns no live
+text. The CLI is unchanged.
 
 The rule has a known false positive: a source that holds the same literal as a host fragment of the
 SAProuter string is refused over MCP, although it holds no secret. Use the CLI for that object:

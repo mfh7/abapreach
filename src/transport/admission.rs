@@ -1077,11 +1077,7 @@ fn is_data_preview(query: &str, body: &[u8]) -> bool {
     let Some(rows) = rows.strip_prefix("rowNumber=") else {
         return false;
     };
-    let rows_valid = !rows.starts_with('0')
-        && rows.bytes().all(|byte| byte.is_ascii_digit())
-        && rows
-            .parse::<u32>()
-            .is_ok_and(|rows| (1..=MAX_PREVIEW_ROWS).contains(&rows));
+    let rows_valid = is_plain_number_in(rows, &(1..=MAX_PREVIEW_ROWS));
     // Only the `/` of a namespace is escaped, as `%2F`; a raw one is refused.
     let decoded = entity.replace("%2F", "/");
 
@@ -1095,11 +1091,7 @@ fn is_freestyle(query: &str, body: &[u8]) -> bool {
     let Some(rows) = query.strip_prefix("rowNumber=") else {
         return false;
     };
-    let rows_valid = !rows.starts_with('0')
-        && rows.bytes().all(|byte| byte.is_ascii_digit())
-        && rows
-            .parse::<u32>()
-            .is_ok_and(|rows| (1..=MAX_PREVIEW_ROWS).contains(&rows));
+    let rows_valid = is_plain_number_in(rows, &(1..=MAX_PREVIEW_ROWS));
 
     rows_valid && std::str::from_utf8(body).is_ok_and(|text| validate_body(text).is_ok())
 }

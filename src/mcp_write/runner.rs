@@ -24,7 +24,7 @@ use crate::operation::payload::Kind;
 use crate::operation::read_ddic::{self, DdicRead};
 use crate::operation::runner_route::random_nonce;
 use crate::operation::runner_tran::{self, TranCreate, TranRead};
-use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
+use crate::operation::simulate_ddic::{self, DdicSimulate, SECRET_STOP, Simulation};
 use crate::policy::McpWrite;
 use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use serde_json::{Map, Value, json};
@@ -385,6 +385,12 @@ impl<G: WriteGate> McpTools<'_, G> {
 
         if let Some(message) = declined {
             return Err(message);
+        }
+
+        // The live definition holds a secret: nothing else of the run is shown, no hash, diff or
+        // token.
+        if exit.stderr.lines().any(|line| line == SECRET_STOP) {
+            return Ok(ToolResult::error(SECRET_REJECTED.to_owned()));
         }
 
         let status = runner_status(&exit);

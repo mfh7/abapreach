@@ -4642,33 +4642,148 @@ fn all_lists_every_user_and_user_names_one() {
     }
 }
 
+/// Both commands with the refusal of `SNAP` scripted on ADT HTTP, run with `extra` arguments on the
+/// connection `conn` of `config`; each stops with the hint, and only ADT HTTP is opened.
+fn assert_snap_hint_stop(config: Option<&str>, extra: &[&str]) {
+    for dump_command in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(scripted(vec![
+            dd02l("SNAP", "TRANSP", None),
+            snap_refused(),
+        ]));
+
+        let mut args = vec!["abapreach", if dump_command { "dump" } else { "dumps" }];
+
+        if dump_command {
+            args.push(OWN_DUMP);
+        }
+
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["--conn", "dev_100"]);
+
+        let env = match config {
+            Some(config) => env_with(directory.path(), config),
+            None => env(directory.path()),
+        };
+        let exit = run(
+            args.iter().map(|arg| (*arg).to_owned()).collect(),
+            env,
+            &mut fake,
+        );
+
+        assert_eq!(exit.code, 2, "{}", exit.stderr);
+        assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+        assert!(exit.stderr.contains("--backend rfc"), "{}", exit.stderr);
+        assert!(!exit.stderr.contains("falling back"), "{}", exit.stderr);
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    }
+}
+
 #[test]
-fn adt_stops_with_the_backend_hint_when_sap_refuses_snap_and_never_falls_back() {
+fn adt_stops_with_the_backend_hint_when_it_was_pinned_and_sap_refuses_snap() {
+    assert_snap_hint_stop(None, &["--backend", "adt"]);
+}
+
+#[test]
+fn adt_only_stops_with_the_backend_hint_when_sap_refuses_snap() {
+    let config = concat!(
+        r#"{"servers":[{"systemId":"DEV","host":"example.com","port":443,"clients":["100"],"#,
+        r#""adt":{"insecure":true}}]}"#,
+    );
+
+    assert_snap_hint_stop(Some(config), &[]);
+}
+
+#[test]
+fn both_backends_fall_back_to_rfc_read_table_when_sap_refuses_snap_over_adt() {
+    let list_widths = [
+        ("DATUM", 8),
+        ("UZEIT", 6),
+        ("AHOST", 32),
+        ("UNAME", 12),
+        ("MANDT", 3),
+        ("MODNO", 3),
+        ("SEQNO", 3),
+        ("FLIST", 200),
+    ];
+    let row = "FC019MESSAGE_TYPE_X_TEXTAP005ZPROGAI006ZINCL AL0023 ";
+    let (api, rfc) = shared(RfcTransport::new(
+        FakeRfcApi::with_responses(vec![
+            rfc_endpoint(dd02l("SNAP", "TRANSP", None)),
+            rfc_endpoint(snap_refused()),
+        ])
+        .with_table_replies(vec![Ok(common::read_table_reply(
+            &list_widths,
+            &[vec![
+                "20261103", "053724", "apphost", "USER", "110", "21", "000", row,
+            ]],
+        ))]),
+    ));
     let mut fake = Fake::default();
 
     fake.adt.push_back(scripted(vec![
         dd02l("SNAP", "TRANSP", None),
         snap_refused(),
     ]));
+    fake.rfc.push_back(rfc);
 
     let exit = dumps(&["--conn", "dev_100"], &mut fake);
 
-    assert_eq!(exit.code, 2, "{}", exit.stderr);
-    assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
-    assert!(exit.stderr.contains("--backend rfc"), "{}", exit.stderr);
-    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "20261103 053724 USER 110 error=MESSAGE_TYPE_X_TEXT program=ZPROG include=ZINCL line=3 id=20261103/053724/apphost/USER/21"
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert_eq!(api.borrow().api().table_calls().len(), 1);
 
+    // `dump` takes the same road.
+    let widths = [("SEQNO", 3), ("MANDT", 3), ("FLIST", 200)];
+    let (api, rfc) = shared(RfcTransport::new(
+        FakeRfcApi::with_responses(vec![
+            rfc_endpoint(dd02l("SNAP", "TRANSP", None)),
+            rfc_endpoint(snap_refused()),
+            rfc_endpoint(dd02l("SNAPT", "TRANSP", None)),
+            rfc_endpoint(Ok(Response::empty(404))),
+        ])
+        .with_table_replies(
+            std::iter::once(Ok(common::read_table_reply(
+                &widths,
+                &[vec!["000", "110", "FC007X_ERRORAP005ZPROG"]],
+            )))
+            .chain((0..7).map(|_| {
+                Err(TransportError::PostSendUncertain(
+                    "RfcInvoke [FIELD_NOT_VALID]".to_owned(),
+                ))
+            }))
+            .collect(),
+        ),
+    ));
     let mut fake = Fake::default();
 
     fake.adt.push_back(scripted(vec![
         dd02l("SNAP", "TRANSP", None),
         snap_refused(),
     ]));
+    fake.rfc.push_back(rfc);
 
     let exit = dump(&[OWN_DUMP, "--conn", "dev_100"], &mut fake);
 
-    assert_eq!(exit.code, 2, "{}", exit.stderr);
-    assert!(exit.stderr.contains("--backend rfc"), "{}", exit.stderr);
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        table_of(&exit).starts_with("error: X_ERROR\nprogram: ZPROG"),
+        "{}",
+        exit.stdout
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert_eq!(api.borrow().api().table_calls().len(), 8);
 }
 
 #[test]

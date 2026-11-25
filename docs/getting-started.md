@@ -727,9 +727,11 @@ but nothing else is removed.
 **Release differences.**
 
 - **7.50.** The data preview refuses `SNAP` (`You cannot display SNAP with the standard tools`). Over
-  ADT HTTP the command stops with exit 2: `SAP does not show SNAP in the data preview of this release;
-  use --backend rfc to read it through RFC_READ_TABLE`. With `--backend rfc` the RFC paths read
-  `SNAP` through the standard function module `RFC_READ_TABLE`, a field group at a time.
+  ADT HTTP, with an RFC backend configured and no `--backend` given, the command moves on to the RFC
+  paths (and so do the MCP tools `abap_dumps` and `abap_dump`). With `--backend adt`, or when no RFC
+  backend is configured, it stops with exit 2: `SAP does not show SNAP in the data preview of this
+  release; use --backend rfc to read it through RFC_READ_TABLE`. The RFC paths read `SNAP` through the
+  standard function module `RFC_READ_TABLE`, a field group at a time.
   ABAPReach recognises the refusal by its English text, so the fallback needs an English logon
   (the `lang` of the server entry, default `EN`). With another logon language the data preview
   error is shown as it is.
