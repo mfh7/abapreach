@@ -6,7 +6,7 @@ use abapreach::config::Connection;
 use abapreach::operation::deploy::{CancelFlag, InterruptAction};
 use abapreach::transport::http::HttpTransport;
 use abapreach::transport::rfc::{FakeRfcApi, RfcEndpointResponse, RfcTransport};
-use abapreach::transport::{Response, SadtTransport, TransportError};
+use abapreach::transport::{Response, SadtTransport, TableCall, TableRows, TransportError};
 use abapreach::{Exit, Factories, RfcLibraryIdentity, RfcLibraryInfo, run};
 use clap::Parser;
 use common::ScriptedTransport;
@@ -39,6 +39,10 @@ impl<T: SadtTransport> SadtTransport for Shared<T> {
 
     fn stateful_supported(&self) -> Option<bool> {
         self.0.borrow().stateful_supported()
+    }
+
+    fn read_table_function(&mut self, call: &TableCall) -> Result<TableRows, TransportError> {
+        self.0.borrow_mut().read_table_function(call)
     }
 }
 
@@ -3934,4 +3938,494 @@ fn create_prog_falls_back_to_rfc_when_the_resolution_cannot_reach_adt() {
         exit.stdout
     );
     assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+// ---- dumps and dump ----------------------------------------------------------------------------
+
+const OWN_DUMP: &str = "20261103/053726/apphost/USER/21";
+const OTHER_DUMP: &str = "20261103/053726/apphost/TESTUSER/21";
+
+fn dumps(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "dumps"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+fn dump(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "dump"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+fn snap_list(release: &str) -> Result<Response, TransportError> {
+    source(
+        &fs::read_to_string(common::fixture_path_in(
+            "m9",
+            &format!("snap-list-{release}.xml"),
+        ))
+        .unwrap(),
+    )
+}
+
+fn snap_refused() -> Result<Response, TransportError> {
+    Ok(Response::text(
+        400,
+        fs::read_to_string(common::fixture_path_in("m9", "snap-list-750-400.xml")).unwrap(),
+    ))
+}
+
+fn rfc_endpoint(response: Result<Response, TransportError>) -> RfcEndpointResponse {
+    let response = response.unwrap();
+
+    RfcEndpointResponse {
+        status: response.status,
+        headers: BTreeMap::new(),
+        body: response.body,
+    }
+}
+
+/// The preview of one synthetic dump: `FLIST` holds the tags, the client is 110.
+fn dump_preview(tags: &str) -> String {
+    common::preview(&[
+        ("SEQNO", &[Some("000")]),
+        ("MANDT", &[Some("110")]),
+        ("FLIST", &[Some(tags)]),
+    ])
+}
+
+#[test]
+fn dumps_and_dump_take_their_options_and_stop_locally_on_a_bad_one() {
+    let cli = |args: &[&str]| {
+        let mut full = vec!["abapreach"];
+
+        full.extend_from_slice(args);
+
+        Cli::try_parse_from(full)
+    };
+
+    match cli(&["dumps", "--conn", "dev_100"]).unwrap().command {
+        Command::Dumps {
+            date,
+            user,
+            all,
+            rows,
+            backend,
+            conn,
+        } => {
+            assert!(date.is_none() && user.is_none() && !all && backend.is_none());
+            assert_eq!(rows, 20);
+            assert_eq!(conn, "dev_100");
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&[
+        "dumps",
+        "--date",
+        "20261101",
+        "--user",
+        "x",
+        "--rows",
+        "1000",
+        "--backend",
+        "rfc",
+        "--conn",
+        "dev_100",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::Dumps {
+            date,
+            user,
+            rows,
+            backend,
+            ..
+        } => {
+            assert_eq!(date.as_deref(), Some("20261101"));
+            assert_eq!(user.as_deref(), Some("x"));
+            assert_eq!(rows, 1000);
+            assert!(backend.is_some());
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&["dump", OWN_DUMP, "--all", "--conn", "dev_100"])
+        .unwrap()
+        .command
+    {
+        Command::Dump { id, all, .. } => {
+            assert_eq!(id, OWN_DUMP);
+            assert!(all);
+        }
+        other => panic!("{other:?}"),
+    }
+    for rows in ["0", "1001", "-1", "x"] {
+        assert!(
+            cli(&["dumps", "--rows", rows, "--conn", "dev_100"]).is_err(),
+            "{rows}"
+        );
+    }
+    assert!(
+        cli(&["dump", "--conn", "dev_100"]).is_err(),
+        "an id is needed"
+    );
+    assert!(cli(&["dumps"]).is_err(), "a connection is needed");
+
+    for args in [
+        vec![
+            "abapreach",
+            "dumps",
+            "--all",
+            "--user",
+            "x",
+            "--conn",
+            "dev_100",
+        ],
+        vec![
+            "abapreach",
+            "dumps",
+            "--date",
+            "2026-11-25",
+            "--conn",
+            "dev_100",
+        ],
+        vec![
+            "abapreach",
+            "dumps",
+            "--date",
+            "20261301",
+            "--conn",
+            "dev_100",
+        ],
+        vec!["abapreach", "dumps", "--user", "a'b", "--conn", "dev_100"],
+        vec!["abapreach", "dumps", "--rows", "0", "--conn", "dev_100"],
+        vec!["abapreach", "dump", "bogus", "--conn", "dev_100"],
+        vec![
+            "abapreach",
+            "dump",
+            "20261103/053726/apphost/US'ER/21",
+            "--conn",
+            "dev_100",
+        ],
+        // The dump of another user needs --all.
+        vec!["abapreach", "dump", OTHER_DUMP, "--conn", "dev_100"],
+    ] {
+        assert_stops_locally(&args);
+    }
+
+    let mut fake = Fake::default();
+    let exit = dumps(&["--all", "--user", "x", "--conn", "dev_100"], &mut fake);
+
+    assert!(
+        exit.stderr.contains("--all") && exit.stderr.contains("--user"),
+        "{}",
+        exit.stderr
+    );
+
+    let exit = dump(&[OTHER_DUMP, "--conn", "dev_100"], &mut fake);
+
+    assert!(exit.stderr.contains("needs --all"), "{}", exit.stderr);
+}
+
+#[test]
+fn dumps_prints_one_line_per_dump_of_the_logon_user_over_adt() {
+    // The logon user is USER. The reply holds a row of another user: the filter of the query is
+    // only a request, so the row is dropped and the stderr says so.
+    let reply = common::preview(&[
+        (
+            "DATUM",
+            &[Some("20261103"), Some("20261104"), Some("20261105")],
+        ),
+        ("UZEIT", &[Some("053724"), Some("053725"), Some("053726")]),
+        (
+            "AHOST",
+            &[Some("apphost"), Some("apphost"), Some("apphost")],
+        ),
+        ("UNAME", &[Some("USER"), Some("TESTUSER"), Some("USER")]),
+        ("MANDT", &[Some("110"), Some("110"), Some("110")]),
+        ("MODNO", &[Some("21 "), Some("21 "), Some("21 ")]),
+        ("SEQNO", &[Some("000"), Some("000"), Some("000")]),
+        (
+            "FLIST",
+            &[
+                Some("FC019MESSAGE_TYPE_X_TEXTAP005ZPROG"),
+                Some("FC006OTHERX"),
+                Some("FC019MESSAGE_TYPE_X_TEXTAP005ZPROG"),
+            ],
+        ),
+    ]);
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![
+        dd02l("SNAP", "TRANSP", None),
+        source(&reply),
+    ]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = dumps(&["--rows", "2", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+
+    let text = table_of(&exit);
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(
+        lines[0].starts_with("20261105 053726 USER 110 error=MESSAGE_TYPE_X_TEXT program=ZPROG")
+    );
+    assert!(lines[0].ends_with("id=20261105/053726/apphost/USER/21"));
+    assert!(lines[1].starts_with("20261103 053724 USER 110"));
+    assert!(
+        !text.contains("TESTUSER") && !text.contains("OTHERX"),
+        "{text}"
+    );
+    assert!(
+        exit.stderr
+            .contains("W: 1 rows of other users than USER were dropped"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert_eq!(calls.borrow().closes, 1);
+
+    let body = String::from_utf8(calls.borrow().calls[1].body.clone()).unwrap();
+
+    assert!(
+        body.contains("FROM SNAP WHERE SEQNO = '000' AND DATUM >= '"),
+        "{body}"
+    );
+    assert!(
+        body.ends_with("AND UNAME = 'USER'"),
+        "the logon user is the default: {body}"
+    );
+}
+
+#[test]
+fn all_lists_every_user_and_user_names_one() {
+    for (args, tail) in [
+        (vec!["--all", "--conn", "dev_100"], None),
+        (
+            vec!["--user", "testuser", "--conn", "dev_100"],
+            Some("UNAME = 'TESTUSER'"),
+        ),
+    ] {
+        let (calls, adt) = shared(ScriptedTransport::replies(vec![
+            dd02l("SNAP", "TRANSP", None),
+            snap_list("740"),
+        ]));
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(adt);
+
+        let exit = dumps(&args, &mut fake);
+
+        assert_eq!(exit.code, 0, "{}", exit.stderr);
+
+        let body = String::from_utf8(calls.borrow().calls[1].body.clone()).unwrap();
+
+        match tail {
+            Some(tail) => assert!(body.ends_with(tail), "{body}"),
+            None => assert!(!body.contains("AND UNAME"), "{body}"),
+        }
+    }
+}
+
+#[test]
+fn adt_stops_with_the_backend_hint_when_sap_refuses_snap_and_never_falls_back() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("SNAP", "TRANSP", None),
+        snap_refused(),
+    ]));
+
+    let exit = dumps(&["--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+    assert!(exit.stderr.contains("--backend rfc"), "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("SNAP", "TRANSP", None),
+        snap_refused(),
+    ]));
+
+    let exit = dump(&[OWN_DUMP, "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert!(exit.stderr.contains("--backend rfc"), "{}", exit.stderr);
+}
+
+#[test]
+fn the_rfc_backend_falls_back_to_rfc_read_table_when_sap_refuses_snap() {
+    let row = "FC019MESSAGE_TYPE_X_TEXTAP005ZPROGAI006ZINCL AL0023 ";
+    let widths = [
+        ("DATUM", 8),
+        ("UZEIT", 6),
+        ("AHOST", 32),
+        ("UNAME", 12),
+        ("MANDT", 3),
+        ("MODNO", 3),
+        ("SEQNO", 3),
+        ("FLIST", 200),
+    ];
+    let (api, rfc) = shared(RfcTransport::new(
+        FakeRfcApi::with_responses(vec![
+            rfc_endpoint(dd02l("SNAP", "TRANSP", None)),
+            rfc_endpoint(snap_refused()),
+        ])
+        .with_table_replies(vec![Ok(common::read_table_reply(
+            &widths,
+            &[vec![
+                "20261103", "053724", "apphost", "USER", "110", "21", "000", row,
+            ]],
+        ))]),
+    ));
+    let mut fake = Fake::default();
+
+    fake.rfc.push_back(rfc);
+
+    let exit = dumps(&["--backend", "rfc", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "20261103 053724 USER 110 error=MESSAGE_TYPE_X_TEXT program=ZPROG include=ZINCL line=3 id=20261103/053724/apphost/USER/21"
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+    assert_eq!(api.borrow().api().table_calls().len(), 1);
+    assert_eq!(api.borrow().api().counts().1, 1, "the session was closed");
+}
+
+#[test]
+fn an_unreachable_adt_falls_back_to_rfc_and_reads_snap_through_the_function_module() {
+    let widths = [("SEQNO", 3), ("MANDT", 3), ("FLIST", 200)];
+    let (api, rfc) = shared(RfcTransport::new(
+        FakeRfcApi::with_responses(vec![
+            rfc_endpoint(dd02l("SNAP", "TRANSP", None)),
+            rfc_endpoint(snap_refused()),
+            rfc_endpoint(dd02l("SNAPT", "TRANSP", None)),
+            rfc_endpoint(Ok(Response::empty(404))),
+        ])
+        .with_table_replies(
+            std::iter::once(Ok(common::read_table_reply(
+                &widths,
+                &[vec!["000", "110", "FC007X_ERRORAP005ZPROG"]],
+            )))
+            .chain((0..7).map(|_| {
+                Err(TransportError::PostSendUncertain(
+                    "RfcInvoke [FIELD_NOT_VALID]".to_owned(),
+                ))
+            }))
+            .collect(),
+        ),
+    ));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(rfc);
+
+    let exit = dump(&[OWN_DUMP, "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        table_of(&exit).starts_with(
+            "error: X_ERROR\nprogram: ZPROG\ninclude: -\nline: -\nuser: USER\nclient: 110"
+        ),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert_eq!(api.borrow().api().table_calls().len(), 8);
+}
+
+#[test]
+fn dump_prints_the_fields_and_scrubs_a_secret_of_the_source() {
+    let tags = "FC007X_ERRORAP005ZPROGAI007ZINCLUDAL0012";
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![
+        dd02l("SNAP", "TRANSP", None),
+        source(&dump_preview(tags)),
+        dd02l("SNAPT", "TRANSP", None),
+        source(&common::preview(&[
+            ("SEQNO", &[Some("000")]),
+            ("TLINE", &[Some("It failed with secret-pw inside.")]),
+        ])),
+        source("first line\nsecond line has secret-pw in it\nthird"),
+    ]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = dump(&[OTHER_DUMP, "--all", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(!exit.stdout.contains("secret-pw"), "{}", exit.stdout);
+    assert_eq!(
+        table_of(&exit),
+        "error: X_ERROR\nprogram: ZPROG\ninclude: ZINCLUD\nline: 2\nuser: TESTUSER\nclient: 110\n\
+         short text:\nIt failed with *** inside.\nsource ZINCLUD:\n\u{20}     1 first line\n\
+         >     2 second line has *** in it\n\u{20}     3 third"
+    );
+    assert_eq!(calls.borrow().closes, 1);
+}
+
+#[test]
+fn a_dump_that_is_not_there_is_a_rejection() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("SNAP", "TRANSP", None),
+        source(&common::preview(&[
+            ("SEQNO", &[]),
+            ("MANDT", &[]),
+            ("FLIST", &[]),
+        ])),
+    ]));
+
+    let exit = dump(&[OWN_DUMP, "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stderr.starts_with("REJECTED: dump not found"),
+        "{}",
+        exit.stderr
+    );
+}
+
+#[test]
+fn snap_on_the_deny_list_stops_dumps_and_dump_without_a_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = concat!(
+        r#"{"policies":{"read_table_denied":["SNAP"]},"servers":[{"systemId":"DEV","host":"example.com","#,
+        r#""port":443,"clients":["100"],"rfc":{"ashost":"example.com","sysnr":"00"},"adt":{"insecure":true}}]}"#,
+    );
+
+    for args in [
+        vec!["abapreach", "dumps", "--conn", "dev_100"],
+        vec!["abapreach", "dump", OWN_DUMP, "--conn", "dev_100"],
+    ] {
+        let mut fake = Fake::default();
+        let exit = run(
+            args.iter().map(|arg| (*arg).to_owned()).collect(),
+            env_with(directory.path(), config),
+            &mut fake,
+        );
+
+        assert_eq!(exit.code, 2, "{}", exit.stderr);
+        assert!(exit.stderr.contains("read_table_denied"), "{}", exit.stderr);
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+    }
 }

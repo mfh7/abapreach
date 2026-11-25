@@ -19,11 +19,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 static CREATES: AtomicU32 = AtomicU32::new(0);
 static DESTROYS: AtomicU32 = AtomicU32::new(0);
 static SETS: AtomicU32 = AtomicU32::new(0);
+static FAIL_CREATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static BODY: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
 
 #[no_mangle] pub extern "C" fn fake_creates() -> u32 { CREATES.load(Ordering::SeqCst) }
 #[no_mangle] pub extern "C" fn fake_destroys() -> u32 { DESTROYS.load(Ordering::SeqCst) }
 #[no_mangle] pub extern "C" fn fake_sets() -> u32 { SETS.load(Ordering::SeqCst) }
+#[no_mangle] pub extern "C" fn fake_fail_next_create() -> u32 { FAIL_CREATE.store(true, Ordering::SeqCst); 0 }
 
 const FN_YFM: usize = 0x10;
 const FN_SADT: usize = 0x20;
@@ -31,6 +33,7 @@ const FN_NULL_CREATE: usize = 0x30;
 const FN_ABAP_EXC: usize = 0x40;
 const FN_HUGE: usize = 0x50;
 const FN_NULL_ROW: usize = 0x60;
+const FN_READ_TABLE: usize = 0x70;
 
 unsafe fn read(pointer: *const c_void) -> String {
     if WIDE {
@@ -96,12 +99,13 @@ struct Node {
     cursor: usize,
     huge: bool,
     null_row: bool,
+    fail_read: bool,
 }
 
 fn node(kind: u8, function: usize) -> *mut c_void {
     Box::into_raw(Box::new(Node {
         kind, function, fields: HashMap::new(), children: HashMap::new(), rows: Vec::new(),
-        cursor: 0, huge: false, null_row: false,
+        cursor: 0, huge: false, null_row: false, fail_read: false,
     })) as *mut c_void
 }
 
@@ -142,6 +146,7 @@ pub unsafe extern "C" fn RfcGetFunctionDesc(_: *mut c_void, name: *const c_void,
         "ABAP_EXC" => FN_ABAP_EXC as *mut c_void,
         "HUGE_TABLE" => FN_HUGE as *mut c_void,
         "NULL_ROW" => FN_NULL_ROW as *mut c_void,
+        "RFC_READ_TABLE" => FN_READ_TABLE as *mut c_void,
         "MISSING_FM" => { fail_key(info, 5, "FU_NOT_FOUND", "function module not found"); std::ptr::null_mut() }
         _ => { fail(info, 20, "bad function"); std::ptr::null_mut() }
     }
@@ -150,7 +155,7 @@ pub unsafe extern "C" fn RfcGetFunctionDesc(_: *mut c_void, name: *const c_void,
 #[no_mangle]
 pub unsafe extern "C" fn RfcCreateFunction(descriptor: *mut c_void, info: *mut c_void) -> *mut c_void {
     CREATES.fetch_add(1, Ordering::SeqCst);
-    if descriptor as usize == FN_NULL_CREATE {
+    if descriptor as usize == FN_NULL_CREATE || FAIL_CREATE.swap(false, Ordering::SeqCst) {
         fail(info, 3, "cannot create");
         return std::ptr::null_mut();
     }
@@ -174,7 +179,9 @@ pub unsafe extern "C" fn RfcGetStructure(container: *mut c_void, name: *const c_
 pub unsafe extern "C" fn RfcGetTable(container: *mut c_void, name: *const c_void, out: *mut *mut c_void, info: *mut c_void) -> c_int {
     let parent = at(container);
     let name = read(name);
-    let allowed = if strict(parent.function) {
+    let allowed = if parent.function == FN_READ_TABLE {
+        parent.kind == 0 && matches!(name.as_str(), "FIELDS" | "OPTIONS" | "DATA")
+    } else if strict(parent.function) {
         parent.kind == 0 && matches!(name.as_str(), "IT_SOURCE" | "ET_SOURCE" | "ET_MESSAGES")
     } else {
         parent.kind == 1 && name == "HEADER_FIELDS"
@@ -283,6 +290,60 @@ pub unsafe extern "C" fn RfcInvoke(_: *mut c_void, function: *mut c_void, info: 
             function.children.insert("ET_MESSAGES".into(), messages);
             0
         }
+        FN_READ_TABLE => {
+            let text = |node: &Node, name: &str| match node.fields.get(name) {
+                Some(Value::Text(text)) => text.clone(),
+                _ => String::new(),
+            };
+            let table = text(function, "QUERY_TABLE");
+            if table == "ZFAIL_INVOKE" {
+                return fail_key(info, 5, "TABLE_NOT_AVAILABLE", "table is not available");
+            }
+            let wanted: usize = text(function, "ROWCOUNT").trim().parse().unwrap_or(0);
+            let fields = at(*function.children.get("FIELDS").expect("FIELDS") as *mut c_void);
+            let width = |name: &str| match name {
+                "SEQNO" | "MANDT" | "MODNO" => 3,
+                "DATUM" => 8,
+                "UZEIT" => 6,
+                "AHOST" => 32,
+                "UNAME" => 12,
+                "TLINE" => 255,
+                name if name.starts_with("FLIST") => 200,
+                _ => 10,
+            };
+            let value = |name: &str, index: usize| match name {
+                "SEQNO" => format!("{index:03}"),
+                "MANDT" => "110".to_string(),
+                "DATUM" => "20261103".to_string(),
+                "UZEIT" => "053726".to_string(),
+                "AHOST" => "apphost".to_string(),
+                "UNAME" => "TESTUSER".to_string(),
+                "MODNO" => "21".to_string(),
+                "FLIST" => "FC007X_ERROR".to_string(),
+                name if name.starts_with("FLIST") => "x".repeat(200),
+                _ => "v".to_string(),
+            };
+            let mut names = Vec::new();
+            let mut offset = 0;
+            for row in fields.rows.clone() {
+                let row = at(row as *mut c_void);
+                let name = text(row, "FIELDNAME");
+                row.fields.insert("OFFSET".into(), Value::Text(format!("{offset:06}")));
+                row.fields.insert("LENGTH".into(), Value::Text(format!("{:06}", width(&name))));
+                offset += width(&name);
+                names.push(name);
+            }
+            let data = node(2, FN_READ_TABLE) as *mut Node;
+            for index in 0..wanted.min(3) {
+                let row = node(3, FN_READ_TABLE) as *mut Node;
+                let line: String = names.iter().map(|name| format!("{:<w$}", value(name, index), w = width(name))).collect();
+                at(row as *mut c_void).fields.insert("WA".into(), Value::Text(line));
+                at(row as *mut c_void).fail_read = table == "ZFAIL_READ";
+                at(data as *mut c_void).rows.push(row);
+            }
+            function.children.insert("DATA".into(), data);
+            0
+        }
         FN_HUGE => {
             let table = node(2, FN_HUGE) as *mut Node;
             at(table as *mut c_void).huge = true;
@@ -367,7 +428,10 @@ pub unsafe extern "C" fn RfcGetInt(container: *mut c_void, name: *const c_void, 
         r#"
 #[no_mangle]
 pub unsafe extern "C" fn RfcGetChars(container: *mut c_void, name: *const c_void, buffer: *mut c_void, length: c_uint, info: *mut c_void) -> c_int {
-    let text = match at(container).fields.get(&read(name)) {
+    let name = read(name);
+    if name == "WA" && length != 512 { return fail(info, 13, "the data row is 512 characters wide"); }
+    if name == "WA" && at(container).fail_read { return fail(info, 22, "conversion failure"); }
+    let text = match at(container).fields.get(&name) {
         Some(Value::Text(text)) => text.clone(),
         Some(Value::Int(_)) => return fail(info, 22, "conversion failure"),
         None => String::new(),
@@ -391,11 +455,16 @@ pub unsafe extern "C" fn RfcSetChars(container: *mut c_void, name: *const c_void
     // The length counts characters, not bytes.
     let text = chars_of(value, length as usize);
     let allowed = match target.kind {
-        0 => matches!(name.as_str(), "IV_OBJECT_TYPE" | "IV_OBJECT_NAME" | "IV_MODE" | "IV_PACKAGE" | "IV_TEXT"),
-        3 => name == "LINE",
+        0 => matches!(name.as_str(), "IV_OBJECT_TYPE" | "IV_OBJECT_NAME" | "IV_MODE" | "IV_PACKAGE" | "IV_TEXT")
+            || (target.function == FN_READ_TABLE && matches!(name.as_str(), "QUERY_TABLE" | "ROWCOUNT")),
+        3 => name == "LINE"
+            || (target.function == FN_READ_TABLE && matches!(name.as_str(), "FIELDNAME" | "TEXT")),
         _ => false,
     };
     if !allowed { return fail(info, 20, "wrong type"); }
+    if name == "QUERY_TABLE" && text == "ZFAIL_SET" { return fail(info, 20, "cannot set the table"); }
+    if name == "TEXT" && length > 72 { return fail(info, 13, "buffer too small"); }
+    if name == "FIELDNAME" && length > 30 { return fail(info, 13, "buffer too small"); }
     if name == "IV_MODE" && length > 10 { return fail(info, 13, "buffer too small"); }
     if name == "LINE" && length > 255 { return fail(info, 13, "buffer too small"); }
     target.fields.insert(name, Value::Text(text));
@@ -1093,4 +1162,118 @@ fn a_library_with_the_ext_symbols_reports_support_and_sadt_is_unchanged() {
             .status,
         200
     );
+}
+
+// ---- the typed RFC_READ_TABLE read -------------------------------------------------------------
+
+use abapreach::transport::TableCall;
+
+fn read_call(table: &str, fields: &[&str], rows: u32) -> TableCall {
+    TableCall::for_test(table, fields, &["SEQNO = '000'"], rows).unwrap()
+}
+
+fn fail_next_create(path: &Path) {
+    let library = unsafe { libloading::Library::new(path) }.unwrap();
+    let arm: libloading::Symbol<unsafe extern "C" fn() -> u32> =
+        unsafe { library.get(b"fake_fail_next_create\0") }.unwrap();
+
+    unsafe { arm() };
+}
+
+#[test]
+fn the_table_read_cuts_a_row_wider_than_the_generic_call_allows_in_either_width() {
+    for wide in WIDTHS {
+        let mut fixture = Fixture::new(wide, &[]);
+        let call = read_call("SNAP", &["SEQNO", "FLIST", "FLIST02"], 2);
+        let rows = fixture
+            .api
+            .read_table(&call)
+            .unwrap_or_else(|error| panic!("wide {wide}: {error}"));
+
+        assert_eq!(rows.columns, ["SEQNO", "FLIST", "FLIST02"], "wide: {wide}");
+        // 403 characters: the row buffer is 512 wide, which the generic call would refuse.
+        assert_eq!(
+            rows.rows,
+            [
+                ["000".to_owned(), "FC007X_ERROR".to_owned(), "x".repeat(200)],
+                ["001".to_owned(), "FC007X_ERROR".to_owned(), "x".repeat(200)],
+            ],
+            "wide: {wide}"
+        );
+        // QUERY_TABLE, ROWCOUNT, three field rows and one condition line reached the library.
+        assert_eq!(fixture.counter(b"fake_sets\0"), 6, "wide: {wide}");
+        assert_eq!(fixture.counter(b"fake_creates\0"), 1);
+        assert_eq!(fixture.counter(b"fake_destroys\0"), 1);
+
+        // ROWCOUNT is what the library sees: a larger one gives what the fake has, three rows.
+        let more = fixture
+            .api
+            .read_table(&read_call("SNAP", &["SEQNO"], 50))
+            .unwrap();
+
+        assert_eq!(more.rows.len(), 3, "wide: {wide}");
+    }
+}
+
+#[test]
+fn a_table_read_that_fails_at_any_stage_is_an_error_and_leaves_no_function_behind() {
+    for wide in WIDTHS {
+        // Setting an import, the invoke and reading a row each fail on their own.
+        for (table, needle) in [
+            ("ZFAIL_SET", "RfcSetChars"),
+            ("ZFAIL_INVOKE", "[TABLE_NOT_AVAILABLE]"),
+            ("ZFAIL_READ", "RfcGetChars"),
+        ] {
+            let mut fixture = Fixture::new(wide, &[]);
+            let error = fixture
+                .api
+                .read_table(&read_call(table, &["SEQNO", "FLIST"], 3))
+                .unwrap_err();
+
+            assert!(
+                error.to_string().contains(needle),
+                "{table} wide {wide}: {error}"
+            );
+            assert_eq!(
+                fixture.counter(b"fake_destroys\0"),
+                fixture.counter(b"fake_creates\0"),
+                "{table} wide {wide}: the function is destroyed"
+            );
+        }
+
+        // The creation fails: there is no function to destroy, and the next call works.
+        let mut fixture = Fixture::new(wide, &[]);
+
+        fail_next_create(&fixture.path);
+
+        let error = fixture
+            .api
+            .read_table(&read_call("SNAP", &["SEQNO"], 1))
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("cannot create"),
+            "wide {wide}: {error}"
+        );
+        assert_eq!(fixture.counter(b"fake_destroys\0"), 0);
+        assert!(
+            fixture
+                .api
+                .read_table(&read_call("SNAP", &["SEQNO"], 1))
+                .is_ok()
+        );
+        assert_eq!(fixture.counter(b"fake_destroys\0"), 1);
+    }
+}
+
+#[test]
+fn a_library_without_the_function_symbols_cannot_read_a_table() {
+    let mut fixture = Fixture::new(true, &["RfcGetChars"]);
+    let error = fixture
+        .api
+        .read_table(&read_call("SNAP", &["SEQNO"], 1))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("RfcGetChars"), "{error}");
+    assert_eq!(fixture.counter(b"fake_creates\0"), 0);
 }

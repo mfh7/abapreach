@@ -73,6 +73,8 @@ pub enum OperationKind {
     ReadTable,
     Sql,
     Search,
+    Dumps,
+    Dump,
     Delete,
     /// `run`: the class, report or snippet an operation executes.
     Run,
@@ -91,6 +93,8 @@ impl fmt::Display for OperationKind {
             Self::ReadTable => write!(formatter, "read-table"),
             Self::Sql => write!(formatter, "sql"),
             Self::Search => write!(formatter, "search"),
+            Self::Dumps => write!(formatter, "dumps"),
+            Self::Dump => write!(formatter, "dump"),
             Self::Delete => write!(formatter, "delete"),
             Self::Run => write!(formatter, "run"),
             Self::Doctor => write!(formatter, "doctor"),

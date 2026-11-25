@@ -1,6 +1,7 @@
 use crate::extension::{ExtensionKind, ExtensionOptions, Registry, Verbs};
 use crate::operation::activate::ActivateTarget;
 use crate::operation::aunit::AunitKind;
+use crate::operation::dumps::{DEFAULT_ROWS as DUMPS_ROWS, ROWS as DUMPS_RANGE};
 use crate::operation::payload::Kind;
 use crate::operation::search::{DEFAULT_MAX, MAX_RESULTS};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
@@ -173,6 +174,47 @@ pub enum Command {
         /// 1 to 1000 results
         #[arg(long, default_value_t = DEFAULT_MAX, value_parser = clap::value_parser!(u32).range(i64::from(*MAX_RESULTS.start())..=i64::from(*MAX_RESULTS.end())))]
         max: u32,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Lists the ST22 short dumps from table SNAP, newest first, one line each
+    Dumps {
+        /// List the dumps from this day on, written YYYYMMDD; without it the last 7 days and one more day for the time zone
+        #[arg(long)]
+        date: Option<String>,
+
+        /// List the dumps of this user; without it the dumps of the logon user
+        #[arg(long)]
+        user: Option<String>,
+
+        /// List the dumps of every user, as ST22 does; not with --user
+        #[arg(long)]
+        all: bool,
+
+        /// 1 to 1000
+        #[arg(long, default_value_t = DUMPS_ROWS, value_parser = clap::value_parser!(u32).range(i64::from(*DUMPS_RANGE.start())..=i64::from(*DUMPS_RANGE.end())))]
+        rows: u32,
+
+        /// Release 7.50 refuses SNAP in the data preview; there `rfc` reads it through RFC_READ_TABLE
+        #[arg(long)]
+        backend: Option<Backend>,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Shows one short dump: error, program, include, line, user, client, short text and source
+    Dump {
+        /// The id `dumps` prints: DATUM/UZEIT/AHOST/UNAME/MODNO
+        id: String,
+
+        /// Show the dump of another user
+        #[arg(long)]
+        all: bool,
+
+        /// Release 7.50 refuses SNAP in the data preview; there `rfc` reads it through RFC_READ_TABLE
+        #[arg(long)]
+        backend: Option<Backend>,
 
         #[arg(long)]
         conn: String,

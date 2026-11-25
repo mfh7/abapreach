@@ -212,3 +212,53 @@ pub fn doctor_runner_replies() -> Vec<Result<Response, TransportError>> {
     .map(|body| Ok(Response::text(200, body)))
     .collect()
 }
+
+/// What `RFC_READ_TABLE` returns: `FIELDS` with the offsets and `DATA` as fixed-width rows whose
+/// trailing blanks the library drops.
+pub fn read_table_reply(
+    fields: &[(&str, usize)],
+    rows: &[Vec<&str>],
+) -> abapreach::transport::rfc::FunctionResult {
+    let mut offset = 0;
+    let mut spans = Vec::new();
+
+    for (name, length) in fields {
+        spans.push((*name, offset, *length));
+        offset += length;
+    }
+
+    let text = |value: &str| abapreach::transport::rfc::Cell::Text(value.to_owned());
+
+    abapreach::transport::rfc::FunctionResult {
+        exports: Vec::new(),
+        tables: vec![
+            (
+                "FIELDS".to_owned(),
+                spans
+                    .iter()
+                    .map(|(name, offset, length)| {
+                        vec![
+                            text(name),
+                            text(&format!("{offset:06}")),
+                            text(&format!("{length:06}")),
+                        ]
+                    })
+                    .collect(),
+            ),
+            (
+                "DATA".to_owned(),
+                rows.iter()
+                    .map(|row| {
+                        let wa: String = row
+                            .iter()
+                            .zip(fields)
+                            .map(|(value, (_, length))| format!("{value:<width$}", width = *length))
+                            .collect();
+
+                        vec![text(wa.trim_end())]
+                    })
+                    .collect(),
+            ),
+        ],
+    }
+}

@@ -96,6 +96,13 @@ impl Query {
     pub fn rows(&self) -> u32 {
         self.rows
     }
+
+    /// The canonical condition of the body, without `WHERE`.
+    pub fn condition(&self) -> Option<&str> {
+        self.body
+            .split_once(" WHERE ")
+            .map(|(_, condition)| condition)
+    }
 }
 
 /// The row count of an MCP call: 100 when absent, 1 to 1000 otherwise.
@@ -108,7 +115,7 @@ pub fn mcp_rows(requested: Option<u32>) -> Result<u32, String> {
 }
 
 /// An upper-case DDIC identifier: `[A-Z0-9_]`, or `/NAMESPACE/NAME`.
-pub(super) fn identifier(what: &str, text: &str) -> Result<String, String> {
+pub(crate) fn identifier(what: &str, text: &str) -> Result<String, String> {
     let name = text.to_ascii_uppercase();
     let plain = |part: &str| {
         !part.is_empty()
@@ -133,7 +140,7 @@ pub(super) fn identifier(what: &str, text: &str) -> Result<String, String> {
     }
 }
 
-pub(super) fn field_name(text: &str) -> Result<String, String> {
+pub(crate) fn field_name(text: &str) -> Result<String, String> {
     let name = identifier("field", text)?;
 
     if RESERVED.contains(&name.as_str()) {
@@ -598,6 +605,16 @@ fn canonical_where(text: &str) -> Result<String, String> {
     }
 
     Ok(condition.text)
+}
+
+/// Whether `text` is a condition in its canonical rendering: the one rule the `RFC_READ_TABLE`
+/// OPTIONS lines of the transport follow, so no line holds text this grammar would not build.
+pub fn validate_condition(text: &str) -> Result<(), String> {
+    match canonical_where(text) {
+        Ok(canonical) if canonical == text => Ok(()),
+        Ok(_) => Err("the condition is not in its canonical form".to_owned()),
+        Err(message) => Err(message),
+    }
 }
 
 /// Parse a data-preview body with the same grammar as `Query` and require its exact canonical

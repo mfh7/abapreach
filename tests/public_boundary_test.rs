@@ -241,3 +241,24 @@ fn only_the_transport_the_extension_module_and_the_factories_name_the_function_l
         }
     }
 }
+
+/// The typed `RFC_READ_TABLE` read is a trait method that skips the data preview, so only its
+/// trait declaration, the RFC transport that serves it and the `dumps` operation may name it; the
+/// operation builds every call from a query that passed the deny list.
+#[test]
+fn only_the_dumps_operation_and_the_rfc_transport_call_the_table_function() {
+    let allowed = [
+        "src/operation/dumps.rs",
+        "src/transport/rfc.rs",
+        "src/transport/mod.rs",
+    ];
+
+    for (name, text) in text_files(&["src"]) {
+        if text.contains("read_table_function") {
+            assert!(
+                allowed.contains(&name.as_str()),
+                "{name} names the table function"
+            );
+        }
+    }
+}

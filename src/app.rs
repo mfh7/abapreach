@@ -28,6 +28,7 @@ use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope,
 use crate::operation::deploy_ddic::{self, DdicDeploy};
 use crate::operation::dictionary::PreviewError;
 use crate::operation::doctor::Doctor;
+use crate::operation::dumps::{self, DumpQuery, ListOptions, ListQuery};
 use crate::operation::inactive;
 use crate::operation::payload::Kind;
 use crate::operation::quality;
@@ -393,6 +394,8 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::ReadTable { conn, .. }
         | Command::Sql { conn, .. }
         | Command::Search { conn, .. }
+        | Command::Dumps { conn, .. }
+        | Command::Dump { conn, .. }
         | Command::Delete { conn, .. }
         | Command::Inactive { conn, .. }
         | Command::Activate { conn, .. }
@@ -485,6 +488,27 @@ fn stop_attempt(message: &str) -> Attempt {
 pub(crate) fn read_attempt(read: Result<TableData, PreviewError>) -> Attempt {
     match read {
         Ok(data) => table_attempt(&data),
+        Err(PreviewError::Refused(message)) => stop_attempt(&message),
+        Err(PreviewError::Rejected(message)) => rejected_attempt(&message),
+        Err(PreviewError::Failed { failure, message }) => Attempt::failed(message, failure),
+    }
+}
+
+/// The attempt of a `dumps` or `dump` run: the text it printed, or why it stopped, as for a
+/// data preview read.
+fn text_attempt(read: Result<String, PreviewError>) -> Attempt {
+    match read {
+        Ok(stdout) => Attempt {
+            outcome: Outcome {
+                status: None,
+                exit: 0,
+                stdout,
+                stderr: String::new(),
+            },
+            failure: None,
+            fallback_allowed: false,
+            detail: None,
+        },
         Err(PreviewError::Refused(message)) => stop_attempt(&message),
         Err(PreviewError::Rejected(message)) => rejected_attempt(&message),
         Err(PreviewError::Failed { failure, message }) => Attempt::failed(message, failure),
@@ -747,6 +771,81 @@ fn execute(
 
                     // A read holds no lock, so a failed session end is only a note.
                     quality::attempt(result, end_session(transport))
+                },
+            )
+        }
+        Command::Dumps {
+            date,
+            user,
+            all,
+            rows,
+            backend,
+            ..
+        } => {
+            let options = ListOptions {
+                date: date.as_deref(),
+                user: user.as_deref(),
+                all,
+                rows,
+            };
+            let query = match ListQuery::new(
+                &options,
+                &connection.user,
+                &dumps::today(),
+                &connection.policies,
+            ) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            route(
+                OperationKind::Dumps,
+                backend.map(backend_kind),
+                false,
+                connection,
+                factories,
+                |transport, selection, _, _| {
+                    let list =
+                        dumps::run_list(transport, selection.backend, &query, &connection.policies);
+
+                    // A read holds no lock, so a failed session end is only a note.
+                    let note = end_session(transport);
+
+                    let warning = list.as_ref().ok().and_then(|l| l.warning.clone());
+
+                    text_attempt(list.map(|listing| listing.text))
+                        .noted(warning)
+                        .noted(note)
+                },
+            )
+        }
+        Command::Dump {
+            id, all, backend, ..
+        } => {
+            let query = match DumpQuery::new(&id, all, &connection.user, &connection.policies) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            route(
+                OperationKind::Dump,
+                backend.map(backend_kind),
+                false,
+                connection,
+                factories,
+                |transport, selection, _, _| {
+                    let shown = dumps::run_dump(
+                        transport,
+                        selection.backend,
+                        &query,
+                        &connection.policies,
+                        &connection.lang,
+                    );
+
+                    // A read holds no lock, so a failed session end is only a note.
+                    let note = end_session(transport);
+
+                    text_attempt(shown).noted(note)
                 },
             )
         }

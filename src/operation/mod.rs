@@ -10,6 +10,7 @@ pub mod deploy_ddic;
 pub mod dictionary;
 pub mod doctor;
 pub mod doctor_runner;
+pub mod dumps;
 pub mod inactive;
 pub mod include;
 pub mod payload;
