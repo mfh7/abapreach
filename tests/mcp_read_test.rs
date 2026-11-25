@@ -184,7 +184,7 @@ fn a_source_read_carries_the_same_data_in_text_and_structured_fields() {
 }
 
 #[test]
-fn a_lines_read_is_a_partial_excerpt_without_hash_or_source() {
+fn a_lines_read_is_a_partial_excerpt_with_the_whole_source_hash_and_no_source() {
     let mut rig = rig();
 
     rig.adt(vec![source(PROGRAM)]);
@@ -198,10 +198,70 @@ fn a_lines_read_is_a_partial_excerpt_without_hash_or_source() {
     assert_eq!(result.structured["excerpt"], "WRITE 'a'.\nWRITE 'b'.");
     assert_eq!(result.structured["partial"], true);
     assert_eq!(result.structured["lines"], 2);
-    assert!(result.structured.get("hash").is_none());
     assert!(result.structured.get("source").is_none());
     assert!(result.text.contains("WRITE 'a'.\nWRITE 'b'."));
+
+    // The hash is the one of the whole source, not of the excerpt.
+    let whole = source_hash(&lines_of(PROGRAM));
+
+    assert_eq!(result.structured["hash"], whole);
+    assert_ne!(
+        result.structured["hash"],
+        source_hash(&lines_of("WRITE 'a'.\nWRITE 'b'."))
+    );
+    assert!(
+        result
+            .text
+            .ends_with(&format!("hash {whole} (whole source)")),
+        "{}",
+        result.text
+    );
+}
+
+#[test]
+fn the_partial_hash_equals_the_full_read_hash_for_every_range() {
+    for range in ["1-1", "2-3", "3-9"] {
+        let mut rig = rig();
+
+        // Each call opens its own connection.
+        rig.adt(vec![source(PROGRAM)]);
+        rig.adt(vec![source(PROGRAM)]);
+
+        let full = rig.call(
+            "abap_read_source",
+            json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST"}),
+        );
+        let partial = rig.call(
+            "abap_read_source",
+            json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST", "lines": range}),
+        );
+
+        assert_eq!(
+            partial.structured["hash"], full.structured["hash"],
+            "{range}"
+        );
+    }
+}
+
+#[test]
+fn a_partial_read_gives_no_hash_when_the_whole_source_holds_a_secret() {
+    let mut rig = rig();
+
+    // The secret is on line 3; the excerpt of lines 1-2 does not show it.
+    rig.adt(vec![source(&format!(
+        "REPORT y.\nWRITE 'a'.\n\" {PASSWORD}"
+    ))]);
+
+    let result = rig.call(
+        "abap_read_source",
+        json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST", "lines": "1-2"}),
+    );
+
+    assert!(!result.is_error, "{}", result.text);
+    assert_eq!(result.structured["excerpt"], "REPORT y.\nWRITE 'a'.");
+    assert!(result.structured.get("hash").is_none());
     assert!(!result.text.contains("hash"), "{}", result.text);
+    assert!(!result.text.contains(PASSWORD));
 }
 
 #[test]

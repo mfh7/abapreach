@@ -670,8 +670,16 @@ fn the_stale_base_text_of_the_edits_path_names_base_not_the_cli_flag() {
 
     let result = rig.bare("abap_simulate", arguments);
 
-    assert!(result.text.contains("!= base 000"), "{}", result.text);
-    assert!(!result.text.contains("--base"), "{}", result.text);
+    assert!(
+        result
+            .text
+            .contains("STOP: live changed since your read: base does not match"),
+        "{}",
+        result.text
+    );
+    // No hash of the live source in the text: neither the live one nor the stale one.
+    assert!(!result.text.contains("000000"), "{}", result.text);
+    assert!(!result.text.contains(&base()), "{}", result.text);
 }
 
 #[test]
@@ -923,4 +931,219 @@ fn fugr_and_main_bind_a_token_of_edits() {
     }
 
     assert_eq!(rig.opened(), (0, 0));
+}
+
+const SECRET_REJECTED: &str = "REJECTED: payload contains a configured secret";
+
+#[test]
+fn a_source_that_holds_a_secret_reveals_nothing_to_an_edits_simulation() {
+    let secret_source = "REPORT ytest_abapreach01.\n\nWRITE / 'v1'.\n\" secret-pw";
+    let base = source_hash(
+        &secret_source
+            .split('\n')
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+    );
+
+    for (what, base, edits) in [
+        (
+            "wrong base",
+            "0".repeat(64),
+            json!([{"old": "'v1'", "new": "'v2'"}]),
+        ),
+        (
+            "right base, no match",
+            base.clone(),
+            json!([{"old": "nothing", "new": "x"}]),
+        ),
+        (
+            "right base, match",
+            base.clone(),
+            json!([{"old": "'v1'", "new": "'v2'"}]),
+        ),
+        (
+            "right base, secret probe",
+            base.clone(),
+            json!([{"old": "secret-pw", "new": "x"}]),
+        ),
+    ] {
+        let mut rig = rig(TOKEN);
+
+        rig.adt(replay(
+            FIXTURE,
+            vec![Step::ReplyTo(
+                6,
+                Ok(abapreach::transport::Response::text(200, secret_source)),
+            )],
+        ));
+
+        let mut arguments = edit_arguments(edits);
+
+        arguments["base"] = json!(base);
+
+        let result = rig.bare("abap_simulate", arguments);
+
+        assert!(result.is_error, "{what}");
+        assert_eq!(result.text, SECRET_REJECTED, "{what}");
+        assert!(result.structured.get("plan_token").is_none(), "{what}");
+        assert!(!result.structured.to_string().contains(&base), "{what}");
+        assert!(!result.text.contains("@@"), "{what}: no diff");
+    }
+}
+
+#[test]
+fn the_hash_of_a_partial_read_is_a_valid_base_for_edits() {
+    let mut rig = rig(TOKEN);
+    let mut session = FakeSession::new(false);
+
+    rig.adt(replay(FIXTURE, vec![fx(6)]));
+
+    let partial = rig.call(
+        &mut session,
+        "abap_read_source",
+        json!({"conn": "DEV_100", "type": "PROG", "name": NAME, "lines": "3-3"}),
+    );
+
+    assert!(!partial.is_error, "{}", partial.text);
+
+    let hash = partial.structured["hash"].as_str().unwrap().to_owned();
+
+    rig.adt(replay(FIXTURE, simulate_steps()));
+
+    let mut arguments = edit_arguments(v2_edits());
+
+    arguments["base"] = json!(hash);
+
+    let result = rig.call(&mut session, "abap_simulate", arguments);
+
+    assert!(!result.is_error, "{}", result.text);
+    assert!(result.structured.get("plan_token").is_some());
+}
+
+fn secret_reply(text: &str) -> Step {
+    Step::ReplyTo(6, Ok(abapreach::transport::Response::text(200, text)))
+}
+
+#[test]
+fn a_full_source_simulation_rejects_a_live_source_with_a_secret_far_from_the_change() {
+    let mut rig = rig(TOKEN);
+
+    // The secret is on line 2, seven lines above the change: the diff would not show it.
+    rig.adt(replay(
+        FIXTURE,
+        vec![secret_reply(
+            "REPORT ytest_abapreach01.\n\" secret-pw\n\n\n\n\n\n\nWRITE / 'v1'.",
+        )],
+    ));
+
+    let result = rig.bare("abap_simulate", deploy_arguments());
+
+    assert!(result.is_error);
+    assert_eq!(result.text, SECRET_REJECTED);
+    assert!(result.structured.get("plan_token").is_none());
+    assert!(!result.text.contains("hash"));
+}
+
+#[test]
+fn an_execute_rejects_a_source_that_gained_a_secret_since_the_simulation_before_the_lock() {
+    let mut rig = rig(TOKEN);
+    let mut session = FakeSession::new(false);
+    let requests = log();
+
+    rig.adt(replay(FIXTURE, simulate_steps()));
+
+    let token = token_of(&rig.call(&mut session, "abap_simulate", deploy_arguments()));
+
+    rig.adt(recording(
+        replay(
+            FIXTURE,
+            vec![secret_reply(
+                "REPORT ytest_abapreach01.\n\" secret-pw\n\n\n\n\n\n\nWRITE / 'v1'.",
+            )],
+        ),
+        &requests,
+    ));
+
+    let result = rig.call(
+        &mut session,
+        "abap_deploy",
+        with_token(deploy_arguments(), &token),
+    );
+
+    assert!(result.is_error);
+    assert_eq!(result.text, SECRET_REJECTED);
+    assert!(!any(&requests, "_action=LOCK"));
+    assert!(!any(&requests, "PUT "));
+}
+
+#[test]
+fn a_secret_in_the_reread_under_the_lock_is_rejected_without_a_hash_and_unlocks() {
+    let mut rig = rig(TOKEN);
+    let mut session = FakeSession::new(false);
+    let requests = log();
+
+    rig.adt(replay(FIXTURE, simulate_steps()));
+
+    let token = token_of(&rig.call(&mut session, "abap_simulate", deploy_arguments()));
+
+    rig.adt(recording(
+        replay(
+            FIXTURE,
+            vec![
+                fx(6),
+                no_inactive(),
+                fx(7),
+                secret_reply("REPORT ytest_abapreach01.\n\" secret-pw\n\nWRITE / 'v1'."),
+                fx(9),
+            ],
+        ),
+        &requests,
+    ));
+
+    let result = rig.call(
+        &mut session,
+        "abap_deploy",
+        with_token(deploy_arguments(), &token),
+    );
+
+    assert!(result.is_error);
+    assert_eq!(result.text, SECRET_REJECTED);
+    assert!(any(&requests, "_action=UNLOCK"));
+    assert!(!any(&requests, "PUT "));
+}
+
+#[test]
+fn a_moved_source_under_the_lock_is_reported_without_hashes_over_mcp() {
+    let mut rig = rig(TOKEN);
+    let mut session = FakeSession::new(false);
+
+    rig.adt(replay(FIXTURE, simulate_steps()));
+
+    let token = token_of(&rig.call(&mut session, "abap_simulate", deploy_arguments()));
+
+    rig.adt(replay(
+        FIXTURE,
+        vec![
+            fx(6),
+            no_inactive(),
+            fx(7),
+            secret_reply("REPORT ytest_abapreach01.\n\nWRITE / 'moved'."),
+            fx(9),
+        ],
+    ));
+
+    let result = rig.call(
+        &mut session,
+        "abap_deploy",
+        with_token(deploy_arguments(), &token),
+    );
+
+    assert!(result.is_error);
+    assert!(
+        result.text.contains("live changed since initial read"),
+        "{}",
+        result.text
+    );
+    // The diff block prints the live hash of a clean source; the STOP line compares none.
+    assert!(!result.text.contains(" != "), "{}", result.text);
 }

@@ -666,6 +666,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             .create_include(create_include)
             .main(main)
             .expected_main(expected_main)
+            .guard_secrets(true)
             .expected_result(
                 stored
                     .as_ref()
@@ -709,6 +710,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                 seen.group = result.group.clone();
                 seen.base = result.base.clone();
                 seen.result_hash = result.result_hash.clone();
+                seen.secret_rejected = result.secret_rejected;
                 seen.change = result.change.clone();
                 seen.main = result.main.clone();
                 seen.warning = result
@@ -728,6 +730,11 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
         );
 
         drop(factories);
+
+        // Nothing else of a source that holds a secret is shown: no hash, diff or edit result.
+        if seen.secret_rejected {
+            return Ok(ToolResult::error(SECRET_REJECTED.to_owned()));
+        }
 
         let issue = (!execute && seen.status == Some(Status::SimulatedOk)).then(|| Ticket {
             backend: seen.backend,
@@ -1361,6 +1368,7 @@ struct Seen {
     group: Option<String>,
     base: Option<String>,
     result_hash: Option<String>,
+    secret_rejected: bool,
     main: Option<String>,
     warning: Option<String>,
     change: Option<Change>,

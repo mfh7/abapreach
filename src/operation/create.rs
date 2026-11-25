@@ -300,6 +300,7 @@ impl CreateProg {
             base: None,
             change: None,
             result_hash: None,
+            secret_rejected: false,
             main: None,
         }
     }

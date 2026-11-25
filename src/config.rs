@@ -149,6 +149,13 @@ impl Connection {
         secrets
     }
 
+    /// Whether `payload` holds a value that must never be printed.
+    pub fn holds_secret(&self, payload: &str) -> bool {
+        self.secrets()
+            .iter()
+            .any(|secret| !secret.is_empty() && payload.contains(secret.as_str()))
+    }
+
     /// The server hosts. Only the doctor hides them: its probe errors may quote them, while a
     /// read or deploy prints source text that has no business being rewritten.
     pub fn hosts(&self) -> Vec<String> {

@@ -23,6 +23,7 @@ use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::path::Path;
 
 /// The refusal of a type no read tool knows.
@@ -263,21 +264,33 @@ impl<'a> ReadTools<'a> {
             format!("{payload}\n")
         };
         let (mut text, mut structured) = match range {
-            Some(range) => (
-                format!(
+            Some(range) => {
+                let mut text = format!(
                     "{block}{} lines (lines {}-{}, partial excerpt)",
                     shown.len(),
                     range.start,
                     range.end
-                ),
-                json!({
+                );
+                let mut structured = json!({
                     "status": status_token(Status::Active),
                     "partial": true,
                     "excerpt": payload,
                     "lines": shown.len(),
                     "range": format!("{}-{}", range.start, range.end),
-                }),
-            ),
+                });
+
+                // The hash of the whole source lets a client send edits without a full read. It
+                // is a hash of text the excerpt does not show, so it must not act as an oracle
+                // for a configured secret elsewhere in the source: no hash then.
+                if !holds_secret(&connection, &lines.join("\n")) {
+                    let hash = source_hash(&lines);
+
+                    write!(text, "\nhash {hash} (whole source)").expect("writing to a String");
+                    structured["hash"] = json!(hash);
+                }
+
+                (text, structured)
+            }
             None => {
                 let hash = source_hash(&lines);
 
@@ -559,10 +572,7 @@ pub(crate) fn diagnostic(connection: &Connection, text: &str) -> String {
 }
 
 pub(crate) fn holds_secret(connection: &Connection, payload: &str) -> bool {
-    connection
-        .secrets()
-        .iter()
-        .any(|secret| !secret.is_empty() && payload.contains(secret.as_str()))
+    connection.holds_secret(payload)
 }
 
 fn add_notes(text: &mut String, structured: &mut Value, notes: &str) {
