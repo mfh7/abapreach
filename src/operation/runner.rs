@@ -225,6 +225,13 @@ pub const STATELESS: &str = "ADT HTTP session is stateless on this release; the 
 const TEMPLATE_BUG: &str =
     "W: the generated runner class did not activate; please report this as a bug";
 const MASK: &str = "<lock handle>";
+/// The stage name of the inactive-source check, in the retry note and in the failure text.
+const INACTIVE_STAGE: &str = "source check (inactive)";
+/// The RFC code of a lost connection: the session of the cycle is gone.
+const RFC_COMMUNICATION_TEXT: &str = "(RFC code 1)";
+/// The shortest and the longest pause before the retry of a disturbed write or activation.
+const PAUSE_MIN_MILLIS: u64 = 1000;
+const PAUSE_SPAN_MILLIS: u64 = 2001;
 /// Added to the leftover text when only the object directory entry stays.
 const DIRECTORY_HINT: &str = "\nhint: only the object directory entry (TADIR) is left; remove it \
                               in SE03 (Change Object Directory Entries) or SE80";
@@ -299,6 +306,9 @@ pub struct CycleExtras {
     /// Where a snippet stands in the class source: its first line (from 1) and its line count. An
     /// activation error inside it is the snippet's own error, not a bug of the template.
     pub snippet: Option<(usize, usize)>,
+    /// The pause before the one retry of a disturbed write or activation. `None` is a random
+    /// 1 to 3 seconds ([`random_pause`]); tests pass a function that does not sleep.
+    pub pause: Option<fn()>,
 }
 
 /// The start of the `STOP` text that is no stop but the error of a snippet: the operation prints
@@ -508,6 +518,7 @@ pub fn run_cycle_with(
         out: OutType::default(),
         directory_left: false,
         extras: *extras,
+        discovery: None,
     };
     let end = match cycle.steps(post, open) {
         Ok(end) | Err(end) => end,
@@ -566,6 +577,29 @@ struct Cycle<'a> {
     /// The last proof found the class gone and `TADIR` still holding its row.
     directory_left: bool,
     extras: CycleExtras,
+    /// The ADT discovery document the session probe read, for the classrun check of a POST 404.
+    discovery: Option<String>,
+}
+
+/// Why one attempt to write and activate the class ended.
+enum Fail {
+    /// A write or activation that a parallel session of the same user may have disturbed; one
+    /// retry may cure it.
+    Retry(Retry),
+    End(RunnerEnd),
+}
+
+impl From<RunnerEnd> for Fail {
+    fn from(end: RunnerEnd) -> Self {
+        Self::End(end)
+    }
+}
+
+/// A retryable failure: the stage, the SAP text on one line, and whether the session is gone.
+struct Retry {
+    stage: &'static str,
+    reason: String,
+    session_lost: bool,
 }
 
 impl Cycle<'_> {
@@ -579,6 +613,38 @@ impl Cycle<'_> {
         self.create()?;
         self.checkpoint()?;
 
+        self.settle(open)?;
+        self.checkpoint()?;
+        self.verify_source()?;
+        self.checkpoint()?;
+
+        Ok(self.post(post, open))
+    }
+
+    /// Writes the source and activates the class. A write or activation that a parallel session
+    /// of the same user disturbed is repeated once, under the same class name, after a short
+    /// pause; the second failure ends the row.
+    fn settle(&mut self, open: &mut Opener<'_>) -> Result<(), RunnerEnd> {
+        let retry = match self.attempt() {
+            Ok(()) => return Ok(()),
+            Err(Fail::End(end)) => return Err(end),
+            Err(Fail::Retry(retry)) => retry,
+        };
+
+        self.prepare_retry(&retry, open)?;
+
+        match self.attempt() {
+            Ok(()) => Ok(()),
+            Err(Fail::End(end)) => Err(end),
+            Err(Fail::Retry(retry)) => Err(RunnerEnd::Rejected(format!(
+                "runner {} failed after one retry: {}",
+                retry.stage, retry.reason
+            ))),
+        }
+    }
+
+    /// Lock, write, unlock, check the inactive source, activate.
+    fn attempt(&mut self) -> Result<(), Fail> {
         let lock = self.lock_class()?;
 
         self.held = Some(lock);
@@ -586,12 +652,40 @@ impl Cycle<'_> {
         self.checkpoint()?;
         self.unlock()?;
         self.checkpoint()?;
-        self.activate()?;
+        self.verify_inactive()?;
         self.checkpoint()?;
-        self.verify_source()?;
+        self.activate()
+    }
+
+    /// The note, the pause, and a new session when the old one is gone.
+    fn prepare_retry(&mut self, retry: &Retry, open: &mut Opener<'_>) -> Result<(), RunnerEnd> {
+        self.notes.push(format!(
+            "W: runner {} retried once: {}",
+            retry.stage, retry.reason
+        ));
+        self.checkpoint()?;
+        (self.extras.pause.unwrap_or(random_pause))();
         self.checkpoint()?;
 
-        Ok(self.post(post, open))
+        if retry.session_lost {
+            let fresh = open()
+                .map_err(|error| RunnerEnd::Rejected(self.stage_text(retry.stage, &error)))?;
+
+            self.swap_session(fresh);
+        }
+
+        Ok(())
+    }
+
+    /// The old session is abandoned: closing it releases whatever it still holds.
+    fn swap_session(&mut self, fresh: Box<dyn SadtTransport>) {
+        let mut old = std::mem::replace(&mut self.session, fresh);
+
+        if let Err(error) = old.close() {
+            self.notes.push(format!("W: session close failed: {error}"));
+        }
+
+        self.held = None;
     }
 
     fn checkpoint(&self) -> Result<(), RunnerEnd> {
@@ -700,6 +794,8 @@ impl Cycle<'_> {
             _ => return Err(RunnerEnd::Rejected(self.failed("preflight", &response))),
         }
 
+        self.discovery = Some(String::from_utf8_lossy(&response.body).into_owned());
+
         if self.session.stateful_supported() == Some(false) {
             return Err(RunnerEnd::Stop(if self.input.rfc_available {
                 STATELESS.to_owned()
@@ -714,9 +810,10 @@ impl Cycle<'_> {
         Ok(())
     }
 
-    fn needs_classrun(&self) -> String {
+    /// The STOP text of a system without classrun, with the stage that found it out.
+    fn needs_classrun(&self, stage: &str) -> String {
         format!(
-            "{} needs ADT classrun; not available on {}",
+            "{} needs ADT classrun; not available on {} ({stage})",
             self.input.operation, self.input.sid
         )
     }
@@ -926,7 +1023,7 @@ impl Cycle<'_> {
         }
     }
 
-    fn activate(&mut self) -> Result<(), RunnerEnd> {
+    fn activate(&mut self) -> Result<(), Fail> {
         let mut request = Request::post(
             "/sap/bc/adt/activation?method=activate&preauditRequested=true",
             activation_request_xml(self.name(), &self.object_uri()).into_bytes(),
@@ -941,8 +1038,8 @@ impl Cycle<'_> {
 
         let response = match self.send(request) {
             Ok(response) if ok(&response) => response,
-            Ok(response) => return Err(self.reject("activate", &response)),
-            Err(error) => return Err(self.reject_error("activate", &error)),
+            Ok(response) => return Err(self.response_failure("activate", &response)),
+            Err(error) => return Err(self.error_failure("activate", &error)),
         };
         let text = String::from_utf8_lossy(&response.body).into_owned();
 
@@ -950,16 +1047,17 @@ impl Cycle<'_> {
             return Err(RunnerEnd::Rejected(
                 "runner activate failed: the server answered a worklist and activated nothing"
                     .to_owned(),
-            ));
+            )
+            .into());
         }
 
         let messages = parse_messages(&text).unwrap_or_default();
 
         if messages
             .iter()
-            .any(|message| message.is_error() && mentions_interface(&message.text))
+            .any(|message| message.is_error() && interface_unknown(&message.text))
         {
-            return Err(RunnerEnd::Stop(self.needs_classrun()));
+            return Err(RunnerEnd::Stop(self.needs_classrun("activate")).into());
         }
 
         // An unclosed block (IF, LOOP, TRY ...) is reported at the ENDMETHOD right after the
@@ -976,20 +1074,118 @@ impl Cycle<'_> {
             return Err(RunnerEnd::Stop(format!(
                 "{SNIPPET_ERROR_PREFIX}line {line}: {}",
                 cut(&self.mask(message.text.trim()))
-            )));
+            ))
+            .into());
         }
 
-        match messages.iter().find(|message| message.is_error()) {
-            Some(message) => {
-                self.notes.push(TEMPLATE_BUG.to_owned());
+        let Some(message) = messages.iter().find(|message| message.is_error()) else {
+            return Ok(());
+        };
 
-                Err(RunnerEnd::Rejected(format!(
-                    "runner activate failed: {}",
-                    cut(&self.mask(&message.render()))
-                )))
+        if let Some(disturbed) = messages
+            .iter()
+            .find(|message| message.is_error() && self.is_disturbed(&message.text))
+        {
+            return Err(Fail::Retry(Retry {
+                stage: "activate",
+                reason: self.one_line(&disturbed.render()),
+                session_lost: false,
+            }));
+        }
+
+        self.notes.push(TEMPLATE_BUG.to_owned());
+
+        Err(RunnerEnd::Rejected(format!(
+            "runner activate failed: {}",
+            cut(&self.mask(&message.render()))
+        ))
+        .into())
+    }
+
+    /// The inactive source must be the generated one before it is activated: a parallel session
+    /// of the same user can activate or disturb the class between the write and the activation.
+    fn verify_inactive(&mut self) -> Result<(), Fail> {
+        let mut request = Request::get(format!(
+            "{}/source/main?version=inactive",
+            self.object_uri()
+        ));
+
+        request
+            .headers
+            .insert("Accept".to_owned(), "text/plain".to_owned());
+
+        let response = match self.send(request) {
+            Ok(response) if ok(&response) => response,
+            Ok(response) if response.status == 404 => {
+                return Err(Fail::Retry(Retry {
+                    stage: INACTIVE_STAGE,
+                    reason: "the class has no inactive source".to_owned(),
+                    session_lost: false,
+                }));
             }
-            None => Ok(()),
+            Ok(response) => return Err(self.response_failure(INACTIVE_STAGE, &response)),
+            Err(error) => return Err(self.error_failure(INACTIVE_STAGE, &error)),
+        };
+        let text = String::from_utf8_lossy(&response.body);
+
+        if Some(source_hash(&local_source_lines(&text))) == self.expected {
+            return Ok(());
         }
+
+        Err(Fail::Retry(Retry {
+            stage: INACTIVE_STAGE,
+            reason: "the inactive class source differs from the generated source".to_owned(),
+            session_lost: false,
+        }))
+    }
+
+    /// Whether a SAP text says that a parallel session disturbed the class: a method without
+    /// its implementation, or the class itself not known to the work process.
+    fn is_disturbed(&self, text: &str) -> bool {
+        let text = text.to_ascii_lowercase();
+
+        text.contains("implementation missing")
+            || text.contains(&format!(
+                "class {} does not exist",
+                self.name().to_ascii_lowercase()
+            ))
+    }
+
+    /// A failed reply of a stage: retryable when it says the class was disturbed, else the
+    /// rejection of the stage.
+    fn response_failure(&self, stage: &'static str, response: &Response) -> Fail {
+        let message = self.message_of(response);
+        let refused = response.status == 403 || response.authorization_failure().is_some();
+
+        if !refused && self.is_disturbed(&message) {
+            return Fail::Retry(Retry {
+                stage,
+                reason: message,
+                session_lost: false,
+            });
+        }
+
+        self.reject(stage, response).into()
+    }
+
+    /// A failed transport call of a stage; a lost RFC connection also asks for a new session.
+    fn error_failure(&self, stage: &'static str, error: &TransportError) -> Fail {
+        let text = self.detail(error);
+
+        if Failure::from(error) != Failure::Authorization && self.is_disturbed(&text) {
+            return Fail::Retry(Retry {
+                stage,
+                reason: self.one_line(&text),
+                session_lost: text.contains(RFC_COMMUNICATION_TEXT),
+            });
+        }
+
+        self.reject_error(stage, error).into()
+    }
+
+    /// A SAP text on one line, masked and cut.
+    fn one_line(&self, text: &str) -> String {
+        cut(&self.mask(&text.split_whitespace().collect::<Vec<_>>().join(" ")))
     }
 
     /// The active source must be the generated one: this closes a class that changed between
@@ -1072,7 +1268,7 @@ impl Cycle<'_> {
         crate::fault::hold_post(self.cancel);
 
         match result {
-            Ok(response) if response.status == 404 => RunnerEnd::Stop(self.needs_classrun()),
+            Ok(response) if response.status == 404 => self.not_found(&response),
             Ok(response)
                 if response.status == 403 || response.authorization_failure().is_some() =>
             {
@@ -1085,6 +1281,35 @@ impl Cycle<'_> {
             Err(error) if error.was_sent() => RunnerEnd::PostUncertain(error),
             Err(error) => RunnerEnd::Rejected(self.stage_text("POST", &error)),
         }
+    }
+
+    /// A POST answered 404: classrun is unavailable only when the discovery document does not
+    /// list it. Otherwise the 404 is a failure of this run (the work process may not see the new
+    /// class yet) and the POST is not repeated.
+    fn not_found(&mut self, response: &Response) -> RunnerEnd {
+        match self.classrun_listed() {
+            Some(false) => RunnerEnd::Stop(self.needs_classrun("POST 404")),
+            Some(true) | None => RunnerEnd::Rejected(self.failed("POST", response)),
+        }
+    }
+
+    /// Whether the ADT discovery document lists classrun; `None` when it cannot be read. ADT
+    /// HTTP read it in the session probe; RFC-SADT reads it now, as the bare request its
+    /// admission allows.
+    fn classrun_listed(&mut self) -> Option<bool> {
+        if self.discovery.is_none() {
+            let response = self.send(Request::get(DISCOVERY)).ok()?;
+
+            if !ok(&response) {
+                return None;
+            }
+
+            self.discovery = Some(String::from_utf8_lossy(&response.body).into_owned());
+        }
+
+        self.discovery
+            .as_deref()
+            .map(|text| text.to_ascii_lowercase().contains("classrun"))
     }
 
     /// Removes the class and proves from a new session that it is gone; `true` when it stays.
@@ -1120,14 +1345,7 @@ impl Cycle<'_> {
             }
         };
 
-        // The old session is abandoned: closing it releases whatever it still holds.
-        let mut old = std::mem::replace(&mut self.session, fresh);
-
-        if let Err(error) = old.close() {
-            self.notes.push(format!("W: session close failed: {error}"));
-        }
-
-        self.held = None;
+        self.swap_session(fresh);
 
         !self.delete_and_prove(open)
     }
@@ -1341,9 +1559,28 @@ impl Cycle<'_> {
     }
 }
 
-/// An activation error about the classrun interface itself: the system does not have it.
-fn mentions_interface(text: &str) -> bool {
-    text.to_ascii_uppercase().contains("IF_OO_ADT_CLASSRUN")
+/// An activation error that says the classrun interface itself is unknown: the system does not
+/// have it. Any other error that names the interface, such as a method of it without its
+/// implementation, is a failure of the class and not a missing classrun.
+fn interface_unknown(text: &str) -> bool {
+    let text = text.to_ascii_uppercase();
+
+    text.contains("IF_OO_ADT_CLASSRUN")
+        && ["UNKNOWN", "DOES NOT EXIST", "NOT FOUND", "NOT KNOWN"]
+            .iter()
+            .any(|marker| text.contains(marker))
+}
+
+/// A random pause of 1 to 3 seconds before the retry of a disturbed write or activation, so a
+/// parallel activation of the same user can finish. A failed random source pauses the minimum.
+pub fn random_pause() {
+    let mut bytes = [0u8; 2];
+    let extra = match getrandom::fill(&mut bytes) {
+        Ok(()) => u64::from(u16::from_le_bytes(bytes)) % PAUSE_SPAN_MILLIS,
+        Err(_) => 0,
+    };
+
+    std::thread::sleep(Duration::from_millis(PAUSE_MIN_MILLIS + extra));
 }
 
 fn ok(response: &Response) -> bool {
