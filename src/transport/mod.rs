@@ -163,6 +163,14 @@ pub trait SadtTransport {
         None
     }
 
+    /// Whether the RFC library behind this transport reads and writes one byte per character
+    /// (the single-byte SAP GUI for Windows library). Such a library cannot send the wide text
+    /// columns of some tables, so a caller that needs them refuses before the call. Only an RFC
+    /// transport can say yes.
+    fn uses_single_byte_characters(&self) -> bool {
+        false
+    }
+
     /// Reads rows through the standard function module `RFC_READ_TABLE`. Only the RFC backends
     /// have it; ADT HTTP answers with an error.
     fn read_table_function(&mut self, _call: &TableCall) -> Result<TableRows, TransportError> {

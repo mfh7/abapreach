@@ -61,6 +61,10 @@ internal repository where that implementation was developed. See the
   data preview refuses `SNAP`: the RFC paths read it through `RFC_READ_TABLE` (this needs an English
   logon). Without `--backend` and with RFC configured, ADT HTTP moves on to RFC (the MCP tools have no
   `backend` argument); with `--backend adt` or without RFC it stops with the hint `--backend rfc`.
+  There, `dump` through a single-byte RFC library (the SAP GUI for Windows `sapnwrfccm.dll`) stops
+  before any call with `STOP: this RFC library uses single-byte characters and cannot read the dump
+  text of SNAP on this release; use the SAP NW RFC SDK (ABAPREACH_RFC_LIBRARY) to read it`: the server
+  cannot send the dump text to that library and writes a short dump for every attempt. `dumps` works.
 - `ping [--backend adt|rfc]` shows the system, the application server instance that answered and the
   round trip time, from `/system/information` over ADT HTTP and `RFC_SYSTEM_INFO` over RFC. On the
   7.40 system, which has no `/system/information`, the instance is `unknown` over ADT HTTP and the
@@ -89,7 +93,8 @@ internal repository where that implementation was developed. See the
   needs up to 24 lookups, so a view with more than about 21 base tables is refused.
 - Every MCP deploy (`abap_simulate` and `abap_deploy`, with `source` or with `edits`) is refused with
   `REJECTED: payload contains a configured secret` when the live source of the object holds a
-  configured secret (the logon password, the SAProuter string or its host fragments). The refusal
+  configured secret (the logon password, the SAProuter string or its host fragments; a fragment
+  that equals a configured server host, `adt.host` or `rfc.ashost`, is not a secret). The refusal
   comes before any base check, edit, diff or hash, and the re-read under the lock is guarded the same
   way. A source that holds the same literal as a router host fragment is refused over MCP too; use
   the CLI for it. The CLI is unchanged.

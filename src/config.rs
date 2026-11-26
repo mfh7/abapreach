@@ -130,16 +130,25 @@ pub struct Connection {
 
 impl Connection {
     /// Values that must never be printed: the password and the route, including its sensitive
-    /// fragments when an RFC library reports only part of a route.
+    /// fragments when an RFC library reports only part of a route. A fragment that equals a
+    /// configured server host (`adt.host`, `rfc.ashost`; ASCII case-insensitive) is left out:
+    /// server hosts are not secrets (see [`Connection::hosts`]), and guarding one would reject
+    /// every output that quotes the ADT URL and hide the real error. The full route and every
+    /// other fragment stay secrets.
     pub fn secrets(&self) -> Vec<String> {
         let mut secrets = vec![self.password.clone()];
 
         if let Some(rfc) = &self.rfc
             && let Some(route) = &rfc.saprouter
         {
+            let hosts = self.hosts();
+
             secrets.push(route.clone());
             for pair in route.split('/').collect::<Vec<_>>().windows(2) {
-                if matches!(pair[0], "H" | "W") && pair[1].len() >= 3 {
+                if matches!(pair[0], "H" | "W")
+                    && pair[1].len() >= 3
+                    && !hosts.iter().any(|host| host.eq_ignore_ascii_case(pair[1]))
+                {
                     secrets.push(pair[1].to_owned());
                 }
             }

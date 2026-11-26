@@ -12,7 +12,7 @@ use abapreach::operation::dumps::{
 };
 use abapreach::policy::Policies;
 use abapreach::transport::rfc::{
-    Cell, FakeRfcApi, FunctionResult, RfcEndpointResponse, RfcTransport,
+    Cell, FakeRfcApi, FunctionResult, RfcEndpointResponse, RfcTransport, UcWidth,
 };
 use abapreach::transport::{Response, TransportError};
 use common::{ScriptedTransport, fixture_path_in, preview, read_table_reply};
@@ -1407,6 +1407,78 @@ fn the_rfc_backend_reads_a_dump_field_by_field_and_skips_columns_the_release_lac
             .iter()
             .all(|call| call.imports[1] == ("ROWCOUNT".to_owned(), "1000".to_owned()))
     );
+}
+
+const SINGLE_BYTE_STOP: &str = "this RFC library uses single-byte characters and cannot read the dump text of SNAP on this release; use the SAP NW RFC SDK (ABAPREACH_RFC_LIBRARY) to read it";
+
+#[test]
+fn a_single_byte_rfc_library_refuses_dump_before_any_read_table_call() {
+    let mut transport = RfcTransport::new(
+        FakeRfcApi::with_responses(vec![endpoint(dd02l("SNAP")), endpoint(refused())])
+            .with_width(UcWidth::Narrow),
+    );
+    let error = run_dump(
+        &mut transport,
+        BackendKind::RfcSadt,
+        &dump_query(false),
+        &policies(),
+        "EN",
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&error, PreviewError::Refused(message) if message == SINGLE_BYTE_STOP),
+        "{error:?}"
+    );
+    assert!(transport.api().table_calls().is_empty());
+}
+
+#[test]
+fn a_wide_rfc_library_still_reads_a_dump_through_rfc_read_table() {
+    let mut transport = RfcTransport::new(
+        FakeRfcApi::with_responses(vec![endpoint(dd02l("SNAP")), endpoint(refused())])
+            .with_width(UcWidth::Utf16)
+            .with_table_replies(vec![Err(TransportError::PostSendUncertain(
+                "RfcInvoke [FIELD_NOT_VALID]: field FLIST is not valid".to_owned(),
+            ))]),
+    );
+    let error = run_dump(
+        &mut transport,
+        BackendKind::RfcSadt,
+        &dump_query(false),
+        &policies(),
+        "EN",
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, PreviewError::Failed { .. }), "{error:?}");
+    assert_eq!(transport.api().table_calls().len(), 1);
+}
+
+#[test]
+fn dumps_still_lists_on_a_single_byte_rfc_library() {
+    let rows = vec![vec![
+        "20261103",
+        "053724",
+        "apphost",
+        "TESTUSER",
+        "110",
+        "21",
+        "000",
+        "FC006OTHERXAP005ZPROGAI005ZINCLAL00212",
+    ]];
+    let mut transport = RfcTransport::new(
+        FakeRfcApi::with_responses(vec![endpoint(dd02l("SNAP")), endpoint(refused())])
+            .with_width(UcWidth::Narrow)
+            .with_table_replies(vec![Ok(read_table_reply(&LIST_WIDTHS, &rows))]),
+    );
+    let query = ListQuery::new(&options(), "TESTUSER", TODAY, &policies()).unwrap();
+    let text = run_list(&mut transport, BackendKind::RfcSadt, &query, &policies())
+        .unwrap()
+        .text;
+
+    assert!(text.contains("error=OTHERX"), "{text}");
+    assert_eq!(transport.api().table_calls().len(), 1);
 }
 
 fn refused_for(table: &str) -> Result<Response, TransportError> {

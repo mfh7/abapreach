@@ -593,6 +593,12 @@ pub trait RfcApi {
 
     fn close(&mut self);
 
+    /// The size of one `SAP_UC` in the loaded library; a test double and an API that carries no
+    /// library answer UTF-16, the width of every library but the single-byte Windows GUI build.
+    fn uc_width(&self) -> UcWidth {
+        UcWidth::Utf16
+    }
+
     /// One `RFC_READ_TABLE` call on the open connection. An API that carries no generic function
     /// calls answers with an error.
     fn read_table(&mut self, _call: &TableCall) -> Result<TableRows, TransportError> {
@@ -1069,6 +1075,10 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
         Ok(())
     }
 
+    fn uses_single_byte_characters(&self) -> bool {
+        self.api.uc_width() == UcWidth::Narrow
+    }
+
     fn read_table_function(&mut self, call: &TableCall) -> Result<TableRows, TransportError> {
         self.ensure_open()?;
 
@@ -1093,6 +1103,7 @@ pub struct FakeRfcApi {
     table_calls: Vec<FunctionCall>,
     system_info_calls: usize,
     system_info: Option<Result<SystemInfo, TransportError>>,
+    width: UcWidth,
 }
 
 #[cfg(feature = "test-support")]
@@ -1108,7 +1119,13 @@ impl FakeRfcApi {
             table_calls: Vec::new(),
             system_info_calls: 0,
             system_info: None,
+            width: UcWidth::Utf16,
         }
+    }
+
+    /// The fake stands for a library of the given `SAP_UC` width.
+    pub fn with_width(self, width: UcWidth) -> Self {
+        Self { width, ..self }
     }
 
     /// The fake answers `RFC_SYSTEM_INFO` with `answer`, every time.
@@ -1165,6 +1182,10 @@ impl RfcApi for FakeRfcApi {
         self.opens += 1;
 
         Ok(())
+    }
+
+    fn uc_width(&self) -> UcWidth {
+        self.width
     }
 
     fn invoke(
@@ -2120,6 +2141,10 @@ impl DynamicRfcApi {
 impl RfcApi for DynamicRfcApi {
     fn open(&mut self) -> Result<(), TransportError> {
         self.ensure_open().map(|_| ())
+    }
+
+    fn uc_width(&self) -> UcWidth {
+        self.width
     }
 
     fn invoke(

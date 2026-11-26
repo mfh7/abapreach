@@ -513,6 +513,10 @@ impl DumpQuery {
 
 // ---- reading SNAP -----------------------------------------------------------------------------
 
+/// The STOP of `dump` on a release that refuses `SNAP` in the data preview, read through a
+/// single-byte RFC library.
+const SINGLE_BYTE_REFUSAL: &str = "this RFC library uses single-byte characters and cannot read the dump text of SNAP on this release; use the SAP NW RFC SDK (ABAPREACH_RFC_LIBRARY) to read it";
+
 /// The start of the STOP that ADT HTTP gives when SAP refuses `SNAP` in the data preview.
 const PREVIEW_REFUSAL_LEAD: &str = "SAP does not show";
 
@@ -542,12 +546,16 @@ fn unreadable(message: &str) -> PreviewError {
 /// split by field); ADT HTTP stops with the hint to use RFC. A group after the first that names a
 /// column the release does not have is skipped. The refusal is matched on its English text: its
 /// reply has no key of its own, so a connection that logs on in another language gets the preview
-/// error as it is, and no fallback.
+/// error as it is, and no fallback. With `needs_wide_text` the groups hold the wide text columns of
+/// `SNAP`, which a single-byte RFC library cannot send (the server fails with
+/// `RFC_CONVERSION_SEND_TABLE` and writes a short dump for the logon user), so the RFC read is
+/// refused before any call.
 fn read_snap(
     transport: &mut dyn SadtTransport,
     backend: BackendKind,
     query: &Query,
     groups: &[Vec<&str>],
+    needs_wide_text: bool,
     policies: &Policies,
 ) -> Result<Vec<TableData>, PreviewError> {
     let table = query.table();
@@ -565,6 +573,10 @@ fn read_snap(
         return Err(PreviewError::Refused(format!(
             "{PREVIEW_REFUSAL_LEAD} {table} in the data preview of this release; use --backend rfc to read it through RFC_READ_TABLE"
         )));
+    }
+
+    if needs_wide_text && transport.uses_single_byte_characters() {
+        return Err(PreviewError::Refused(SINGLE_BYTE_REFUSAL.to_owned()));
     }
 
     let mut tables = Vec::new();
@@ -612,6 +624,7 @@ pub fn run_list(
         backend,
         &query.read,
         &[LIST_FIELDS.to_vec()],
+        false,
         policies,
     )?;
     let data = tables
@@ -799,7 +812,7 @@ pub fn read_dump(
 
     let mut rows = Rows::default();
 
-    for data in read_snap(transport, backend, &query.read, &groups, policies)? {
+    for data in read_snap(transport, backend, &query.read, &groups, true, policies)? {
         // A read that fills its cap was cut: what is shown would be a prefix, so it is refused.
         if data.rows.len() >= DUMP_CAP as usize {
             return Err(PreviewError::Refused(format!(
@@ -916,7 +929,7 @@ fn short_text(
             policies,
         )
         .ok()?;
-        let tables = read_snap(transport, backend, &query, &[fields], policies).ok()?;
+        let tables = read_snap(transport, backend, &query, &[fields], false, policies).ok()?;
 
         if let Some(lines) = text_lines(tables.first()?, language.is_none()) {
             return Some(lines);
