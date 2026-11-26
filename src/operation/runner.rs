@@ -1070,10 +1070,19 @@ impl Cycle<'_> {
 
         let messages = parse_messages(&text).unwrap_or_default();
 
-        if let Some(disturbed) = messages
-            .iter()
-            .find(|message| message.is_error() && self.is_disturbed(&message.text))
-        {
+        // A message inside the snippet rows is the user's own error, never the runner's frame
+        // disturbed by a parallel session: it is not retried, whatever its text says.
+        let in_snippet = |row: usize| {
+            self.extras
+                .snippet
+                .is_some_and(|(first, count)| row >= first && row <= first + count)
+        };
+
+        if let Some(disturbed) = messages.iter().find(|message| {
+            message.is_error()
+                && !in_snippet(message.row as usize)
+                && self.is_disturbed(&message.text)
+        }) {
             return Err(Fail::Retry(Retry {
                 stage: "activate",
                 reason: self.one_line(&disturbed.render()),

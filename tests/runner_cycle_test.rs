@@ -40,6 +40,7 @@ const MESSAGES_UNRELATED_INTERFACE: &str = r#"<chkl:messages xmlns:chkl="x"><msg
 const MESSAGES_METHOD_DOES_NOT_EXIST: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="9"><shortText><txt>IF_OO_ADT_CLASSRUN~MAIN does not exist</txt></shortText></msg></chkl:messages>"#;
 const MESSAGES_METHOD_NOT_FOUND: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="9"><shortText><txt>IF_OO_ADT_CLASSRUN~MAIN not found</txt></shortText></msg></chkl:messages>"#;
 const MESSAGES_CLASS_AND_INTERFACE: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="9"><shortText><txt>Class <N> does not exist; Interface IF_OO_ADT_CLASSRUN is unknown</txt></shortText></msg></chkl:messages>"#;
+const MESSAGES_SNIPPET_IMPLEMENTATION_MISSING: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="22"><shortText><txt>Implementation missing for method "LOCAL_METHOD"</txt></shortText></msg></chkl:messages>"#;
 const DISCOVERY_WITH_CLASSRUN: &str =
     r#"<app:service xmlns:app="x"><app:collection href="/sap/bc/adt/oo/classrun"/></app:service>"#;
 const CLASS_MISSING: &str = "RfcInvoke: Internal error: Class <N> does not exist (RFC code 3)";
@@ -1543,6 +1544,76 @@ fn a_disturbed_class_is_retried_even_when_the_text_names_the_unknown_interface()
     );
 
     let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+    assert_eq!(sap.borrow().count(Step::Activate), 2);
+    assert_eq!(pauses(), 1);
+    assert_clean(&sap, &run);
+}
+
+/// A snippet that stands on rows 20 to 24 of the class source.
+fn snippet_extras() -> CycleExtras {
+    CycleExtras {
+        snippet: Some((20, 5)),
+        ..extras()
+    }
+}
+
+fn http_row_with(sap: &Shared, extras: &CycleExtras) -> RunnerRun {
+    let mut open = || http_session(sap);
+
+    run_cycle_with(
+        &input(BackendKind::AdtHttp, true),
+        &mut open,
+        PostRoute::Cycle,
+        &CancelFlag::new(),
+        extras,
+    )
+}
+
+#[test]
+fn a_snippet_error_that_says_implementation_missing_is_never_retried() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(true);
+
+    sap.borrow_mut().activation = Some(MESSAGES_SNIPPET_IMPLEMENTATION_MISSING);
+
+    let run = http_row_with(&sap, &snippet_extras());
+
+    assert_eq!(
+        run.end,
+        RunnerEnd::Stop(
+            "SNIPPET_ERROR: line 3: Implementation missing for method \"LOCAL_METHOD\"".to_owned()
+        ),
+        "{:?}",
+        run.end
+    );
+    assert_eq!(sap.borrow().count(Step::Activate), 1, "no retry");
+    assert_eq!(pauses(), 0);
+    assert!(
+        run.notes.iter().all(|note| !note.contains("retried")),
+        "{:?}",
+        run.notes
+    );
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn an_implementation_missing_of_the_runner_frame_is_retried_with_a_snippet_present() {
+    // Row 9 is the runner's own frame (the classrun method), outside the snippet rows 20-24.
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(true);
+
+    fault(
+        &sap,
+        Step::Activate,
+        1,
+        Fault::Status(200, MESSAGES_CLASSRUN_METHOD_MISSING),
+    );
+
+    let run = http_row_with(&sap, &snippet_extras());
 
     assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
     assert_eq!(sap.borrow().count(Step::Activate), 2);
