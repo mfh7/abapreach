@@ -14,6 +14,8 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-27
+
 ### Fixed
 - Temporary runner class: the inactive source is checked before activation, and a write or
   activation that a parallel session of the same user disturbed (`Implementation missing for

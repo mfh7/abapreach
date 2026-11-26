@@ -1,4 +1,4 @@
-use crate::adt::{ActivationBody, classify_activation, parse_messages};
+use crate::adt::{ActivationBody, classify_activation, discovery_collections, parse_messages};
 use crate::backend::{BackendKind, Failure};
 use crate::cli::{CreateKind, Subc};
 use crate::domain::Origin;
@@ -1336,9 +1336,8 @@ impl Cycle<'_> {
     }
 
     /// Whether the ADT discovery document lists classrun; `None` when it cannot be read or is no
-    /// discovery document. ADT
-    /// HTTP read it in the session probe; RFC-SADT reads it now, as the bare request its
-    /// admission allows.
+    /// discovery document. ADT HTTP read it in the session probe; RFC-SADT reads it now, as the
+    /// bare request its admission allows.
     fn classrun_listed(&mut self) -> Option<bool> {
         if self.discovery.is_none() {
             let response = self.send(Request::get(DISCOVERY)).ok()?;
@@ -1351,11 +1350,14 @@ impl Cycle<'_> {
         }
 
         // A body without any collection is no discovery document: nothing to conclude from it.
-        self.discovery.as_deref().and_then(|text| {
-            let text = text.to_ascii_lowercase();
+        let hrefs = discovery_collections(self.discovery.as_deref()?).ok()?;
 
-            text.contains("collection")
-                .then(|| text.contains("classrun"))
+        (!hrefs.is_empty()).then(|| {
+            hrefs.iter().any(|href| {
+                href.trim_end_matches('/')
+                    .to_ascii_lowercase()
+                    .ends_with("/oo/classrun")
+            })
         })
     }
 

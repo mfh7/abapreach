@@ -43,6 +43,8 @@ const MESSAGES_CLASS_AND_INTERFACE: &str = r#"<chkl:messages xmlns:chkl="x"><msg
 const MESSAGES_SNIPPET_IMPLEMENTATION_MISSING: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="22"><shortText><txt>Implementation missing for method "LOCAL_METHOD"</txt></shortText></msg></chkl:messages>"#;
 const MESSAGES_FRAME_AND_SNIPPET: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="9"><shortText><txt>Implementation missing for method IF_OO_ADT_CLASSRUN~MAIN</txt></shortText></msg><msg type="E" line="22"><shortText><txt>Statement is not accessible</txt></shortText></msg></chkl:messages>"#;
 const DISCOVERY_WITHOUT_CLASSRUN: &str = r#"<app:service xmlns:app="x"><app:workspace><app:collection href="/sap/bc/adt/oo/classes"/></app:workspace></app:service>"#;
+/// "classrun" appears, but in no collection href.
+const DISCOVERY_CLASSRUN_ONLY_IN_TEXT: &str = r#"<app:service xmlns:app="x"><app:workspace><app:collection href="/sap/bc/adt/oo/classes" title="classrun"/><app:collection href="/sap/bc/adt/oo/classrunner"/></app:workspace></app:service>"#;
 const DISCOVERY_WITH_CLASSRUN: &str =
     r#"<app:service xmlns:app="x"><app:collection href="/sap/bc/adt/oo/classrun"/></app:service>"#;
 const CLASS_MISSING: &str = "RfcInvoke: Internal error: Class <N> does not exist (RFC code 3)";
@@ -1972,6 +1974,30 @@ fn a_post_404_is_a_missing_classrun_only_when_the_discovery_lacks_it() {
             sap.borrow().count(Step::Preflight),
             1,
             "{backend:?}: one read"
+        );
+        assert_clean(&sap, &run);
+    }
+}
+
+#[test]
+fn a_discovery_that_names_classrun_outside_a_collection_href_does_not_list_it() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        let sap = new_sap(backend == BackendKind::AdtHttp);
+
+        sap.borrow_mut().discovery = Some(DISCOVERY_CLASSRUN_ONLY_IN_TEXT);
+        fault(&sap, Step::Post, 1, Fault::Status(404, "x"));
+
+        let run = match backend {
+            BackendKind::AdtHttp => http_row(&sap, &CancelFlag::new()),
+            BackendKind::RfcSadt => rfc_row(&sap, &CancelFlag::new()),
+        };
+
+        assert_eq!(
+            run.end,
+            RunnerEnd::Stop(
+                "read DTEL needs ADT classrun; not available on DEV (POST 404)".to_owned()
+            ),
+            "{backend:?}"
         );
         assert_clean(&sap, &run);
     }
