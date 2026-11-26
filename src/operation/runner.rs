@@ -227,8 +227,10 @@ const TEMPLATE_BUG: &str =
 const MASK: &str = "<lock handle>";
 /// The stage name of the inactive-source check, in the retry note and in the failure text.
 const INACTIVE_STAGE: &str = "source check (inactive)";
-/// The RFC code of a lost connection: the session of the cycle is gone.
-const RFC_COMMUNICATION_TEXT: &str = "(RFC code 1)";
+/// Every error of the RFC library ends in `(RFC code N)` (`classify_rfc_error`). The library
+/// closes the connection after a runtime failure (code 3) as well as after a lost one (code 1),
+/// so on RFC-SADT any text with this marker means the session of the cycle is gone.
+const RFC_ERROR_MARKER: &str = "(RFC code ";
 /// The shortest and the longest pause before the retry of a disturbed write or activation.
 const PAUSE_MIN_MILLIS: u64 = 1000;
 const PAUSE_SPAN_MILLIS: u64 = 2001;
@@ -519,6 +521,7 @@ pub fn run_cycle_with(
         directory_left: false,
         extras: *extras,
         discovery: None,
+        session_dead: false,
     };
     let end = match cycle.steps(post, open) {
         Ok(end) | Err(end) => end,
@@ -579,6 +582,8 @@ struct Cycle<'a> {
     extras: CycleExtras,
     /// The ADT discovery document the session probe read, for the classrun check of a POST 404.
     discovery: Option<String>,
+    /// The cycle session was lost and no new one could be opened for the retry.
+    session_dead: bool,
 }
 
 /// Why one attempt to write and activate the class ended.
@@ -668,10 +673,21 @@ impl Cycle<'_> {
         self.checkpoint()?;
 
         if retry.session_lost {
-            let fresh = open()
-                .map_err(|error| RunnerEnd::Rejected(self.stage_text(retry.stage, &error)))?;
+            match open() {
+                Ok(fresh) => self.swap_session(fresh),
+                Err(error) => {
+                    // The cycle session is dead: cleanup must start on a new one, not on it.
+                    self.held = None;
+                    self.session_dead = true;
 
-            self.swap_session(fresh);
+                    return Err(RunnerEnd::Rejected(format!(
+                        "runner {} failed after one retry: {}; a new session could not be opened: {}",
+                        retry.stage,
+                        retry.reason,
+                        self.detail(&error)
+                    )));
+                }
+            }
         }
 
         Ok(())
@@ -686,6 +702,7 @@ impl Cycle<'_> {
         }
 
         self.held = None;
+        self.session_dead = false;
     }
 
     fn checkpoint(&self) -> Result<(), RunnerEnd> {
@@ -1053,6 +1070,17 @@ impl Cycle<'_> {
 
         let messages = parse_messages(&text).unwrap_or_default();
 
+        if let Some(disturbed) = messages
+            .iter()
+            .find(|message| message.is_error() && self.is_disturbed(&message.text))
+        {
+            return Err(Fail::Retry(Retry {
+                stage: "activate",
+                reason: self.one_line(&disturbed.render()),
+                session_lost: false,
+            }));
+        }
+
         if messages
             .iter()
             .any(|message| message.is_error() && interface_unknown(&message.text))
@@ -1081,17 +1109,6 @@ impl Cycle<'_> {
         let Some(message) = messages.iter().find(|message| message.is_error()) else {
             return Ok(());
         };
-
-        if let Some(disturbed) = messages
-            .iter()
-            .find(|message| message.is_error() && self.is_disturbed(&message.text))
-        {
-            return Err(Fail::Retry(Retry {
-                stage: "activate",
-                reason: self.one_line(&disturbed.render()),
-                session_lost: false,
-            }));
-        }
 
         self.notes.push(TEMPLATE_BUG.to_owned());
 
@@ -1168,7 +1185,8 @@ impl Cycle<'_> {
         self.reject(stage, response).into()
     }
 
-    /// A failed transport call of a stage; a lost RFC connection also asks for a new session.
+    /// A failed transport call of a stage; on RFC-SADT an error of the RFC library also asks for
+    /// a new session, because the library closes the connection after it.
     fn error_failure(&self, stage: &'static str, error: &TransportError) -> Fail {
         let text = self.detail(error);
 
@@ -1176,7 +1194,8 @@ impl Cycle<'_> {
             return Fail::Retry(Retry {
                 stage,
                 reason: self.one_line(&text),
-                session_lost: text.contains(RFC_COMMUNICATION_TEXT),
+                session_lost: self.input.backend == BackendKind::RfcSadt
+                    && text.contains(RFC_ERROR_MARKER),
             });
         }
 
@@ -1328,6 +1347,22 @@ impl Cycle<'_> {
 
         if self.class == Class::Absent {
             return false;
+        }
+
+        // A lost cycle session is never reused: the delete starts on a new one, and when none
+        // can be opened the class stays and the notes say why.
+        if self.session_dead {
+            match open() {
+                Ok(fresh) => self.swap_session(fresh),
+                Err(error) => {
+                    self.notes.push(format!(
+                        "W: runner cleanup skipped: the cycle session is lost and a new session cannot be opened: {}",
+                        self.detail(&error)
+                    ));
+
+                    return true;
+                }
+            }
         }
 
         if self.delete_and_prove(open) {
@@ -1561,11 +1596,13 @@ impl Cycle<'_> {
 
 /// An activation error that says the classrun interface itself is unknown: the system does not
 /// have it. Any other error that names the interface, such as a method of it without its
-/// implementation, is a failure of the class and not a missing classrun.
+/// implementation or one that "does not exist" in the class, is a failure of the class and not
+/// a missing classrun; a text that names `IF_OO_ADT_CLASSRUN~<member>` is never this.
 fn interface_unknown(text: &str) -> bool {
     let text = text.to_ascii_uppercase();
 
     text.contains("IF_OO_ADT_CLASSRUN")
+        && !text.contains("IF_OO_ADT_CLASSRUN~")
         && ["UNKNOWN", "DOES NOT EXIST", "NOT FOUND", "NOT KNOWN"]
             .iter()
             .any(|marker| text.contains(marker))
@@ -1576,11 +1613,16 @@ fn interface_unknown(text: &str) -> bool {
 pub fn random_pause() {
     let mut bytes = [0u8; 2];
     let extra = match getrandom::fill(&mut bytes) {
-        Ok(()) => u64::from(u16::from_le_bytes(bytes)) % PAUSE_SPAN_MILLIS,
+        Ok(()) => u16::from_le_bytes(bytes),
         Err(_) => 0,
     };
 
-    std::thread::sleep(Duration::from_millis(PAUSE_MIN_MILLIS + extra));
+    std::thread::sleep(Duration::from_millis(pause_millis(extra)));
+}
+
+/// The pause for one random draw: `PAUSE_MIN_MILLIS` to `PAUSE_MIN_MILLIS + PAUSE_SPAN_MILLIS - 1`.
+fn pause_millis(draw: u16) -> u64 {
+    PAUSE_MIN_MILLIS + u64::from(draw) % PAUSE_SPAN_MILLIS
 }
 
 fn ok(response: &Response) -> bool {
@@ -1715,5 +1757,60 @@ mod run_mapping_tests {
 
         assert_eq!(result.outcome.exit, 0);
         assert!(!result.outcome.stderr.contains(INTERRUPTED));
+    }
+}
+
+#[cfg(test)]
+mod pause_and_interface_tests {
+    use super::{PAUSE_MIN_MILLIS, interface_unknown, pause_millis};
+
+    #[test]
+    fn the_pause_stays_between_one_and_three_seconds_for_every_draw() {
+        assert_eq!(pause_millis(0), 1000);
+        assert_eq!(pause_millis(2000), 3000);
+        assert_eq!(pause_millis(2001), 1000, "the span wraps, never exceeds");
+
+        for draw in 0..=u16::MAX {
+            let millis = pause_millis(draw);
+
+            assert!((1000..=3000).contains(&millis), "{draw} -> {millis}");
+            assert!(millis >= PAUSE_MIN_MILLIS);
+        }
+    }
+
+    #[test]
+    fn every_marker_of_an_unknown_interface_is_matched() {
+        for text in [
+            "Interface IF_OO_ADT_CLASSRUN is unknown",
+            "Interface IF_OO_ADT_CLASSRUN does not exist",
+            "Interface IF_OO_ADT_CLASSRUN not found",
+            "Interface IF_OO_ADT_CLASSRUN is not known",
+            "interface if_oo_adt_classrun is unknown",
+        ] {
+            assert!(interface_unknown(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_text_without_the_interface_or_without_a_marker_is_not_an_unknown_interface() {
+        for text in [
+            "Class YCL_X is unknown",
+            "Interface IF_OO_ADT_CLASSRUN is fine",
+            "Implementation missing for method IF_OO_ADT_CLASSRUN~MAIN",
+        ] {
+            assert!(!interface_unknown(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_text_that_names_a_method_of_the_interface_is_never_an_unknown_interface() {
+        for text in [
+            "IF_OO_ADT_CLASSRUN~MAIN does not exist",
+            "Method IF_OO_ADT_CLASSRUN~MAIN not found",
+            "IF_OO_ADT_CLASSRUN~MAIN is unknown",
+            "Component IF_OO_ADT_CLASSRUN~OUT is not known",
+        ] {
+            assert!(!interface_unknown(text), "{text}");
+        }
     }
 }

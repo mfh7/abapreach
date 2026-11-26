@@ -37,11 +37,16 @@ const MESSAGES_NO_INTERFACE: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="
 const MESSAGES_IMPLEMENTATION_MISSING: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="134"><shortText><txt>Implementation missing for method "CHECK_BASE"</txt></shortText></msg></chkl:messages>"#;
 const MESSAGES_CLASSRUN_METHOD_MISSING: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="9"><shortText><txt>Implementation missing for method IF_OO_ADT_CLASSRUN~MAIN</txt></shortText></msg></chkl:messages>"#;
 const MESSAGES_UNRELATED_INTERFACE: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="3"><shortText><txt>Statement not allowed after IF_OO_ADT_CLASSRUN~MAIN</txt></shortText></msg></chkl:messages>"#;
+const MESSAGES_METHOD_DOES_NOT_EXIST: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="9"><shortText><txt>IF_OO_ADT_CLASSRUN~MAIN does not exist</txt></shortText></msg></chkl:messages>"#;
+const MESSAGES_METHOD_NOT_FOUND: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="9"><shortText><txt>IF_OO_ADT_CLASSRUN~MAIN not found</txt></shortText></msg></chkl:messages>"#;
+const MESSAGES_CLASS_AND_INTERFACE: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="9"><shortText><txt>Class <N> does not exist; Interface IF_OO_ADT_CLASSRUN is unknown</txt></shortText></msg></chkl:messages>"#;
 const DISCOVERY_WITH_CLASSRUN: &str =
     r#"<app:service xmlns:app="x"><app:collection href="/sap/bc/adt/oo/classrun"/></app:service>"#;
 const CLASS_MISSING: &str = "RfcInvoke: Internal error: Class <N> does not exist (RFC code 3)";
-const CLASS_MISSING_LOST: &str =
-    "RfcInvoke: Internal error: Class <N> does not exist\nLINE 10026 (RFC code 1)";
+/// The kernel error as FED 7.40 reports it: several lines, the code at the end.
+const CLASS_MISSING_KERNEL: &str =
+    "RfcInvoke: Internal error: Class <N> does not exist\nLINE 10026\nCOUNTER 7 (RFC code 3)";
+const CLASS_MISSING_CODE_4: &str = "RfcInvoke: Class <N> does not exist (RFC code 4)";
 const MESSAGES_OK: &str = r#"<chkl:messages xmlns:chkl="x"></chkl:messages>"#;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1167,6 +1172,41 @@ fn an_inactive_source_that_differs_is_written_again_once() {
 }
 
 #[test]
+fn a_404_on_the_inactive_read_is_retried_once() {
+    for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
+        PAUSES.with(|pauses| pauses.set(0));
+
+        let sap = new_sap(backend == BackendKind::AdtHttp);
+
+        fault(&sap, Step::GetInactive, 1, Fault::Status(404, ""));
+
+        let run = match backend {
+            BackendKind::AdtHttp => http_row(&sap, &CancelFlag::new()),
+            BackendKind::RfcSadt => rfc_row(&sap, &CancelFlag::new()),
+        };
+        let state = sap.borrow();
+
+        assert!(
+            matches!(&run.end, RunnerEnd::Posted(_)),
+            "{backend:?}: {:?}",
+            run.end
+        );
+        assert_eq!(state.count(Step::Put), 2, "{backend:?}: one retry");
+        assert_eq!(state.count(Step::GetInactive), 2, "{backend:?}");
+        assert_eq!(state.count(Step::Create), 1, "{backend:?}: same class");
+        assert_eq!(pauses(), 1, "{backend:?}");
+        assert!(
+            run.notes.iter().any(|note| note
+                == "W: runner source check (inactive) retried once: the class has no inactive source"),
+            "{backend:?}: {:?}",
+            run.notes
+        );
+        drop(state);
+        assert_clean(&sap, &run);
+    }
+}
+
+#[test]
 fn a_missing_implementation_is_retried_once_and_then_rejected_without_a_bug_note() {
     // One disturbed activation: the retry succeeds.
     PAUSES.with(|pauses| pauses.set(0));
@@ -1230,57 +1270,44 @@ fn a_missing_implementation_is_retried_once_and_then_rejected_without_a_bug_note
 }
 
 #[test]
-fn a_class_that_does_not_exist_is_retried_and_a_lost_connection_gets_a_new_session() {
-    // RFC code 3: the retry stays on the session of the cycle.
-    PAUSES.with(|pauses| pauses.set(0));
+fn any_rfc_failure_of_a_disturbed_class_gets_a_new_session_and_a_repeat_is_rejected() {
+    // The RFC library closes the connection after a runtime failure (code 3) as it does after a
+    // lost one (code 1): the retry runs on a new session, the old one is closed.
+    for text in [CLASS_MISSING, CLASS_MISSING_KERNEL, CLASS_MISSING_CODE_4] {
+        PAUSES.with(|pauses| pauses.set(0));
 
-    let sap = new_sap(false);
+        let sap = new_sap(false);
 
-    fault(&sap, Step::Activate, 1, Fault::Rfc(CLASS_MISSING));
+        fault(&sap, Step::Activate, 1, Fault::Rfc(text));
 
-    let run = rfc_row(&sap, &CancelFlag::new());
+        let run = rfc_row(&sap, &CancelFlag::new());
+        let state = sap.borrow();
 
-    assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
-    assert_eq!(sap.borrow().on_session(1, Step::Activate), 2);
-    assert_eq!(pauses(), 1);
-    assert!(
-        run.notes
-            .iter()
-            .any(|note| note.starts_with("W: runner activate retried once: protocol error: ")),
-        "{:?}",
-        run.notes
-    );
-    assert_clean(&sap, &run);
-
-    // RFC code 1: the session is gone, the retry runs on a new one and the old one is closed.
-    PAUSES.with(|pauses| pauses.set(0));
-
-    let sap = new_sap(false);
-
-    fault(&sap, Step::Activate, 1, Fault::Rfc(CLASS_MISSING_LOST));
-
-    let run = rfc_row(&sap, &CancelFlag::new());
-    let state = sap.borrow();
-
-    assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
-    assert_eq!(state.on_session(1, Step::Activate), 1);
-    assert_eq!(state.on_session(2, Step::Activate), 1);
-    assert_eq!(
-        state.on_session(2, Step::Lock),
-        2,
-        "write, then cleanup delete"
-    );
-    assert_eq!(pauses(), 1);
-    assert!(
-        run.notes
-            .iter()
-            .any(|note| note.starts_with("W: runner activate retried once: ")
-                && !note.contains('\n')),
-        "{:?}",
-        run.notes
-    );
-    drop(state);
-    assert_clean(&sap, &run);
+        assert!(
+            matches!(&run.end, RunnerEnd::Posted(_)),
+            "{text}: {:?}",
+            run.end
+        );
+        assert_eq!(state.on_session(1, Step::Activate), 1, "{text}");
+        assert_eq!(state.on_session(2, Step::Activate), 1, "{text}");
+        assert_eq!(
+            state.on_session(2, Step::Lock),
+            2,
+            "{text}: write, then cleanup delete"
+        );
+        assert!(state.closes >= 2, "{text}: the old session is closed");
+        assert_eq!(pauses(), 1, "{text}");
+        assert!(
+            run.notes
+                .iter()
+                .any(|note| note.starts_with("W: runner activate retried once: ")
+                    && !note.contains('\n')),
+            "{text}: {:?}",
+            run.notes
+        );
+        drop(state);
+        assert_clean(&sap, &run);
+    }
 
     // Repeated: a rejection after one retry, never a classrun STOP.
     PAUSES.with(|pauses| pauses.set(0));
@@ -1301,6 +1328,99 @@ fn a_class_that_does_not_exist_is_retried_and_a_lost_connection_gets_a_new_sessi
     assert_eq!(pauses(), 1);
     assert_eq!(sap.borrow().count(Step::Post), 0);
     assert_clean(&sap, &run);
+}
+
+/// The cycle session is lost, the opener of the retry fails; `later_opens_fail` keeps it failing
+/// for the cleanup as well.
+fn run_with_failing_swap(sap: &Shared, later_opens_fail: bool) -> RunnerRun {
+    let calls = Cell::new(0);
+    let mut open = || -> Opened {
+        calls.set(calls.get() + 1);
+
+        if calls.get() == 2 || (later_opens_fail && calls.get() > 2) {
+            return Err(TransportError::PreSendConnectivity("no route".to_owned()));
+        }
+
+        rfc_session(sap)
+    };
+
+    run_cycle_with(
+        &input(BackendKind::RfcSadt, true),
+        &mut open,
+        PostRoute::Cycle,
+        &CancelFlag::new(),
+        &extras(),
+    )
+}
+
+#[test]
+fn a_new_session_that_cannot_be_opened_keeps_the_sap_reason_and_cleans_up_on_another_one() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(false);
+
+    fault(&sap, Step::Activate, 1, Fault::Rfc(CLASS_MISSING));
+
+    let run = run_with_failing_swap(&sap, false);
+    let text = rejected(&run);
+
+    assert!(
+        text.starts_with("runner activate failed after one retry: protocol error: ")
+            && text.contains("does not exist (RFC code 3); a new session could not be opened: ")
+            && text.contains("no route"),
+        "{text}"
+    );
+    assert_eq!(run.exit_code(0), 1);
+
+    let state = sap.borrow();
+
+    assert_eq!(state.count(Step::Post), 0);
+    assert_eq!(
+        state.on_session(1, Step::Delete),
+        0,
+        "never on the dead session"
+    );
+    assert_eq!(
+        state.on_session(2, Step::Delete),
+        1,
+        "cleanup on a new session"
+    );
+    drop(state);
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn a_cleanup_that_cannot_open_a_session_after_a_lost_one_leaves_a_clear_note() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(false);
+
+    fault(&sap, Step::Activate, 1, Fault::Rfc(CLASS_MISSING));
+
+    let run = run_with_failing_swap(&sap, true);
+
+    assert!(
+        rejected(&run).contains("a new session could not be opened: "),
+        "{:?}",
+        run.end
+    );
+    assert!(run.leftover.is_some(), "the class stays");
+    assert!(
+        run.notes.iter().any(|note| note.starts_with(
+            "W: runner cleanup skipped: the cycle session is lost and a new session cannot be opened: "
+        )),
+        "{:?}",
+        run.notes
+    );
+
+    let state = sap.borrow();
+
+    assert_eq!(
+        state.count(Step::Delete),
+        0,
+        "no request on the dead session"
+    );
+    assert_eq!(state.on_session(1, Step::Lock), 1, "only the write lock");
 }
 
 #[test]
@@ -1391,6 +1511,46 @@ fn an_activation_error_that_names_the_classrun_interface_is_no_missing_classrun(
 }
 
 #[test]
+fn a_text_that_names_a_method_of_the_interface_is_no_missing_classrun_on_any_marker() {
+    for activation in [MESSAGES_METHOD_DOES_NOT_EXIST, MESSAGES_METHOD_NOT_FOUND] {
+        let sap = new_sap(true);
+
+        sap.borrow_mut().activation = Some(activation);
+
+        let run = http_row(&sap, &CancelFlag::new());
+
+        assert!(
+            rejected(&run).starts_with("runner activate failed: E row 9: IF_OO_ADT_CLASSRUN~MAIN"),
+            "{activation}: {:?}",
+            run.end
+        );
+        assert_eq!(sap.borrow().count(Step::Activate), 1, "{activation}");
+        assert_clean(&sap, &run);
+    }
+}
+
+#[test]
+fn a_disturbed_class_is_retried_even_when_the_text_names_the_unknown_interface() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(true);
+
+    fault(
+        &sap,
+        Step::Activate,
+        1,
+        Fault::Status(200, MESSAGES_CLASS_AND_INTERFACE),
+    );
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+    assert_eq!(sap.borrow().count(Step::Activate), 2);
+    assert_eq!(pauses(), 1);
+    assert_clean(&sap, &run);
+}
+
+#[test]
 fn a_post_404_is_a_missing_classrun_only_when_the_discovery_lacks_it() {
     for backend in [BackendKind::AdtHttp, BackendKind::RfcSadt] {
         let http = backend == BackendKind::AdtHttp;
@@ -1442,6 +1602,29 @@ fn a_post_404_is_a_missing_classrun_only_when_the_discovery_lacks_it() {
             1,
             "{backend:?}: one read"
         );
+        assert_clean(&sap, &run);
+    }
+}
+
+#[test]
+fn a_post_404_whose_discovery_cannot_be_read_is_rejected_and_never_a_missing_classrun() {
+    // Only RFC-SADT reads the discovery for the 404; ADT HTTP has it from the probe.
+    for fault_on_discovery in [Fault::Status(500, "x"), Fault::LostBefore] {
+        let sap = new_sap(false);
+
+        fault(&sap, Step::Post, 1, Fault::Status(404, "x"));
+        fault(&sap, Step::Preflight, 1, fault_on_discovery.clone());
+
+        let run = rfc_row(&sap, &CancelFlag::new());
+
+        assert!(
+            rejected(&run).starts_with("runner POST failed: HTTP 404"),
+            "{fault_on_discovery:?}: {:?}",
+            run.end
+        );
+        assert_eq!(run.exit_code(0), 1, "{fault_on_discovery:?}");
+        assert_eq!(sap.borrow().count(Step::Post), 1, "never repeated");
+        assert_eq!(sap.borrow().count(Step::Preflight), 1, "one read");
         assert_clean(&sap, &run);
     }
 }
