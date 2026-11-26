@@ -522,6 +522,7 @@ pub fn run_cycle_with(
         extras: *extras,
         discovery: None,
         session_dead: false,
+        attempts: 0,
     };
     let end = match cycle.steps(post, open) {
         Ok(end) | Err(end) => end,
@@ -582,8 +583,10 @@ struct Cycle<'a> {
     extras: CycleExtras,
     /// The ADT discovery document the session probe read, for the classrun check of a POST 404.
     discovery: Option<String>,
-    /// The cycle session was lost and no new one could be opened for the retry.
+    /// The cycle session is gone (an RFC error closed it): a retry and the cleanup use a new one.
     session_dead: bool,
+    /// How often the write and activation attempt ran (at most twice).
+    attempts: u8,
 }
 
 /// Why one attempt to write and activate the class ended.
@@ -600,11 +603,10 @@ impl From<RunnerEnd> for Fail {
     }
 }
 
-/// A retryable failure: the stage, the SAP text on one line, and whether the session is gone.
+/// A retryable failure: the stage and the SAP text on one line.
 struct Retry {
     stage: &'static str,
     reason: String,
-    session_lost: bool,
 }
 
 impl Cycle<'_> {
@@ -650,6 +652,8 @@ impl Cycle<'_> {
 
     /// Lock, write, unlock, check the inactive source, activate.
     fn attempt(&mut self) -> Result<(), Fail> {
+        self.attempts += 1;
+
         let lock = self.lock_class()?;
 
         self.held = Some(lock);
@@ -672,13 +676,12 @@ impl Cycle<'_> {
         (self.extras.pause.unwrap_or(random_pause))();
         self.checkpoint()?;
 
-        if retry.session_lost {
+        if self.session_dead {
             match open() {
                 Ok(fresh) => self.swap_session(fresh),
                 Err(error) => {
-                    // The cycle session is dead: cleanup must start on a new one, not on it.
+                    // The cycle session stays dead: cleanup must start on a new one.
                     self.held = None;
-                    self.session_dead = true;
 
                     return Err(RunnerEnd::Rejected(format!(
                         "runner {} failed after one retry: {}; a new session could not be opened: {}",
@@ -715,11 +718,22 @@ impl Cycle<'_> {
 
     /// Requests go through the ADT HTTP gate on that backend; RFC-SADT has its own admission.
     fn send(&mut self, request: Request) -> Result<Response, TransportError> {
-        if self.input.backend == BackendKind::AdtHttp {
+        let result = if self.input.backend == BackendKind::AdtHttp {
             RunnerGated::new(&mut *self.session).request(request)
         } else {
             self.session.request(request)
+        };
+
+        // The RFC library closes the connection after an error (a runtime failure, code 3, as
+        // well as a lost connection, code 1): the session of the cycle is dead, retried or not.
+        if self.input.backend == BackendKind::RfcSadt
+            && let Err(error) = &result
+            && error.to_string().contains(RFC_ERROR_MARKER)
+        {
+            self.session_dead = true;
         }
+
+        result
     }
 
     fn name(&self) -> &str {
@@ -1070,23 +1084,25 @@ impl Cycle<'_> {
 
         let messages = parse_messages(&text).unwrap_or_default();
 
-        // A message inside the snippet rows is the user's own error, never the runner's frame
-        // disturbed by a parallel session: it is not retried, whatever its text says.
+        // Any error inside the snippet rows is the user's own: the activation is not retried,
+        // whatever else the reply says, and the snippet error below ends the row.
         let in_snippet = |row: usize| {
             self.extras
                 .snippet
                 .is_some_and(|(first, count)| row >= first && row <= first + count)
         };
+        let snippet_error = messages
+            .iter()
+            .any(|message| message.is_error() && in_snippet(message.row as usize));
 
-        if let Some(disturbed) = messages.iter().find(|message| {
-            message.is_error()
-                && !in_snippet(message.row as usize)
-                && self.is_disturbed(&message.text)
-        }) {
+        if !snippet_error
+            && let Some(disturbed) = messages
+                .iter()
+                .find(|message| message.is_error() && self.is_disturbed(&message.text))
+        {
             return Err(Fail::Retry(Retry {
                 stage: "activate",
                 reason: self.one_line(&disturbed.render()),
-                session_lost: false,
             }));
         }
 
@@ -1142,11 +1158,13 @@ impl Cycle<'_> {
 
         let response = match self.send(request) {
             Ok(response) if ok(&response) => response,
+            // On the second attempt a missing inactive source goes on to the activation: the
+            // active-source check after it decides.
+            Ok(response) if response.status == 404 && self.attempts >= 2 => return Ok(()),
             Ok(response) if response.status == 404 => {
                 return Err(Fail::Retry(Retry {
                     stage: INACTIVE_STAGE,
                     reason: "the class has no inactive source".to_owned(),
-                    session_lost: false,
                 }));
             }
             Ok(response) => return Err(self.response_failure(INACTIVE_STAGE, &response)),
@@ -1161,7 +1179,6 @@ impl Cycle<'_> {
         Err(Fail::Retry(Retry {
             stage: INACTIVE_STAGE,
             reason: "the inactive class source differs from the generated source".to_owned(),
-            session_lost: false,
         }))
     }
 
@@ -1187,15 +1204,14 @@ impl Cycle<'_> {
             return Fail::Retry(Retry {
                 stage,
                 reason: message,
-                session_lost: false,
             });
         }
 
         self.reject(stage, response).into()
     }
 
-    /// A failed transport call of a stage; on RFC-SADT an error of the RFC library also asks for
-    /// a new session, because the library closes the connection after it.
+    /// A failed transport call of a stage: retryable when it says the class was disturbed, else
+    /// the rejection of the stage.
     fn error_failure(&self, stage: &'static str, error: &TransportError) -> Fail {
         let text = self.detail(error);
 
@@ -1203,8 +1219,6 @@ impl Cycle<'_> {
             return Fail::Retry(Retry {
                 stage,
                 reason: self.one_line(&text),
-                session_lost: self.input.backend == BackendKind::RfcSadt
-                    && text.contains(RFC_ERROR_MARKER),
             });
         }
 
@@ -1321,7 +1335,8 @@ impl Cycle<'_> {
         }
     }
 
-    /// Whether the ADT discovery document lists classrun; `None` when it cannot be read. ADT
+    /// Whether the ADT discovery document lists classrun; `None` when it cannot be read or is no
+    /// discovery document. ADT
     /// HTTP read it in the session probe; RFC-SADT reads it now, as the bare request its
     /// admission allows.
     fn classrun_listed(&mut self) -> Option<bool> {
@@ -1335,9 +1350,13 @@ impl Cycle<'_> {
             self.discovery = Some(String::from_utf8_lossy(&response.body).into_owned());
         }
 
-        self.discovery
-            .as_deref()
-            .map(|text| text.to_ascii_lowercase().contains("classrun"))
+        // A body without any collection is no discovery document: nothing to conclude from it.
+        self.discovery.as_deref().and_then(|text| {
+            let text = text.to_ascii_lowercase();
+
+            text.contains("collection")
+                .then(|| text.contains("classrun"))
+        })
     }
 
     /// Removes the class and proves from a new session that it is gone; `true` when it stays.
