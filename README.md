@@ -5,7 +5,7 @@
 **Read and deploy ABAP source from the command line, over ADT HTTP or RFC, including
 systems you can only reach through SAProuter.**
 
-![version](https://img.shields.io/badge/version-0.17.1-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50_%7C_758-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
+![version](https://img.shields.io/badge/version-0.18.0-blue) ![macOS arm64](https://img.shields.io/badge/macOS_arm64-SAP_GUI_for_Java_8.10-2ea44f) ![Windows](https://img.shields.io/badge/Windows_x64-tested-2ea44f) ![Linux](https://img.shields.io/badge/Linux_x64_%7C_arm64-tested-2ea44f) ![RFC library](https://img.shields.io/badge/RFC_library-SAP_GUI_7.53_%7C_7.54_%7C_NW_RFC_SDK_7.50-0a6ed1) ![SAP_BASIS](https://img.shields.io/badge/SAP__BASIS-7.40_%7C_7.50_%7C_758-0a6ed1) ![backends](https://img.shields.io/badge/backends-ADT_HTTP_%7C_RFC-0a6ed1)
 
 ```text
 $ abapreach deploy PROG ZDEMO ZDEMO.abap --base 63886692bf65... --conn A4H_001
@@ -184,7 +184,7 @@ the SAP system, but the user needs developer authorization for that class. See
 
 ## Platforms
 
-Release 0.17.1 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
+Release 0.18.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The RFC
 library lookup per OS, the release file checks, the Linux glibc baseline, the credential
 file permission rules and the test matrix are in
 [Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
@@ -216,6 +216,19 @@ set ran on the 7.50 system on all four platforms (no FAIL cell); this is the fir
 and Linux arm64 run since 0.16.1, and smoke only, not the full matrix. The 7.40 system was not run
 for 0.17.1. See
 [Behavior differences: 0.17.1 release checks](docs/behavior-differences.md#0171-release-checks-0171-rc1).
+
+The 0.18.0 release checks ran on `v0.18.0-rc.2` and `v0.18.0-rc.3`; the release binaries are the rc.3
+binaries, and a cell that rc.3 does not change keeps its rc.2 result. The full matrix ran on the 7.50 and
+7.40 systems on macOS arm64, Linux x64, Linux arm64, Windows x64 native and Windows x64 emulated on arm64,
+and on the 758 system on macOS arm64 and Linux x64, on all three paths: 6237 PASS, 2055 UNSUPPORTED and
+5 FAIL in 8297 cells (290 scenarios). Each UNSUPPORTED cell has its reason listed (for example, no RFC SAP GUI
+library on Linux arm64). No product defect is open. The 5 FAIL cells are one rc.2 runner cell that failed with
+several lanes of one SAP user running in parallel (`m6-dtel-inactive`, 7.40 system, RFC SDK, macOS arm64; the
+same cell passed in a serial rerun on Linux arm64), three cleanup and sweep cells of one run on the 7.50
+system, and one dump cell that was rerun without its list cell. 11 other cells that failed in the parallel
+runs passed on serial reruns. The cells of the new features (group m8) ran on rc.3: 571 PASS, 76 UNSUPPORTED
+and 1 FAIL (the dump cell). See
+[Behavior differences: 0.18.0 release checks](docs/behavior-differences.md#0180-release-checks-0180-rc2-and-rc3).
 
 An explicit `ABAPREACH_RFC_LIBRARY` that cannot be loaded stops the command with an
 error. ABAPReach does not fall back to another library in that case.

@@ -1126,6 +1126,13 @@ The 0.17.1 release checks ran on `v0.17.1-rc.1` (the release binaries). The smok
 system on all four platforms, which is the first live Windows x64 and Linux arm64 run since 0.16.1. The
 results are in [Results of the 0.17.1 release checks](#results-of-the-0171-release-checks).
 
+The 0.18.0 release checks ran on `v0.18.0-rc.2` and `v0.18.0-rc.3` (the release binaries are the rc.3
+binaries; a cell that rc.3 does not change keeps its rc.2 result). The full matrix ran on the three systems
+and the three paths: the 7.50 and 7.40 systems on macOS arm64, Linux x64, Linux arm64, Windows x64 native and
+Windows x64 emulated on arm64, and the 758 system on macOS arm64 and Linux x64. The result is 6237 PASS,
+2055 UNSUPPORTED and 5 FAIL in 8297 cells; the FAIL cells are explained in
+[Results of the 0.18.0 release checks](#results-of-the-0180-release-checks).
+
 Each cell has one of three results:
 
 - **PASS**: the scenario ran on that platform and path and its checks held.
@@ -1226,6 +1233,40 @@ delay (the POST session logon measured about 1 to 2 seconds), not on an observat
 The UNSUPPORTED cells are structural: the ADT HTTP path loads no RFC library, and the OS trust store is
 already installed. SAP GUI for Java runs on x86_64 only, so Linux arm64 has no RFC SAP GUI library path.
 This is smoke only, not the full matrix.
+
+### Results of the 0.18.0 release checks
+
+The release binaries are `v0.18.0-rc.3`. rc.3 differs from rc.2 in two changes: `dump` stops on a single-byte
+RFC library, and server host values are not treated as secret fragments. The runs are from 2026-11-26 and
+2026-11-27. Where a cell ran more than once, the last result counts. The merged matrix has 290 scenarios in
+8297 cells (4844 cells ran on rc.3, 1380 on rc.2, and 2073 UNSUPPORTED or housekeeping cells carry no binary
+version).
+
+| System | Hosts | PASS | UNSUPPORTED | FAIL |
+| :--- | :--- | ---: | ---: | ---: |
+| SAP 7.50 system | macOS arm64, Linux x64, Linux arm64, Windows x64 native, Windows x64 emulated on arm64 | 2933 | 519 | 4 |
+| SAP 7.40 system | the same five hosts | 2015 | 1265 | 1 |
+| SAP 758 system | macOS arm64, Linux x64 | 1289 | 271 | 0 |
+| All | | 6237 | 2055 | 5 |
+
+Linux arm64 has no RFC SAP GUI library path (214 cells on each of the 7.50 and 7.40 systems). The cells of
+the 0.18.0 features (group m8, 648 cells) ran on rc.3: 571 PASS, 76 UNSUPPORTED and 1 FAIL.
+
+The first runs on rc.2 and rc.3 ran several lanes of one SAP user in parallel and had 16 FAIL cells in the
+merged result. On 2026-11-27 the failing cells were rerun on rc.3, one lane at a time (34 cells, all PASS),
+which cleared 11 of the 16. No product defect is open. The 5 FAIL cells that remain:
+
+- `m6-dtel-inactive` on the 7.40 system, RFC SDK, macOS arm64 (rc.2): the runner failed with several lanes of
+  one SAP user in parallel (the runner cleanup proof reported that the class still existed in a new session).
+  The same cell passed in the serial rerun on Linux arm64 (rc.3), on RFC through the SAP GUI library on macOS
+  arm64, on the 7.50 system and on the 758 system. It was not rerun with the RFC SDK on macOS arm64.
+- `object-cleanup`, `object-cleanup/transport` and `sweep-end` on the 7.50 system, macOS arm64: harness
+  housekeeping cells of one run, which later runs on the system pass.
+- `m8-dump-show` on the 7.50 system, RFC SDK, Windows x64 native: a harness artifact. The cell was rerun
+  without its list cell (`m8-dumps-list`) and stopped with `dump-id-missing`; the full run passed.
+
+The per-difference results are in
+[Behavior differences: 0.18.0 release checks](behavior-differences.md#0180-release-checks-0180-rc2-and-rc3).
 
 ### Unsupported cells
 
