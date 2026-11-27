@@ -1,0 +1,12 @@
+Lists the objects that use one object, through ADT or the standard cross-reference tables
+
+Usage: abapreach where-used [OPTIONS] --conn <CONN> <TYPE> <NAME>
+
+Arguments:
+  <TYPE>  PROG, FUNC, FUGR, CLAS, INTF, DTEL, DOMA, TABL or TTYP
+  <NAME>  The object name
+
+Options:
+      --max <MAX>    1 to 5000 objects [default: 200]
+      --conn <CONN>  
+  -h, --help         Print help

@@ -13,7 +13,8 @@ use crate::app::{
 use crate::backend::{BackendKind, Failure, OperationKind, Selection, SelectionReason};
 use crate::cli::{CreateKind, DeleteKind, DeleteTarget, IncludeKind, ObjectKind, Subc, TypeArg};
 use crate::config::{Connection, scrub};
-use crate::domain::{Outcome, Status};
+use crate::domain::{Origin, Outcome, Status};
+use crate::edit::{EditPlan, edits_sha256, parse_edits};
 use crate::extension::{
     CreateRequest, ExtensionDelete, ExtensionKind, ExtensionOp, ExtensionOptions, MixedDelete,
     Normalize, Registry, RunContext, SharedFactories, Verbs, adt_label,
@@ -32,7 +33,7 @@ use crate::operation::delete::{self, Context, DeleteBackend, DeleteReport, Plan,
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch, batch_unsent_failure};
 use crate::operation::deploy::{
-    CancelFlag, Change, DeployInput, DeployProg, DeployScope, NEW_INCLUDE_WARNING,
+    CancelFlag, Change, DeployInput, DeployProg, DeployScope, DeploySource, NEW_INCLUDE_WARNING,
     known_lock_handles,
 };
 use crate::policy::{Confirmer, McpWrite};
@@ -103,6 +104,10 @@ pub struct Ticket {
     pub group: Option<String>,
     /// The live hash the simulation read; the write refuses a source that moved on.
     pub base: Option<String>,
+    /// The hash of the full source a deploy by edits reached in the simulation. It is not a bound
+    /// field (the gate compares fields before any SAP read); the execute stops before the lock
+    /// when its own result hashes differently.
+    pub result_hash: Option<String>,
     /// The main program an include was resolved to; the write runs under the same one, so a
     /// main program that changed since the simulation stops it before the lock.
     pub main: Option<String>,
@@ -181,6 +186,7 @@ impl Ticket {
             plan: None,
             group: None,
             base: None,
+            result_hash: None,
             main: None,
             warning: None,
             change: None,
@@ -497,6 +503,13 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
     ) -> Result<Ticket, String> {
         let (stored, confirm) = self.admit(connection, arguments, presented, session)?;
 
+        // A ticket of a simulation by edits always carries the result it reached; without one the
+        // execute could not compare its own result, so it refuses rather than write unchecked.
+        // This comes before the form: a human is never asked about a call that is refused.
+        if presented.fields.contains_key("edits_sha256") && stored.result_hash.is_none() {
+            return Err("the plan_token holds no edit result; simulate again".to_owned());
+        }
+
         if !confirm {
             return Ok(stored);
         }
@@ -548,7 +561,12 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
 
         let kind = parse::<ObjectKind>(required(arguments, "type")?, READ_TYPES)?;
         let name = required(arguments, "name")?;
-        let source = required(arguments, "source")?;
+        let source = optional(arguments, "source")?;
+        let edits = match arguments.get("edits") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(parse_edits(value)?),
+        };
+        let base = optional(arguments, "base")?;
         let tr = optional(arguments, "tr")?;
         let include = match optional(arguments, "include")? {
             Some(include) => Some(parse::<IncludeKind>(
@@ -563,14 +581,59 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
 
         check_deploy_options(kind, name, include, create_include, fugr, main)?;
 
-        let lines = local_source_lines(source);
+        // A full source is the whole object; edits change the live source, which only a read
+        // of SAP can show. The checks of an edit result run in the deploy, after the edits.
+        let (deploy_source, change_binding) = match (source, edits) {
+            (Some(_), Some(_)) => return Err("pass exactly one of source or edits".to_owned()),
+            (None, None) => return Err("source or edits is required".to_owned()),
+            (Some(_), None) if base.is_some() => {
+                return Err("base only applies to edits".to_owned());
+            }
+            (Some(source), None) => {
+                let lines = local_source_lines(source);
 
-        check_deploy_source(kind, name, &lines)?;
+                check_deploy_source(kind, name, &lines)?;
 
+                (
+                    DeploySource::Full(lines),
+                    ("source_sha256", Some(sha256_hex(source))),
+                )
+            }
+            (None, Some(edits)) => {
+                let base = base.ok_or("base is required with edits")?;
+
+                if base.len() != 64
+                    || !base
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                {
+                    return Err("base must be the 64-hex hash from abap_read_source".to_owned());
+                }
+
+                if create_include {
+                    return Err("edits do not apply to create_include".to_owned());
+                }
+
+                let digest = edits_sha256(&edits);
+                let plan = EditPlan {
+                    base: base.to_owned(),
+                    edits,
+                };
+
+                (DeploySource::Edits(plan), ("edits_sha256", Some(digest)))
+            }
+        };
         let mut fields = bind([
             ("type", Some(kind.token().to_owned())),
             ("name", Some(name.to_ascii_uppercase())),
-            ("source_sha256", Some(sha256_hex(source))),
+            change_binding,
+            (
+                "base",
+                match &deploy_source {
+                    DeploySource::Edits(plan) => Some(plan.base.clone()),
+                    DeploySource::Full(_) => None,
+                },
+            ),
             ("tr", tr.map(str::to_ascii_uppercase)),
             ("include", include.map(|include| include.token().to_owned())),
             ("fugr", fugr.map(str::to_ascii_uppercase)),
@@ -603,10 +666,17 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
             .create_include(create_include)
             .main(main)
             .expected_main(expected_main)
+            .guard_secrets(true)
+            .origin(Origin::Mcp)
+            .expected_result(
+                stored
+                    .as_ref()
+                    .and_then(|stored| stored.result_hash.as_deref()),
+            )
             .cancel_before_lock(true);
         let input = DeployInput {
             name: name.to_owned(),
-            source: lines,
+            source: deploy_source,
             base: stored.as_ref().and_then(|stored| stored.base.clone()),
             simulate: !execute,
             tr: tr.map(str::to_owned),
@@ -640,6 +710,8 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                 seen.status = result.outcome.status;
                 seen.group = result.group.clone();
                 seen.base = result.base.clone();
+                seen.result_hash = result.result_hash.clone();
+                seen.secret_rejected = result.secret_rejected;
                 seen.change = result.change.clone();
                 seen.main = result.main.clone();
                 seen.warning = result
@@ -660,10 +732,16 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
 
         drop(factories);
 
+        // Nothing else of a source that holds a secret is shown: no hash, diff or edit result.
+        if seen.secret_rejected {
+            return Ok(ToolResult::error(SECRET_REJECTED.to_owned()));
+        }
+
         let issue = (!execute && seen.status == Some(Status::SimulatedOk)).then(|| Ticket {
             backend: seen.backend,
             group: seen.group.clone(),
             base: seen.base.clone(),
+            result_hash: seen.result_hash.clone(),
             main: seen.main.clone(),
             warning: seen.warning.clone(),
             change: seen.change.clone(),
@@ -871,6 +949,7 @@ impl<'a, G: WriteGate> McpTools<'a, G> {
                     simulate: !execute,
                     subc: subc.unwrap_or(Subc::Program),
                     source: None,
+                    origin: Origin::Mcp,
                 };
 
                 route(
@@ -1290,6 +1369,8 @@ struct Seen {
     status: Option<Status>,
     group: Option<String>,
     base: Option<String>,
+    result_hash: Option<String>,
+    secret_rejected: bool,
     main: Option<String>,
     warning: Option<String>,
     change: Option<Change>,

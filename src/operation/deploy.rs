@@ -6,7 +6,8 @@ use crate::adt::{
 use crate::backend::{Failure, Selection, SelectionReason};
 use crate::cli::{IncludeKind, ObjectKind};
 use crate::config::{Connection, tls_warning};
-use crate::domain::{Outcome, Status};
+use crate::domain::{Origin, Outcome, Status};
+use crate::edit::{EditPlan, apply_edits};
 use crate::hash::{normalize, source_hash};
 use crate::object::{check_deploy_source, check_request, context_uri};
 use crate::operation::include::{
@@ -43,10 +44,18 @@ const WHERE_USED_LIMIT: usize = 50;
 const RUNTIME_WARNING: &str = "W: callers' syntax check does not catch missing CALL FUNCTION parameters; they dump at runtime";
 const OBJECT_STRUCTURE: &str = "objectstructure?version=active&withShortDescriptions=true";
 
+/// What a deploy writes: the full source as sent, or the edits that turn the live source into it.
+/// There is no empty stand-in for either, so a run can never write a source it was not given.
+#[derive(Clone, Debug)]
+pub enum DeploySource {
+    Full(Vec<String>),
+    Edits(EditPlan),
+}
+
 #[derive(Clone, Debug)]
 pub struct DeployInput {
     pub name: String,
-    pub source: Vec<String>,
+    pub source: DeploySource,
     pub base: Option<String>,
     pub simulate: bool,
     pub tr: Option<String>,
@@ -68,6 +77,16 @@ pub struct DeployScope {
     /// The main program the simulation resolved: the execute resolves exactly as the simulation
     /// did and stops before the lock when the result differs.
     pub expected_main: Option<String>,
+    /// The hash of the result the simulation reached; the execute stops before the lock when its
+    /// own result hashes differently.
+    pub expected_result: Option<String>,
+    /// The MCP deploy stops before anything is compared, matched or shown when the live source
+    /// holds a secret of the connection: the hash, the base result, a match and the diff (which
+    /// shows only the lines around a change) would all tell something about text the client was
+    /// never allowed to read. The CLI prints sources as they are.
+    pub guard_secrets: bool,
+    /// Who runs the deploy: it decides how a stop names the base and the hashes.
+    pub origin: Origin,
 }
 
 impl DeployScope {
@@ -80,7 +99,16 @@ impl DeployScope {
             cancel_before_lock: false,
             main: None,
             expected_main: None,
+            expected_result: None,
+            guard_secrets: false,
+            origin: Origin::Cli,
         }
+    }
+
+    pub fn origin(mut self, origin: Origin) -> Self {
+        self.origin = origin;
+
+        self
     }
 
     pub fn cancel_before_lock(mut self, stop: bool) -> Self {
@@ -117,6 +145,18 @@ impl DeployScope {
 
     pub fn expected_main(mut self, main: Option<&str>) -> Self {
         self.expected_main = main.map(str::to_owned);
+
+        self
+    }
+
+    pub fn guard_secrets(mut self, guard: bool) -> Self {
+        self.guard_secrets = guard;
+
+        self
+    }
+
+    pub fn expected_result(mut self, result: Option<&str>) -> Self {
+        self.expected_result = result.map(str::to_owned);
 
         self
     }
@@ -338,6 +378,10 @@ pub struct DeployResult {
     /// The main program an include was checked and activated under (resolved from the server or
     /// `--main`); `None` for everything else.
     pub main: Option<String>,
+    /// The hash of the full source the run would write (the edit result for a deploy by edits).
+    pub result_hash: Option<String>,
+    /// The run stopped because the live source of an MCP deploy holds a configured secret.
+    pub secret_rejected: bool,
 }
 
 /// The start of the `W:` line of a new include's first simulation (no check before the first
@@ -493,6 +537,11 @@ impl DeployProg {
             main_arg: scope.main,
             expected_main: scope.expected_main,
             include_main: None,
+            expected_result: scope.expected_result,
+            secret_guard: connection.filter(|_| scope.guard_secrets).cloned(),
+            origin: scope.origin,
+            secret_rejected: false,
+            result_hash: None,
         };
         // `--base` and an explicit `--backend` bind the run to the backend that was picked.
         let pinned = input.base.is_some()
@@ -528,6 +577,8 @@ impl DeployProg {
             base: run.live_hash.clone(),
             change: run.change.take(),
             main: run.include_main.as_ref().map(|main| main.name.clone()),
+            result_hash: run.result_hash.take(),
+            secret_rejected: run.secret_rejected,
         }
     }
 }
@@ -731,6 +782,19 @@ impl Finish {
     }
 }
 
+/// The local rules of a deploy source: the name and line rules of the type, and for a FUNC the
+/// ADT format and a readable signature.
+fn check_source(kind: ObjectKind, name: &str, source: &[String]) -> Result<(), Finish> {
+    check_deploy_source(kind, name, source).map_err(Finish::stop)?;
+
+    if kind == ObjectKind::Func {
+        validate_signature(source)
+            .map_err(|error| Finish::stop(format!("FUNC source signature unreadable: {error}")))?;
+    }
+
+    Ok(())
+}
+
 fn token(status: Status) -> &'static str {
     match status {
         Status::Active => "ACTIVE",
@@ -850,6 +914,15 @@ struct Run<'a> {
     /// Set once the name resolved to an include: the main program its check and activation run
     /// under. The include's own URI stays in `uri` for the lock.
     include_main: Option<MainProgram>,
+    /// The result hash the simulation reached; a different one now is a STOP before the lock.
+    expected_result: Option<String>,
+    /// The connection whose secrets an MCP deploy (full source or edits) must not reveal; set only
+    /// for the MCP.
+    secret_guard: Option<Connection>,
+    origin: Origin,
+    secret_rejected: bool,
+    /// The hash of the full source this run would write.
+    result_hash: Option<String>,
 }
 
 enum InactiveOwnerError {
@@ -871,6 +944,19 @@ impl Run<'_> {
         }
 
         finish.stderr = Some(lines.join("\n"));
+    }
+
+    /// Whether a guarded run (the MCP) read a source that holds a secret; the run then ends
+    /// without showing anything of it.
+    fn holds_guarded_secret(&mut self, lines: &[String]) -> bool {
+        let held = self
+            .secret_guard
+            .as_ref()
+            .is_some_and(|connection| connection.holds_secret(&lines.join("\n")));
+
+        self.secret_rejected |= held;
+
+        held
     }
 
     fn call(&mut self, request: Request) -> Result<Response, TransportError> {
@@ -907,29 +993,78 @@ impl Run<'_> {
         pinned: bool,
         cancel: &CancelFlag,
     ) -> Result<Finish, Finish> {
-        check_deploy_source(self.kind, &input.name, &input.source).map_err(Finish::stop)?;
-        if self.kind == ObjectKind::Func {
-            validate_signature(&input.source).map_err(|error| {
-                Finish::stop(format!("FUNC source signature unreadable: {error}"))
-            })?;
+        // A full source is checked before SAP is touched; the result of edits only exists once
+        // the live source is read.
+        if let DeploySource::Full(source) = &input.source {
+            check_source(self.kind, &input.name, source)?;
         }
+
         self.resolve_target()?;
 
-        let file = normalize(input.source.clone());
         let live = normalize(self.read_live()?);
         let live_hash = source_hash(&live);
 
         self.live_hash = Some(live_hash.clone());
 
-        if let Some(base) = &input.base
-            && *base != live_hash
-        {
-            return Err(Finish::stop(format!(
-                "live changed: live hash {live_hash} != --base {base}"
-            )));
+        if self.holds_guarded_secret(&live) {
+            return Err(Finish::stop("payload contains a configured secret"));
         }
 
-        if source_hash(&file) == live_hash {
+        // The CLI names its flag and shows the hashes. An MCP call (edits, or the execute of a full
+        // source whose base is the one its simulation saw) has no `--base` flag, and its client
+        // may not read the source in full, so its text names neither the flag nor a hash.
+        let mcp = self.origin == Origin::Mcp;
+        let edit_base = match &input.source {
+            DeploySource::Edits(plan) => Some(&plan.base),
+            DeploySource::Full(_) => None,
+        };
+
+        for base in input.base.iter().chain(edit_base) {
+            if *base != live_hash {
+                return Err(Finish::stop(if edit_base.is_some() || mcp {
+                    "live changed since your read: base does not match".to_owned()
+                } else {
+                    format!("live changed: live hash {live_hash} != --base {base}")
+                }));
+            }
+        }
+
+        let (file, result_hash) = match &input.source {
+            DeploySource::Edits(plan) => {
+                let result = normalize(apply_edits(&live, &plan.edits).map_err(Finish::stop)?);
+                let hash = source_hash(&result);
+
+                // A result equal to live is "no changes", whatever the checks would say.
+                if hash != live_hash {
+                    check_source(self.kind, &input.name, &result)?;
+                }
+
+                (result, hash)
+            }
+            DeploySource::Full(source) => {
+                let file = normalize(source.clone());
+                let hash = source_hash(&file);
+
+                (file, hash)
+            }
+        };
+
+        self.result_hash = Some(result_hash.clone());
+
+        if let Some(expected) = &self.expected_result
+            && *expected != result_hash
+        {
+            // The MCP never shows a hash of a source its client may not read in full.
+            return Err(Finish::stop(if self.origin == Origin::Mcp {
+                "result changed since the simulation".to_owned()
+            } else {
+                format!(
+                    "result changed since the simulation: result hash {result_hash} != {expected}"
+                )
+            }));
+        }
+
+        if result_hash == live_hash {
             return Ok(Finish::plain("no changes"));
         }
 
@@ -1539,15 +1674,24 @@ impl Run<'_> {
                 Err(finish) => return Locked::Finished(finish),
             };
 
-        let reread = match self.read_active("re-read live source after lock") {
-            Ok(lines) => source_hash(&lines),
+        let reread_lines = match self.read_active("re-read live source after lock") {
+            Ok(lines) => lines,
             Err(finish) => return Locked::Finished(finish),
         };
 
+        if self.holds_guarded_secret(&reread_lines) {
+            return Locked::Finished(Finish::stop("payload contains a configured secret"));
+        }
+
+        let reread = source_hash(&reread_lines);
+
         if reread != live_hash {
-            return Locked::Finished(Finish::stop(format!(
-                "live changed since initial read: live hash {reread} != {live_hash}"
-            )));
+            // The MCP never shows a live hash of a source its client may not read in full.
+            return Locked::Finished(Finish::stop(if self.origin == Origin::Mcp {
+                "live changed since initial read".to_owned()
+            } else {
+                format!("live changed since initial read: live hash {reread} != {live_hash}")
+            }));
         }
 
         // Another user may have saved an inactive version between the version list and the LOCK,

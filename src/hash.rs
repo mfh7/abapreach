@@ -14,12 +14,17 @@ pub fn local_source_lines(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// One line as the hash and the diff see it: trailing CR and trailing blanks cut.
+pub(crate) fn cut_line(line: &str) -> &str {
+    line.trim_end_matches('\r').trim_end_matches(' ')
+}
+
 /// The empty source of a fresh object is an empty body on 7.50 and a single NUL character on
 /// 7.40; both normalize to no lines, so read and hash agree on one canonical empty source.
 pub fn normalize(lines: Vec<String>) -> Vec<String> {
     let mut normalized = lines
         .into_iter()
-        .map(|line| line.trim_end_matches('\r').trim_end_matches(' ').to_owned())
+        .map(|line| cut_line(&line).to_owned())
         .collect::<Vec<_>>();
 
     while normalized.last().is_some_and(String::is_empty) {

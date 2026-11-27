@@ -1,0 +1,12 @@
+Lists the ST22 short dumps from table SNAP, newest first, one line each
+
+Usage: abapreach dumps [OPTIONS] --conn <CONN>
+
+Options:
+      --date <DATE>        List the dumps from this day on, written YYYYMMDD; without it the last 7 days and one more day for the time zone
+      --user <USER>        List the dumps of this user; without it the dumps of the logon user
+      --all                List the dumps of every user, as ST22 does; not with --user
+      --rows <ROWS>        1 to 1000 [default: 20]
+      --backend <BACKEND>  Release 7.50 refuses SNAP in the data preview; there `rfc` reads it through RFC_READ_TABLE [possible values: adt, rfc]
+      --conn <CONN>        
+  -h, --help               Print help

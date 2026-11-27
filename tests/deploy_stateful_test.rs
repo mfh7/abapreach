@@ -4,7 +4,7 @@ mod replay;
 use abapreach::backend::{BackendKind, Failure, Selection, SelectionReason};
 use abapreach::domain::Status;
 use abapreach::hash::source_hash;
-use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg};
+use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeploySource};
 use abapreach::transport::http::HttpTransport;
 use abapreach::transport::{Response, SadtTransport};
 use replay::NO_INACTIVE_FEED;
@@ -24,11 +24,11 @@ const LOCK_BODY: &str = concat!(
 fn input(base: Option<String>) -> DeployInput {
     DeployInput {
         name: "YTEST_ABAPREACH01".to_owned(),
-        source: vec![
+        source: DeploySource::Full(vec![
             "REPORT ytest_abapreach01.".to_owned(),
             String::new(),
             "WRITE / 'v2'.".to_owned(),
-        ],
+        ]),
         base,
         simulate: true,
         tr: None,

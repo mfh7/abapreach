@@ -6,12 +6,13 @@ use crate::adt::package_of;
 use crate::backend::{Failure, Selection, SelectionReason};
 use crate::cli::{CreateKind, ObjectKind, Subc};
 use crate::config::Connection;
-use crate::domain::{Outcome, Status};
+use crate::domain::{Origin, Outcome, Status};
 use crate::object::{
     DEFAULT_PACKAGE, PackageScope, program_creation_request_uri, program_validation_uri,
 };
 use crate::operation::deploy::{
-    CancelFlag, DeployInput, DeployProg, DeployResult, DeployScope, INTERRUPT_EXIT_CODE, leaf_texts,
+    CancelFlag, DeployInput, DeployProg, DeployResult, DeployScope, DeploySource,
+    INTERRUPT_EXIT_CODE, leaf_texts,
 };
 use crate::operation::include::{Located, ProgKind, ResolveError, locate};
 use crate::operation::read::OBJECT_STRUCTURE;
@@ -39,6 +40,8 @@ pub struct CreateInput {
     /// A `PROG` create only: the source a simulate deploy checks after `CREATE: ACTIVE`; it is
     /// never written.
     pub source: Option<Vec<String>>,
+    /// Who runs the create: its simulate deploy words a stop for that caller.
+    pub origin: Origin,
 }
 
 /// What a validation request answered.
@@ -298,6 +301,8 @@ impl CreateProg {
             group: None,
             base: None,
             change: None,
+            result_hash: None,
+            secret_rejected: false,
             main: None,
         }
     }
@@ -784,12 +789,12 @@ impl Run<'_> {
             &mut *self.transport,
             DeployInput {
                 name: self.input.name.clone(),
-                source,
+                source: DeploySource::Full(source),
                 base: None,
                 simulate: true,
                 tr: self.input.tr.clone(),
             },
-            DeployScope::new(ObjectKind::Prog),
+            DeployScope::new(ObjectKind::Prog).origin(self.input.origin),
             None,
             connection,
             cancel,

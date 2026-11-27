@@ -130,16 +130,25 @@ pub struct Connection {
 
 impl Connection {
     /// Values that must never be printed: the password and the route, including its sensitive
-    /// fragments when an RFC library reports only part of a route.
+    /// fragments when an RFC library reports only part of a route. A fragment that equals a
+    /// configured server host (`adt.host`, `rfc.ashost`; ASCII case-insensitive) is left out:
+    /// server hosts are not secrets (see [`Connection::hosts`]), and guarding one would reject
+    /// every output that quotes the ADT URL and hide the real error. The full route and every
+    /// other fragment stay secrets.
     pub fn secrets(&self) -> Vec<String> {
         let mut secrets = vec![self.password.clone()];
 
         if let Some(rfc) = &self.rfc
             && let Some(route) = &rfc.saprouter
         {
+            let hosts = self.hosts();
+
             secrets.push(route.clone());
             for pair in route.split('/').collect::<Vec<_>>().windows(2) {
-                if matches!(pair[0], "H" | "W") && pair[1].len() >= 3 {
+                if matches!(pair[0], "H" | "W")
+                    && pair[1].len() >= 3
+                    && !hosts.iter().any(|host| host.eq_ignore_ascii_case(pair[1]))
+                {
                     secrets.push(pair[1].to_owned());
                 }
             }
@@ -147,6 +156,13 @@ impl Connection {
 
         secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
         secrets
+    }
+
+    /// Whether `payload` holds a value that must never be printed.
+    pub fn holds_secret(&self, payload: &str) -> bool {
+        self.secrets()
+            .iter()
+            .any(|secret| !secret.is_empty() && payload.contains(secret.as_str()))
     }
 
     /// The server hosts. Only the doctor hides them: its probe errors may quote them, while a
@@ -526,6 +542,20 @@ impl Config {
             ca_file: server.adt.ca_file.clone(),
             insecure: server.adt.insecure,
         }))
+    }
+
+    /// Whether `connection_id` names a configured system and one of its clients. It reads no
+    /// credential, so a caller that must not echo a bad id can test before it resolves.
+    pub fn is_configured(&self, connection_id: &str) -> bool {
+        Self::parse_id(connection_id).is_ok_and(|(system_id, client)| {
+            self.servers.iter().any(|server| {
+                server.system_id == system_id
+                    && server
+                        .clients
+                        .iter()
+                        .any(|configured| configured == &client)
+            })
+        })
     }
 
     pub fn parse_id(connection_id: &str) -> Result<(String, String), String> {

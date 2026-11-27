@@ -4,7 +4,7 @@ use crate::config::{
     Config, ConfigPaths, Connection, LocalCredentialsPermission, local_credentials_permission,
     scrub, tls_warning,
 };
-use crate::domain::Outcome;
+use crate::domain::{Origin, Outcome};
 use crate::extension::{
     CreateRequest, ExtensionDelete, ExtensionKind, ExtensionOp, ExtensionOptions, MixedDelete,
     ReadRequest, Registry, RunContext, SharedFactories, adt_label, adt_pin,
@@ -24,19 +24,25 @@ use crate::operation::create_ddic::{self, DdicCreate};
 use crate::operation::delete::{self, Context};
 use crate::operation::delete_adt::{AdtDelete, NO_STATEFUL_SESSION};
 use crate::operation::delete_ddic::{DdicDelete, DdicEnv, RunnerBatch, batch_unsent_failure};
-use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope};
+use crate::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeployScope, DeploySource};
 use crate::operation::deploy_ddic::{self, DdicDeploy};
+use crate::operation::dictionary::PreviewError;
 use crate::operation::doctor::Doctor;
+use crate::operation::dumps::{self, DumpQuery, ListOptions, ListQuery};
 use crate::operation::inactive;
 use crate::operation::payload::Kind;
+use crate::operation::ping;
 use crate::operation::quality;
 use crate::operation::read::{ReadProg, ReadTarget};
 use crate::operation::read_ddic::{self, DdicRead};
 use crate::operation::read_table::{
-    CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableError, ReadTableRequest,
+    CLI_MAX_ROWS, MAX_OUTPUT_BYTES, Query, ReadTable, ReadTableRequest, TableData,
 };
 use crate::operation::runner_tran::{self, TranCreate, TranRead};
+use crate::operation::search::{self, Query as SearchQuery};
 use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
+use crate::operation::sql::{self, Query as SqlQuery, TEXT_MAX};
+use crate::operation::where_used::{self, Query as WhereUsedQuery};
 use crate::policy::{RunPolicy, Terminal};
 use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use crate::transport::http::{HttpConfig, HttpTransport};
@@ -47,6 +53,7 @@ use crate::transport::{Request, Response, SadtTransport, TransportError};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -295,7 +302,8 @@ pub(crate) fn run_registered(
             );
         }
     };
-    let is_doctor = matches!(cli.command, Command::Doctor { .. });
+    // `ping` prints the instance name as SAP reports it; only the doctor also masks the hosts.
+    let masks_hosts = matches!(cli.command, Command::Doctor { .. });
     let Some(conn) = connection_id(&cli.command) else {
         return with_warning(mcp(env, factories, registry), warning.as_deref());
     };
@@ -329,7 +337,7 @@ pub(crate) fn run_registered(
 
     let mut secrets = connection.secrets();
 
-    if is_doctor {
+    if masks_hosts {
         secrets.extend(connection.hosts());
         secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     }
@@ -387,14 +395,380 @@ fn connection_id(command: &Command) -> Option<&str> {
         | Command::Deploy { conn, .. }
         | Command::Create { conn, .. }
         | Command::ReadTable { conn, .. }
+        | Command::Sql { conn, .. }
+        | Command::Search { conn, .. }
+        | Command::Dumps { conn, .. }
+        | Command::Dump { conn, .. }
+        | Command::WhereUsed { conn, .. }
         | Command::Delete { conn, .. }
         | Command::Inactive { conn, .. }
         | Command::Activate { conn, .. }
         | Command::Aunit { conn, .. }
         | Command::Run { conn, .. }
-        | Command::Doctor { conn } => Some(conn),
+        | Command::Doctor { conn }
+        | Command::Ping { conn, .. } => Some(conn),
         Command::Mcp => None,
     }
+}
+
+/// The statement of `--file`: at most `TEXT_MAX` bytes are read, so a large or endless file is
+/// refused instead of loaded.
+fn read_statement(file: &Path) -> Result<String, String> {
+    let fail = |error: std::io::Error| format!("cannot read {}: {error}", file.display());
+    let mut bytes = Vec::new();
+
+    fs::File::open(file)
+        .map_err(fail)?
+        .take(TEXT_MAX as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(fail)?;
+
+    if bytes.len() > TEXT_MAX {
+        return Err(format!(
+            "{} is longer than {TEXT_MAX} characters",
+            file.display()
+        ));
+    }
+
+    String::from_utf8(bytes).map_err(|_| format!("{} is not UTF-8 text", file.display()))
+}
+
+/// A successful data preview: the table, cut at `MAX_OUTPUT_BYTES` with a warning for the rows
+/// left out.
+fn table_attempt(data: &TableData) -> Attempt {
+    let (stdout, omitted) = data.render(MAX_OUTPUT_BYTES);
+    let stderr = if omitted == 0 {
+        String::new()
+    } else {
+        format!("W: output cut at {MAX_OUTPUT_BYTES} bytes; {omitted} rows left out")
+    };
+
+    Attempt {
+        outcome: Outcome {
+            status: None,
+            exit: 0,
+            stdout,
+            stderr,
+        },
+        failure: None,
+        fallback_allowed: false,
+        detail: None,
+    }
+}
+
+/// A dictionary lookup that could not vouch for an entity: exit 1, no fallback.
+fn rejected_attempt(message: &str) -> Attempt {
+    Attempt {
+        outcome: Outcome {
+            status: None,
+            exit: 1,
+            stdout: String::new(),
+            stderr: format!("REJECTED: {message}"),
+        },
+        failure: None,
+        fallback_allowed: false,
+        detail: None,
+    }
+}
+
+/// A rule the input broke: exit 2, no fallback.
+fn stop_attempt(message: &str) -> Attempt {
+    let exit = stop(message);
+
+    Attempt {
+        outcome: Outcome {
+            status: None,
+            exit: exit.code,
+            stdout: exit.stdout,
+            stderr: exit.stderr,
+        },
+        failure: None,
+        fallback_allowed: false,
+        detail: None,
+    }
+}
+
+/// The attempt of a `read-table` or `sql` run: a refusal is a STOP, a lookup that could not
+/// answer is a rejection, and a failed backend keeps its routing class.
+pub(crate) fn read_attempt(read: Result<TableData, PreviewError>) -> Attempt {
+    match read {
+        Ok(data) => table_attempt(&data),
+        Err(error) => preview_error_attempt(error),
+    }
+}
+
+/// The attempt of a run that reads through the data preview and prints its own outcome.
+pub(crate) fn outcome_attempt(result: Result<Outcome, PreviewError>) -> Attempt {
+    match result {
+        Ok(outcome) => Attempt {
+            outcome,
+            failure: None,
+            fallback_allowed: false,
+            detail: None,
+        },
+        Err(error) => preview_error_attempt(error),
+    }
+}
+
+fn preview_error_attempt(error: PreviewError) -> Attempt {
+    match error {
+        PreviewError::Refused(message) => stop_attempt(&message),
+        PreviewError::Rejected(message) => rejected_attempt(&message),
+        PreviewError::Failed { failure, message } => Attempt::failed(message, failure),
+    }
+}
+
+/// The attempt of a `dumps` or `dump` run: the text it printed, or why it stopped, as for a
+/// data preview read.
+pub(crate) fn text_attempt(read: Result<String, PreviewError>) -> Attempt {
+    match read {
+        Ok(stdout) => Attempt {
+            outcome: Outcome {
+                status: None,
+                exit: 0,
+                stdout,
+                stderr: String::new(),
+            },
+            failure: None,
+            fallback_allowed: false,
+            detail: None,
+        },
+        Err(PreviewError::Refused(message)) => stop_attempt(&message),
+        Err(PreviewError::Rejected(message)) => rejected_attempt(&message),
+        Err(PreviewError::Failed { failure, message }) => Attempt::failed(message, failure),
+    }
+}
+
+/// [`text_attempt`] of a run that may still move to RFC (`may_fall_back`): the refusal of `SNAP`
+/// over ADT HTTP then lets the router go on, and the STOP with the hint stays for a run that
+/// cannot.
+fn snap_attempt(read: Result<String, PreviewError>, may_fall_back: bool) -> Attempt {
+    match read {
+        Err(error) if may_fall_back && dumps::is_preview_refusal(&error) => {
+            let PreviewError::Refused(message) = error else {
+                unreachable!("only a refusal is a preview refusal")
+            };
+
+            Attempt {
+                fallback_allowed: true,
+                ..Attempt::failed(message, Failure::CapabilityUnavailable)
+            }
+        }
+        other => text_attempt(other),
+    }
+}
+
+// ---- the read commands of 0.18.0, shared by the CLI and the MCP tools ----------------------------
+
+/// `sql`: the statement through the freestyle data preview. `found` receives the rows of a run
+/// that answered, so a caller that wants the data reads them there and not from the text.
+pub(crate) fn run_sql(
+    connection: &Connection,
+    factories: &mut dyn Factories,
+    query: &SqlQuery,
+    found: &mut Option<TableData>,
+) -> Exit {
+    route(
+        OperationKind::Sql,
+        None,
+        false,
+        connection,
+        factories,
+        |transport, _, _, _| {
+            let read = sql::run(transport, query.clone(), &connection.policies);
+
+            // A read holds no lock, so a failed session end is only a note.
+            let note = end_session(transport);
+            let attempt = match read {
+                Ok(data) => {
+                    let attempt = table_attempt(&data);
+
+                    *found = Some(data);
+
+                    attempt
+                }
+                Err(error) => preview_error_attempt(error),
+            };
+
+            attempt.noted(note)
+        },
+    )
+}
+
+/// `search`: the objects whose name matches. `found` receives them.
+pub(crate) fn run_search(
+    connection: &Connection,
+    factories: &mut dyn Factories,
+    query: &SearchQuery,
+    found: &mut Option<search::Found>,
+) -> Exit {
+    route(
+        OperationKind::Search,
+        None,
+        false,
+        connection,
+        factories,
+        |transport, _, _, _| {
+            let result = search::list(transport, query).map(|list| {
+                let outcome = list.outcome();
+
+                *found = Some(list);
+
+                outcome
+            });
+
+            // A read holds no lock, so a failed session end is only a note.
+            quality::attempt(result, end_session(transport))
+        },
+    )
+}
+
+/// `where-used`: the objects that use one object. `found` receives them.
+pub(crate) fn run_where_used(
+    connection: &Connection,
+    factories: &mut dyn Factories,
+    query: &WhereUsedQuery,
+    found: &mut Option<where_used::Listing>,
+) -> Exit {
+    route(
+        OperationKind::WhereUsed,
+        None,
+        false,
+        connection,
+        factories,
+        |transport, _, _, _| {
+            let result = where_used::list(transport, query, &connection.policies).map(|list| {
+                let outcome = list.outcome();
+
+                *found = Some(list);
+
+                outcome
+            });
+
+            // A read holds no lock, so a failed session end is only a note.
+            let note = end_session(transport);
+
+            outcome_attempt(result).noted(note)
+        },
+    )
+}
+
+/// `ping`: the system and the instance that answered. `found` receives the reading.
+pub(crate) fn run_ping(
+    connection: &Connection,
+    backend: Option<BackendKind>,
+    factories: &mut dyn Factories,
+    found: &mut Option<ping::Pinged>,
+) -> Exit {
+    route(
+        OperationKind::Ping,
+        backend,
+        false,
+        connection,
+        factories,
+        |transport, selection, _, _| {
+            let reading = ping::read(transport, selection.backend, &connection.secrets());
+            let result = reading
+                .map(|reading| {
+                    let pinged = ping::Pinged {
+                        backend: selection.backend,
+                        reading,
+                    };
+                    let outcome = pinged.reading.outcome(pinged.backend);
+
+                    *found = Some(pinged);
+
+                    outcome
+                })
+                .map_err(|failure| failure.error);
+
+            // A read holds no lock, so a failed session end is only a note.
+            quality::attempt(result, end_session(transport))
+        },
+    )
+}
+
+/// `dumps`: the list of the short dumps. `found` receives the rows.
+pub(crate) fn run_dumps(
+    connection: &Connection,
+    backend: Option<BackendKind>,
+    factories: &mut dyn Factories,
+    query: &ListQuery,
+    found: &mut Option<dumps::Listing>,
+) -> Exit {
+    route(
+        OperationKind::Dumps,
+        backend,
+        false,
+        connection,
+        factories,
+        |transport, selection, _, _| {
+            let list = dumps::run_list(transport, selection.backend, query, &connection.policies);
+            let may_fall_back = backend.is_none()
+                && selection.backend == BackendKind::AdtHttp
+                && connection.rfc.is_some();
+
+            // A read holds no lock, so a failed session end is only a note.
+            let note = end_session(transport);
+            let warning = list.as_ref().ok().and_then(|l| l.warning.clone());
+            let attempt = match list {
+                Ok(listing) => {
+                    let attempt = text_attempt(Ok(listing.text.clone()));
+
+                    *found = Some(listing);
+
+                    attempt
+                }
+                Err(error) => snap_attempt(Err(error), may_fall_back),
+            };
+
+            attempt.noted(warning).noted(note)
+        },
+    )
+}
+
+/// `dump`: one short dump. `found` receives it.
+pub(crate) fn run_dump(
+    connection: &Connection,
+    backend: Option<BackendKind>,
+    factories: &mut dyn Factories,
+    query: &DumpQuery,
+    found: &mut Option<dumps::Dump>,
+) -> Exit {
+    route(
+        OperationKind::Dump,
+        backend,
+        false,
+        connection,
+        factories,
+        |transport, selection, _, _| {
+            let shown = dumps::read_dump(
+                transport,
+                selection.backend,
+                query,
+                &connection.policies,
+                &connection.lang,
+            );
+            let may_fall_back = backend.is_none()
+                && selection.backend == BackendKind::AdtHttp
+                && connection.rfc.is_some();
+
+            // A read holds no lock, so a failed session end is only a note.
+            let note = end_session(transport);
+            let attempt = match shown {
+                Ok(dump) => {
+                    let attempt = text_attempt(Ok(dump.text()));
+
+                    *found = Some(dump);
+
+                    attempt
+                }
+                Err(error) => snap_attempt(Err(error), may_fall_back),
+            };
+
+            attempt.noted(note)
+        },
+    )
 }
 
 /// `mcp` loads every policy once, then serves stdio until EOF. Each tool call re-reads the
@@ -563,6 +937,9 @@ fn execute(
                 stderr: String::new(),
             }
         }
+        Command::Ping { backend, .. } => {
+            run_ping(connection, backend.map(backend_kind), factories, &mut None)
+        }
         Command::ReadTable {
             table,
             fields,
@@ -592,48 +969,103 @@ fn execute(
 
                     // A read holds no lock, so a failed session end is only a note.
                     let note = end_session(transport);
-                    let attempt = match read {
-                        Ok(data) => {
-                            let (stdout, omitted) = data.render(MAX_OUTPUT_BYTES);
-                            let stderr = if omitted == 0 {
-                                String::new()
-                            } else {
-                                format!(
-                                    "W: output cut at {MAX_OUTPUT_BYTES} bytes; {omitted} rows left out"
-                                )
-                            };
-
-                            Attempt {
-                                outcome: Outcome {
-                                    status: None,
-                                    exit: 0,
-                                    stdout,
-                                    stderr,
-                                },
-                                failure: None,
-                                fallback_allowed: false,
-                                detail: None,
-                            }
-                        }
-                        Err(ReadTableError::Rejected(message)) => Attempt {
-                            outcome: Outcome {
-                                status: None,
-                                exit: 1,
-                                stdout: String::new(),
-                                stderr: format!("REJECTED: {message}"),
-                            },
-                            failure: None,
-                            fallback_allowed: false,
-                            detail: None,
-                        },
-                        Err(ReadTableError::Failed { failure, message }) => {
-                            Attempt::failed(message, failure)
-                        }
-                    };
+                    let attempt = read_attempt(read);
 
                     attempt.noted(note)
                 },
             )
+        }
+        Command::Sql {
+            query, file, rows, ..
+        } => {
+            let text = match (query, file) {
+                (Some(text), None) => text,
+                (None, Some(file)) => match read_statement(&file) {
+                    Ok(text) => text,
+                    Err(message) => return stop(message),
+                },
+                _ => return stop("give either a statement or --file, not both"),
+            };
+            let query = match SqlQuery::new(&text, rows, CLI_MAX_ROWS, &connection.policies) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            run_sql(connection, factories, &query, &mut None)
+        }
+        Command::Search {
+            pattern,
+            object_type,
+            max,
+            ..
+        } => {
+            let query = match SearchQuery::new(&pattern, object_type.as_deref(), max) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            run_search(connection, factories, &query, &mut None)
+        }
+        Command::Dumps {
+            date,
+            user,
+            all,
+            rows,
+            backend,
+            ..
+        } => {
+            let options = ListOptions {
+                date: date.as_deref(),
+                user: user.as_deref(),
+                all,
+                rows,
+            };
+            let query = match ListQuery::new(
+                &options,
+                &connection.user,
+                &dumps::today(),
+                &connection.policies,
+            ) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            run_dumps(
+                connection,
+                backend.map(backend_kind),
+                factories,
+                &query,
+                &mut None,
+            )
+        }
+        Command::Dump {
+            id, all, backend, ..
+        } => {
+            let query = match DumpQuery::new(&id, all, &connection.user, &connection.policies) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            run_dump(
+                connection,
+                backend.map(backend_kind),
+                factories,
+                &query,
+                &mut None,
+            )
+        }
+        Command::WhereUsed {
+            object_type,
+            name,
+            max,
+            ..
+        } => {
+            let query = match WhereUsedQuery::new(&object_type, &name, max) {
+                Ok(query) => query,
+                Err(message) => return stop(message),
+            };
+
+            run_where_used(connection, factories, &query, &mut None)
         }
         Command::Delete {
             targets,
@@ -1089,6 +1521,7 @@ fn execute(
                 simulate,
                 subc: subc.unwrap_or(Subc::Program),
                 source,
+                origin: Origin::Cli,
             };
 
             route(
@@ -1153,6 +1586,7 @@ fn execute(
                             tr: tr.as_deref(),
                             simulation: Simulation::Deploy {
                                 base: base.as_deref(),
+                                origin: Origin::Cli,
                             },
                         };
 
@@ -1175,6 +1609,7 @@ fn execute(
                             xml: &xml,
                             tr: tr.as_deref(),
                             base: base.as_deref(),
+                            origin: Origin::Cli,
                         };
 
                         return deploy_ddic::deploy(
@@ -1226,7 +1661,7 @@ fn execute(
                 .main(main.as_deref());
             let input = DeployInput {
                 name,
-                source,
+                source: DeploySource::Full(source),
                 base,
                 simulate,
                 tr,

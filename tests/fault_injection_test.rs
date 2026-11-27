@@ -8,9 +8,10 @@ mod replay;
 use abapreach::backend::{BackendKind, Selection, SelectionReason};
 use abapreach::cli::{CreateKind, Subc};
 use abapreach::config::Connection;
+use abapreach::domain::Origin;
 use abapreach::fault::{Fault, Target};
 use abapreach::operation::create::{CreateInput, CreateProg, program_creation_body};
-use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg};
+use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, DeploySource};
 use abapreach::transport::rfc::{
     FakeRfcApi, RfcApi, RfcEndpointRequest, RfcEndpointResponse, RfcTransport,
     SADT_REST_RFC_ENDPOINT,
@@ -52,11 +53,11 @@ fn create(uri: &str, body: Vec<u8>) -> Request {
 fn v2() -> DeployInput {
     DeployInput {
         name: "YTEST_ABAPREACH01".to_owned(),
-        source: vec![
+        source: DeploySource::Full(vec![
             "REPORT ytest_abapreach01.".to_owned(),
             String::new(),
             "WRITE / 'v2'.".to_owned(),
-        ],
+        ]),
         base: None,
         simulate: false,
         tr: None,
@@ -419,6 +420,7 @@ fn clas_create() -> CreateInput {
         simulate: false,
         subc: Subc::Program,
         source: None,
+        origin: Origin::Cli,
     }
 }
 
@@ -503,6 +505,7 @@ fn include_create() -> CreateInput {
         simulate: false,
         subc: Subc::Include,
         source: None,
+        origin: Origin::Cli,
     }
 }
 

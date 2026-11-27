@@ -1,9 +1,10 @@
 mod common;
 
 use abapreach::backend::Failure;
+use abapreach::operation::dictionary::PreviewError;
 use abapreach::operation::read_table::{
-    CLI_MAX_ROWS, MCP_DEFAULT_ROWS, MCP_MAX_ROWS, Query, ReadTable, ReadTableError,
-    ReadTableRequest, TableData, mcp_rows, parse_preview, preview_request, split_where,
+    CLI_MAX_ROWS, MCP_DEFAULT_ROWS, MCP_MAX_ROWS, Query, ReadTable, ReadTableRequest, TableData,
+    mcp_rows, parse_preview, preview_request, split_where,
 };
 use abapreach::policy::Policies;
 use abapreach::transport::{Response, TransportError};
@@ -27,6 +28,15 @@ fn transparent(name: &str) -> Result<Response, TransportError> {
 
 fn database_view(name: &str) -> Result<Response, TransportError> {
     class_of(name, "VIEW", Some("D"))
+}
+
+/// A `DDLDEPENDENCY` answer without a row: the name is no generated CDS SQL view.
+fn no_cds() -> Result<Response, TransportError> {
+    ok(preview(&[
+        ("DDLNAME", &[]),
+        ("OBJECTNAME", &[]),
+        ("OBJECTTYPE", &[]),
+    ]))
 }
 
 fn bases(view: &str, tables: &[&str]) -> Result<Response, TransportError> {
@@ -90,7 +100,7 @@ fn run(
     transport: &mut ScriptedTransport,
     request: &ReadTableRequest,
     policies: &Policies,
-) -> Result<TableData, ReadTableError> {
+) -> Result<TableData, PreviewError> {
     let query = Query::new(request, CLI_MAX_ROWS, policies).expect("valid query");
 
     ReadTable::run(transport, &query, policies)
@@ -586,7 +596,9 @@ fn output_beyond_the_size_cap_is_cut_at_a_row_boundary() {
 fn a_denied_base_table_of_a_view_fails_before_the_data_read() {
     let mut transport = ScriptedTransport::replies(vec![
         database_view("ZV_USERS"),
+        no_cds(),
         bases("ZV_USERS", &["T000", "USR02"]),
+        transparent("T000"),
     ]);
     let error = run(
         &mut transport,
@@ -596,7 +608,7 @@ fn a_denied_base_table_of_a_view_fails_before_the_data_read() {
     .unwrap_err();
 
     match error {
-        ReadTableError::Rejected(message) => {
+        PreviewError::Refused(message) => {
             assert!(
                 message.contains("USR02") && message.contains("ZV_USERS"),
                 "{message}"
@@ -605,9 +617,9 @@ fn a_denied_base_table_of_a_view_fails_before_the_data_read() {
         other => panic!("{other:?}"),
     }
 
-    assert_eq!(transport.calls.len(), 2);
+    assert_eq!(transport.calls.len(), 4);
     assert!(
-        sent(&transport, 1)
+        sent(&transport, 2)
             .1
             .contains("FROM DD26S WHERE VIEWNAME = 'ZV_USERS'")
     );
@@ -626,7 +638,9 @@ fn the_deny_list_of_the_view_check_is_the_policy_in_force() {
     let relaxed = policies_denying(&[]);
     let mut transport = ScriptedTransport::replies(vec![
         database_view("ZV_USERS"),
+        no_cds(),
         bases("ZV_USERS", &["USR02"]),
+        transparent("USR02"),
         ok(preview(&[("BNAME", &[Some("X")])])),
     ]);
 
@@ -635,20 +649,23 @@ fn the_deny_list_of_the_view_check_is_the_policy_in_force() {
     let added = policies_denying(&["T000"]);
     let mut transport = ScriptedTransport::replies(vec![
         database_view("SBC_CLIENT"),
+        no_cds(),
         bases("SBC_CLIENT", &["t000"]),
     ]);
 
     assert!(matches!(
         run(&mut transport, &request("SBC_CLIENT", &[], None, 5), &added),
-        Err(ReadTableError::Rejected(_))
+        Err(PreviewError::Refused(_))
     ));
 }
 
 #[test]
-fn a_view_over_allowed_tables_is_read_after_two_lookups() {
+fn a_view_over_allowed_tables_is_read_after_four_lookups() {
     let mut transport = ScriptedTransport::replies(vec![
         database_view("SBC_CLIENT"),
+        no_cds(),
         bases("SBC_CLIENT", &["T000"]),
+        transparent("T000"),
         ok(preview(&[("MANDT", &[Some("100")])])),
     ]);
     let data = run(
@@ -658,9 +675,17 @@ fn a_view_over_allowed_tables_is_read_after_two_lookups() {
     )
     .unwrap();
 
-    assert_eq!(transport.calls.len(), 3);
+    assert_eq!(transport.calls.len(), 5);
     assert_eq!(
         sent(&transport, 1),
+        (
+            "/sap/bc/adt/datapreview/ddic?rowNumber=10&ddicEntityName=DDLDEPENDENCY".to_owned(),
+            "SELECT DDLNAME, OBJECTNAME, OBJECTTYPE FROM DDLDEPENDENCY WHERE OBJECTNAME = 'SBC_CLIENT' AND OBJECTTYPE = 'VIEW'"
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        sent(&transport, 2),
         (
             "/sap/bc/adt/datapreview/ddic?rowNumber=500&ddicEntityName=DD26S".to_owned(),
             "SELECT VIEWNAME, TABNAME, TABPOS FROM DD26S WHERE VIEWNAME = 'SBC_CLIENT' AND AS4LOCAL = 'A'"
@@ -668,7 +693,15 @@ fn a_view_over_allowed_tables_is_read_after_two_lookups() {
         )
     );
     assert_eq!(
-        sent(&transport, 2),
+        sent(&transport, 3),
+        (
+            "/sap/bc/adt/datapreview/ddic?rowNumber=10&ddicEntityName=DD02L".to_owned(),
+            "SELECT TABNAME, TABCLASS, VIEWCLASS FROM DD02L WHERE TABNAME = 'T000' AND AS4LOCAL = 'A'"
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        sent(&transport, 4),
         (
             "/sap/bc/adt/datapreview/ddic?rowNumber=5&ddicEntityName=SBC_CLIENT".to_owned(),
             "SELECT * FROM SBC_CLIENT".to_owned()
@@ -697,11 +730,12 @@ fn pool_and_cluster_tables_are_read_like_transparent_ones() {
     }
 }
 
-fn rejected(
+/// The error of a run that stops after `expected_calls` requests.
+fn stopped(
     first: Result<Response, TransportError>,
     rest: Vec<Result<Response, TransportError>>,
     expected_calls: usize,
-) -> String {
+) -> PreviewError {
     let mut replies = vec![first];
 
     replies.extend(rest);
@@ -712,14 +746,60 @@ fn rejected(
         &request("T001", &[], None, 5),
         &Policies::default(),
     )
-    .expect_err("must be rejected");
+    .expect_err("must stop");
 
     assert_eq!(transport.calls.len(), expected_calls, "{error:?}");
 
-    match error {
-        ReadTableError::Rejected(message) => message,
-        other => panic!("{other:?}"),
+    error
+}
+
+/// The dictionary refused the entity: a STOP. Returns its message.
+fn refused(
+    first: Result<Response, TransportError>,
+    rest: Vec<Result<Response, TransportError>>,
+    expected_calls: usize,
+) -> String {
+    match stopped(first, rest, expected_calls) {
+        PreviewError::Refused(message) => message,
+        other => panic!("expected a refusal: {other:?}"),
     }
+}
+
+/// A lookup could not answer, so the check failed closed: a rejection. Returns its message.
+fn rejected(
+    first: Result<Response, TransportError>,
+    rest: Vec<Result<Response, TransportError>>,
+    expected_calls: usize,
+) -> String {
+    match stopped(first, rest, expected_calls) {
+        PreviewError::Rejected(message) => message,
+        other => panic!("expected a rejection: {other:?}"),
+    }
+}
+
+#[test]
+fn a_refusal_is_a_stop_and_a_lookup_that_cannot_answer_is_a_rejection() {
+    let run_with = |reply: Result<Response, TransportError>| {
+        run(
+            &mut ScriptedTransport::replies(vec![reply]),
+            &request("T001", &[], None, 5),
+            &Policies::default(),
+        )
+        .unwrap_err()
+    };
+
+    assert!(matches!(
+        run_with(ok(preview(&[
+            ("TABNAME", &[]),
+            ("TABCLASS", &[]),
+            ("VIEWCLASS", &[]),
+        ]))),
+        PreviewError::Refused(message) if message.ends_with("nothing was read")
+    ));
+    assert!(matches!(
+        run_with(Ok(Response::text(500, "boom"))),
+        PreviewError::Rejected(_)
+    ));
 }
 
 #[test]
@@ -730,7 +810,7 @@ fn an_unknown_name_is_rejected_without_a_read() {
         ("VIEWCLASS", &[]),
     ]));
 
-    assert!(rejected(empty, vec![], 1).contains("T001"));
+    assert!(refused(empty, vec![], 1).contains("T001"));
 }
 
 #[test]
@@ -741,7 +821,7 @@ fn a_lookup_that_fails_or_cannot_be_read_is_rejected_fail_closed() {
     rejected(Ok(Response::text(400, "<exc:exception/>")), vec![], 1);
     rejected(ok("not xml <<".to_owned()), vec![], 1);
     rejected(ok(preview(&[("OTHER", &[Some("x")])])), vec![], 1);
-    rejected(
+    refused(
         ok(preview(&[
             ("TABNAME", &[Some("OTHER")]),
             ("TABCLASS", &[Some("TRANSP")]),
@@ -750,7 +830,7 @@ fn a_lookup_that_fails_or_cannot_be_read_is_rejected_fail_closed() {
         vec![],
         1,
     );
-    rejected(
+    refused(
         ok(preview(&[
             ("TABNAME", &[Some("T001"), Some("T001")]),
             ("TABCLASS", &[Some("TRANSP"), Some("VIEW")]),
@@ -763,24 +843,28 @@ fn a_lookup_that_fails_or_cannot_be_read_is_rejected_fail_closed() {
 
 #[test]
 fn a_view_without_a_readable_base_list_is_rejected() {
-    rejected(database_view("T001"), vec![bases("T001", &[])], 2);
+    refused(database_view("T001"), vec![no_cds(), bases("T001", &[])], 3);
     rejected(
         database_view("T001"),
-        vec![Ok(Response::text(500, "boom"))],
-        2,
+        vec![no_cds(), Ok(Response::text(500, "boom"))],
+        3,
     );
-    rejected(database_view("T001"), vec![ok("<<".to_owned())], 2);
     rejected(
         database_view("T001"),
-        vec![ok(preview(&[("VIEWNAME", &[Some("T001")])]))],
-        2,
+        vec![no_cds(), ok("<<".to_owned())],
+        3,
+    );
+    rejected(
+        database_view("T001"),
+        vec![no_cds(), ok(preview(&[("VIEWNAME", &[Some("T001")])]))],
+        3,
     );
 }
 
 #[test]
 fn cds_and_other_non_database_views_are_rejected() {
     for view_class in [Some("V"), Some("P"), Some("H"), Some("C"), None] {
-        let message = rejected(class_of("T001", "VIEW", view_class), vec![], 1);
+        let message = refused(class_of("T001", "VIEW", view_class), vec![], 1);
 
         assert!(message.contains("database view"), "{message}");
     }
@@ -789,7 +873,7 @@ fn cds_and_other_non_database_views_are_rejected() {
 #[test]
 fn objects_that_are_no_table_or_view_are_rejected() {
     for class in ["INTTAB", "APPEND", ""] {
-        rejected(class_of("T001", class, None), vec![], 1);
+        refused(class_of("T001", class, None), vec![], 1);
     }
 }
 
@@ -807,7 +891,7 @@ fn a_failed_data_read_reports_the_sap_message() {
     .unwrap_err();
 
     match error {
-        ReadTableError::Failed { failure, message } => {
+        PreviewError::Failed { failure, message } => {
             assert_eq!(failure, Failure::Validation);
             assert!(message.contains("Unknown column name"), "{message}");
         }
@@ -829,14 +913,14 @@ fn a_refused_logon_and_a_lost_connection_keep_their_routing_class() {
     };
 
     match failed(vec![Ok(Response::empty(401))]) {
-        ReadTableError::Failed { failure, .. } => assert_eq!(failure, Failure::Authorization),
+        PreviewError::Failed { failure, .. } => assert_eq!(failure, Failure::Authorization),
         other => panic!("{other:?}"),
     }
 
     match failed(vec![Err(TransportError::PreSendConnectivity(
         "no route".to_owned(),
     ))]) {
-        ReadTableError::Failed { failure, .. } => {
+        PreviewError::Failed { failure, .. } => {
             assert_eq!(failure, Failure::PreSendConnectivity);
         }
         other => panic!("{other:?}"),
@@ -846,7 +930,7 @@ fn a_refused_logon_and_a_lost_connection_keep_their_routing_class() {
         transparent("T001"),
         Err(TransportError::NoResponse("closed".to_owned())),
     ]) {
-        ReadTableError::Failed { failure, .. } => {
+        PreviewError::Failed { failure, .. } => {
             assert_eq!(failure, Failure::PreSendConnectivity);
         }
         other => panic!("{other:?}"),
@@ -869,7 +953,7 @@ fn a_reply_with_columns_of_unequal_length_is_an_error_not_a_guess() {
             &request("T001", &[], None, 5),
             &Policies::default()
         ),
-        Err(ReadTableError::Failed { .. })
+        Err(PreviewError::Failed { .. })
     ));
 }
 
@@ -1006,7 +1090,7 @@ fn a_table_that_is_not_in_the_dictionary_is_named_as_such() {
         ("TABCLASS", &[]),
         ("VIEWCLASS", &[]),
     ]));
-    let message = rejected(empty, vec![], 1);
+    let message = refused(empty, vec![], 1);
 
     assert!(
         message.contains("T001 is not in the ABAP dictionary as an active table or view"),
@@ -1025,7 +1109,7 @@ fn a_base_table_row_of_another_view_or_without_a_table_is_unreadable() {
     };
 
     for reply in [rows("OTHER", Some("T001")), rows("T001", None)] {
-        let message = rejected(database_view("T001"), vec![reply], 2);
+        let message = refused(database_view("T001"), vec![no_cds(), reply], 3);
 
         assert!(
             message.contains("the base tables of T001 are unreadable"),
@@ -1083,4 +1167,101 @@ fn a_reply_without_a_root_columns_or_column_names_is_no_table() {
     }
 
     assert!(parse_preview(&format!("{PREVIEW_OPEN}{column}</dataPreview:tableData>")).is_ok());
+}
+
+#[test]
+fn a_generated_cds_sql_view_is_rejected_before_its_base_tables_and_the_read() {
+    let generated = ok(preview(&[
+        ("DDLNAME", &[Some("I_COMPANYCODE")]),
+        ("OBJECTNAME", &[Some("ICOMPANYCODE")]),
+        ("OBJECTTYPE", &[Some("VIEW")]),
+    ]));
+    let mut transport = ScriptedTransport::replies(vec![database_view("ICOMPANYCODE"), generated]);
+    let error = run(
+        &mut transport,
+        &request("ICOMPANYCODE", &[], None, 5),
+        &Policies::default(),
+    )
+    .unwrap_err();
+
+    match error {
+        PreviewError::Refused(message) => {
+            assert!(message.contains("generated CDS SQL view"), "{message}");
+            assert!(message.ends_with("nothing was read"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(transport.calls.len(), 2);
+    transport.assert_finished();
+}
+
+#[test]
+fn a_view_over_a_view_is_checked_down_to_its_tables() {
+    let mut transport = ScriptedTransport::replies(vec![
+        database_view("ZV_OUTER"),
+        no_cds(),
+        bases("ZV_OUTER", &["ZV_INNER"]),
+        database_view("ZV_INNER"),
+        no_cds(),
+        bases("ZV_INNER", &["USR02"]),
+    ]);
+    let error = run(
+        &mut transport,
+        &request("ZV_OUTER", &[], None, 5),
+        &Policies::default(),
+    )
+    .unwrap_err();
+
+    match error {
+        PreviewError::Refused(message) => {
+            assert!(
+                message.contains("view ZV_INNER reads table USR02"),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    transport.assert_finished();
+}
+
+#[test]
+fn a_base_table_the_dictionary_does_not_know_is_rejected() {
+    let mut transport = ScriptedTransport::replies(vec![
+        database_view("ZV"),
+        no_cds(),
+        bases("ZV", &["GONE"]),
+        ok(preview(&[
+            ("TABNAME", &[]),
+            ("TABCLASS", &[]),
+            ("VIEWCLASS", &[]),
+        ])),
+    ]);
+    let error = run(
+        &mut transport,
+        &request("ZV", &[], None, 5),
+        &Policies::default(),
+    )
+    .unwrap_err();
+
+    match error {
+        PreviewError::Refused(message) => {
+            assert!(
+                message.contains("GONE is not in the ABAP dictionary"),
+                "{message}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+
+    assert_eq!(transport.calls.len(), 4);
+}
+
+#[test]
+fn where_of_read_table_keeps_decimal_numbers() {
+    assert_eq!(
+        body_of("T001", &[], Some("a = 1.5 and b between 0.5 and 2.25")),
+        "SELECT * FROM T001 WHERE A = 1.5 AND B BETWEEN 0.5 AND 2.25"
+    );
 }

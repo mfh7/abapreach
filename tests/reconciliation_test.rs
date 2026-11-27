@@ -4,7 +4,9 @@ mod replay;
 use abapreach::backend::Failure;
 use abapreach::domain::Status;
 use abapreach::hash::source_hash;
-use abapreach::operation::deploy::{CancelFlag, DeployInput, DeployProg, InactiveRead, reconcile};
+use abapreach::operation::deploy::{
+    CancelFlag, DeployInput, DeployProg, DeploySource, InactiveRead, reconcile,
+};
 use abapreach::transport::{Response, TransportError};
 use replay::{Replay, Step, fx, no_inactive, replay};
 
@@ -45,11 +47,11 @@ fn inactive_failures() -> Vec<(Result<Response, TransportError>, String)> {
 fn input(last_line: &str) -> DeployInput {
     DeployInput {
         name: "YTEST_ABAPREACH01".to_owned(),
-        source: vec![
+        source: DeploySource::Full(vec![
             "REPORT ytest_abapreach01.".to_owned(),
             String::new(),
             last_line.to_owned(),
-        ],
+        ]),
         base: None,
         simulate: false,
         tr: None,

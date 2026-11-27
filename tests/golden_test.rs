@@ -41,16 +41,22 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// File name, arguments, and whether the text is on stdout (help, version) or stderr (a STOP).
-const COMMANDS: [(&str, &[&str], bool); 15] = [
+const COMMANDS: [(&str, &[&str], bool); 21] = [
     ("help-top.txt", &["--help"], true),
     ("help-read.txt", &["read", "--help"], true),
     ("help-deploy.txt", &["deploy", "--help"], true),
     ("help-create.txt", &["create", "--help"], true),
     ("help-read-table.txt", &["read-table", "--help"], true),
+    ("help-sql.txt", &["sql", "--help"], true),
+    ("help-search.txt", &["search", "--help"], true),
+    ("help-dumps.txt", &["dumps", "--help"], true),
+    ("help-dump.txt", &["dump", "--help"], true),
+    ("help-where-used.txt", &["where-used", "--help"], true),
     ("help-delete.txt", &["delete", "--help"], true),
     ("help-run.txt", &["run", "--help"], true),
     ("help-mcp.txt", &["mcp", "--help"], true),
     ("help-doctor.txt", &["doctor", "--help"], true),
+    ("help-ping.txt", &["ping", "--help"], true),
     ("version.txt", &["--version"], true),
     (
         "err-read-unknown-type.txt",
@@ -134,9 +140,20 @@ fn the_cli_golden_texts_name_the_new_types_the_prog_option_and_the_footprint() {
     }
 
     assert!(golden("new", "help-read.txt").contains("temporary class"));
-    // The top level grew by the quality commands and `run` of 0.17 and is otherwise the old text:
+    // The top level grew by `sql`, `search`, `dumps`, `dump`, `where-used` and `ping` of 0.18, the quality commands and `run` of 0.17 and is otherwise the old text:
     // the footprint sits in the help of the subcommands.
-    let added = ["inactive", "activate", "aunit", "run"];
+    let added = [
+        "sql",
+        "search",
+        "dumps",
+        "dump",
+        "where-used",
+        "ping",
+        "inactive",
+        "activate",
+        "aunit",
+        "run",
+    ];
     let top = golden("new", "help-top.txt");
     let without: String = top
         .lines()
@@ -169,6 +186,30 @@ fn minus_tran(old: &str) -> String {
     text.push('\n');
     text
 }
+
+/// The tools that only read, by name: the hints are checked against this list, not against the
+/// list the server derives its own behavior from.
+const READ_ONLY_TOOLS: [&str; 8] = [
+    "abap_read_table",
+    "abap_inactive",
+    "abap_sql",
+    "abap_search",
+    "abap_where_used",
+    "abap_dumps",
+    "abap_dump",
+    "abap_ping",
+];
+/// The tools that write, by name. `abap_read_source` is neither: it can create a temporary class.
+const WRITE_TOOLS_LISTED: [&str; 8] = [
+    "abap_simulate",
+    "abap_deploy",
+    "abap_create_simulate",
+    "abap_create",
+    "abap_delete_simulate",
+    "abap_delete",
+    "abap_activate_simulate",
+    "abap_activate",
+];
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -245,7 +286,12 @@ fn the_mcp_tool_list_is_the_golden_schema_of_the_m6_contract() {
 
         assert_eq!(
             tool["annotations"]["readOnlyHint"],
-            name == "abap_read_table" || name == "abap_inactive",
+            READ_ONLY_TOOLS.contains(&name),
+            "{name}"
+        );
+        assert_eq!(
+            tool["annotations"]["destructiveHint"],
+            WRITE_TOOLS_LISTED.contains(&name),
             "{name}"
         );
     }

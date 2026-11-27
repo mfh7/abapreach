@@ -3,7 +3,9 @@
 //! The result carries the same data in `content` text and in `structuredContent`; the status
 //! comes from the operation's own state, never from formatted text.
 
-use crate::app::{Attempt, Factories, end_session, route};
+mod features;
+
+use crate::app::{Attempt, Factories, end_session, read_attempt, route};
 use crate::backend::OperationKind;
 use crate::cli::{IncludeKind, LineRange, ObjectKind};
 use crate::config::{Config, ConfigPaths, Connection, McpPolicies, scrub};
@@ -17,17 +19,25 @@ use crate::operation::inactive::{self, InactiveEntry};
 use crate::operation::quality;
 use crate::operation::read::{ReadProg, ReadTarget, project_lines};
 use crate::operation::read_table::{
-    MAX_OUTPUT_BYTES, MCP_MAX_ROWS, Query, ReadTable, ReadTableError, ReadTableRequest, mcp_rows,
+    MAX_OUTPUT_BYTES, MCP_MAX_ROWS, Query, ReadTable, ReadTableRequest, TableData, mcp_rows,
 };
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fmt::Write;
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 /// The refusal of a type no read tool knows.
 pub(crate) const READ_TYPES: &str =
     "type must be one of PROG, FUNC, CLAS, INTF, DTEL, DOMA, TABL, TTYP, TRAN";
+
+/// The refusal of a connection id that names no configured system and client. It does not quote
+/// the id: an MCP client may have sent anything, a secret included, and a refusal comes back in
+/// its context. The CLI names the id, since the user typed it.
+pub(crate) const UNKNOWN_CONNECTION: &str =
+    "unknown connection id; use <SID>_<client> of a configured system and client";
 
 /// The stderr line of a call that found other policies in the file than the server started with.
 const POLICIES_CHANGED: &str =
@@ -67,6 +77,8 @@ pub struct ReadTools<'a> {
     reload: Option<Reload>,
     /// The stderr lines of the calls so far; `take_warnings` hands them to the session log.
     warnings: RefCell<Vec<String>>,
+    /// The connection the running call resolved, so that `seal` does not resolve it again.
+    resolved: RefCell<Option<Connection>>,
     env: BTreeMap<String, String>,
     factories: &'a mut dyn Factories,
     /// The extension types the tools refuse by name; none without a registry.
@@ -83,6 +95,7 @@ impl<'a> ReadTools<'a> {
             config,
             reload: None,
             warnings: RefCell::default(),
+            resolved: RefCell::default(),
             env,
             factories,
             registry: None,
@@ -123,14 +136,36 @@ impl<'a> ReadTools<'a> {
     }
 
     pub(crate) fn connection(&self, arguments: &Map<String, Value>) -> Result<Connection, String> {
+        let connection = self.resolve(arguments)?;
+
+        *self.resolved.borrow_mut() = Some(connection.clone());
+
+        Ok(connection)
+    }
+
+    fn resolve(&self, arguments: &Map<String, Value>) -> Result<Connection, String> {
         let id = required(arguments, "conn")?;
         let Some(reload) = &self.reload else {
+            if !self.config.is_configured(id) {
+                return Err(UNKNOWN_CONNECTION.to_owned());
+            }
+
             return self.config.resolve(id, &self.env);
         };
         let fresh = Config::load(reload.paths.clone(), &self.env)?;
-        let (system_id, client) = Config::parse_id(id)?;
+
+        let (system_id, client) =
+            Config::parse_id(id).map_err(|_| UNKNOWN_CONNECTION.to_owned())?;
         let key = format!("{system_id}_{client}").to_ascii_uppercase();
-        let (mut connection, started) = match reload.known.get(&key) {
+        let known = reload.known.get(&key);
+
+        // An id of the start is a real one and keeps its own refusals; any other must name a
+        // system and a client of the file now.
+        if known.is_none() && !fresh.is_configured(id) {
+            return Err(UNKNOWN_CONNECTION.to_owned());
+        }
+
+        let (mut connection, started) = match known {
             // A connection of the start keeps its start target and credentials: the file may
             // add connections, never redirect one that is in use.
             Some(Ok(start)) => match fresh.resolve(id, &self.env) {
@@ -263,21 +298,33 @@ impl<'a> ReadTools<'a> {
             format!("{payload}\n")
         };
         let (mut text, mut structured) = match range {
-            Some(range) => (
-                format!(
+            Some(range) => {
+                let mut text = format!(
                     "{block}{} lines (lines {}-{}, partial excerpt)",
                     shown.len(),
                     range.start,
                     range.end
-                ),
-                json!({
+                );
+                let mut structured = json!({
                     "status": status_token(Status::Active),
                     "partial": true,
                     "excerpt": payload,
                     "lines": shown.len(),
                     "range": format!("{}-{}", range.start, range.end),
-                }),
-            ),
+                });
+
+                // The hash of the whole source lets a client send edits without a full read. It
+                // is a hash of text the excerpt does not show, so it must not act as an oracle
+                // for a configured secret elsewhere in the source: no hash then.
+                if !holds_secret(&connection, &lines.join("\n")) {
+                    let hash = source_hash(&lines);
+
+                    write!(text, "\nhash {hash} (whole source)").expect("writing to a String");
+                    structured["hash"] = json!(hash);
+                }
+
+                (text, structured)
+            }
             None => {
                 let hash = source_hash(&lines);
 
@@ -312,16 +359,7 @@ impl<'a> ReadTools<'a> {
             _ => Vec::new(),
         };
         let where_clause = optional(arguments, "where")?.map(str::to_owned);
-        let rows = match arguments.get("rows") {
-            None | Some(Value::Null) => None,
-            Some(value) => Some(
-                value
-                    .as_u64()
-                    .and_then(|rows| u32::try_from(rows).ok())
-                    .ok_or_else(|| format!("rows must be between 1 and {MCP_MAX_ROWS}"))?,
-            ),
-        };
-        let rows = mcp_rows(rows)?;
+        let rows = preview_rows(arguments)?;
         let connection = self.connection(arguments)?;
         let request = ReadTableRequest {
             table: table.to_owned(),
@@ -348,20 +386,7 @@ impl<'a> ReadTools<'a> {
 
                         done()
                     }
-                    Err(ReadTableError::Rejected(message)) => Attempt {
-                        outcome: Outcome {
-                            status: None,
-                            exit: 1,
-                            stdout: String::new(),
-                            stderr: format!("REJECTED: {message}"),
-                        },
-                        failure: None,
-                        fallback_allowed: false,
-                        detail: None,
-                    },
-                    Err(ReadTableError::Failed { failure, message }) => {
-                        Attempt::failed(message, failure)
-                    }
+                    Err(error) => read_attempt(Err(error)),
                 };
 
                 attempt.noted(note)
@@ -372,44 +397,14 @@ impl<'a> ReadTools<'a> {
         let Some(data) = found.filter(|_| exit.code == 0) else {
             return Ok(ToolResult::error(notes));
         };
-        let (mut text, omitted) = data.render(MAX_OUTPUT_BYTES);
-        let shown = data.rows.len() - omitted;
 
-        if holds_secret(&connection, &text) {
-            return Ok(ToolResult::error(SECRET_REJECTED.to_owned()));
-        }
-
-        if omitted > 0 {
-            text.push_str(&format!(
-                "\nW: output cut at {MAX_OUTPUT_BYTES} bytes; {omitted} rows left out"
-            ));
-        }
-
-        let mut structured = json!({
-            "columns": data.columns,
-            "rows": &data.rows[..shown],
-            "row_count": shown,
-            "truncated": omitted > 0,
-            "omitted": omitted,
-        });
-
-        add_notes(&mut text, &mut structured, &notes);
-
-        Ok(ToolResult {
-            text,
-            structured,
-            is_error: false,
-        })
+        Ok(table_result(&connection, &data, &notes))
     }
 }
 
 impl ReadTools<'_> {
     fn inactive(&mut self, arguments: &Map<String, Value>) -> Result<ToolResult, String> {
-        let all = match arguments.get("all") {
-            None | Some(Value::Null) => false,
-            Some(Value::Bool(all)) => *all,
-            Some(_) => return Err("all must be a boolean".to_owned()),
-        };
+        let all = boolean(arguments, "all")?;
         let connection = self.connection(arguments)?;
         let mut found = None;
         let exit = route(
@@ -480,10 +475,18 @@ impl ReadTools<'_> {
 
 impl ToolHandler for ReadTools<'_> {
     fn call(&mut self, name: &str, arguments: &Map<String, Value>) -> ToolResult {
+        *self.resolved.borrow_mut() = None;
+
         let result = match name {
             "abap_read_source" => self.read_source(arguments),
             "abap_read_table" => self.read_table(arguments),
             "abap_inactive" => self.inactive(arguments),
+            "abap_sql" => self.sql(arguments),
+            "abap_search" => self.search(arguments),
+            "abap_where_used" => self.where_used(arguments),
+            "abap_dumps" => self.dumps(arguments),
+            "abap_dump" => self.dump(arguments),
+            "abap_ping" => self.ping(arguments),
             _ => {
                 return ToolResult::error(format!(
                     "ERROR: {name} is not available in this build yet"
@@ -491,7 +494,73 @@ impl ToolHandler for ReadTools<'_> {
             }
         };
 
-        result.unwrap_or_else(|message| ToolResult::error(format!("STOP: {message}")))
+        self.seal(
+            arguments,
+            result.unwrap_or_else(|message| ToolResult::error(format!("STOP: {message}"))),
+        )
+    }
+}
+
+impl ReadTools<'_> {
+    /// The one place every result of a read tool passes before it leaves the server, so a tool
+    /// cannot forget it: an error (an argument error echoes what the client sent, a refusal
+    /// what SAP said) goes through the scrub of the connection, in every case of its secrets, its
+    /// hosts and its route, in the text and in the structured message. A result that carries data
+    /// has passed the secret check of its payload already; here every string of it is scrubbed of
+    /// the exact secrets once more, so that no field of the structure can carry one that the
+    /// text check did not see. Hosts and cases are left alone there: source and rows are never
+    /// rewritten.
+    fn seal(&self, arguments: &Map<String, Value>, result: ToolResult) -> ToolResult {
+        // The tool resolved the connection unless it refused an argument first.
+        let resolved = self.resolved.borrow_mut().take();
+        let Some(connection) = resolved.or_else(|| self.connection(arguments).ok()) else {
+            // No connection, so no secret to name; a lock handle never leaves the process.
+            if !result.is_error {
+                return result;
+            }
+
+            return ToolResult::error(scrub(result.text, &known_lock_handles()));
+        };
+
+        if result.is_error {
+            return ToolResult::error(error_scrub(&connection, &result.text));
+        }
+
+        let secrets = connection.secrets();
+        let mut result = result;
+
+        result.text = scrub(result.text, &secrets);
+        scrub_strings(&mut result.structured, &secrets);
+
+        result
+    }
+}
+
+/// An error text without any secret of the connection: the exact values and their lower and upper
+/// case (a tool may fold what the client sent), its hosts and its route.
+fn error_scrub(connection: &Connection, text: &str) -> String {
+    let mut folded: Vec<String> = connection
+        .secrets()
+        .iter()
+        .flat_map(|secret| [secret.to_ascii_lowercase(), secret.to_ascii_uppercase()])
+        .collect();
+
+    folded.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+
+    scrub(diagnostic(connection, text), &folded)
+}
+
+/// Scrubs every string of a JSON value, the object keys excepted.
+fn scrub_strings(value: &mut Value, secrets: &[String]) {
+    match value {
+        Value::String(text) => *text = scrub(std::mem::take(text), secrets),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| scrub_strings(item, secrets)),
+        Value::Object(fields) => fields
+            .values_mut()
+            .for_each(|field| scrub_strings(field, secrets)),
+        _ => {}
     }
 }
 
@@ -537,6 +606,85 @@ pub(crate) fn optional<'a>(
     }
 }
 
+/// The `rows` argument of a data preview tool: default 100, at most 1000.
+pub(crate) fn preview_rows(arguments: &Map<String, Value>) -> Result<u32, String> {
+    let rows = count(arguments, "rows", &(1..=MCP_MAX_ROWS))?;
+
+    mcp_rows(rows)
+}
+
+/// An optional count argument: an integer within `range`.
+pub(crate) fn count(
+    arguments: &Map<String, Value>,
+    key: &str,
+    range: &RangeInclusive<u32>,
+) -> Result<Option<u32>, String> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .and_then(|count| u32::try_from(count).ok())
+            .filter(|count| range.contains(count))
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "{key} must be between {} and {}",
+                    range.start(),
+                    range.end()
+                )
+            }),
+    }
+}
+
+/// An optional flag argument: `false` when absent.
+pub(crate) fn boolean(arguments: &Map<String, Value>, key: &str) -> Result<bool, String> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(flag)) => Ok(*flag),
+        Some(_) => Err(format!("{key} must be a boolean")),
+    }
+}
+
+/// The result of a data preview read: the table as the CLI prints it, cut at the output limit, and
+/// the same rows as structured data. Rows that hold a configured secret are not shown at all.
+fn table_result(connection: &Connection, data: &TableData, notes: &str) -> ToolResult {
+    let (mut text, omitted) = data.render(MAX_OUTPUT_BYTES);
+    let shown = data.rows.len() - omitted;
+    // The rendering may change a cell (a control character, a tab), so the cells are checked as
+    // SAP sent them, rows past the output cut included.
+    let raw_cells = data.columns.iter().chain(data.rows.iter().flatten());
+
+    if holds_secret(connection, &text)
+        || raw_cells.clone().any(|cell| holds_secret(connection, cell))
+    {
+        return ToolResult::error(SECRET_REJECTED.to_owned());
+    }
+
+    let cut = format!("W: output cut at {MAX_OUTPUT_BYTES} bytes; {omitted} rows left out");
+
+    // A run that already carries the warning as a note does not say it twice.
+    if omitted > 0 && !notes.contains(&cut) {
+        text.push('\n');
+        text.push_str(&cut);
+    }
+
+    let mut structured = json!({
+        "columns": data.columns,
+        "rows": &data.rows[..shown],
+        "row_count": shown,
+        "truncated": omitted > 0,
+        "omitted": omitted,
+    });
+
+    add_notes(&mut text, &mut structured, notes);
+
+    ToolResult {
+        text,
+        structured,
+        is_error: false,
+    }
+}
+
 /// Error and note text goes through the scrub, including the hosts and the route; payload never.
 pub(crate) fn diagnostic(connection: &Connection, text: &str) -> String {
     let mut secrets = connection.secrets();
@@ -559,10 +707,7 @@ pub(crate) fn diagnostic(connection: &Connection, text: &str) -> String {
 }
 
 pub(crate) fn holds_secret(connection: &Connection, payload: &str) -> bool {
-    connection
-        .secrets()
-        .iter()
-        .any(|secret| !secret.is_empty() && payload.contains(secret.as_str()))
+    connection.holds_secret(payload)
 }
 
 fn add_notes(text: &mut String, structured: &mut Value, notes: &str) {

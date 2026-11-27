@@ -376,57 +376,104 @@ fn other_searches_stay_refused_and_the_group_search_is_unchanged() {
         "operation=quickSearch&query=ZFM_A&maxResults=10&objectType=FUGR%2FFF"
     )));
 
+    // The broader `search` shape admits a wildcard anywhere, 1000 results and the other types
+    // (`search_admission_test.rs`); these stay refused by every shape.
     for query in [
-        // Not a prefix search, a wildcard elsewhere, or a name that is not a runner prefix.
-        "operation=quickSearch&query=YCL_ABAPREACH_RUN_&maxResults=50&objectType=CLAS%2FOC",
-        "operation=quickSearch&query=*&maxResults=50&objectType=CLAS%2FOC",
-        "operation=quickSearch&query=*YCL&maxResults=50&objectType=CLAS%2FOC",
-        "operation=quickSearch&query=Y*CL*&maxResults=50&objectType=CLAS%2FOC",
-        "operation=quickSearch&query=YCL**&maxResults=50&objectType=CLAS%2FOC",
+        // Not upper case, or an encoded wildcard.
         "operation=quickSearch&query=ycl_*&maxResults=50&objectType=CLAS%2FOC",
-        "operation=quickSearch&query=CL_*&maxResults=50&objectType=CLAS%2FOC",
         "operation=quickSearch&query=YCL%2A&maxResults=50&objectType=CLAS%2FOC",
-        "operation=quickSearch&query=YCL_ABAPREACH_RUN_AB12CD34AB*&maxResults=50&objectType=CLAS%2FOC",
         // maxResults out of range or not a plain number.
         "operation=quickSearch&query=YCL_*&maxResults=0&objectType=CLAS%2FOC",
-        "operation=quickSearch&query=YCL_*&maxResults=101&objectType=CLAS%2FOC",
         "operation=quickSearch&query=YCL_*&maxResults=050&objectType=CLAS%2FOC",
         "operation=quickSearch&query=YCL_*&maxResults=&objectType=CLAS%2FOC",
         "operation=quickSearch&query=YCL_*&maxResults=5%30&objectType=CLAS%2FOC",
-        // Other object types, extra keys, another order.
-        "operation=quickSearch&query=YCL_*&maxResults=50&objectType=PROG%2FP",
+        // Extra keys, another order, an unencoded type, a fragment.
         "operation=quickSearch&query=YCL_*&maxResults=50&objectType=CLAS%2FOC&x=1",
-        "operation=quickSearch&query=YCL_*&maxResults=50",
         "operation=quickSearch&query=YCL_*&objectType=CLAS%2FOC&maxResults=50",
         "operation=quickSearch&query=YCL_*&maxResults=50&objectType=CLAS/OC",
-        "operation=quickSearch&query=YCL_*&maxResults=50&objectType=INTF%2FOI",
-        "operation=quickSearch&query=YCL_*&maxResults=50&objectType=FUGR%2FFF",
-        "operation=quickSearch&query=ZFM_A*&maxResults=10&objectType=FUGR%2FFF",
-        "operation=quickSearch&query=ZFM_A&maxResults=11&objectType=FUGR%2FFF",
         "operation=quickSearch&query=YCL_*&maxResults=50&objectType=CLAS%2FOC#f",
     ] {
         assert!(!rfc_admits(&search(query)), "{query}");
     }
 }
 
+/// The `search` shape is a read of names, packages and descriptions, like the group and class
+/// searches and the object metadata reads that stay admitted while a runner is armed. Unlike a
+/// freestyle data preview it reads no table content, so it is not refused while armed; the older
+/// class search, which the new shape also covers, keeps working.
 #[test]
-fn a_freestyle_data_preview_stays_refused() {
+fn the_searches_stay_admitted_while_a_runner_is_armed() {
+    for query in [
+        "operation=quickSearch&query=YCL_ABAPREACH_RUN_*&maxResults=50&objectType=CLAS%2FOC",
+        "operation=quickSearch&query=ZFM_A&maxResults=10&objectType=FUGR%2FFF",
+        "operation=quickSearch&query=Z*&maxResults=1000",
+        "operation=quickSearch&query=/NS/ZCL_*&maxResults=5&objectType=CLAS%2FOC",
+    ] {
+        assert_both(Some(RUNNER), &search(query), true);
+        assert_both(None, &search(query), true);
+    }
+
+    // The RFC SADT shape stays closed while armed; the ADT HTTP gate has no search rule.
+    let _arm = RunnerArm::arm(RUNNER).unwrap();
+
+    assert!(rfc_admits(&search(
+        "operation=quickSearch&query=Z*&maxResults=1000"
+    )));
+    assert!(!rfc_admits(&search(
+        "operation=quickSearch&query=Z*&maxResults=1001"
+    )));
+}
+
+fn freestyle(uri: &str, body: &str) -> Request {
+    let mut request = Request::post(uri, body.as_bytes().to_vec());
+
+    request
+        .headers
+        .insert("Content-Type".to_owned(), "text/plain".to_owned());
+    request
+        .headers
+        .insert("Accept".to_owned(), "application/*".to_owned());
+
+    request
+}
+
+/// The 0.17 rule stays: while a runner is armed, a freestyle data preview is refused on both
+/// transports, in any spelling of its path.
+#[test]
+fn a_freestyle_data_preview_stays_refused_while_a_runner_is_armed() {
     for uri in [
         "/sap/bc/adt/datapreview/freestyle",
         "/sap/bc/adt/datapreview/freestyle?rowNumber=1",
+        "/SAP/BC/ADT/DATAPREVIEW/FREESTYLE?rowNumber=1",
+        "/sap/bc/adt/datapreview/Freestyle?rowNumber=1",
+        "/sap/bc/adt/datapreview/./freestyle?rowNumber=1",
+        "/sap/bc/adt/datapreview//freestyle?rowNumber=1",
+        "/sap/bc/adt/datapreview/freestyle;x=1?rowNumber=1",
+        "/sap/bc/adt/datapreview/%66reestyle?rowNumber=1",
+        "/sap/bc/adt/x/../datapreview/freestyle?rowNumber=1",
     ] {
-        let mut request = Request::post(uri, b"SELECT * FROM T001".to_vec());
+        // A canonical body: only the arm refuses it.
+        assert_both(Some(RUNNER), &freestyle(uri, "SELECT * FROM T001"), false);
+    }
+}
 
-        request
-            .headers
-            .insert("Content-Type".to_owned(), "text/plain".to_owned());
-        request
-            .headers
-            .insert("Accept".to_owned(), "application/*".to_owned());
+/// Unarmed, the exact 0.18 shape is admitted on both transports, and a spelling that is not the
+/// exact path stays refused on RFC SADT.
+#[test]
+fn an_unarmed_freestyle_data_preview_is_admitted_only_in_its_exact_shape() {
+    let exact = freestyle(
+        "/sap/bc/adt/datapreview/freestyle?rowNumber=1",
+        "SELECT * FROM T001",
+    );
 
-        let _arm = RunnerArm::arm(RUNNER).unwrap();
+    assert_both(None, &exact, true);
 
-        assert!(!rfc_admits(&request), "{uri}");
+    for uri in [
+        "/SAP/BC/ADT/DATAPREVIEW/FREESTYLE?rowNumber=1",
+        "/sap/bc/adt/datapreview/Freestyle?rowNumber=1",
+        "/sap/bc/adt/datapreview/freestyle",
+    ] {
+        assert!(!rfc_admits(&freestyle(uri, "SELECT * FROM T001")), "{uri}");
     }
 }
 

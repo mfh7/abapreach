@@ -361,6 +361,14 @@ does not find it. The lookup order per OS, and what happens when an explicit pat
 fails, are in [RFC library lookup](#rfc-library-lookup). `doctor` also reports
 whether ADT HTTP has a stateful session, which deploy needs for its lock.
 
+Since 0.18.0, `doctor` also prints one `instance ...` line: the application server instance that
+answered, read on the session that passed (ADT HTTP, else RFC). On a release without
+`/system/information` (the 7.40 system over ADT HTTP) it prints
+`instance unknown (no /system/information on this release)`. The line never changes the verdict.
+`doctor` masks the host part of the name: `instance ***_<SID>_<NN>`, or `instance ***` for a name that
+does not have the form `<host>_<SID>_<NN>`.
+See [Ping the system](#ping-the-system).
+
 ## Read an existing program
 
 ```sh
@@ -512,6 +520,14 @@ abapreach read-table T000 --fields MANDT,MTEXT --rows 3 --conn A4H_001
 operators, `AND`, `OR`, `NOT`, parentheses and literals. Tables on the read-table deny list are
 refused; see [MCP server: Trust boundaries](mcp.md#trust-boundaries).
 
+Since 0.18.0 `read-table` also asks the ABAP dictionary about the table before it reads it, with
+the fail-closed rules of [`sql`](#run-sql-with-joins): a table or a DDIC database view whose base
+tables are all allowed is read, and a view over a denied table, a generated CDS SQL view, a CDS
+entity, a structure or an unknown name is refused. A refusal is now `STOP` with exit 2 (it was
+`REJECTED` with exit 1), for example
+`STOP: view V reads table USR02 (read_table_denied); nothing was read`. A lookup that fails stays
+`REJECTED` with exit 1.
+
 `delete` removes objects only from a plan written by `--simulate`:
 
 ```text
@@ -523,6 +539,259 @@ Add `--tr TRKORR` when the object is transportable. Delete has a reconciliation 
 path; see [Deploy safety: Delete](deploy-safety.md#delete).
 
 To use ABAPReach from an AI assistant, see [MCP server](mcp.md).
+
+## Run SQL with joins
+
+`sql` runs one read-only `SELECT` through the ADT freestyle data preview. It is the multi-table
+counterpart of `read-table`:
+
+```text
+abapreach sql "SELECT a~obj_name, b~dlvunit AS unit FROM tadir AS a INNER JOIN tdevc AS b ON a~devclass = b~devclass WHERE a~obj_name LIKE 'ZEXAMPLE%'" --rows 20 --conn A4H_001
+abapreach sql --file query.sql --conn A4H_001
+```
+
+Give the statement as one argument, or in a file with `--file` (at most 4000 characters; the
+command takes exactly one of the two). `--rows` takes 1 to 5000 (default 100). The columns of a
+joined table are written `alias~field`.
+
+SAP runs a freestyle body as written, so ABAPReach never sends your text. It parses the statement
+with its own grammar and sends only the single-line canonical rendering of the parsed tree (upper
+case names, one space between tokens, string literals unchanged). A body that is not canonical is
+refused before it leaves the process.
+
+Accepted:
+
+```text
+SELECT [DISTINCT] item {, item} | *
+FROM entity [AS alias]
+{[INNER | LEFT [OUTER]] JOIN entity [AS alias] ON col = col {AND col = col}}
+[WHERE condition] [GROUP BY col {, col}] [HAVING condition]
+[ORDER BY col [ASCENDING | DESCENDING] {, ...}]
+```
+
+An item is a column (with an optional `AS` alias) or an aggregate: `COUNT`, `SUM`, `MIN`, `MAX` or
+`AVG` over one column, or `COUNT( * )`. A condition follows the `read-table` rules. A statement has
+at most 10 tables and views in `FROM` and `JOIN` together.
+
+Refused with exit 2 and nothing sent: subqueries, `UNION`, `EXISTS`, `WITH`, `INTO`, `UP TO` (use
+`--rows`), host variables (`@`), path expressions, CDS parameters, comments, backquote literals,
+parenthesized joins, `RIGHT` and `CROSS` joins, `USING CLIENT` and `CLIENT SPECIFIED`. The message
+names the first refused construct, for example `STOP: sql: INTO is not supported (the rows are
+returned as a table)`.
+
+**Which entities may be read.** The `read_table_denied` list applies to every table and view in
+`FROM` and `JOIN`. Before any statement is sent, ABAPReach asks the ABAP dictionary (`DD02L`,
+`DDLDEPENDENCY` and `DD26S`, through data previews) about each entity and fails closed:
+
+- A transparent, pool or cluster table is allowed.
+- A DDIC database view is allowed only when its base tables are listed in `DD26S` and each one is
+  allowed in turn. A view over a denied table is refused, for example
+  `STOP: view V reads table USR02 (read_table_denied); no statement was sent`.
+- Everything else is refused: CDS entities (a DDL name is not in `DD02L`), generated CDS SQL
+  views, views without `DD26S` rows, structures and unknown names.
+- The check follows views down to a view of a view. A deeper nesting, more than 500 base tables of
+  one view, or more than 24 lookups in one statement is refused, so a view with more than about 21
+  base tables cannot be read.
+- A refusal exits with 2. A dictionary lookup that fails (the system did not answer) exits with 1,
+  `REJECTED: cannot read ...`, and sends nothing.
+
+The output is the same as `read-table`: one header line with the column names, then one
+tab-separated line per row, at most 1 MiB (`W: output cut at 1048576 bytes; N rows left out` on
+stderr). The 7.50 data preview answers one row more than asked; ABAPReach drops it. The 7.40 data
+preview stops at 5000 rows. A configured secret in the output is masked.
+
+The 7.50 and 758 systems list the freestyle data preview in their ADT discovery. The 7.40 system
+has an empty HTTP discovery but still answers `sql` over ADT HTTP (checked live on the 7.40 test
+system).
+
+## Search objects
+
+`search` finds objects by name through the ADT object search (`quickSearch`):
+
+```text
+abapreach search 'ZEXAMPLE*' --type CLAS --max 20 --conn A4H_001
+```
+
+`*` is the only wildcard. A pattern without `*` names exactly one object. A pattern has at most 40
+characters: letters, digits and `_`, plus `*` and an optional namespace at the start (`/NS/NAME`).
+It is converted to upper case. `--type` limits the search to one type: `PROG`, `FUNC` (function
+module), `FUGR`, `CLAS`, `INTF`, `DTEL`, `DOMA`, `TABL` (transparent tables), `TTYP`, `TRAN`, `DDLS` or
+`MSAG`. `--max` takes 1 to 1000 (default 50).
+
+One line per object, then a count:
+
+```text
+CLAS/OC ZCL_EXAMPLE package=ZEXAMPLE Example class
+SEARCH: 1 object
+```
+
+The first field is the ADT object type as SAP names it (`PROG/P`, `FUGR/FF` for a function module,
+`CLAS/OC`, `TABL/DS` for a structure). A missing package prints as `package=?`. Without `--type`,
+the search also returns structures and other types; `--type TABL` returns transparent tables only.
+Exit 0 also when nothing matches (`SEARCH: 0 objects`).
+
+A release that ignores the type filter answers objects of other types. ABAPReach drops them, and
+every object whose name does not match the pattern, and says so on stderr:
+`W: the reply held objects of other types; N left out (the result may hold fewer than --max objects)`.
+A system without the search route answers `the object search answered HTTP 404: this system does
+not offer the object search on this route`. The 7.50 and 758 systems list the search in their ADT
+discovery. The 7.40 system has an empty HTTP discovery but still answers the search over ADT HTTP
+(checked live on the 7.40 test system).
+
+## Find where an object is used
+
+`where-used` lists the objects that use one object:
+
+```text
+abapreach where-used FUNC ZEXAMPLE_FM --max 100 --conn A4H_001
+```
+
+`TYPE` is `PROG`, `FUNC`, `FUGR`, `CLAS`, `INTF`, `DTEL`, `DOMA`, `TABL` or `TTYP`; `--max` takes 1
+to 5000 (default 200). `MSAG` stops with `where-used of MSAG is not available in this version`, and
+`TRAN` stops with `where-used of TRAN is not supported: no ADT where-used path exists for a
+transaction`. A name of a type that goes through ADT has letters, digits and `_` only.
+
+One line per using object, sorted, each once, then a count:
+
+```text
+USED-BY PROG ZEXAMPLE_REPORT package=ZEXAMPLE via=ADT
+WHERE-USED: 1
+```
+
+Exit 0 also with no hit. `--max` cuts the sorted list and prints
+`W: N objects found; the first M are shown (--max)` on stderr. Only the objects are listed, not the
+lines of code that use the object.
+
+**ADT first, cross-reference tables as the fallback.** `PROG`, `FUNC`, `FUGR`, `CLAS` and `INTF`
+always go through the ADT `usageReferences` search, and `via=ADT` marks each line. A DDIC type goes
+through it only when the discovery document of the release lists the collection of the type. On the
+7.40 system no DDIC type is listed, on the 7.50 system data elements and structures are, and the
+758 system lists all of them. Otherwise `where-used` reads the standard cross-reference tables
+through the data preview, as `read-table` does: `WBCROSSGT` (type use), `DD03L` for the tables that
+use a data element and `DD04L` for the data elements that use a domain. The line says which table
+it came from (`via=WBCROSSGT`, `via=DD03L`, `via=DD04L`), and stderr gets one of:
+
+- `W: no ADT where-used for <TYPE> on this release; using cross-reference tables`
+- `W: the ADT where-used for <TYPE> answered HTTP <n>; using cross-reference tables`
+- `W: no ADT where-used path for a namespaced <TYPE> name; using cross-reference tables`
+
+**`TABL`: tables and structures.** ADT has one collection for transparent tables and another for
+structures. ABAPReach reads the table class from `DD02L` and picks the collection. A transparent,
+pool or cluster table uses `tables`, a structure uses `structures`, and any other class uses the
+cross-reference tables.
+
+The fallback maps an include to its main object (a class pool include to `CLAS`, a function group
+include to `FUGR`, otherwise the master `PROG`) and reads the packages from `TADIR` in a few
+bounded reads. Where it reaches a limit it says so with a `W:` line, for example the packages of
+some objects were not looked up (`package=?`).
+
+**The 64 MiB reply cap.** `usageReferences` has no result limit: a widely used structure such as
+`BAPIRET2` answers 15 to 29 MB. ABAPReach reads the reply and refuses one over 64 MiB with exit 1,
+`REJECTED: the where-used reply is <n> bytes, over the limit of 67108864 bytes; --max cannot help,
+because the system sends the whole list before it is cut`. `--max` only shortens the printed list.
+
+`delete --simulate` keeps its own where-used check and is not changed.
+
+## Short dumps
+
+`dumps` lists the ST22 short dumps from table `SNAP`, newest first, and `dump` shows one of them:
+
+```text
+abapreach dumps --date 20260101 --rows 10 --conn A4H_001
+abapreach dump 20260105/101500/apphost_A4H_00/DEVUSER/001 --conn A4H_001
+```
+
+`dumps` shows the dumps of the logon user from the last 7 days (one more day covers the time
+zone). `--date YYYYMMDD` starts on that day. `--user U` shows another user's dumps, `--all` shows
+every user's, as ST22 does, and the two cannot be combined. `--rows` takes 1 to 1000 (default 20).
+One line per dump, or `(no dumps)` when there is none:
+
+```text
+20260105 101500 DEVUSER 001 error=COMPUTE_INT_ZERODIVIDE program=ZEXAMPLE include=ZEXAMPLE line=12 id=20260105/101500/apphost_A4H_00/DEVUSER/001
+```
+
+`id` is the argument of `dump`: `DATUM/UZEIT/AHOST/UNAME/MODNO`. `dump` prints the error, program,
+include, line, user and client, the short text from `SNAPT` (in English, else in the logon
+language, else in the first language the table has) and the source lines from five before to five
+after the failing line, with `>` on it. It prints only these decoded fields, never the raw dump
+content. A class method include (a name with `=`) cannot be read, and the excerpt says so
+(`(source <name> not read: not a program or include name)`). A dump of another user needs `--all`
+(`STOP: the dump belongs to user X, not to the logon user; a dump of another user needs --all`).
+A dump that does not exist is `REJECTED: dump not found: <id>` (exit 1).
+
+**`--all` is a display filter, not an access boundary.** `SNAP` is not on the default
+`read_table_denied` list, so `read-table SNAP` and `sql` can already read every user's dumps where
+the data preview allows it. Which dumps a user can read is decided by the SAP authorizations of the
+logon user. A dump can hold the values of variables; the output is masked for configured secrets,
+but nothing else is removed.
+
+**Release differences.**
+
+- **7.50.** The data preview refuses `SNAP` (`You cannot display SNAP with the standard tools`). Over
+  ADT HTTP, with an RFC backend configured and no `--backend` given, the command moves on to the RFC
+  paths (and so do the MCP tools `abap_dumps` and `abap_dump`). With `--backend adt`, or when no RFC
+  backend is configured, it stops with exit 2: `SAP does not show SNAP in the data preview of this
+  release; use --backend rfc to read it through RFC_READ_TABLE`. The RFC paths read `SNAP` through the
+  standard function module `RFC_READ_TABLE`, a field group at a time.
+  ABAPReach recognises the refusal by its English text, so the fallback needs an English logon
+  (the `lang` of the server entry, default `EN`). With another logon language the data preview
+  error is shown as it is.
+- **7.40 and 758.** The data preview reads `SNAP` directly.
+- **Dump content.** A dump is stored in the columns `FLIST` to `FLIST08` (eight columns of 200
+  characters). ABAPReach reads all of them; the reference tooling reads `FLIST` to `FLIST05` only.
+  On the RFC fallback, a column group the release does not have is skipped.
+- **Limits.** `dumps` reads at most 5000 matching rows and refuses a larger match
+  (`5000 or more dumps match; narrow the list with --date or --user`). `dump` refuses a dump of
+  1000 rows or more as too large.
+
+## Ping the system
+
+`ping` shows the system, the application server instance that answered and the round trip time:
+
+```text
+abapreach ping --conn A4H_001
+abapreach ping --backend rfc --conn A4H_001
+```
+
+```text
+backend ADT HTTP
+instance apphost_A4H_00
+system id A4H
+kernel 753
+database DB6
+os Linux
+round trip 142 ms (includes logon)
+```
+
+Without `--backend`, ABAPReach tries ADT HTTP first and moves to RFC only when nothing was sent,
+as for every command; the first line names the backend that answered. `--backend adt` and
+`--backend rfc` pin the path (`rfc` is the SAP GUI library or the NW RFC SDK), so you can see the
+instance each path reaches. A line with no value on a path is left out.
+
+| | ADT HTTP | RFC |
+| :--- | :--- | :--- |
+| Source | `GET /sap/bc/adt/system/information` | `RFC_SYSTEM_INFO` |
+| Instance | `ApplicationServerName` | `RFCDEST` |
+| Lines | system id, kernel, database, os | system id, release, kernel, database |
+| Round trip | the call, with the logon | the call alone, after the logon |
+
+The round trip is the time of that one call. Over ADT HTTP it is the first request of the
+session, so it includes the TLS connect and the logon, and the line says
+`(includes logon)`. Over RFC it is the time of the function call alone. Exit 0 when the system
+answered; otherwise the usual connection failure.
+
+The 7.40 system has no `/system/information` (HTTP 404). `ping` over ADT HTTP then prints
+`instance unknown (no /system/information on this release)` and still exits 0; use
+`--backend rfc` to see the instance. HTTP 406 gives `instance unknown (HTTP 406)`. The host address
+and the database server of the reply are never printed.
+
+`ping` prints the instance name in clear, exactly as SAP reports it (`<host>_<SID>_<NN>`, with the
+host). `doctor` prints the same reading from the one session that answered, with the host masked:
+`instance ***_<SID>_<NN>`, or `instance ***` for a name that does not have that form. A failed
+reading shows `instance unknown (<reason>)` in both and does not change the verdict of `doctor`.
+The reason is one of a fixed set: `no /system/information on this release`, `HTTP 406`, `HTTP <status>`, `request failed`, `no answer`, `not authorized` or `unreadable reply`; it is never the text
+of an error. Over MCP, `abap_ping` prints the name in clear like `ping`; see
+[MCP](mcp.md#new-read-tools-0180).
 
 ## Inactive objects, activation and ABAP Unit
 
@@ -857,6 +1126,13 @@ The 0.17.1 release checks ran on `v0.17.1-rc.1` (the release binaries). The smok
 system on all four platforms, which is the first live Windows x64 and Linux arm64 run since 0.16.1. The
 results are in [Results of the 0.17.1 release checks](#results-of-the-0171-release-checks).
 
+The 0.18.0 release checks ran on `v0.18.0-rc.2` and `v0.18.0-rc.3` (the release binaries are the rc.3
+binaries; a cell that rc.3 does not change keeps its rc.2 result). The full matrix ran on the three systems
+and the three paths: the 7.50 and 7.40 systems on macOS arm64, Linux x64, Linux arm64, Windows x64 native and
+Windows x64 emulated on arm64, and the 758 system on macOS arm64 and Linux x64. The result is 6237 PASS,
+2055 UNSUPPORTED and 5 FAIL in 8297 cells; the FAIL cells are explained in
+[Results of the 0.18.0 release checks](#results-of-the-0180-release-checks).
+
 Each cell has one of three results:
 
 - **PASS**: the scenario ran on that platform and path and its checks held.
@@ -957,6 +1233,40 @@ delay (the POST session logon measured about 1 to 2 seconds), not on an observat
 The UNSUPPORTED cells are structural: the ADT HTTP path loads no RFC library, and the OS trust store is
 already installed. SAP GUI for Java runs on x86_64 only, so Linux arm64 has no RFC SAP GUI library path.
 This is smoke only, not the full matrix.
+
+### Results of the 0.18.0 release checks
+
+The release binaries are `v0.18.0-rc.3`. rc.3 differs from rc.2 in two changes: `dump` stops on a single-byte
+RFC library, and server host values are not treated as secret fragments. The runs are from 2026-11-26 and
+2026-11-27. Where a cell ran more than once, the last result counts. The merged matrix has 290 scenarios in
+8297 cells (4844 cells ran on rc.3, 1380 on rc.2, and 2073 UNSUPPORTED or housekeeping cells carry no binary
+version).
+
+| System | Hosts | PASS | UNSUPPORTED | FAIL |
+| :--- | :--- | ---: | ---: | ---: |
+| SAP 7.50 system | macOS arm64, Linux x64, Linux arm64, Windows x64 native, Windows x64 emulated on arm64 | 2933 | 519 | 4 |
+| SAP 7.40 system | the same five hosts | 2015 | 1265 | 1 |
+| SAP 758 system | macOS arm64, Linux x64 | 1289 | 271 | 0 |
+| All | | 6237 | 2055 | 5 |
+
+Linux arm64 has no RFC SAP GUI library path (214 cells on each of the 7.50 and 7.40 systems). The cells of
+the 0.18.0 features (group m8, 648 cells) ran on rc.3: 571 PASS, 76 UNSUPPORTED and 1 FAIL.
+
+The first runs on rc.2 and rc.3 ran several lanes of one SAP user in parallel and had 16 FAIL cells in the
+merged result. On 2026-11-27 the failing cells were rerun on rc.3, one lane at a time (34 cells, all PASS),
+which cleared 11 of the 16. No product defect is open. The 5 FAIL cells that remain:
+
+- `m6-dtel-inactive` on the 7.40 system, RFC SDK, macOS arm64 (rc.2): the runner failed with several lanes of
+  one SAP user in parallel (the runner cleanup proof reported that the class still existed in a new session).
+  The same cell passed in the serial rerun on Linux arm64 (rc.3), on RFC through the SAP GUI library on macOS
+  arm64, on the 7.50 system and on the 758 system. It was not rerun with the RFC SDK on macOS arm64.
+- `object-cleanup`, `object-cleanup/transport` and `sweep-end` on the 7.50 system, macOS arm64: harness
+  housekeeping cells of one run, which later runs on the system pass.
+- `m8-dump-show` on the 7.50 system, RFC SDK, Windows x64 native: a harness artifact. The cell was rerun
+  without its list cell (`m8-dumps-list`) and stopped with `dump-id-missing`; the full run passed.
+
+The per-difference results are in
+[Behavior differences: 0.18.0 release checks](behavior-differences.md#0180-release-checks-0180-rc2-and-rc3).
 
 ### Unsupported cells
 

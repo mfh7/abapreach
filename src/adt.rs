@@ -1,6 +1,7 @@
 use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
+use std::collections::HashSet;
 
 /// The `atom:id` of the inactive version in the version list of an object.
 pub const INACTIVE_VERSION_ID: &str = "99999";
@@ -370,10 +371,97 @@ pub fn parse_versions(xml: &str) -> Result<Vec<VersionEntry>, String> {
     Ok(entries)
 }
 
+/// The entries of the `/system/information` feed that `ping` and `doctor` print. Every other
+/// entry (the host address, the database server, the `NotAuthorized*` flags) is dropped here, so
+/// it never reaches an output.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SystemInformation {
+    pub application_server: Option<String>,
+    pub kernel_release: Option<String>,
+    pub database_system: Option<String>,
+    pub os_name: Option<String>,
+}
+
+/// Reads `atom:id` and `atom:title` of every `atom:entry` by local name and keeps the four ids
+/// of [`SystemInformation`]. A body that is not XML is an error; an unknown id is ignored.
+pub fn parse_system_information(xml: &str) -> Result<SystemInformation, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut info = SystemInformation::default();
+    let mut in_entry = false;
+    let mut id = String::new();
+    let mut title = String::new();
+    let mut field: Option<FeedField> = None;
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) => match local_name(&element) {
+                "entry" => {
+                    in_entry = true;
+                    id.clear();
+                    title.clear();
+                    field = None;
+                }
+                "id" if in_entry => field = Some(FeedField::Id),
+                "title" if in_entry => field = Some(FeedField::Title),
+                _ => {}
+            },
+            Event::Text(text) => {
+                push_entry_text(
+                    field,
+                    &text.xml_content(XmlVersion::Implicit1_0),
+                    &mut id,
+                    &mut title,
+                );
+            }
+            Event::CData(text) => push_entry_text(field, &text.into_inner(), &mut id, &mut title),
+            Event::GeneralRef(reference) => {
+                push_entry_text(field, &reference_text(&reference)?, &mut id, &mut title);
+            }
+            Event::End(element) => match element.local_name().into_inner() {
+                "id" | "title" => field = None,
+                "entry" => {
+                    let slot = match id.trim() {
+                        "ApplicationServerName" => Some(&mut info.application_server),
+                        "KernelRelease" => Some(&mut info.kernel_release),
+                        "DBSystem" => Some(&mut info.database_system),
+                        "OSName" => Some(&mut info.os_name),
+                        _ => None,
+                    };
+
+                    if let Some(slot) = slot {
+                        slot.get_or_insert_with(|| title.trim().to_owned());
+                    }
+
+                    in_entry = false;
+                }
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(info)
+}
+
+fn push_entry_text(field: Option<FeedField>, text: &str, id: &mut String, title: &mut String) {
+    match field {
+        Some(FeedField::Id) => id.push_str(text),
+        Some(FeedField::Title) => title.push_str(text),
+        None => {}
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Field {
     Id,
     Author,
+}
+
+#[derive(Clone, Copy)]
+enum FeedField {
+    Id,
+    Title,
 }
 
 /// What the body of an activation answer is. The status is 200 in every case, so the root of the
@@ -410,30 +498,41 @@ pub fn classify_activation(body: &str) -> ActivationBody {
     }
 }
 
-/// An object reference of a worklist (`ioc:object/ioc:ref`), kept as listed.
+/// An object reference of a worklist (`ioc:object/ioc:ref`) or of a search reply, kept as listed.
+/// The package and the description exist only in a search reply.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ObjectRef {
     pub uri: String,
     pub kind: String,
     pub name: String,
     pub parent_uri: Option<String>,
+    pub package: Option<String>,
+    pub description: Option<String>,
 }
 
 /// The object references of an `ioc:inactiveObjects` list. An entry without `ioc:object` carries
 /// only its transport request, and a reference inside `ioc:transport` is the request, so neither
 /// is an object.
 pub fn parse_object_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
-    collect_refs(xml, false)
+    collect_refs(xml, false, false)
 }
 
 /// Like [`parse_object_refs`], but also reads the flat 7.40 feed, where every
 /// `adtcore:objectReference` is an object. Only for the advisory inactive-sibling warning: the
 /// admission and activation callers keep the strict reader.
 pub fn parse_inactive_feed_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
-    collect_refs(xml, true)
+    collect_refs(xml, true, false)
 }
 
-fn collect_refs(xml: &str, flat: bool) -> Result<Vec<ObjectRef>, String> {
+/// The objects of a `quickSearch` reply, in reply order: every `adtcore:objectReference`, with its
+/// package and description when it names them. The reply is the flat feed of the inactive list on
+/// 7.40, so the same reader serves both. Only this reader fills the package and the description:
+/// a worklist reference is compared as a whole by the activation resend check.
+pub fn parse_search_refs(xml: &str) -> Result<Vec<ObjectRef>, String> {
+    collect_refs(xml, true, true)
+}
+
+fn collect_refs(xml: &str, flat: bool, details: bool) -> Result<Vec<ObjectRef>, String> {
     let mut reader = Reader::from_str(xml);
     let mut refs = Vec::new();
     let mut in_object = false;
@@ -442,15 +541,15 @@ fn collect_refs(xml: &str, flat: bool) -> Result<Vec<ObjectRef>, String> {
         match reader.read_event().map_err(|error| error.to_string())? {
             Event::Start(element) => match local_name(&element) {
                 "object" => in_object = true,
-                "ref" if in_object => refs.push(object_ref(&element)?),
-                "objectReference" if flat => refs.push(object_ref(&element)?),
+                "ref" if in_object => refs.push(object_ref(&element, details)?),
+                "objectReference" if flat => refs.push(object_ref(&element, details)?),
                 _ => {}
             },
             Event::Empty(element)
                 if (in_object && local_name(&element) == "ref")
                     || (flat && local_name(&element) == "objectReference") =>
             {
-                refs.push(object_ref(&element)?);
+                refs.push(object_ref(&element, details)?);
             }
             Event::End(element) if element.local_name().into_inner() == "object" => {
                 in_object = false;
@@ -463,7 +562,7 @@ fn collect_refs(xml: &str, flat: bool) -> Result<Vec<ObjectRef>, String> {
     Ok(refs)
 }
 
-fn object_ref(element: &BytesStart<'_>) -> Result<ObjectRef, String> {
+fn object_ref(element: &BytesStart<'_>, details: bool) -> Result<ObjectRef, String> {
     let mut found = ObjectRef::default();
 
     for attribute in element.attributes() {
@@ -478,6 +577,8 @@ fn object_ref(element: &BytesStart<'_>) -> Result<ObjectRef, String> {
             "type" => found.kind = value,
             "name" => found.name = value,
             "parentUri" => found.parent_uri = Some(value),
+            "packageName" if details => found.package = Some(value),
+            "description" if details => found.description = Some(value),
             _ => {}
         }
     }
@@ -553,6 +654,137 @@ pub fn parse_callers(xml: &str) -> Result<Vec<Caller>, String> {
     }
 
     Ok(callers)
+}
+
+/// One using object of a where-used result, with the type as ADT names it (`CLAS/OC`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UsingObject {
+    pub kind: String,
+    pub name: String,
+    pub package: Option<String>,
+}
+
+/// One `usageReferences:referencedObject`, as listed.
+#[derive(Default)]
+struct UsageEntry {
+    uri: String,
+    parent_uri: String,
+    object: UsingObject,
+}
+
+/// The objects that use the asked object, from a `usageReferenceResult`. The reply is a tree: a
+/// package (`DEVC/K`) is never a user, and a part of an object (a method, an include of a
+/// function group, a function module) names its object as `parentUri` when the reply lists that
+/// object, so only the object is kept. An entry with no type or no name is a part or a
+/// placeholder, not an object. The `numberOfResults` attribute is not read: a trimmed or capped
+/// reply keeps the original count. Order and repeats are the caller's concern.
+pub fn parse_usage_objects(xml: &str) -> Result<Vec<UsingObject>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut entries: Vec<UsageEntry> = Vec::new();
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element) => match local_name(&element) {
+                "referencedObject" => {
+                    let mut entry = UsageEntry::default();
+
+                    for (key, value) in attributes_of(&element)? {
+                        match key.as_str() {
+                            "uri" => entry.uri = value,
+                            "parentUri" => entry.parent_uri = value,
+                            _ => {}
+                        }
+                    }
+
+                    entries.push(entry);
+                }
+                "adtObject" => {
+                    if let Some(entry) = entries.last_mut() {
+                        for (key, value) in attributes_of(&element)? {
+                            match key.as_str() {
+                                "name" => entry.object.name = value,
+                                "type" => entry.object.kind = value,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                "packageRef" => {
+                    if let Some(entry) = entries.last_mut()
+                        && entry.object.package.is_none()
+                    {
+                        entry.object.package = attributes_of(&element)?
+                            .into_iter()
+                            .find_map(|(key, value)| (key == "name").then_some(value));
+                    }
+                }
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    let is_object = |entry: &UsageEntry| {
+        let object = &entry.object;
+
+        !object.kind.trim().is_empty()
+            && !object.name.trim().is_empty()
+            && !object.kind.starts_with("DEVC")
+    };
+    let objects: HashSet<&str> = entries
+        .iter()
+        .filter(|entry| is_object(entry))
+        .map(|entry| entry.uri.as_str())
+        .collect();
+
+    Ok(entries
+        .iter()
+        .filter(|entry| is_object(entry))
+        .filter(|entry| entry.parent_uri.is_empty() || !objects.contains(entry.parent_uri.as_str()))
+        .map(|entry| entry.object.clone())
+        .collect())
+}
+
+/// The `href` of every collection of an ADT discovery document (`app:collection`), as listed.
+pub fn discovery_collections(xml: &str) -> Result<Vec<String>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut hrefs = Vec::new();
+
+    loop {
+        match reader.read_event().map_err(|error| error.to_string())? {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(&element) == "collection" =>
+            {
+                hrefs.extend(
+                    attributes_of(&element)?
+                        .into_iter()
+                        .find_map(|(key, value)| (key == "href").then_some(value)),
+                );
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    Ok(hrefs)
+}
+
+/// The attributes of an element as `(local name, value)` pairs.
+fn attributes_of(element: &BytesStart<'_>) -> Result<Vec<(String, String)>, String> {
+    let mut pairs = Vec::new();
+
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        let value = attribute
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|error| error.to_string())?
+            .into_owned();
+
+        pairs.push((attribute.key.local_name().into_inner().to_owned(), value));
+    }
+
+    Ok(pairs)
 }
 
 /// One checkrun or activation message, printed as `TYPE row N: MSG`.

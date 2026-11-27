@@ -24,6 +24,7 @@
 use crate::app::{Exit, Factories, Opened, stop};
 use crate::backend::{BackendKind, Failure, Selection};
 use crate::config::Connection;
+use crate::domain::Origin;
 use crate::hash::{local_source_lines, normalize, source_hash};
 use crate::object::DEFAULT_PACKAGE;
 use crate::operation::deploy::CancelFlag;
@@ -41,12 +42,19 @@ use similar::TextDiff;
 pub(crate) const CHECK_NONCE: &str = "00000000000000000000000000000000";
 /// The row of a transparent table in the XML file; the class decides a verdict for such a table.
 const TRANSPARENT_ROW: &str = "<TABCLASS>TRANSP</TABCLASS>";
+/// The stop of an MCP deploy whose live definition holds a configured secret. The MCP adapter
+/// recognises this exact line and answers with its own fixed refusal.
+pub(crate) const SECRET_STOP: &str = "STOP: payload contains a configured secret";
 
 /// Which simulate runs and the values only it takes.
 #[derive(Clone, Copy, Debug)]
 pub enum Simulation<'a> {
-    /// `deploy --simulate`: `--base` is compared with the live hash after the run.
-    Deploy { base: Option<&'a str> },
+    /// `deploy --simulate`: `--base` is compared with the live hash after the run. `origin` says
+    /// how the stop of a moved base is worded.
+    Deploy {
+        base: Option<&'a str>,
+        origin: Origin,
+    },
     /// `create --simulate`: the package and the description that must agree with the XML.
     Create {
         package: Option<&'a str>,
@@ -149,7 +157,7 @@ fn payload(
     run.tr = request.tr;
 
     match request.simulation {
-        Simulation::Deploy { base } => run.base = base.filter(|_| validate_base),
+        Simulation::Deploy { base, .. } => run.base = base.filter(|_| validate_base),
         Simulation::Create { package, text } => {
             run.package = package;
             run.text = text;
@@ -495,7 +503,9 @@ fn report_done(attempt: &Attempt<'_>, run: &RunnerRun, report: &Report, mut prin
     warnings(report, &mut print);
 
     match attempt.request.simulation {
-        Simulation::Deploy { base } => deploy_report(attempt, run, report, base, print),
+        Simulation::Deploy { base, origin } => {
+            deploy_report(attempt, run, report, (base, origin), print)
+        }
         Simulation::Create { package, .. } => {
             Flow::Done(create_report(attempt, run, report, package, print))
         }
@@ -600,7 +610,7 @@ fn deploy_report(
     attempt: &Attempt<'_>,
     run: &RunnerRun,
     report: &Report,
-    base: Option<&str>,
+    (base, origin): (Option<&str>, Origin),
     mut print: Print,
 ) -> Flow {
     let live = match live_of(report) {
@@ -615,14 +625,31 @@ fn deploy_report(
         }
     };
 
+    // An MCP deploy of a definition that holds a secret of the connection ends before the base
+    // compare, the diff, `no changes` or the hash: each would tell something about text the client
+    // may not read.
+    if origin == Origin::Mcp
+        && live
+            .as_ref()
+            .is_some_and(|live| attempt.connection.holds_secret(&join(&live.rows)))
+    {
+        print.stderr.push(SECRET_STOP.to_owned());
+
+        return Flow::Done(print.finish(run, 2));
+    }
+
     // M1: a base that is not the live hash ends the command before anything else is shown.
     if let (Some(base), Some(live)) = (base, &live)
         && !base.eq_ignore_ascii_case(&live.hash)
     {
-        print.stderr.push(format!(
-            "STOP: live changed: live hash {} != --base {base}",
-            live.hash
-        ));
+        // An MCP client sent no `--base` flag and may not read the definition: no flag, no hash.
+        print.stderr.push(match origin {
+            Origin::Cli => format!(
+                "STOP: live changed: live hash {} != --base {base}",
+                live.hash
+            ),
+            Origin::Mcp => "STOP: live changed since your read: base does not match".to_owned(),
+        });
 
         return Flow::Done(print.finish(run, 2));
     }

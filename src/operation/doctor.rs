@@ -1,8 +1,11 @@
 use crate::app::{Factories, RfcLibraryInfo, end_session};
+use crate::backend::BackendKind;
 use crate::config::{Connection, LocalCredentialsPermission, tls_warning};
 use crate::extension::{Registry, doctor_line};
 use crate::operation::doctor_runner::RunnerFacts;
+use crate::operation::ping;
 use crate::transport::Request;
+use crate::transport::SadtTransport;
 use crate::transport::rfc::identity_report;
 
 const DISCOVERY_URI: &str = "/sap/bc/adt/discovery";
@@ -116,10 +119,12 @@ impl Doctor {
         let mut rfc_passed = false;
         let mut stateful = None;
         let mut runner = None;
+        let mut instance = None;
 
         match connection.adt {
             Some(_) => {
-                let (probe, close_note) = adt_probe(connection, factories, &mut runner);
+                let (probe, close_note) =
+                    adt_probe(connection, factories, &mut runner, &mut instance);
 
                 match probe {
                     Ok(probe) => {
@@ -216,7 +221,9 @@ impl Doctor {
         let mut runner_notes = Vec::new();
         let facts = match runner {
             Some(facts) => facts,
-            None if rfc_passed => runner_over_sadt(connection, factories, &mut runner_notes),
+            None if rfc_passed => {
+                runner_over_sadt(connection, factories, &mut runner_notes, &mut instance)
+            }
             None => RunnerFacts::unknown("no backend answered"),
         };
 
@@ -234,6 +241,9 @@ impl Doctor {
             format!("capability deploy PROG: {deployed}"),
             format!("capability doctor: {capabilities}"),
         ]);
+
+        // The instance of the one session that answered: ADT when it did, else the SADT session.
+        lines.extend(instance);
 
         if let Some(warning) = tls_warning(connection) {
             lines.push(warning);
@@ -272,6 +282,7 @@ fn adt_probe(
     connection: &Connection,
     factories: &mut dyn Factories,
     runner: &mut Option<RunnerFacts>,
+    instance: &mut Option<String>,
 ) -> (Result<AdtProbe, String>, Option<String>) {
     let mut transport = match factories.adt(connection) {
         Ok(transport) => transport,
@@ -283,6 +294,11 @@ fn adt_probe(
     // The same logon serves the runner reads, so the discovery stays the one ADT logon.
     if response.as_ref().is_ok_and(|reply| reply.status == 200) {
         *runner = Some(RunnerFacts::read(transport.as_mut(), connection));
+        *instance = Some(instance_line(
+            transport.as_mut(),
+            BackendKind::AdtHttp,
+            connection,
+        ));
     }
 
     let note = end_session(transport.as_mut());
@@ -302,18 +318,38 @@ fn adt_probe(
     (probe, note)
 }
 
+/// The instance line of `ping` with the host masked, read on the session of `backend`. A reading that fails leaves the
+/// instance unknown with a fixed reason, never the error text; it never changes the verdict of the doctor.
+fn instance_line(
+    transport: &mut dyn SadtTransport,
+    backend: BackendKind,
+    connection: &Connection,
+) -> String {
+    match ping::read(transport, backend, &connection.secrets()) {
+        Ok(reading) => reading.facts.masked_instance_line(),
+        Err(failure) => format!("instance unknown ({})", failure.reason),
+    }
+}
+
 /// The runner reads on one SADT session, for a connection whose ADT probe did not pass. A failed
 /// close is the `W:` line returned beside the facts.
 fn runner_over_sadt(
     connection: &Connection,
     factories: &mut dyn Factories,
     notes: &mut Vec<String>,
+    instance: &mut Option<String>,
 ) -> RunnerFacts {
     let mut transport = match factories.rfc(connection) {
         Ok(transport) => transport,
         Err(error) => return RunnerFacts::unknown(&format!("cannot open a SADT session: {error}")),
     };
     let facts = RunnerFacts::read(transport.as_mut(), connection);
+
+    *instance = Some(instance_line(
+        transport.as_mut(),
+        BackendKind::RfcSadt,
+        connection,
+    ));
 
     notes.extend(end_session(transport.as_mut()));
 

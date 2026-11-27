@@ -3,6 +3,7 @@ pub mod http;
 pub mod rfc;
 
 pub use admission::{RunnerArm, runner_verdict};
+pub use rfc::{TableCall, TableRows};
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -160,5 +161,29 @@ pub trait SadtTransport {
     /// Whether the backend keeps a stateful session; `None` when it cannot tell (RFC/SADT).
     fn stateful_supported(&self) -> Option<bool> {
         None
+    }
+
+    /// Whether the RFC library behind this transport reads and writes one byte per character
+    /// (the single-byte SAP GUI for Windows library). Such a library cannot send the wide text
+    /// columns of some tables, so a caller that needs them refuses before the call. Only an RFC
+    /// transport can say yes.
+    fn uses_single_byte_characters(&self) -> bool {
+        false
+    }
+
+    /// Reads rows through the standard function module `RFC_READ_TABLE`. Only the RFC backends
+    /// have it; ADT HTTP answers with an error.
+    fn read_table_function(&mut self, _call: &TableCall) -> Result<TableRows, TransportError> {
+        Err(TransportError::Protocol(
+            "RFC_READ_TABLE needs the RFC backend".to_owned(),
+        ))
+    }
+
+    /// One typed `RFC_SYSTEM_INFO` call on this session. Only the RFC transport has it; ADT HTTP
+    /// reads the same facts from a request.
+    fn system_info(&mut self) -> Result<rfc::SystemInfo, TransportError> {
+        Err(TransportError::Protocol(
+            "this transport has no RFC_SYSTEM_INFO call".to_owned(),
+        ))
     }
 }

@@ -3,6 +3,10 @@ use super::admission::Admission;
 use super::admission::{is_classrun_post, is_create_post, is_delete_request, is_put_request};
 use super::{Request, Response, SadtTransport, TransportError};
 use crate::config::Connection;
+use crate::operation::read_table::{
+    Query, WHERE_LINE_MAX, field_name, identifier, split_where, validate_condition,
+};
+use crate::policy::Policies;
 use libloading::{Library, Symbol};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -13,6 +17,11 @@ use std::os::raw::{c_int, c_uint};
 use std::path::{Path, PathBuf};
 
 pub const SADT_REST_RFC_ENDPOINT: &str = "SADT_REST_RFC_ENDPOINT";
+
+/// The standard function module that answers with the system and the instance of the logon.
+pub const SYSTEM_INFO_FUNCTION: &str = "RFC_SYSTEM_INFO";
+/// Its exporting structure; the fields below are the ones [`SystemInfo`] reads.
+const SYSTEM_INFO_STRUCTURE: &str = "RFCSI_EXPORT";
 
 /// The library reads this (through the C runtime's `getenv`) when it opens its log, which is its
 /// first call.
@@ -583,6 +592,338 @@ pub trait RfcApi {
     ) -> Result<RfcEndpointResponse, TransportError>;
 
     fn close(&mut self);
+
+    /// The size of one `SAP_UC` in the loaded library; a test double and an API that carries no
+    /// library answer UTF-16, the width of every library but the single-byte Windows GUI build.
+    fn uc_width(&self) -> UcWidth {
+        UcWidth::Utf16
+    }
+
+    /// One `RFC_READ_TABLE` call on the open connection. An API that carries no generic function
+    /// calls answers with an error.
+    fn read_table(&mut self, _call: &TableCall) -> Result<TableRows, TransportError> {
+        Err(TransportError::Protocol(
+            "RFC_READ_TABLE is not available on this RFC API".to_owned(),
+        ))
+    }
+
+    /// One typed `RFC_SYSTEM_INFO` call. An API that has no such call (a test double of the
+    /// SADT endpoint) reports it as unsupported.
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        Err(TransportError::Protocol(
+            "this RFC API has no RFC_SYSTEM_INFO call".to_owned(),
+        ))
+    }
+}
+
+/// The standard function module the typed table read calls.
+const READ_TABLE_FUNCTION: &str = "RFC_READ_TABLE";
+/// The width of one `DATA` row of `RFC_READ_TABLE`.
+const READ_TABLE_ROW_WIDTH: usize = 512;
+
+/// The most fields one `RFC_READ_TABLE` call names.
+const READ_TABLE_FIELDS_MAX: usize = 32;
+
+/// One `RFC_READ_TABLE` call. It is built from a `Query` that passed the deny list, so the table
+/// and the fields are DDIC identifiers, the OPTIONS lines are at most 72 characters and join to a
+/// condition in its canonical rendering, and the row count is the one of the query. No other
+/// text can reach the function module.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableCall {
+    table: String,
+    fields: Vec<String>,
+    options: Vec<String>,
+    rows: u32,
+}
+
+impl TableCall {
+    /// The read of `fields` of the table of `query`, with its condition and its row count. The
+    /// deny list is checked again: a table on it never reaches the function module. At least one
+    /// field is needed and the rows of `RFC_READ_TABLE` are 512 characters wide, so a caller
+    /// names the fields that fit.
+    pub(crate) fn from_query(
+        query: &Query,
+        fields: &[&str],
+        policies: &Policies,
+    ) -> Result<Self, TransportError> {
+        if policies.is_read_table_denied(query.table()) {
+            return Err(TransportError::Protocol(format!(
+                "RFC_READ_TABLE: table {} is on the read_table_denied list",
+                query.table()
+            )));
+        }
+
+        let options = match query.condition() {
+            Some(condition) => split_where(condition).map_err(|message| {
+                TransportError::Protocol(format!("RFC_READ_TABLE: {message}"))
+            })?,
+            None => Vec::new(),
+        };
+
+        Self::build(query.table(), fields, options, query.rows())
+    }
+
+    fn build(
+        table: &str,
+        fields: &[&str],
+        options: Vec<String>,
+        rows: u32,
+    ) -> Result<Self, TransportError> {
+        let refuse =
+            |message: String| TransportError::Protocol(format!("RFC_READ_TABLE: {message}"));
+        let table = identifier("table", table).map_err(refuse)?;
+
+        if fields.is_empty() || fields.len() > READ_TABLE_FIELDS_MAX {
+            return Err(refuse(format!(
+                "a read names 1 to {READ_TABLE_FIELDS_MAX} fields"
+            )));
+        }
+
+        if rows == 0 || rows as usize > MAX_CALL_ROWS {
+            return Err(refuse(format!(
+                "rows must be between 1 and {MAX_CALL_ROWS}"
+            )));
+        }
+
+        let fields = fields
+            .iter()
+            .map(|field| field_name(field))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(refuse)?;
+
+        if let Some(line) = options
+            .iter()
+            .find(|line| line.chars().count() > WHERE_LINE_MAX)
+        {
+            return Err(refuse(format!(
+                "an OPTIONS line of {} characters is longer than {WHERE_LINE_MAX}",
+                line.chars().count()
+            )));
+        }
+
+        if !options.is_empty() {
+            validate_condition(&options.join(" ")).map_err(refuse)?;
+        }
+
+        Ok(Self {
+            table,
+            fields,
+            options,
+            rows,
+        })
+    }
+
+    /// A call for the tests of the library layer, which have no `Query`: the same grammar, no
+    /// policy.
+    #[cfg(feature = "test-support")]
+    pub fn for_test(
+        table: &str,
+        fields: &[&str],
+        options: &[&str],
+        rows: u32,
+    ) -> Result<Self, TransportError> {
+        Self::build(
+            table,
+            fields,
+            options.iter().map(|line| (*line).to_owned()).collect(),
+            rows,
+        )
+    }
+
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    pub fn fields(&self) -> &[String] {
+        &self.fields
+    }
+
+    pub fn options(&self) -> &[String] {
+        &self.options
+    }
+
+    fn function_call(&self) -> FunctionCall {
+        let mut tables = vec![TableWrite {
+            name: "FIELDS".to_owned(),
+            rows: self
+                .fields
+                .iter()
+                .map(|field| vec![("FIELDNAME".to_owned(), field.clone())])
+                .collect(),
+        }];
+
+        if !self.options.is_empty() {
+            tables.push(TableWrite {
+                name: "OPTIONS".to_owned(),
+                rows: self
+                    .options
+                    .iter()
+                    .map(|line| vec![("TEXT".to_owned(), line.clone())])
+                    .collect(),
+            });
+        }
+
+        let column = |name: &str, length| ColumnRead {
+            name: name.to_owned(),
+            kind: CellKind::Chars(length),
+        };
+
+        FunctionCall {
+            function: READ_TABLE_FUNCTION.to_owned(),
+            // ROWCOUNT is an INT4 import set as text, like every import of the generic call.
+            imports: vec![
+                ("QUERY_TABLE".to_owned(), self.table.clone()),
+                ("ROWCOUNT".to_owned(), self.rows.to_string()),
+            ],
+            tables,
+            exports: Vec::new(),
+            export_tables: vec![
+                TableRead {
+                    name: "FIELDS".to_owned(),
+                    columns: vec![
+                        column("FIELDNAME", 30),
+                        column("OFFSET", 6),
+                        column("LENGTH", 6),
+                    ],
+                },
+                TableRead {
+                    name: "DATA".to_owned(),
+                    columns: vec![column("WA", READ_TABLE_ROW_WIDTH)],
+                },
+            ],
+        }
+    }
+}
+
+/// The rows an `RFC_READ_TABLE` call returned: the field names and one value per field, each cut
+/// out of the fixed-width row and without its trailing blanks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableRows {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+/// Cuts the fixed-width `DATA` rows of a `FunctionResult` at the offsets and lengths of `FIELDS`.
+fn table_rows(result: &FunctionResult) -> Result<TableRows, TransportError> {
+    let broken = |message: &str| {
+        TransportError::Protocol(format!("RFC_READ_TABLE: unreadable reply ({message})"))
+    };
+    let rows_of = |name: &str| {
+        result
+            .tables
+            .iter()
+            .find(|(found, _)| found == name)
+            .map(|(_, rows)| rows)
+            .ok_or_else(|| broken(&format!("no table {name}")))
+    };
+    let text = |cell: Option<&Cell>| match cell {
+        Some(Cell::Text(text)) => Ok(text.clone()),
+        _ => Err(broken("a cell is not text")),
+    };
+    let number = |cell: Option<&Cell>| {
+        text(cell)?
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| broken("an offset or length is not a number"))
+    };
+    let mut columns = Vec::new();
+    let mut spans = Vec::new();
+
+    for row in rows_of("FIELDS")? {
+        let (offset, length) = (number(row.get(1))?, number(row.get(2))?);
+
+        if offset + length > READ_TABLE_ROW_WIDTH {
+            return Err(broken("a field lies beyond the row"));
+        }
+
+        columns.push(text(row.first())?.trim().to_owned());
+        spans.push((offset, length));
+    }
+
+    let rows = rows_of("DATA")?
+        .iter()
+        .map(|row| {
+            // Offsets and lengths count UTF-16 units, as ABAP does: a character outside the BMP
+            // is two units, so the row is cut before it is decoded.
+            let line: Vec<u16> = text(row.first())?.encode_utf16().collect();
+
+            Ok(spans
+                .iter()
+                .map(|&(offset, length)| {
+                    let cut: Vec<u16> = line.iter().skip(offset).take(length).copied().collect();
+
+                    String::from_utf16_lossy(&cut)
+                        .trim_end_matches(' ')
+                        .to_owned()
+                })
+                .collect())
+        })
+        .collect::<Result<Vec<_>, TransportError>>()?;
+
+    Ok(TableRows { columns, rows })
+}
+
+/// The length in characters of an `RFCSI_EXPORT` field that [`SystemInfo`] reads, as `RFCSI`
+/// defines it. `RfcGetChars` needs the length of the field.
+fn system_info_field_chars(name: &str) -> usize {
+    match name {
+        "RFCDEST" => 32,
+        "RFCDBSYS" => 10,
+        "RFCHOST" | "RFCSYSID" => 8,
+        _ => 4,
+    }
+}
+
+/// The part of `RFCSI_EXPORT` that `ping` and `doctor` print, each field with trailing blanks
+/// dropped. `host` is the short application server host the library reports. It is never printed,
+/// and a failed read only leaves it empty.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SystemInfo {
+    /// `RFCDEST`: the instance name, `<host>_<SID>_<NN>`.
+    pub instance: String,
+    /// `RFCHOST`.
+    pub host: String,
+    /// `RFCSYSID`.
+    pub system_id: String,
+    /// `RFCSAPRL`: the SAP release.
+    pub release: String,
+    /// `RFCKERNRL`: the kernel release.
+    pub kernel: String,
+    /// `RFCDBSYS`: the database system.
+    pub database: String,
+    /// The time of the `RfcInvoke` alone, after the logon and the function description; `None`
+    /// when the API cannot time it apart.
+    pub invoke_time: Option<std::time::Duration>,
+}
+
+impl SystemInfo {
+    /// The `RFCSI_EXPORT` fields this type reads, in the order of [`SystemInfo::from_fields`].
+    pub const FIELDS: [&'static str; 6] = [
+        "RFCDEST",
+        "RFCHOST",
+        "RFCSYSID",
+        "RFCSAPRL",
+        "RFCKERNRL",
+        "RFCDBSYS",
+    ];
+
+    /// Builds the value from a reader of one `RFCSI_EXPORT` field by name. The first failing read
+    /// is the error, except `RFCHOST`, which only drops its own field. `invoke_time` is `None`.
+    pub fn from_fields(
+        mut read: impl FnMut(&str) -> Result<String, TransportError>,
+    ) -> Result<Self, TransportError> {
+        let mut field = |name: &str| read(name).map(|text| text.trim_end().to_owned());
+
+        Ok(Self {
+            instance: field(Self::FIELDS[0])?,
+            host: field(Self::FIELDS[1]).unwrap_or_default(),
+            system_id: field(Self::FIELDS[2])?,
+            release: field(Self::FIELDS[3])?,
+            kernel: field(Self::FIELDS[4])?,
+            database: field(Self::FIELDS[5])?,
+            invoke_time: None,
+        })
+    }
 }
 
 pub struct RfcTransport<A> {
@@ -733,6 +1074,22 @@ impl<A: RfcApi> SadtTransport for RfcTransport<A> {
 
         Ok(())
     }
+
+    fn uses_single_byte_characters(&self) -> bool {
+        self.api.uc_width() == UcWidth::Narrow
+    }
+
+    fn read_table_function(&mut self, call: &TableCall) -> Result<TableRows, TransportError> {
+        self.ensure_open()?;
+
+        self.api.read_table(call)
+    }
+
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        self.ensure_open()?;
+
+        self.api.system_info()
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -742,6 +1099,11 @@ pub struct FakeRfcApi {
     invocations: usize,
     last_request: Option<RfcEndpointRequest>,
     responses: std::collections::VecDeque<RfcEndpointResponse>,
+    tables: std::collections::VecDeque<Result<FunctionResult, TransportError>>,
+    table_calls: Vec<FunctionCall>,
+    system_info_calls: usize,
+    system_info: Option<Result<SystemInfo, TransportError>>,
+    width: UcWidth,
 }
 
 #[cfg(feature = "test-support")]
@@ -753,7 +1115,31 @@ impl FakeRfcApi {
             invocations: 0,
             last_request: None,
             responses: std::collections::VecDeque::new(),
+            tables: std::collections::VecDeque::new(),
+            table_calls: Vec::new(),
+            system_info_calls: 0,
+            system_info: None,
+            width: UcWidth::Utf16,
         }
+    }
+
+    /// The fake stands for a library of the given `SAP_UC` width.
+    pub fn with_width(self, width: UcWidth) -> Self {
+        Self { width, ..self }
+    }
+
+    /// The fake answers `RFC_SYSTEM_INFO` with `answer`, every time.
+    pub fn with_system_info(answer: Result<SystemInfo, TransportError>) -> Self {
+        Self {
+            system_info: Some(answer),
+            ..Self::ok()
+        }
+    }
+
+    /// How many typed `RFC_SYSTEM_INFO` calls the fake served; they are no invocation of the
+    /// SADT endpoint and never count in [`FakeRfcApi::counts`].
+    pub fn system_info_calls(&self) -> usize {
+        self.system_info_calls
     }
 
     pub fn with_responses(responses: Vec<RfcEndpointResponse>) -> Self {
@@ -763,8 +1149,24 @@ impl FakeRfcApi {
         }
     }
 
+    /// The replies of the `RFC_READ_TABLE` calls, one per call: the `FIELDS` and `DATA` tables the
+    /// function module returns, or the error of the call.
+    pub fn with_table_replies(
+        mut self,
+        replies: Vec<Result<FunctionResult, TransportError>>,
+    ) -> Self {
+        self.tables = replies.into();
+
+        self
+    }
+
     pub fn counts(&self) -> (usize, usize, usize) {
         (self.opens, self.closes, self.invocations)
+    }
+
+    /// The function calls the typed table read made, in order.
+    pub fn table_calls(&self) -> &[FunctionCall] {
+        &self.table_calls
     }
 
     pub fn last_request(&self) -> &RfcEndpointRequest {
@@ -780,6 +1182,10 @@ impl RfcApi for FakeRfcApi {
         self.opens += 1;
 
         Ok(())
+    }
+
+    fn uc_width(&self) -> UcWidth {
+        self.width
     }
 
     fn invoke(
@@ -798,6 +1204,27 @@ impl RfcApi for FakeRfcApi {
 
     fn close(&mut self) {
         self.closes += 1;
+    }
+
+    fn read_table(&mut self, call: &TableCall) -> Result<TableRows, TransportError> {
+        self.table_calls.push(call.function_call());
+
+        match self.tables.pop_front() {
+            Some(reply) => table_rows(&reply?),
+            None => Err(TransportError::Protocol(
+                "the fake has no reply for this RFC_READ_TABLE call".to_owned(),
+            )),
+        }
+    }
+
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        self.system_info_calls += 1;
+
+        self.system_info.clone().unwrap_or_else(|| {
+            Err(TransportError::Protocol(
+                "the fake RFC API has no RFC_SYSTEM_INFO answer".to_owned(),
+            ))
+        })
     }
 }
 
@@ -1626,6 +2053,49 @@ impl DynamicRfcApi {
         Ok(function)
     }
 
+    /// Invokes `RFC_SYSTEM_INFO` and reads the character fields of `RFCSI_EXPORT` with
+    /// `RfcGetChars`, an optional symbol: a library without it reports the missing names before
+    /// the invoke.
+    fn read_system_info(
+        &self,
+        connection: RfcHandle,
+        function: RfcHandle,
+    ) -> Result<SystemInfo, TransportError> {
+        let symbols = self.loaded_symbols()?;
+        let mut error = RfcErrorInfo::default();
+        // The logon and the function description are done: only the invoke is timed.
+        let started = std::time::Instant::now();
+        // SAFETY: `connection` is the open handle of `ensure_open` and `function` the live handle
+        // of `create_function`, neither destroyed yet; `error` is a valid, initialized
+        // `RfcErrorInfo` the library may write to.
+        let result = unsafe { (self.symbols.invoke)(connection, function, &mut error) };
+        let invoke_time = started.elapsed();
+
+        check(self.width, RfcPhase::Invoke, "RfcInvoke", result, &error)?;
+
+        let export = self.structure(RfcPhase::Invoke, function, SYSTEM_INFO_STRUCTURE)?;
+        // The fields are CHAR, so `RfcGetChars` reads them with the width of each field; the
+        // string getters refuse a CHAR field with RFC code 20. `export` belongs to the invoked
+        // `function`, which the caller destroys only after this returns.
+        let mut info = SystemInfo::from_fields(|name| {
+            let column = ColumnRead {
+                name: name.to_owned(),
+                kind: CellKind::Chars(system_info_field_chars(name)),
+            };
+
+            match self.read_cell(&symbols, export, &column)? {
+                Cell::Text(text) => Ok(text),
+                Cell::Int(_) => Err(TransportError::Protocol(format!(
+                    "RFCSI_EXPORT field {name} is not a character field"
+                ))),
+            }
+        })?;
+
+        info.invoke_time = Some(invoke_time);
+
+        Ok(info)
+    }
+
     fn call(
         &self,
         connection: RfcHandle,
@@ -1673,6 +2143,10 @@ impl RfcApi for DynamicRfcApi {
         self.ensure_open().map(|_| ())
     }
 
+    fn uc_width(&self) -> UcWidth {
+        self.width
+    }
+
     fn invoke(
         &mut self,
         request: RfcEndpointRequest,
@@ -1684,6 +2158,24 @@ impl RfcApi for DynamicRfcApi {
         let mut destroy_error = RfcErrorInfo::default();
 
         // A failing destroy must not turn a sent request into a reported failure.
+        // SAFETY: `function` was created by `create_function` on this connection and is destroyed
+        // exactly once, here; `destroy_error` outlives the call.
+        unsafe {
+            (self.symbols.destroy_function)(function, &mut destroy_error);
+        }
+
+        result
+    }
+
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        let connection = self.ensure_open()?;
+        let function = self.create_function(connection, SYSTEM_INFO_FUNCTION)?;
+        let result = self.read_system_info(connection, function);
+        let mut destroy_error = RfcErrorInfo::default();
+
+        // A failing destroy must not turn an answered call into a reported failure.
+        // SAFETY: `function` came from `create_function` and is destroyed exactly once, here,
+        // after the last read of it; `destroy_error` is a valid `RfcErrorInfo`.
         unsafe {
             (self.symbols.destroy_function)(function, &mut destroy_error);
         }
@@ -1700,6 +2192,17 @@ impl RfcApi for DynamicRfcApi {
         unsafe {
             (self.symbols.close_connection)(connection, &mut error);
         }
+    }
+
+    fn read_table(&mut self, call: &TableCall) -> Result<TableRows, TransportError> {
+        // The rows of this function module are wider than the generic limit of a column.
+        let function = call.function_call();
+
+        validate_call_within(&function, READ_TABLE_ROW_WIDTH)?;
+
+        let result = self.invoke_function(&function)?;
+
+        table_rows(&result)
     }
 }
 
@@ -1845,23 +2348,30 @@ fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 30 && name.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
-fn too_long(what: &str, chars: usize) -> TransportError {
+fn too_long(what: &str, chars: usize, limit: usize) -> TransportError {
     TransportError::Protocol(format!(
-        "RFC call: {what} has {chars} characters; the limit is {MAX_CALL_CHARS}"
+        "RFC call: {what} has {chars} characters; the limit is {limit}"
     ))
 }
 
 /// Checks a call before the first library call, so a bad request never reaches the SDK.
 fn validate_call(call: &FunctionCall) -> Result<(), TransportError> {
+    validate_call_within(call, MAX_CALL_CHARS)
+}
+
+/// [`validate_call`] with `max_column` as the widest column a call may read.
+fn validate_call_within(call: &FunctionCall, max_column: usize) -> Result<(), TransportError> {
     let name_error = |name: &str| {
         TransportError::Protocol(format!(
             "RFC call: {name:?} is not a function, parameter or field name"
         ))
     };
     let column_error = |column: &ColumnRead| match column.kind {
-        CellKind::Chars(length) if length == 0 || length > MAX_CALL_CHARS => {
-            Some(too_long(&format!("column {}", column.name), length))
-        }
+        CellKind::Chars(length) if length == 0 || length > max_column => Some(too_long(
+            &format!("column {}", column.name),
+            length,
+            max_column,
+        )),
         _ => None,
     };
 
@@ -1875,7 +2385,11 @@ fn validate_call(call: &FunctionCall) -> Result<(), TransportError> {
         }
 
         if value.chars().count() > MAX_CALL_CHARS {
-            return Err(too_long(&format!("field {name}"), value.chars().count()));
+            return Err(too_long(
+                &format!("field {name}"),
+                value.chars().count(),
+                MAX_CALL_CHARS,
+            ));
         }
     }
 
@@ -1901,6 +2415,7 @@ fn validate_call(call: &FunctionCall) -> Result<(), TransportError> {
                 return Err(too_long(
                     &format!("field {field} of table {}", table.name),
                     value.chars().count(),
+                    MAX_CALL_CHARS,
                 ));
             }
         }
@@ -2032,6 +2547,24 @@ impl DynamicRfcApi {
         })
     }
 
+    /// Creates the function, runs the call and destroys the function. `call` has been checked.
+    fn invoke_function(&mut self, call: &FunctionCall) -> Result<FunctionResult, TransportError> {
+        let symbols = self.loaded_symbols()?;
+        let connection = self.ensure_open()?;
+        let function = self.create_function(connection, &call.function)?;
+        let result = self.run_function(&symbols, connection, function, call);
+        let mut destroy_error = RfcErrorInfo::default();
+
+        // A failing destroy must not turn a sent request into a reported failure.
+        // SAFETY: `function` was created by `create_function` on this connection and is destroyed
+        // exactly once, here; `destroy_error` outlives the call.
+        unsafe {
+            (self.symbols.destroy_function)(function, &mut destroy_error);
+        }
+
+        result
+    }
+
     fn loaded_symbols(&self) -> Result<FunctionSymbols, TransportError> {
         self.function_support()
             .map(|()| *self.function.as_ref().expect("checked by function_support"))
@@ -2073,6 +2606,8 @@ impl DynamicRfcApi {
         match column.kind {
             CellKind::Int => {
                 let mut value: c_int = 0;
+                // SAFETY: `container` is a live handle of this call, `name` is a NUL-terminated
+                // string of the library's character size, and `value` and `error` outlive the call.
                 let result =
                     unsafe { (symbols.get_int)(container, name.as_ptr(), &mut value, &mut error) };
 
@@ -2081,6 +2616,9 @@ impl DynamicRfcApi {
             }
             CellKind::Chars(length) => {
                 let mut buffer = UcBuffer::new(self.width, length);
+                // SAFETY: `container` is a live handle of this call, `name` is a NUL-terminated
+                // string, and `buffer` holds `length` characters of the library's size, the
+                // capacity passed to the library.
                 let result = unsafe {
                     (symbols.get_chars)(
                         container,
@@ -2326,20 +2864,9 @@ impl FunctionApi for DynamicRfcApi {
     }
 
     fn call_function(&mut self, call: &FunctionCall) -> Result<FunctionResult, TransportError> {
-        let symbols = self.loaded_symbols()?;
-
         validate_call(call)?;
-        let connection = self.ensure_open()?;
-        let function = self.create_function(connection, &call.function)?;
-        let result = self.run_function(&symbols, connection, function, call);
-        let mut destroy_error = RfcErrorInfo::default();
 
-        // A failing destroy must not turn a sent request into a reported failure.
-        unsafe {
-            (self.symbols.destroy_function)(function, &mut destroy_error);
-        }
-
-        result
+        self.invoke_function(call)
     }
 }
 
@@ -3683,4 +4210,159 @@ fn non_empty<'a>(env: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str
     env.get(key)
         .map(String::as_str)
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod table_call_tests {
+    use super::*;
+    use crate::operation::read_table::ReadTableRequest;
+
+    fn query(table: &str, condition: Option<&str>, rows: u32) -> Query {
+        let open = Policies {
+            read_table_denied: Vec::new(),
+            ..Policies::default()
+        };
+
+        Query::new(
+            &ReadTableRequest {
+                table: table.to_owned(),
+                fields: Vec::new(),
+                where_clause: condition.map(str::to_owned),
+                rows,
+            },
+            5000,
+            &open,
+        )
+        .unwrap()
+    }
+
+    fn lines(options: &[&str]) -> Vec<String> {
+        options.iter().map(|line| (*line).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_call_on_a_denied_table_cannot_be_built() {
+        let denied = query("USR02", None, 10);
+
+        assert!(Policies::default().is_read_table_denied("USR02"));
+
+        let error = TableCall::from_query(&denied, &["BNAME"], &Policies::default()).unwrap_err();
+
+        assert!(error.to_string().contains("read_table_denied"), "{error}");
+        assert!(TableCall::from_query(&denied, &["BNAME"], &Policies::default()).is_err());
+
+        let open = Policies {
+            read_table_denied: Vec::new(),
+            ..Policies::default()
+        };
+
+        assert!(TableCall::from_query(&denied, &["BNAME"], &open).is_ok());
+    }
+
+    #[test]
+    fn the_call_carries_the_condition_in_short_lines_and_the_row_count_of_the_query() {
+        let long = format!(
+            "SEQNO = '000' AND UNAME = '{}' AND DATUM >= '20261118'",
+            "X".repeat(40)
+        );
+        let call = TableCall::from_query(
+            &query("SNAP", Some(&long), 1000),
+            &["SEQNO", "FLIST"],
+            &Policies::default(),
+        )
+        .unwrap();
+
+        assert!(call.options().len() > 1);
+        assert!(call.options().iter().all(|line| line.len() <= 72));
+        assert_eq!(call.options().join(" "), long);
+
+        let function = call.function_call();
+
+        assert_eq!(
+            function.imports,
+            [
+                ("QUERY_TABLE".to_owned(), "SNAP".to_owned()),
+                ("ROWCOUNT".to_owned(), "1000".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_call_takes_only_checked_parts() {
+        let ok = |table: &str, fields: &[&str], options: &[&str], rows: u32| {
+            TableCall::build(table, fields, lines(options), rows)
+        };
+        let many: Vec<&str> = vec!["SEQNO"; READ_TABLE_FIELDS_MAX + 1];
+        let long = format!("UNAME = '{}'", "X".repeat(70));
+
+        assert!(ok("SNAP", &["SEQNO", "FLIST"], &["SEQNO = '000'"], 5).is_ok());
+        assert!(ok("SNAP", &["SEQNO"], &[], 1).is_ok());
+        assert!(
+            ok(
+                "SNAP",
+                &["SEQNO"],
+                &["SEQNO = '000' AND", "DATUM >= '1'"],
+                1
+            )
+            .is_ok()
+        );
+
+        for (table, fields, options, rows) in [
+            ("SNAP ", vec!["SEQNO"], vec![], 1),
+            ("SNAP", vec![], vec![], 1),
+            ("SNAP", many.clone(), vec![], 1),
+            ("SNAP", vec!["SEQNO,FLIST"], vec![], 1),
+            ("SNAP", vec!["SELECT"], vec![], 1),
+            ("SNAP", vec!["SEQNO"], vec!["SEQNO = '000'; DELETE"], 1),
+            (
+                "SNAP",
+                vec!["SEQNO"],
+                vec!["SEQNO IN (SELECT BNAME FROM USR02)"],
+                1,
+            ),
+            ("SNAP", vec!["SEQNO"], vec!["SEQNO='000'"], 1),
+            ("SNAP", vec!["SEQNO"], vec![long.as_str()], 1),
+            ("SNAP", vec!["SEQNO"], vec!["SEQNO = '000' AND", "DATUM"], 1),
+            ("SNAP", vec!["SEQNO"], vec![], 0),
+            ("SNAP", vec!["SEQNO"], vec![], 100_001),
+        ] {
+            assert!(
+                ok(table, &fields, &options, rows).is_err(),
+                "{table:?} {fields:?} {options:?} {rows}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_wide_row_passes_the_width_check_only_where_it_is_allowed() {
+        let call = TableCall::build("SNAP", &["SEQNO"], Vec::new(), 1).unwrap();
+        let function = call.function_call();
+
+        assert!(validate_call_within(&function, READ_TABLE_ROW_WIDTH).is_ok());
+        assert!(validate_call(&function).is_err());
+    }
+
+    #[test]
+    fn rows_are_cut_in_utf16_units_as_abap_counts_them() {
+        let text = |value: &str| Cell::Text(value.to_owned());
+        // The first field holds one character outside the BMP: two units, so the second field
+        // starts at unit 2 and a cut by characters would read it one character too far.
+        let result = FunctionResult {
+            exports: Vec::new(),
+            tables: vec![
+                (
+                    "FIELDS".to_owned(),
+                    vec![
+                        vec![text("A"), text("000000"), text("000002")],
+                        vec![text("B"), text("000002"), text("000003")],
+                    ],
+                ),
+                ("DATA".to_owned(), vec![vec![text("\u{1F600}xyz  ")]]),
+            ],
+        };
+        let rows = table_rows(&result).unwrap();
+
+        assert_eq!(rows.columns, ["A", "B"]);
+        assert_eq!(rows.rows, [["\u{1F600}", "xyz"]]);
+    }
 }

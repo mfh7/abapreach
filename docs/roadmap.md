@@ -21,6 +21,7 @@ release (0.12.0, 0.13.0, ...); 1.0.0 follows when every feature below is release
 | 0.16.1 | `--tr` for objects no open request holds; classrun on newer releases (tested on a S/4HANA 758 system); classrun POST from a new session; runner cleanup proof against `TADIR`; MCP re-reads connections per call (released) |
 | 0.17.0 | `inactive`, `activate`, `aunit` (ABAP Unit) and `run` (class, report with ALV capture, code snippet), with MCP tools; defaults: `run: plan`, `mcp_run: off`, `mcp_run_snippet: off`; tested on the 7.50, 7.40 and S/4HANA 758 systems (released) |
 | 0.17.1 | Test and fault-build follow-ups of 0.17.0: a live cell for Ctrl-C twice during `run`, and a `FAULT: classrun POST sending` marker in the fault-injection build; the ordinary build is unchanged (released) |
+| 0.18.0 | MCP deploy by `edits` and `base`, with the whole-source hash on a partial read; `sql` (read-only SELECT with joins), `search`, `where-used`, `dumps` and `dump`, `ping` and the instance line in `doctor`; `read-table` checks views and refuses with exit 2 |
 | later | The remaining features below, one milestone at a time |
 
 Platforms come before new features, so every feature after 0.12.0 is built and tested on
@@ -109,6 +110,26 @@ The behavior, outcomes and limits of each command are in the [changelog](../CHAN
 
 Not in 0.17.0: ATC (`atc`).
 
+## Shipped in 0.18.0
+
+| Feature | Reference command | Path |
+| :--- | :--- | :--- |
+| Read-only SQL with joins, a closed grammar (`sql`) | new | ADT freestyle data preview |
+| Object search by name pattern and type (`search`) | new | ADT |
+| Where-used (`where-used`), ADT first and the cross-reference tables as fallback | `rfc-read where-used` | ADT, standard tables |
+| Short dumps (`dumps`, `dump`) | `rfc-read dumps` | data preview of `SNAP`, `RFC_READ_TABLE` on the 7.50 system |
+| Ping, system information and the application server instance (`ping`, and the instance line of `doctor`) | `rfc-read ping` | ADT, RFC |
+| MCP: deploy by `edits` and `base`, the whole-source `hash` of a partial read, the secret guard on every deploy | MCP server (0.14.0) | stdio |
+| MCP: `abap_sql`, `abap_search`, `abap_where_used`, `abap_dumps`, `abap_dump`, `abap_ping` | MCP server (0.14.0) | stdio |
+
+All of them are read-only and use standard SAP paths. `sql` keeps the `read-table` policies (denied
+tables, row limits) and fails closed on views: a view is read only when its base tables are all
+allowed. `read-table` has the same check, and a dictionary refusal there is now `STOP` with exit 2.
+In MCP, every deploy is refused when the live source holds a configured secret. Where-used for
+`MSAG` is planned for 0.19.0. The behavior, the limits per release and the differences from the
+earlier tooling are in [Getting started](getting-started.md), [MCP server](mcp.md),
+[Behavior differences](behavior-differences.md) and the [changelog](../CHANGELOG.md).
+
 ## Planned for 1.0.0
 
 ### Other object types
@@ -140,21 +161,13 @@ Not in 0.17.0: ATC (`atc`).
 
 | Feature | Reference command | Path |
 | :--- | :--- | :--- |
-| Ping and system info | `rfc-read ping` | ADT, RFC |
-| Short dumps (ST22) | `rfc-read dumps` | ADT? |
 | DDIC field info | `rfc-read ddic` | RFC (`DDIF_FIELDINFO_GET` is remote-enabled) |
-| Where-used | `rfc-read where-used` | ADT? |
 | Test call of a remote FM | `rfc-call` | RFC |
 
 ### Additions beyond the earlier tooling
 
-| Feature | Reference command | Path |
-| :--- | :--- | :--- |
-| Read-only SQL with joins (beyond the one-table `read-table`) | new | ADT? |
-| Object search by name pattern and type | new | ADT |
-| The application server instance that answered, in `doctor` and ping | new | ADT, RFC |
-
-`run` shipped in 0.17.0. The SQL path keeps the `read-table` policies (denied tables, row limit).
+The four additions have shipped: `run` in 0.17.0, and `sql`, `search` and the application server
+instance in `doctor` and `ping` in 0.18.0. No addition is left.
 
 ### Outside the 1.0.0 scope, timing to be decided
 

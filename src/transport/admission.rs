@@ -8,8 +8,11 @@ use super::Request;
 use crate::adt::{
     ActivationBody, ObjectRef, USAGE_REQUEST_XML, classify_activation, parse_object_refs,
 };
+use crate::operation::ping::{SYSTEM_INFORMATION_ACCEPT, SYSTEM_INFORMATION_URI};
 use crate::operation::read_table::validate_preview_body;
-use crate::operation::runner::{RUNNER_CLASS_REFUSED, is_runner_class, validate_runner_prefix};
+use crate::operation::runner::{RUNNER_CLASS_REFUSED, is_runner_class};
+use crate::operation::search::{MAX_RESULTS, is_encoded_type, validate_pattern};
+use crate::operation::sql::{FREESTYLE_URI, validate_body};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 use std::cell::RefCell;
@@ -25,6 +28,7 @@ const NODE_STRUCTURE: &str = "/sap/bc/adt/repository/nodestructure";
 const FUNCTION_VALIDATION: &str = "/sap/bc/adt/functions/validation";
 const OBJECT_VALIDATION: &str = "/sap/bc/adt/oo/validation/objectname";
 const GROUPS: &str = "/sap/bc/adt/functions/groups";
+const DDIC: &str = "/sap/bc/adt/ddic";
 const CLASSES: &str = "/sap/bc/adt/oo/classes";
 const INTERFACES: &str = "/sap/bc/adt/oo/interfaces";
 const PROGRAMS: &str = "/sap/bc/adt/programs/programs";
@@ -38,11 +42,7 @@ const MAX_PREVIEW_ROWS: u32 = 5000;
 /// A DDIC identifier is at most 30 characters, `/NAMESPACE/` included.
 const MAX_ENTITY: usize = 30;
 const OBJECT_STRUCTURE: &str = "version=active&withShortDescriptions=true";
-const SEARCH_TAIL: &str = "&maxResults=10&objectType=FUGR%2FFF";
-const CLASS_SEARCH: &str = "operation=quickSearch&query=";
-const CLASS_SEARCH_TAIL: &str = "objectType=CLAS%2FOC";
-/// The `maxResults` of the runner class search: a plain number in this range.
-const CLASS_SEARCH_LIMIT: std::ops::RangeInclusive<u32> = 1..=100;
+const QUICK_SEARCH: &str = "operation=quickSearch&query=";
 /// The classrun endpoint of ADT; only `POST <CLASSRUN>/<armed runner>` is ever admitted.
 const CLASSRUN: &str = "/sap/bc/adt/oo/classrun";
 /// A class name is at most 30 characters.
@@ -99,6 +99,11 @@ impl Admission {
     /// Whether the request may be sent. A class first step waits for its RFC response before a
     /// resend can be admitted.
     pub fn admits(&mut self, request: &Request) -> bool {
+        // Two headers that differ only in case are one header to SAP and two to the checks below.
+        if has_ambiguous_headers(request) {
+            return false;
+        }
+
         let uri = request.uri.as_str();
 
         if uri.contains('#') {
@@ -112,7 +117,9 @@ impl Admission {
         let (path, query) = split_query(uri);
 
         match request.method.as_str() {
-            "GET" => is_read(uri, path, query),
+            // The discovery is read as the `doctor` probe and `where-used` send it: nothing else.
+            "GET" if uri == DISCOVERY => request.body.is_empty() && request.headers.is_empty(),
+            "GET" => is_read(uri, path, query) || is_system_information(request),
             "DELETE" => request.body.is_empty() && is_delete(path, query),
             "PUT" => is_put(path, query) && has_content_type(request, "text/plain; charset=utf-8"),
             "POST" => {
@@ -322,6 +329,12 @@ pub fn runner_verdict(request: &Request) -> Option<bool> {
         return Some(admits_classrun_post(request));
     }
 
+    // While a runner is armed, nothing in this process has a reason to run a freestyle data
+    // preview, so it is refused in any spelling (the 0.17 rule, kept beside the 0.18 shape).
+    if is_armed() && reaches_freestyle(&request.uri) {
+        return Some(false);
+    }
+
     (request.method == "POST" && !admits_runner_create(request)).then_some(false)
 }
 
@@ -329,6 +342,19 @@ pub fn runner_verdict(request: &Request) -> Option<bool> {
 /// repeated percent-encoding, `.`/`..` segments, doubled slashes, matrix parameters, or a query
 /// that starts early. The decision is on path segments: a class named `ZCL_X_CLASSRUN` is not it.
 fn reaches_classrun(uri: &str) -> bool {
+    reaches(uri, is_classrun_window)
+}
+
+/// Whether the URI reaches the freestyle data preview, or a path below it, in any spelling.
+fn reaches_freestyle(uri: &str) -> bool {
+    reaches(uri, is_freestyle_window)
+}
+
+fn is_armed() -> bool {
+    ARMED.with(|armed| armed.borrow().is_some())
+}
+
+fn reaches(uri: &str, window: fn(&[&str]) -> bool) -> bool {
     let mut text = uri.to_owned();
 
     loop {
@@ -336,7 +362,7 @@ fn reaches_classrun(uri: &str) -> bool {
         // without a split at the first one.
         let path = text.split(['?', '#']).next().unwrap_or_default();
 
-        if is_classrun_path(&text) || is_classrun_path(path) {
+        if has_window(&text, window) || has_window(path, window) {
             return true;
         }
 
@@ -350,10 +376,21 @@ fn reaches_classrun(uri: &str) -> bool {
     }
 }
 
-/// Whether the path, as written or with its dot segments resolved, holds the classrun resource.
-/// A fifth segment that begins with the word counts too (`classrunx`, `classrun.NAME`): no such
-/// resource exists, and refusing it keeps the rule independent of server quirks.
-fn is_classrun_path(path: &str) -> bool {
+/// Five path segments of the classrun resource. A fifth segment that begins with the word counts
+/// too (`classrunx`, `classrun.NAME`): no such resource exists, and refusing it keeps the rule
+/// independent of server quirks.
+fn is_classrun_window(window: &[&str]) -> bool {
+    window[..4] == ["sap", "bc", "adt", "oo"] && window[4].starts_with("classrun")
+}
+
+/// Five path segments of the freestyle data preview (or a segment that begins with the word).
+fn is_freestyle_window(window: &[&str]) -> bool {
+    window[..4] == ["sap", "bc", "adt", "datapreview"] && window[4].starts_with("freestyle")
+}
+
+/// Whether the path, as written or with its dot segments resolved, holds a five-segment window
+/// that `window` accepts.
+fn has_window(path: &str, window: fn(&[&str]) -> bool) -> bool {
     let lower = path.to_ascii_lowercase().replace('\\', "/");
     let written: Vec<&str> = lower
         .split('/')
@@ -372,11 +409,9 @@ fn is_classrun_path(path: &str) -> bool {
 
     // The window may sit at any position, so a scheme, an authority, or a leading segment of an
     // absolute-form URI cannot hide it.
-    [&written, &resolved].into_iter().any(|segments| {
-        segments.windows(5).any(|window| {
-            window[..4] == ["sap", "bc", "adt", "oo"] && window[4].starts_with("classrun")
-        })
-    })
+    [&written, &resolved]
+        .into_iter()
+        .any(|segments| segments.windows(5).any(window))
 }
 
 fn percent_decoded(text: &str) -> String {
@@ -704,8 +739,19 @@ fn split_query(uri: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// `GET /sap/bc/adt/system/information` with no query, no body and the one `Accept` the `ping`
+/// command sends: the Atom feed of the system and instance facts. It is metadata only, so a
+/// running runner does not change the verdict. `ping` over RFC calls `RFC_SYSTEM_INFO` instead
+/// and never sends this request through the SADT endpoint; the shape exists for parity with the
+/// RFC SADT backend, which serves every ADT read the HTTP backend can send.
+fn is_system_information(request: &Request) -> bool {
+    request.uri == SYSTEM_INFORMATION_URI
+        && request.body.is_empty()
+        && has_header(request, "Accept", SYSTEM_INFORMATION_ACCEPT)
+}
+
 fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
-    if uri == DISCOVERY || uri == INACTIVE_OBJECTS {
+    if uri == INACTIVE_OBJECTS {
         return true;
     }
 
@@ -714,7 +760,7 @@ fn is_read(uri: &str, path: &str, query: Option<&str>) -> bool {
     }
 
     if path == SEARCH {
-        return query.is_some_and(|query| is_group_search(query) || is_class_search(query));
+        return query.is_some_and(is_pattern_search);
     }
 
     let Some(parsed) = parse_path(path) else {
@@ -884,35 +930,36 @@ fn is_testable_object(uri: &str) -> bool {
     })
 }
 
-/// `search?operation=quickSearch&query=<NAME>&maxResults=10&objectType=FUGR%2FFF`, the typed
-/// search that resolves the function group of a function module.
-fn is_group_search(query: &str) -> bool {
-    query
-        .strip_prefix("operation=quickSearch&query=")
-        .and_then(|rest| rest.strip_suffix(SEARCH_TAIL))
-        .is_some_and(|name| is_name(name, false))
-}
-
-/// `search?operation=quickSearch&query=<PREFIX>*&maxResults=<1..=100>&objectType=CLAS%2FOC`, the
-/// leftover search of `doctor`. The prefix follows the `runner_prefix` rule; no other wildcard.
-fn is_class_search(query: &str) -> bool {
-    let Some((prefix, rest)) = query
-        .strip_prefix(CLASS_SEARCH)
-        .and_then(|rest| rest.split_once("*&maxResults="))
+/// `search?operation=quickSearch&query=<PATTERN>&maxResults=<1..=1000>[&objectType=<TYPE>]`, the
+/// `search` command, in this order and with nothing else. It is also the one shape of the function
+/// group resolver (`<NAME>&maxResults=10&objectType=FUGR%2FFF`) and of the `doctor` leftover search
+/// (`<PREFIX>*&maxResults=<n>&objectType=CLAS%2FOC`). The pattern is the canonical form of
+/// `validate_pattern` (upper case, no encoding), and the type one of the encoded ADT types the
+/// command knows.
+fn is_pattern_search(query: &str) -> bool {
+    let Some((pattern, rest)) = query
+        .strip_prefix(QUICK_SEARCH)
+        .and_then(|rest| rest.split_once("&maxResults="))
     else {
         return false;
     };
-    let Some((limit, object_type)) = rest.split_once('&') else {
-        return false;
+    let (limit, object_type) = match rest.split_once("&objectType=") {
+        Some((limit, object_type)) => (limit, Some(object_type)),
+        None => (rest, None),
     };
 
-    validate_runner_prefix(prefix).is_ok()
-        && object_type == CLASS_SEARCH_TAIL
-        && !limit.starts_with('0')
-        && limit.bytes().all(|byte| byte.is_ascii_digit())
-        && limit
+    validate_pattern(pattern).is_ok_and(|canonical| canonical == pattern)
+        && is_plain_number_in(limit, &MAX_RESULTS)
+        && object_type.is_none_or(is_encoded_type)
+}
+
+/// A decimal number without a sign, a leading zero or an encoding, inside `range`.
+fn is_plain_number_in(text: &str, range: &std::ops::RangeInclusive<u32>) -> bool {
+    !text.starts_with('0')
+        && text.bytes().all(|byte| byte.is_ascii_digit())
+        && text
             .parse::<u32>()
-            .is_ok_and(|limit| CLASS_SEARCH_LIMIT.contains(&limit))
+            .is_ok_and(|number| range.contains(&number))
 }
 
 /// `nodestructure?parent_type=FUGR%2FF&parent_name=<NAME>&withShortDescriptions=false`, the
@@ -948,8 +995,16 @@ fn is_post(request: &Request, uri: &str, path: &str, query: Option<&str>) -> boo
             && query.is_some_and(|query| is_data_preview(query, &request.body));
     }
 
+    if path == FREESTYLE_URI {
+        return has_content_type(request, "text/plain")
+            && has_header(request, "Accept", "application/*")
+            && query.is_some_and(|query| is_freestyle(query, &request.body));
+    }
+
     if path == USAGE_REFERENCES {
-        return query.is_some_and(|query| is_where_used_object(query, &request.body));
+        return has_content_type(request, "application/*")
+            && has_header(request, "Accept", "application/*")
+            && query.is_some_and(|query| is_where_used_object(query, &request.body));
     }
 
     if path == NODE_STRUCTURE {
@@ -996,6 +1051,16 @@ fn has_content_type(request: &Request, expected: &str) -> bool {
     has_header(request, "Content-Type", expected)
 }
 
+/// Whether two header names are equal ignoring case.
+fn has_ambiguous_headers(request: &Request) -> bool {
+    let mut seen = std::collections::HashSet::new();
+
+    request
+        .headers
+        .keys()
+        .any(|name| !seen.insert(name.to_ascii_lowercase()))
+}
+
 fn has_header(request: &Request, name: &str, expected: &str) -> bool {
     request
         .headers
@@ -1012,15 +1077,23 @@ fn is_data_preview(query: &str, body: &[u8]) -> bool {
     let Some(rows) = rows.strip_prefix("rowNumber=") else {
         return false;
     };
-    let rows_valid = !rows.starts_with('0')
-        && rows.bytes().all(|byte| byte.is_ascii_digit())
-        && rows
-            .parse::<u32>()
-            .is_ok_and(|rows| (1..=MAX_PREVIEW_ROWS).contains(&rows));
+    let rows_valid = is_plain_number_in(rows, &(1..=MAX_PREVIEW_ROWS));
     // Only the `/` of a namespace is escaped, as `%2F`; a raw one is refused.
     let decoded = entity.replace("%2F", "/");
 
     rows_valid && !entity.contains('/') && is_entity(&decoded) && reads_entity(body, &decoded)
+}
+
+/// `rowNumber=<1..5000>` and nothing else, with a body that is the exact canonical rendering of a
+/// statement of the `sql` grammar. SAP runs a freestyle body as written, so this boundary re-parses
+/// it; the deny list and the dictionary check belong to the operation layer.
+fn is_freestyle(query: &str, body: &[u8]) -> bool {
+    let Some(rows) = query.strip_prefix("rowNumber=") else {
+        return false;
+    };
+    let rows_valid = is_plain_number_in(rows, &(1..=MAX_PREVIEW_ROWS));
+
+    rows_valid && std::str::from_utf8(body).is_ok_and(|text| validate_body(text).is_ok())
 }
 
 /// `NAME` or `/NAMESPACE/NAME` of letters, digits and `_`.
@@ -1117,21 +1190,57 @@ fn is_validation(path: &str, query: &str) -> bool {
         && is_encoded(text)
 }
 
-/// `uri=<function module>`, the object a where-used request asks for; or a program or include
-/// as `usage_references_uri` emits it, with exactly `USAGE_REQUEST_XML` as the body.
+/// The DDIC collections a where-used request may name; `where_used.rs` builds the same URIs.
+const DDIC_COLLECTIONS: [&str; 5] = [
+    "dataelements",
+    "domains",
+    "tables",
+    "structures",
+    "tabletypes",
+];
+
+/// `uri=<object URI>` and nothing else, with exactly `USAGE_REQUEST_XML` as the body. The object
+/// is one of the kinds `usage_references_uri` emits: a program or an include, a function module,
+/// a function group, a class, an interface, or a data element, domain, table or table type of the
+/// DDIC collections. Each name is plain (letters, digits, `_`), because the query keeps `/` and
+/// unreserved characters literal and encodes every other one: a `%`, `.`, `..` or `?` is refused.
 fn is_where_used_object(query: &str, body: &[u8]) -> bool {
     let Some(uri) = query.strip_prefix("uri=") else {
         return false;
     };
 
-    uri.strip_prefix(PROGRAMS)
+    body == USAGE_REQUEST_XML.as_bytes() && is_where_used_uri(uri)
+}
+
+fn is_where_used_uri(uri: &str) -> bool {
+    if let Some(name) = uri
+        .strip_prefix(PROGRAMS)
         .or_else(|| uri.strip_prefix(PROGRAM_INCLUDES))
         .and_then(|rest| rest.strip_prefix('/'))
-        .map_or_else(
-            || parse_path(uri).is_some_and(|p| p.kind == Kind::Func && p.part == Part::Object),
-            // Plain names only: the M1 program rule would admit `$`, `-`, `.` and `%2f`.
-            |name| is_name(name, false) && body == USAGE_REQUEST_XML.as_bytes(),
-        )
+    {
+        // Plain names only: the M1 program rule would admit `$`, `-`, `.` and `%2f`.
+        return is_name(name, false);
+    }
+
+    if let Some(name) = uri
+        .strip_prefix(DDIC)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .and_then(|rest| {
+            DDIC_COLLECTIONS
+                .iter()
+                .find_map(|collection| rest.strip_prefix(collection)?.strip_prefix('/'))
+        })
+    {
+        return is_name(name, false);
+    }
+
+    parse_path(uri).is_some_and(|parsed| {
+        parsed.part == Part::Object
+            && matches!(
+                parsed.kind,
+                Kind::Func | Kind::Clas | Kind::Intf | Kind::Group
+            )
+    })
 }
 
 /// Splits an ADT path into its object and the part below it. Names are checked as path segments:

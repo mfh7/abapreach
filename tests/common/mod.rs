@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use abapreach::transport::rfc::SystemInfo;
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use serde::Deserialize;
 use std::collections::{BTreeMap, VecDeque};
@@ -46,6 +47,8 @@ pub struct ScriptedTransport {
     pub closes: usize,
     expected: VecDeque<Request>,
     replies: VecDeque<Result<Response, TransportError>>,
+    /// The answer of the typed `RFC_SYSTEM_INFO` call, when the script plays an RFC session.
+    system_info: Option<Result<SystemInfo, TransportError>>,
 }
 
 pub fn fixture_path(name: &str) -> PathBuf {
@@ -94,6 +97,7 @@ pub fn from_fixture(
         closes: 0,
         expected,
         replies,
+        system_info: None,
     }
 }
 
@@ -104,7 +108,15 @@ impl ScriptedTransport {
             closes: 0,
             expected: VecDeque::new(),
             replies: replies.into(),
+            system_info: None,
         }
+    }
+
+    /// Makes the script an RFC session that answers `RFC_SYSTEM_INFO` with `answer`.
+    pub fn with_system_info(mut self, answer: Result<SystemInfo, TransportError>) -> Self {
+        self.system_info = Some(answer);
+
+        self
     }
 
     pub fn assert_finished(&self) {
@@ -129,6 +141,14 @@ impl SadtTransport for ScriptedTransport {
         self.closes += 1;
 
         Ok(())
+    }
+
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        self.system_info.clone().unwrap_or_else(|| {
+            Err(TransportError::Protocol(
+                "the script has no RFC_SYSTEM_INFO answer".to_owned(),
+            ))
+        })
     }
 }
 
@@ -176,7 +196,8 @@ pub fn preview(columns: &[(&str, &[Option<&str>])]) -> String {
 
 /// The replies of the `doctor` runner reads on one session after the discovery: the interface
 /// preview (found), an empty leftover search, the two preflight previews, the type of the classrun
-/// `OUT` parameter, and the two orphan previews (no rows).
+/// `OUT` parameter, the two orphan previews (no rows), and the system information of the
+/// instance line.
 pub fn doctor_runner_replies() -> Vec<Result<Response, TransportError>> {
     let found = preview(&[("CLSNAME", &[Some("IF_OO_ADT_CLASSRUN")])]);
     let t000 = preview(&[
@@ -210,5 +231,99 @@ pub fn doctor_runner_replies() -> Vec<Result<Response, TransportError>> {
     ]
     .into_iter()
     .map(|body| Ok(Response::text(200, body)))
+    .chain([sysinfo_reply("sysinfo-750.xml")])
     .collect()
+}
+
+/// What `RFC_READ_TABLE` returns: `FIELDS` with the offsets and `DATA` as fixed-width rows whose
+/// trailing blanks the library drops.
+pub fn read_table_reply(
+    fields: &[(&str, usize)],
+    rows: &[Vec<&str>],
+) -> abapreach::transport::rfc::FunctionResult {
+    let mut offset = 0;
+    let mut spans = Vec::new();
+
+    for (name, length) in fields {
+        spans.push((*name, offset, *length));
+        offset += length;
+    }
+
+    let text = |value: &str| abapreach::transport::rfc::Cell::Text(value.to_owned());
+
+    abapreach::transport::rfc::FunctionResult {
+        exports: Vec::new(),
+        tables: vec![
+            (
+                "FIELDS".to_owned(),
+                spans
+                    .iter()
+                    .map(|(name, offset, length)| {
+                        vec![
+                            text(name),
+                            text(&format!("{offset:06}")),
+                            text(&format!("{length:06}")),
+                        ]
+                    })
+                    .collect(),
+            ),
+            (
+                "DATA".to_owned(),
+                rows.iter()
+                    .map(|row| {
+                        let wa: String = row
+                            .iter()
+                            .zip(fields)
+                            .map(|(value, (_, length))| format!("{value:<width$}", width = *length))
+                            .collect();
+
+                        vec![text(wa.trim_end())]
+                    })
+                    .collect(),
+            ),
+        ],
+    }
+}
+
+/// A synthetic `RFC_SYSTEM_INFO` answer; no live value.
+pub fn system_info() -> SystemInfo {
+    SystemInfo {
+        instance: "apphost_HD1_00".to_owned(),
+        host: "apphost".to_owned(),
+        system_id: "HD1".to_owned(),
+        release: "750".to_owned(),
+        kernel: "753".to_owned(),
+        database: "DB6".to_owned(),
+        invoke_time: Some(std::time::Duration::from_millis(7)),
+    }
+}
+
+/// The reply of `/system/information` of a fixture in `tests/fixtures/m9`.
+pub fn sysinfo_reply(name: &str) -> Result<Response, TransportError> {
+    let status = if name.ends_with("-404.xml") { 404 } else { 200 };
+    let body = fs::read_to_string(fixture_path_in("m9", name)).expect("read fixture");
+
+    Ok(Response::text(status, body))
+}
+
+/// A session whose close fails with `error`; every other call goes to `inner`.
+pub struct CloseFails<T> {
+    pub inner: T,
+    pub error: TransportError,
+}
+
+impl<T: SadtTransport> SadtTransport for CloseFails<T> {
+    fn request(&mut self, request: Request) -> Result<Response, TransportError> {
+        self.inner.request(request)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        let _ = self.inner.close();
+
+        Err(self.error.clone())
+    }
+
+    fn system_info(&mut self) -> Result<SystemInfo, TransportError> {
+        self.inner.system_info()
+    }
 }

@@ -6,7 +6,7 @@ use abapreach::config::Connection;
 use abapreach::operation::deploy::{CancelFlag, InterruptAction};
 use abapreach::transport::http::HttpTransport;
 use abapreach::transport::rfc::{FakeRfcApi, RfcEndpointResponse, RfcTransport};
-use abapreach::transport::{Response, SadtTransport, TransportError};
+use abapreach::transport::{Response, SadtTransport, TableCall, TableRows, TransportError};
 use abapreach::{Exit, Factories, RfcLibraryIdentity, RfcLibraryInfo, run};
 use clap::Parser;
 use common::ScriptedTransport;
@@ -39,6 +39,10 @@ impl<T: SadtTransport> SadtTransport for Shared<T> {
 
     fn stateful_supported(&self) -> Option<bool> {
         self.0.borrow().stateful_supported()
+    }
+
+    fn read_table_function(&mut self, call: &TableCall) -> Result<TableRows, TransportError> {
+        self.0.borrow_mut().read_table_function(call)
     }
 }
 
@@ -2242,9 +2246,14 @@ fn an_emptied_deny_list_lets_read_table_through_the_policy() {
 }
 
 #[test]
-fn a_view_over_a_denied_table_is_rejected_after_the_lookups_only() {
+fn a_view_over_a_denied_table_is_a_stop_after_the_lookups_only() {
     let (calls, adt) = shared(ScriptedTransport::replies(vec![
         dd02l("ZV_USERS", "VIEW", Some("D")),
+        source(&common::preview(&[
+            ("DDLNAME", &[]),
+            ("OBJECTNAME", &[]),
+            ("OBJECTTYPE", &[]),
+        ])),
         source(&common::preview(&[
             ("VIEWNAME", &[Some("ZV_USERS")]),
             ("TABNAME", &[Some("USR02")]),
@@ -2257,12 +2266,13 @@ fn a_view_over_a_denied_table_is_rejected_after_the_lookups_only() {
 
     let exit = read_table(&["zv_users", "--conn", "dev_100"], &mut fake);
 
-    assert_eq!(exit.code, 1);
-    assert!(exit.stderr.starts_with("REJECTED: "), "{}", exit.stderr);
+    assert_eq!(exit.code, 2);
+    assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+    assert!(exit.stderr.contains("nothing was read"), "{}", exit.stderr);
     assert!(exit.stderr.contains("USR02"), "{}", exit.stderr);
     assert_eq!(table_of(&exit), "");
-    assert_eq!(calls.borrow().calls.len(), 2);
-    assert_eq!(fake.rfc_opened, 0, "a rejection never falls back");
+    assert_eq!(calls.borrow().calls.len(), 3);
+    assert_eq!(fake.rfc_opened, 0, "a refusal never falls back");
 }
 
 #[test]
@@ -2321,6 +2331,1289 @@ fn an_rfc_only_connection_reads_over_a_fresh_rfc_connection() {
 
     assert_eq!(exit.code, 0, "{}", exit.stderr);
     assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+}
+
+// ---- sql -------------------------------------------------------------------------------------
+
+const SQL_JOIN: &str = "SELECT TADIR~OBJ_NAME, TDEVC~DLVUNIT FROM TADIR INNER JOIN TDEVC ON TADIR~DEVCLASS = TDEVC~DEVCLASS WHERE TADIR~OBJECT = 'CLAS' AND TADIR~OBJ_NAME LIKE 'CL_ABAP_TYPED%'";
+const FREESTYLE: &str = "/sap/bc/adt/datapreview/freestyle";
+const JOIN_TABLE: &str =
+    "OBJ_NAME\tDLVUNIT\nCL_ABAP_TYPEDESCR\tSAP_BASIS\nCL_ABAP_TYPED\tSAP_BASIS";
+
+fn sql(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "sql"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+fn join_rows() -> Result<Response, TransportError> {
+    source(&common::preview(&[
+        (
+            "OBJ_NAME",
+            &[Some("CL_ABAP_TYPEDESCR"), Some("CL_ABAP_TYPED")],
+        ),
+        ("DLVUNIT", &[Some("SAP_BASIS"), Some("SAP_BASIS")]),
+    ]))
+}
+
+/// The dictionary answers of a join of `TADIR` and `TDEVC`, then the freestyle rows.
+fn join_replies() -> Vec<Result<Response, TransportError>> {
+    vec![
+        dd02l("TADIR", "TRANSP", None),
+        dd02l("TDEVC", "TRANSP", None),
+        join_rows(),
+    ]
+}
+
+/// The dictionary answers that end in a refusal: a view over `USR02`.
+fn denied_view_replies() -> Vec<Result<Response, TransportError>> {
+    vec![
+        dd02l("ZV_USERS", "VIEW", Some("D")),
+        source(&common::preview(&[
+            ("DDLNAME", &[]),
+            ("OBJECTNAME", &[]),
+            ("OBJECTTYPE", &[]),
+        ])),
+        source(&common::preview(&[
+            ("VIEWNAME", &[Some("ZV_USERS")]),
+            ("TABNAME", &[Some("USR02")]),
+            ("TABPOS", &[Some("0001")]),
+        ])),
+    ]
+}
+
+/// Replies as the RFC endpoint returns them.
+fn rfc_replies(replies: &[Result<Response, TransportError>]) -> Vec<RfcEndpointResponse> {
+    replies
+        .iter()
+        .map(|reply| {
+            let response = reply.as_ref().expect("a reply");
+
+            RfcEndpointResponse {
+                status: response.status,
+                headers: BTreeMap::new(),
+                body: response.body.clone(),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn sql_accepts_a_statement_or_a_file_and_the_row_limits_of_read_table() {
+    let cli = |args: &[&str]| {
+        let mut full = vec!["abapreach", "sql"];
+
+        full.extend_from_slice(args);
+
+        Cli::try_parse_from(full)
+    };
+
+    match cli(&["SELECT * FROM T001", "--conn", "dev_100"])
+        .unwrap()
+        .command
+    {
+        Command::Sql {
+            query, file, rows, ..
+        } => {
+            assert_eq!(query.as_deref(), Some("SELECT * FROM T001"));
+            assert!(file.is_none());
+            assert_eq!(rows, 100);
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&["--file", "q.sql", "--rows", "5000", "--conn", "dev_100"])
+        .unwrap()
+        .command
+    {
+        Command::Sql {
+            query, file, rows, ..
+        } => {
+            assert!(query.is_none());
+            assert_eq!(file.as_deref(), Some(Path::new("q.sql")));
+            assert_eq!(rows, 5000);
+        }
+        other => panic!("{other:?}"),
+    }
+    for rows in ["0", "5001", "-1", "x"] {
+        assert!(
+            cli(&["SELECT * FROM T001", "--rows", rows, "--conn", "dev_100"]).is_err(),
+            "{rows}"
+        );
+        assert_stops_locally(&[
+            "abapreach",
+            "sql",
+            "SELECT * FROM T001",
+            "--rows",
+            rows,
+            "--conn",
+            "dev_100",
+        ]);
+    }
+    // Exactly one of the statement and `--file`, and a connection.
+    assert!(cli(&["--conn", "dev_100"]).is_err());
+    assert!(cli(&["SELECT * FROM T001"]).is_err());
+    assert!(
+        cli(&["SELECT * FROM T001", "--file", "q.sql", "--conn", "dev_100"]).is_err(),
+        "a statement and --file together"
+    );
+}
+
+#[test]
+fn sql_stops_locally_on_a_denied_table_or_a_statement_outside_the_grammar() {
+    for statement in [
+        "SELECT * FROM usr02",
+        "SELECT * FROM T001 AS A INNER JOIN USR02 AS B ON A~BUKRS = B~BNAME",
+        "SELECT * FROM T001 WHERE BUKRS IN ( SELECT BNAME FROM USR02 )",
+        "SELECT * FROM T001 UNION SELECT * FROM T000",
+        "SELECT * FROM T001 INTO TABLE @DATA(LT_X)",
+        "SELECT * FROM T001 UP TO 5 ROWS",
+        "SELECT * FROM T001 \"comment",
+        "SELECT * FROM T001 RIGHT OUTER JOIN T000 ON T001~BUKRS = T000~MANDT",
+        "DELETE FROM T001",
+        "",
+    ] {
+        let mut fake = Fake::default();
+        let exit = sql(&[statement, "--conn", "dev_100"], &mut fake);
+
+        assert_eq!(exit.code, 2, "{statement:?}: {}", exit.stderr);
+        assert!(
+            exit.stderr.starts_with("STOP: "),
+            "{statement:?}: {}",
+            exit.stderr
+        );
+        assert_eq!(table_of(&exit), "", "{statement:?}");
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0), "{statement:?}");
+    }
+
+    let mut fake = Fake::default();
+    let exit = sql(&["SELECT * FROM usr02", "--conn", "dev_100"], &mut fake);
+
+    assert!(exit.stderr.contains("USR02") && exit.stderr.contains("read_table_denied"));
+}
+
+#[test]
+fn sql_prints_a_tab_separated_table_over_adt_and_sends_the_canonical_body() {
+    let (calls, adt) = shared(ScriptedTransport::replies(join_replies()));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = sql(
+        &[
+            "select tadir~obj_name, tdevc~dlvunit from tadir inner join tdevc on tadir~devclass = tdevc~devclass where tadir~object = 'CLAS' and tadir~obj_name like 'CL_ABAP_TYPED%'",
+            "--rows",
+            "2",
+            "--conn",
+            "dev_100",
+        ],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), JOIN_TABLE);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert_eq!(calls.borrow().closes, 1);
+
+    let calls = calls.borrow();
+    let freestyle = &calls.calls[2];
+
+    assert_eq!(calls.calls.len(), 3);
+    assert_eq!(freestyle.uri, format!("{FREESTYLE}?rowNumber=2"));
+    assert_eq!(String::from_utf8(freestyle.body.clone()).unwrap(), SQL_JOIN);
+    assert_eq!(
+        freestyle.headers.get("Content-Type").map(String::as_str),
+        Some("text/plain")
+    );
+    assert_eq!(
+        freestyle.headers.get("Accept").map(String::as_str),
+        Some("application/*")
+    );
+}
+
+#[test]
+fn sql_reads_a_multi_line_statement_from_a_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("query.sql");
+
+    fs::write(
+        &file,
+        "SELECT tadir~obj_name,\n       tdevc~dlvunit\n  FROM tadir\n  INNER JOIN tdevc\n    ON tadir~devclass = tdevc~devclass\n WHERE tadir~object = 'CLAS'\n   AND tadir~obj_name LIKE 'CL_ABAP_TYPED%'\n",
+    )
+    .unwrap();
+
+    let (calls, adt) = shared(ScriptedTransport::replies(join_replies()));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = go(
+        &[
+            "abapreach",
+            "sql",
+            "--file",
+            file.to_str().unwrap(),
+            "--rows",
+            "2",
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        String::from_utf8(calls.borrow().calls[2].body.clone()).unwrap(),
+        SQL_JOIN
+    );
+
+    let mut fake = Fake::default();
+    let missing = directory.path().join("missing.sql");
+    let exit = go(
+        &[
+            "abapreach",
+            "sql",
+            "--file",
+            missing.to_str().unwrap(),
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2);
+    assert!(
+        exit.stderr.starts_with("STOP: cannot read "),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+#[test]
+fn sql_refuses_a_file_longer_than_the_statement_limit_without_a_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("big.sql");
+
+    // 4001 bytes: the limit is 4000.
+    fs::write(&file, format!("SELECT * FROM T001 {}", " ".repeat(3982))).unwrap();
+
+    let mut fake = Fake::default();
+    let exit = go(
+        &[
+            "abapreach",
+            "sql",
+            "--file",
+            file.to_str().unwrap(),
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert!(
+        exit.stderr.contains("is longer than 4000"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+#[test]
+fn sql_refuses_a_file_that_is_not_utf_8_without_a_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("latin1.sql");
+
+    fs::write(&file, b"SELECT * FROM T001 WHERE BUKRS = '\xE4'").unwrap();
+
+    let mut fake = Fake::default();
+    let exit = go(
+        &[
+            "abapreach",
+            "sql",
+            "--file",
+            file.to_str().unwrap(),
+            "--conn",
+            "dev_100",
+        ],
+        directory.path(),
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 2, "{}", exit.stderr);
+    assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+    assert!(exit.stderr.contains("is not UTF-8 text"), "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+}
+
+#[test]
+fn sql_over_the_rfc_backend_passes_admission_with_the_fake() {
+    let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(rfc_replies(
+        &join_replies(),
+    ))));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(rfc);
+
+    let exit = sql(&[SQL_JOIN, "--rows", "2", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), JOIN_TABLE);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    // The two dictionary lookups and the freestyle POST left the process.
+    assert_eq!(api.borrow().api().counts().2, 3);
+
+    let api = api.borrow();
+    let last = api.api().last_request();
+
+    assert_eq!(last.uri, format!("{FREESTYLE}?rowNumber=2"));
+    assert_eq!(String::from_utf8(last.body.clone()).unwrap(), SQL_JOIN);
+}
+
+#[test]
+fn an_rfc_only_connection_runs_sql_over_a_fresh_rfc_connection() {
+    let mut fake = Fake::default();
+
+    fake.rfc.push_back(scripted(join_replies()));
+
+    let exit = sql(&[SQL_JOIN, "--conn", "qas_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+}
+
+#[test]
+fn sql_falls_back_to_rfc_only_before_anything_was_read() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(scripted(join_replies()));
+
+    let exit = sql(&[SQL_JOIN, "--rows", "2", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), JOIN_TABLE);
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn a_refused_entity_stops_with_exit_2_and_sends_no_freestyle_request_on_any_backend() {
+    let statements = [
+        // A view over a denied table.
+        ("SELECT * FROM ZV_USERS", denied_view_replies()),
+        // A generated CDS SQL view.
+        (
+            "SELECT * FROM IFICOUNTRY",
+            vec![
+                dd02l("IFICOUNTRY", "VIEW", Some("D")),
+                source(&common::preview(&[
+                    ("DDLNAME", &[Some("I_COUNTRY")]),
+                    ("OBJECTNAME", &[Some("IFICOUNTRY")]),
+                    ("OBJECTTYPE", &[Some("VIEW")]),
+                ])),
+            ],
+        ),
+        // A CDS name and an unknown name: the dictionary holds no active entry.
+        (
+            "SELECT * FROM I_COUNTRY",
+            vec![source(&common::preview(&[
+                ("TABNAME", &[]),
+                ("TABCLASS", &[]),
+                ("VIEWCLASS", &[]),
+            ]))],
+        ),
+    ];
+
+    for (statement, replies) in statements {
+        let lookups = replies.len();
+
+        // ADT HTTP.
+        let (calls, adt) = shared(ScriptedTransport::replies(replies.clone()));
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(adt);
+
+        let exit = sql(&[statement, "--conn", "dev_100"], &mut fake);
+
+        assert_eq!(exit.code, 2, "{statement}: {}", exit.stderr);
+        assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+        assert!(
+            exit.stderr.contains("no statement was sent"),
+            "{}",
+            exit.stderr
+        );
+        assert_eq!(table_of(&exit), "");
+        assert_eq!(calls.borrow().calls.len(), lookups, "{statement}");
+        assert!(
+            calls
+                .borrow()
+                .calls
+                .iter()
+                .all(|call| !call.uri.starts_with(FREESTYLE)),
+            "{statement}: freestyle sent over ADT HTTP"
+        );
+        assert_eq!(fake.rfc_opened, 0, "a refusal never falls back");
+
+        // RFC SADT: the library behind it (SAP GUI or NW RFC SDK) does not change the boundary.
+        let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(rfc_replies(
+            &replies,
+        ))));
+        let mut fake = Fake::default();
+
+        fake.rfc.push_back(rfc);
+
+        let exit = sql(&[statement, "--conn", "qas_100"], &mut fake);
+
+        assert_eq!(exit.code, 2, "{statement}: {}", exit.stderr);
+        assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+        assert_eq!(api.borrow().api().counts().2, lookups, "{statement}");
+        assert!(
+            !api.borrow().api().last_request().uri.starts_with(FREESTYLE),
+            "{statement}: freestyle sent over RFC SADT"
+        );
+    }
+}
+
+#[test]
+fn a_dictionary_lookup_that_cannot_answer_is_rejected_without_a_fallback() {
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(500, "boom"))]));
+
+    let exit = sql(&["SELECT * FROM T001", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(exit.stderr.starts_with("REJECTED: "), "{}", exit.stderr);
+    assert_eq!(fake.rfc_opened, 0, "a rejection never falls back");
+}
+
+#[test]
+fn a_failed_freestyle_read_is_an_error_without_fallback() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("T001", "TRANSP", None),
+        Ok(Response::text(400, "<exc:exception><localizedMessage>Unknown column name \"NOPE\"</localizedMessage></exc:exception>")),
+    ]));
+
+    let exit = sql(&["SELECT NOPE FROM T001", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1);
+    assert!(exit.stderr.starts_with("ERROR: "), "{}", exit.stderr);
+    assert!(
+        exit.stderr.contains("Unknown column name"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn sql_output_is_cut_at_one_mebibyte_and_scrubbed_of_secrets() {
+    let value = "x".repeat(4000);
+    let rows: Vec<Option<&str>> = (0..400).map(|_| Some(value.as_str())).collect();
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("T001", "TRANSP", None),
+        source(&common::preview(&[("BIG", &rows)])),
+    ]));
+
+    let exit = sql(
+        &["SELECT BIG FROM T001", "--rows", "400", "--conn", "dev_100"],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(table_of(&exit).len() <= 1 << 20);
+    assert!(
+        exit.stderr.contains("output cut at 1048576 bytes"),
+        "{}",
+        exit.stderr
+    );
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("T001", "TRANSP", None),
+        source(&common::preview(&[("BUTXT", &[Some("pw is secret-pw")])])),
+    ]));
+
+    let exit = sql(&["SELECT BUTXT FROM T001", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(!exit.stdout.contains("secret-pw"), "{}", exit.stdout);
+}
+
+// ---- search ----------------------------------------------------------------------------------
+
+const SEARCH_URI: &str = "/sap/bc/adt/repository/informationsystem/search";
+const SEARCH_758_TABLE: &str = "TABL/DS RFC_SYSTEM_IDENTITY package=SQRFC1 System ID\n\
+    TABL/DS RFC_SYSTEM_INFO package=SOAP_CONFIG Proxy Structure (Generated)\n\
+    FUGR/FF RFC_SYSTEM_INFO package=SRCX Liefert versch. Informationen über das System.\n\
+    SUSH RFC_SYSTEM_INFO RF package=SRCX RFC_SYSTEM_INFO\n\
+    TABL/DS RFC_SYSTEM_INFO_RESPONSE package=SOAP_CONFIG Proxy Structure (generated)\n\
+    SEARCH: 5 objects";
+
+fn search(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "search"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+fn search_reply(name: &str) -> Result<Response, TransportError> {
+    source(&fs::read_to_string(common::fixture_path_in("m9", name)).unwrap())
+}
+
+#[test]
+fn search_takes_a_pattern_an_optional_type_and_a_maximum_of_one_to_a_thousand() {
+    let cli = |args: &[&str]| {
+        let mut full = vec!["abapreach", "search"];
+
+        full.extend_from_slice(args);
+
+        Cli::try_parse_from(full)
+    };
+
+    match cli(&["ZCL_*", "--conn", "dev_100"]).unwrap().command {
+        Command::Search {
+            pattern,
+            object_type,
+            max,
+            conn,
+        } => {
+            assert_eq!(pattern, "ZCL_*");
+            assert!(object_type.is_none());
+            assert_eq!(max, 50);
+            assert_eq!(conn, "dev_100");
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&[
+        "ZCL_*", "--type", "CLAS", "--max", "1000", "--conn", "dev_100",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::Search {
+            object_type, max, ..
+        } => {
+            assert_eq!(object_type.as_deref(), Some("CLAS"));
+            assert_eq!(max, 1000);
+        }
+        other => panic!("{other:?}"),
+    }
+    for max in ["0", "1001", "-1", "x", ""] {
+        assert!(
+            cli(&["Z*", "--max", max, "--conn", "dev_100"]).is_err(),
+            "{max}"
+        );
+        assert_stops_locally(&[
+            "abapreach",
+            "search",
+            "Z*",
+            "--max",
+            max,
+            "--conn",
+            "dev_100",
+        ]);
+    }
+    assert!(cli(&["--conn", "dev_100"]).is_err(), "a pattern is needed");
+    assert!(cli(&["Z*"]).is_err(), "a connection is needed");
+    assert!(cli(&["Z*", "A*", "--conn", "dev_100"]).is_err());
+}
+
+#[test]
+fn search_stops_locally_on_a_pattern_or_type_outside_the_rules() {
+    for args in [
+        vec![""],
+        vec!["ZCL ABAP"],
+        vec!["ZCL%2A"],
+        vec!["ZCL?"],
+        vec!["$TMP"],
+        vec!["/NS/"],
+        vec!["ZCL/X"],
+        vec!["Z*", "--type", "BOGUS"],
+        vec!["Z*", "--type", "CLAS/OC"],
+        vec!["Z*", "--type", ""],
+    ] {
+        let mut fake = Fake::default();
+        let mut full = args.clone();
+
+        full.extend(["--conn", "dev_100"]);
+
+        let exit = search(&full, &mut fake);
+
+        assert_eq!(exit.code, 2, "{args:?}: {}", exit.stderr);
+        assert!(
+            exit.stderr.starts_with("STOP: "),
+            "{args:?}: {}",
+            exit.stderr
+        );
+        assert_eq!(table_of(&exit), "", "{args:?}");
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0), "{args:?}");
+    }
+
+    let mut fake = Fake::default();
+    let exit = search(&["Z*", "--type", "BOGUS", "--conn", "dev_100"], &mut fake);
+
+    assert!(
+        exit.stderr
+            .contains("unknown type BOGUS (known: PROG, FUNC, FUGR, CLAS, INTF"),
+        "{}",
+        exit.stderr
+    );
+}
+
+#[test]
+fn search_prints_one_line_per_object_over_adt_and_sends_the_upper_case_pattern() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![search_reply(
+        "search-untyped-758.xml",
+    )]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = search(&["rfc_system_i*", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), SEARCH_758_TABLE);
+    assert_eq!(exit.stderr, "");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert_eq!(calls.borrow().closes, 1);
+    assert_eq!(calls.borrow().calls.len(), 1);
+    assert_eq!(
+        calls.borrow().calls[0].uri,
+        format!("{SEARCH_URI}?operation=quickSearch&query=RFC_SYSTEM_I*&maxResults=50")
+    );
+    assert_eq!(calls.borrow().calls[0].method, "GET");
+}
+
+#[test]
+fn a_typed_search_sends_the_object_type_and_filters_a_reply_that_ignored_it() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![search_reply(
+        "search-untyped-750.xml",
+    )]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = search(
+        &[
+            "RFC_SYSTEM_I*",
+            "--type",
+            "func",
+            "--max",
+            "7",
+            "--conn",
+            "dev_100",
+        ],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "FUGR/FF RFC_SYSTEM_INFO package=SRCX Function Module\n\
+         FUGR/FF RFC_SYSTEM_INFO_FASTSER package=SRCX Function Module\n\
+         SEARCH: 2 objects"
+    );
+    assert_eq!(
+        exit.stderr,
+        "W: the reply held objects of other types; 3 left out (the result may hold fewer than --max objects)"
+    );
+    assert_eq!(
+        calls.borrow().calls[0].uri,
+        format!(
+            "{SEARCH_URI}?operation=quickSearch&query=RFC_SYSTEM_I*&maxResults=7&objectType=FUGR%2FFF"
+        )
+    );
+}
+
+#[test]
+fn a_search_without_a_hit_is_exit_zero() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![source(
+        r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core"/>"#,
+    )]));
+
+    let exit = search(&["ZNOTHING_*", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "SEARCH: 0 objects");
+    assert_eq!(exit.stderr, "");
+}
+
+#[test]
+fn search_over_the_rfc_backend_passes_admission_with_the_fake() {
+    for (args, uri, reply, count) in [
+        (
+            vec!["rfc_system_i*", "--conn", "dev_100"],
+            format!("{SEARCH_URI}?operation=quickSearch&query=RFC_SYSTEM_I*&maxResults=50"),
+            "search-untyped-758.xml",
+            5,
+        ),
+        (
+            vec![
+                "cl_abap_*",
+                "--type",
+                "clas",
+                "--max",
+                "1000",
+                "--conn",
+                "dev_100",
+            ],
+            format!(
+                "{SEARCH_URI}?operation=quickSearch&query=CL_ABAP_*&maxResults=1000&objectType=CLAS%2FOC"
+            ),
+            "search-clas-758.xml",
+            1,
+        ),
+    ] {
+        let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(rfc_replies(
+            &[search_reply(reply)],
+        ))));
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(scripted(vec![pre_send()]));
+        fake.rfc.push_back(rfc);
+
+        let exit = search(&args, &mut fake);
+
+        assert_eq!(exit.code, 0, "{args:?}: {}", exit.stderr);
+        assert!(
+            table_of(&exit).ends_with(&if count == 1 {
+                "SEARCH: 1 object".to_owned()
+            } else {
+                format!("SEARCH: {count} objects")
+            }),
+            "{}",
+            exit.stdout
+        );
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+        // The one search left the process: admission let the exact shape through.
+        assert_eq!(api.borrow().api().counts().2, 1, "{args:?}");
+        assert_eq!(api.borrow().api().last_request().uri, uri);
+    }
+}
+
+#[test]
+fn an_rfc_only_connection_searches_over_a_fresh_rfc_connection() {
+    let mut fake = Fake::default();
+
+    fake.rfc
+        .push_back(scripted(vec![search_reply("search-untyped-740.xml")]));
+
+    let exit = search(&["RFC_SYSTEM_I*", "--conn", "qas_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        table_of(&exit).ends_with("SEARCH: 4 objects"),
+        "{}",
+        exit.stdout
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+}
+
+#[test]
+fn search_falls_back_to_rfc_only_before_anything_was_sent() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc
+        .push_back(scripted(vec![search_reply("search-untyped-750.xml")]));
+
+    let exit = search(&["RFC_SYSTEM_I*", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        table_of(&exit).ends_with("SEARCH: 5 objects"),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+/// FED answers no discovery on ADT HTTP, so the search path is not served there: an error, never
+/// a silent switch to the RFC path (that is the caller's pin of the route).
+#[test]
+fn a_search_the_system_does_not_serve_is_an_error_without_fallback() {
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(404, "<html/>"))]));
+
+    let exit = search(&["Z*", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .starts_with("ERROR: the object search answered HTTP 404"),
+        "{}",
+        exit.stderr
+    );
+    assert!(exit.stderr.contains("does not offer"), "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "");
+    assert_eq!(fake.rfc_opened, 0);
+}
+
+#[test]
+fn an_unreadable_search_reply_is_rejected_and_the_output_is_scrubbed_of_secrets() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![source("<a><b></a>")]));
+
+    let exit = search(&["Z*", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .starts_with("REJECTED: cannot read the search reply"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(fake.rfc_opened, 0);
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![source(
+        r#"<adtcore:objectReferences xmlns:adtcore="http://www.sap.com/adt/core"><adtcore:objectReference adtcore:type="PROG/P" adtcore:name="ZP" adtcore:packageName="ZPACK" adtcore:description="pw is secret-pw"/></adtcore:objectReferences>"#,
+    )]));
+
+    let exit = search(&["ZP", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(!exit.stdout.contains("secret-pw"), "{}", exit.stdout);
+    assert!(table_of(&exit).starts_with("PROG/P ZP package=ZPACK pw is"));
+}
+
+// ---- where-used ------------------------------------------------------------------------------
+
+const USAGE_URI: &str = "/sap/bc/adt/repository/informationsystem/usageReferences";
+const WHERE_USED_758_CLAS: &str = "USED-BY CLAS ZTEST_OBJECT package=ZTEST_OBJECT via=ADT\n\
+    USED-BY FUGR /SMB/ZIP_UPLOAD_DOWNLOAD package=/SMB/COMMON via=ADT\n\
+    USED-BY FUGR PAOC_SBP_TOOLS package=PAOC_SBP_PYP via=ADT\n\
+    USED-BY PROG ZTEST_OBJECT package=$TMP via=ADT\n\
+    USED-BY PROG/I ZTEST_OBJECT package=ZTEST_OBJECT via=ADT\n\
+    WHERE-USED: 5";
+
+fn where_used(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "where-used"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+fn usage_reply(name: &str) -> Result<Response, TransportError> {
+    source(&fs::read_to_string(common::fixture_path_in("m9", name)).unwrap())
+}
+
+fn discovery_reply(hrefs: &[&str]) -> Result<Response, TransportError> {
+    let collections: String = hrefs
+        .iter()
+        .map(|href| format!(r#"<app:collection href="{href}"/>"#))
+        .collect();
+
+    source(&format!(
+        r#"<app:service xmlns:app="http://www.w3.org/2007/app">{collections}</app:service>"#
+    ))
+}
+
+fn column_reply(name: &str, values: &[&str]) -> Result<Response, TransportError> {
+    let values: Vec<Option<&str>> = values.iter().map(|value| Some(*value)).collect();
+
+    source(&common::preview(&[(name, &values)]))
+}
+
+/// The replies of a data element fallback: the discovery without a DDIC collection, then the
+/// dictionary check and the rows of each table in the order the command reads them. `TRDIR` is a
+/// view on every release, so its check takes four lookups.
+fn dtel_fallback_replies() -> Vec<Result<Response, TransportError>> {
+    vec![
+        discovery_reply(&["/sap/bc/adt/programs/programs"]),
+        dd02l("WBCROSSGT", "TRANSP", None),
+        column_reply("INCLUDE", &["ZREPORT_TOP", "LZFGU01"]),
+        dd02l("TRDIR", "VIEW", Some("D")),
+        source(&common::preview(&[
+            ("DDLNAME", &[]),
+            ("OBJECTNAME", &[]),
+            ("OBJECTTYPE", &[]),
+        ])),
+        source(&common::preview(&[
+            ("VIEWNAME", &[Some("TRDIR")]),
+            ("TABNAME", &[Some("REPOSRC")]),
+            ("TABPOS", &[Some("0001")]),
+        ])),
+        dd02l("REPOSRC", "TRANSP", None),
+        column_reply("NAME", &["SAPLZFG"]),
+        dd02l("WBCROSSI", "TRANSP", None),
+        source(&common::preview(&[
+            ("INCLUDE", &[Some("ZREPORT_TOP")]),
+            ("MASTER", &[Some("ZREPORT")]),
+        ])),
+        dd02l("DD03L", "TRANSP", None),
+        column_reply("TABNAME", &["ZSTRUCT"]),
+        dd02l("TADIR", "TRANSP", None),
+        source(&common::preview(&[
+            ("OBJECT", &[Some("PROG"), Some("FUGR")]),
+            ("OBJ_NAME", &[Some("ZREPORT"), Some("ZFG")]),
+            ("DEVCLASS", &[Some("ZPACK"), Some("ZPACK_FG")]),
+        ])),
+    ]
+}
+
+const DTEL_FALLBACK_OUTPUT: &str = "USED-BY FUGR ZFG package=ZPACK_FG via=WBCROSSGT\n\
+    USED-BY PROG ZREPORT package=ZPACK via=WBCROSSGT\n\
+    USED-BY TABL ZSTRUCT package=? via=DD03L\n\
+    WHERE-USED: 3";
+const DTEL_FALLBACK_WARNING: &str =
+    "W: no ADT where-used for DTEL on this release; using cross-reference tables";
+
+#[test]
+fn where_used_takes_a_type_a_name_and_an_optional_maximum_of_one_to_five_thousand() {
+    let cli = |args: &[&str]| {
+        let mut full = vec!["abapreach", "where-used"];
+
+        full.extend_from_slice(args);
+
+        Cli::try_parse_from(full)
+    };
+
+    match cli(&["CLAS", "CL_ABAP_ZIP", "--conn", "dev_100"])
+        .unwrap()
+        .command
+    {
+        Command::WhereUsed {
+            object_type,
+            name,
+            max,
+            conn,
+        } => {
+            assert_eq!(object_type, "CLAS");
+            assert_eq!(name, "CL_ABAP_ZIP");
+            assert_eq!(max, 200);
+            assert_eq!(conn, "dev_100");
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&["dtel", "ZDE_A", "--max", "5000", "--conn", "dev_100"])
+        .unwrap()
+        .command
+    {
+        Command::WhereUsed {
+            object_type, max, ..
+        } => {
+            assert_eq!(object_type, "dtel");
+            assert_eq!(max, 5000);
+        }
+        other => panic!("{other:?}"),
+    }
+    for max in ["0", "5001", "-1", "x", ""] {
+        assert!(
+            cli(&["CLAS", "ZCL_A", "--max", max, "--conn", "dev_100"]).is_err(),
+            "{max}"
+        );
+        assert_stops_locally(&[
+            "abapreach",
+            "where-used",
+            "CLAS",
+            "ZCL_A",
+            "--max",
+            max,
+            "--conn",
+            "dev_100",
+        ]);
+    }
+    assert!(
+        cli(&["CLAS", "--conn", "dev_100"]).is_err(),
+        "a name is needed"
+    );
+    assert!(cli(&["CLAS", "ZCL_A"]).is_err(), "a connection is needed");
+    assert!(cli(&["CLAS", "ZCL_A", "ZCL_B", "--conn", "dev_100"]).is_err());
+}
+
+#[test]
+fn where_used_stops_locally_on_a_type_or_name_outside_the_rules() {
+    for args in [
+        vec!["MSAG", "ZMSG"],
+        vec!["TRAN", "SE38"],
+        vec!["DDLS", "ZDDL"],
+        vec!["BOGUS", "ZNAME"],
+        vec!["CLAS", "ZCL A"],
+        vec!["CLAS", "ZCL'A"],
+        vec!["CLAS", "/NS/ZCL_A"],
+        vec!["PROG", "Z$PROG"],
+        vec!["PROG", "../ZPROG"],
+        vec!["FUNC", ""],
+        vec!["DTEL", "ZDE'A"],
+        vec!["DOMA", "ZDO;A"],
+        vec!["TABL", &"Z".repeat(31)],
+    ] {
+        let mut fake = Fake::default();
+        let mut full = args.clone();
+
+        full.extend(["--conn", "dev_100"]);
+
+        let exit = where_used(&full, &mut fake);
+
+        assert_eq!(exit.code, 2, "{args:?}: {}", exit.stderr);
+        assert!(
+            exit.stderr.starts_with("STOP: "),
+            "{args:?}: {}",
+            exit.stderr
+        );
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0), "{args:?}");
+    }
+}
+
+#[test]
+fn where_used_over_adt_posts_the_object_query_and_prints_the_sorted_users() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![usage_reply(
+        "usage-clas-758.xml",
+    )]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = where_used(&["clas", "cl_abap_zip", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), WHERE_USED_758_CLAS);
+    assert_eq!(exit.stderr, "");
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+
+    let calls = calls.borrow();
+
+    assert_eq!(calls.calls.len(), 1);
+    assert_eq!(calls.calls[0].method, "POST");
+    assert_eq!(
+        calls.calls[0].uri,
+        format!("{USAGE_URI}?uri=/sap/bc/adt/oo/classes/cl_abap_zip")
+    );
+    assert_eq!(
+        calls.calls[0].body,
+        abapreach::adt::USAGE_REQUEST_XML.as_bytes()
+    );
+    assert_eq!(calls.closes, 1);
+}
+
+#[test]
+fn a_where_used_without_a_user_is_exit_zero() {
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![usage_reply("usage-prog-740.xml")]));
+
+    let exit = where_used(&["PROG", "RSPARAM", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), "WHERE-USED: 0");
+    assert_eq!(exit.stderr, "");
+}
+
+#[test]
+fn where_used_cuts_the_list_at_max_with_a_warning() {
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![usage_reply("usage-clas-758.xml")]));
+
+    let exit = where_used(
+        &["CLAS", "CL_ABAP_ZIP", "--max", "1", "--conn", "dev_100"],
+        &mut fake,
+    );
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "USED-BY CLAS ZTEST_OBJECT package=ZTEST_OBJECT via=ADT\nWHERE-USED: 1"
+    );
+    assert_eq!(
+        exit.stderr,
+        "W: 5 objects found; the first 1 are shown (--max)"
+    );
+}
+
+#[test]
+fn a_ddic_type_the_release_does_not_list_is_read_from_the_cross_reference_tables_over_adt() {
+    let (calls, adt) = shared(ScriptedTransport::replies(dtel_fallback_replies()));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = where_used(&["DTEL", "ZDE_A", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), DTEL_FALLBACK_OUTPUT);
+    assert_eq!(exit.stderr, DTEL_FALLBACK_WARNING);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+
+    let calls = calls.borrow();
+
+    assert_eq!(calls.calls[0].method, "GET");
+    assert_eq!(calls.calls[0].uri, "/sap/bc/adt/discovery");
+    assert!(
+        calls.calls.iter().skip(1).all(|call| call
+            .uri
+            .starts_with("/sap/bc/adt/datapreview/ddic?rowNumber=")),
+        "{:?}",
+        calls.calls.iter().map(|call| &call.uri).collect::<Vec<_>>()
+    );
+    assert_eq!(calls.calls.len(), 14);
+}
+
+#[test]
+fn a_ddic_type_the_release_lists_goes_through_the_usage_search() {
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![
+        discovery_reply(&[
+            "/sap/bc/adt/ddic/dataelements",
+            "/sap/bc/adt/ddic/structures",
+        ]),
+        usage_reply("usage-prog-750.xml"),
+    ]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = where_used(&["DTEL", "ZDE_A", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "USED-BY PROG RFVISL00 package=FVVI via=ADT\nWHERE-USED: 1"
+    );
+    assert_eq!(exit.stderr, "");
+    assert_eq!(
+        calls.borrow().calls[1].uri,
+        format!("{USAGE_URI}?uri=/sap/bc/adt/ddic/dataelements/zde_a")
+    );
+}
+
+#[test]
+fn where_used_over_the_rfc_backend_passes_admission_with_the_fake() {
+    // An ADT kind: the usage POST and the function group search are exact shapes.
+    let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(rfc_replies(
+        &[usage_reply("usage-clas-758.xml")],
+    ))));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(rfc);
+
+    let exit = where_used(&["CLAS", "CL_ABAP_ZIP", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), WHERE_USED_758_CLAS);
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert_eq!(api.borrow().api().counts().2, 1);
+    assert_eq!(
+        api.borrow().api().last_request().uri,
+        format!("{USAGE_URI}?uri=/sap/bc/adt/oo/classes/cl_abap_zip")
+    );
+
+    // The fallback: the discovery GET and every data preview leave the process.
+    let replies = dtel_fallback_replies();
+    let count = replies.len();
+    let (api, rfc) = shared(RfcTransport::new(FakeRfcApi::with_responses(rfc_replies(
+        &replies,
+    ))));
+    let mut fake = Fake::default();
+
+    fake.rfc.push_back(rfc);
+
+    let exit = where_used(&["DTEL", "ZDE_A", "--conn", "qas_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(table_of(&exit), DTEL_FALLBACK_OUTPUT);
+    assert!(
+        exit.stderr.contains(DTEL_FALLBACK_WARNING),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+    assert_eq!(api.borrow().api().counts().2, count);
+}
+
+#[test]
+fn where_used_falls_back_to_rfc_only_before_anything_was_sent() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc
+        .push_back(scripted(vec![usage_reply("usage-prog-750.xml")]));
+
+    let exit = where_used(&["PROG", "RSPARAM", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "USED-BY PROG RFVISL00 package=FVVI via=ADT\nWHERE-USED: 1"
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+#[test]
+fn a_where_used_the_system_refuses_or_cannot_read_is_an_error_without_fallback() {
+    let mut fake = Fake::default();
+
+    fake.adt
+        .push_back(scripted(vec![Ok(Response::text(404, "<html/>"))]));
+
+    let exit = where_used(&["CLAS", "ZCL_A", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .starts_with("ERROR: the where-used search answered HTTP 404"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(table_of(&exit), "");
+    assert_eq!(fake.rfc_opened, 0);
+
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![source("<a><b></a>")]));
+
+    let exit = where_used(&["CLAS", "ZCL_A", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stderr
+            .starts_with("REJECTED: cannot read the where-used reply"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!(fake.rfc_opened, 0);
 }
 
 // ---- delete ----------------------------------------------------------------------------------
@@ -3052,4 +4345,609 @@ fn create_prog_falls_back_to_rfc_when_the_resolution_cannot_reach_adt() {
         exit.stdout
     );
     assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+}
+
+// ---- dumps and dump ----------------------------------------------------------------------------
+
+const OWN_DUMP: &str = "20261103/053726/apphost/USER/21";
+const OTHER_DUMP: &str = "20261103/053726/apphost/TESTUSER/21";
+
+fn dumps(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "dumps"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+fn dump(args: &[&str], fake: &mut Fake) -> Exit {
+    let directory = tempfile::tempdir().unwrap();
+    let mut full = vec!["abapreach", "dump"];
+
+    full.extend_from_slice(args);
+
+    go(&full, directory.path(), fake)
+}
+
+fn snap_list(release: &str) -> Result<Response, TransportError> {
+    source(
+        &fs::read_to_string(common::fixture_path_in(
+            "m9",
+            &format!("snap-list-{release}.xml"),
+        ))
+        .unwrap(),
+    )
+}
+
+fn snap_refused() -> Result<Response, TransportError> {
+    Ok(Response::text(
+        400,
+        fs::read_to_string(common::fixture_path_in("m9", "snap-list-750-400.xml")).unwrap(),
+    ))
+}
+
+fn rfc_endpoint(response: Result<Response, TransportError>) -> RfcEndpointResponse {
+    let response = response.unwrap();
+
+    RfcEndpointResponse {
+        status: response.status,
+        headers: BTreeMap::new(),
+        body: response.body,
+    }
+}
+
+/// The preview of one synthetic dump: `FLIST` holds the tags, the client is 110.
+fn dump_preview(tags: &str) -> String {
+    common::preview(&[
+        ("SEQNO", &[Some("000")]),
+        ("MANDT", &[Some("110")]),
+        ("FLIST", &[Some(tags)]),
+    ])
+}
+
+#[test]
+fn dumps_and_dump_take_their_options_and_stop_locally_on_a_bad_one() {
+    let cli = |args: &[&str]| {
+        let mut full = vec!["abapreach"];
+
+        full.extend_from_slice(args);
+
+        Cli::try_parse_from(full)
+    };
+
+    match cli(&["dumps", "--conn", "dev_100"]).unwrap().command {
+        Command::Dumps {
+            date,
+            user,
+            all,
+            rows,
+            backend,
+            conn,
+        } => {
+            assert!(date.is_none() && user.is_none() && !all && backend.is_none());
+            assert_eq!(rows, 20);
+            assert_eq!(conn, "dev_100");
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&[
+        "dumps",
+        "--date",
+        "20261101",
+        "--user",
+        "x",
+        "--rows",
+        "1000",
+        "--backend",
+        "rfc",
+        "--conn",
+        "dev_100",
+    ])
+    .unwrap()
+    .command
+    {
+        Command::Dumps {
+            date,
+            user,
+            rows,
+            backend,
+            ..
+        } => {
+            assert_eq!(date.as_deref(), Some("20261101"));
+            assert_eq!(user.as_deref(), Some("x"));
+            assert_eq!(rows, 1000);
+            assert!(backend.is_some());
+        }
+        other => panic!("{other:?}"),
+    }
+    match cli(&["dump", OWN_DUMP, "--all", "--conn", "dev_100"])
+        .unwrap()
+        .command
+    {
+        Command::Dump { id, all, .. } => {
+            assert_eq!(id, OWN_DUMP);
+            assert!(all);
+        }
+        other => panic!("{other:?}"),
+    }
+    for rows in ["0", "1001", "-1", "x"] {
+        assert!(
+            cli(&["dumps", "--rows", rows, "--conn", "dev_100"]).is_err(),
+            "{rows}"
+        );
+    }
+    assert!(
+        cli(&["dump", "--conn", "dev_100"]).is_err(),
+        "an id is needed"
+    );
+    assert!(cli(&["dumps"]).is_err(), "a connection is needed");
+
+    for args in [
+        vec![
+            "abapreach",
+            "dumps",
+            "--all",
+            "--user",
+            "x",
+            "--conn",
+            "dev_100",
+        ],
+        vec![
+            "abapreach",
+            "dumps",
+            "--date",
+            "2026-11-25",
+            "--conn",
+            "dev_100",
+        ],
+        vec![
+            "abapreach",
+            "dumps",
+            "--date",
+            "20261301",
+            "--conn",
+            "dev_100",
+        ],
+        vec!["abapreach", "dumps", "--user", "a'b", "--conn", "dev_100"],
+        vec!["abapreach", "dumps", "--rows", "0", "--conn", "dev_100"],
+        vec!["abapreach", "dump", "bogus", "--conn", "dev_100"],
+        vec![
+            "abapreach",
+            "dump",
+            "20261103/053726/apphost/US'ER/21",
+            "--conn",
+            "dev_100",
+        ],
+        // The dump of another user needs --all.
+        vec!["abapreach", "dump", OTHER_DUMP, "--conn", "dev_100"],
+    ] {
+        assert_stops_locally(&args);
+    }
+
+    let mut fake = Fake::default();
+    let exit = dumps(&["--all", "--user", "x", "--conn", "dev_100"], &mut fake);
+
+    assert!(
+        exit.stderr.contains("--all") && exit.stderr.contains("--user"),
+        "{}",
+        exit.stderr
+    );
+
+    let exit = dump(&[OTHER_DUMP, "--conn", "dev_100"], &mut fake);
+
+    assert!(exit.stderr.contains("needs --all"), "{}", exit.stderr);
+}
+
+#[test]
+fn dumps_prints_one_line_per_dump_of_the_logon_user_over_adt() {
+    // The logon user is USER. The reply holds a row of another user: the filter of the query is
+    // only a request, so the row is dropped and the stderr says so.
+    let reply = common::preview(&[
+        (
+            "DATUM",
+            &[Some("20261103"), Some("20261104"), Some("20261105")],
+        ),
+        ("UZEIT", &[Some("053724"), Some("053725"), Some("053726")]),
+        (
+            "AHOST",
+            &[Some("apphost"), Some("apphost"), Some("apphost")],
+        ),
+        ("UNAME", &[Some("USER"), Some("TESTUSER"), Some("USER")]),
+        ("MANDT", &[Some("110"), Some("110"), Some("110")]),
+        ("MODNO", &[Some("21 "), Some("21 "), Some("21 ")]),
+        ("SEQNO", &[Some("000"), Some("000"), Some("000")]),
+        (
+            "FLIST",
+            &[
+                Some("FC019MESSAGE_TYPE_X_TEXTAP005ZPROG"),
+                Some("FC006OTHERX"),
+                Some("FC019MESSAGE_TYPE_X_TEXTAP005ZPROG"),
+            ],
+        ),
+    ]);
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![
+        dd02l("SNAP", "TRANSP", None),
+        source(&reply),
+    ]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = dumps(&["--rows", "2", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+
+    let text = table_of(&exit);
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(
+        lines[0].starts_with("20261105 053726 USER 110 error=MESSAGE_TYPE_X_TEXT program=ZPROG")
+    );
+    assert!(lines[0].ends_with("id=20261105/053726/apphost/USER/21"));
+    assert!(lines[1].starts_with("20261103 053724 USER 110"));
+    assert!(
+        !text.contains("TESTUSER") && !text.contains("OTHERX"),
+        "{text}"
+    );
+    assert!(
+        exit.stderr
+            .contains("W: 1 rows of other users than USER were dropped"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    assert_eq!(calls.borrow().closes, 1);
+
+    let body = String::from_utf8(calls.borrow().calls[1].body.clone()).unwrap();
+
+    assert!(
+        body.contains("FROM SNAP WHERE SEQNO = '000' AND DATUM >= '"),
+        "{body}"
+    );
+    assert!(
+        body.ends_with("AND UNAME = 'USER'"),
+        "the logon user is the default: {body}"
+    );
+}
+
+#[test]
+fn all_lists_every_user_and_user_names_one() {
+    for (args, tail) in [
+        (vec!["--all", "--conn", "dev_100"], None),
+        (
+            vec!["--user", "testuser", "--conn", "dev_100"],
+            Some("UNAME = 'TESTUSER'"),
+        ),
+    ] {
+        let (calls, adt) = shared(ScriptedTransport::replies(vec![
+            dd02l("SNAP", "TRANSP", None),
+            snap_list("740"),
+        ]));
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(adt);
+
+        let exit = dumps(&args, &mut fake);
+
+        assert_eq!(exit.code, 0, "{}", exit.stderr);
+
+        let body = String::from_utf8(calls.borrow().calls[1].body.clone()).unwrap();
+
+        match tail {
+            Some(tail) => assert!(body.ends_with(tail), "{body}"),
+            None => assert!(!body.contains("AND UNAME"), "{body}"),
+        }
+    }
+}
+
+/// Both commands with the refusal of `SNAP` scripted on ADT HTTP, run with `extra` arguments on the
+/// connection `conn` of `config`; each stops with the hint, and only ADT HTTP is opened.
+fn assert_snap_hint_stop(config: Option<&str>, extra: &[&str]) {
+    for dump_command in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut fake = Fake::default();
+
+        fake.adt.push_back(scripted(vec![
+            dd02l("SNAP", "TRANSP", None),
+            snap_refused(),
+        ]));
+
+        let mut args = vec!["abapreach", if dump_command { "dump" } else { "dumps" }];
+
+        if dump_command {
+            args.push(OWN_DUMP);
+        }
+
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["--conn", "dev_100"]);
+
+        let env = match config {
+            Some(config) => env_with(directory.path(), config),
+            None => env(directory.path()),
+        };
+        let exit = run(
+            args.iter().map(|arg| (*arg).to_owned()).collect(),
+            env,
+            &mut fake,
+        );
+
+        assert_eq!(exit.code, 2, "{}", exit.stderr);
+        assert!(exit.stderr.starts_with("STOP: "), "{}", exit.stderr);
+        assert!(exit.stderr.contains("--backend rfc"), "{}", exit.stderr);
+        assert!(!exit.stderr.contains("falling back"), "{}", exit.stderr);
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 0));
+    }
+}
+
+#[test]
+fn adt_stops_with_the_backend_hint_when_it_was_pinned_and_sap_refuses_snap() {
+    assert_snap_hint_stop(None, &["--backend", "adt"]);
+}
+
+#[test]
+fn adt_only_stops_with_the_backend_hint_when_sap_refuses_snap() {
+    let config = concat!(
+        r#"{"servers":[{"systemId":"DEV","host":"example.com","port":443,"clients":["100"],"#,
+        r#""adt":{"insecure":true}}]}"#,
+    );
+
+    assert_snap_hint_stop(Some(config), &[]);
+}
+
+#[test]
+fn both_backends_fall_back_to_rfc_read_table_when_sap_refuses_snap_over_adt() {
+    let list_widths = [
+        ("DATUM", 8),
+        ("UZEIT", 6),
+        ("AHOST", 32),
+        ("UNAME", 12),
+        ("MANDT", 3),
+        ("MODNO", 3),
+        ("SEQNO", 3),
+        ("FLIST", 200),
+    ];
+    let row = "FC019MESSAGE_TYPE_X_TEXTAP005ZPROGAI006ZINCL AL0023 ";
+    let (api, rfc) = shared(RfcTransport::new(
+        FakeRfcApi::with_responses(vec![
+            rfc_endpoint(dd02l("SNAP", "TRANSP", None)),
+            rfc_endpoint(snap_refused()),
+        ])
+        .with_table_replies(vec![Ok(common::read_table_reply(
+            &list_widths,
+            &[vec![
+                "20261103", "053724", "apphost", "USER", "110", "21", "000", row,
+            ]],
+        ))]),
+    ));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("SNAP", "TRANSP", None),
+        snap_refused(),
+    ]));
+    fake.rfc.push_back(rfc);
+
+    let exit = dumps(&["--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "20261103 053724 USER 110 error=MESSAGE_TYPE_X_TEXT program=ZPROG include=ZINCL line=3 id=20261103/053724/apphost/USER/21"
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert_eq!(api.borrow().api().table_calls().len(), 1);
+
+    // `dump` takes the same road.
+    let widths = [("SEQNO", 3), ("MANDT", 3), ("FLIST", 200)];
+    let (api, rfc) = shared(RfcTransport::new(
+        FakeRfcApi::with_responses(vec![
+            rfc_endpoint(dd02l("SNAP", "TRANSP", None)),
+            rfc_endpoint(snap_refused()),
+            rfc_endpoint(dd02l("SNAPT", "TRANSP", None)),
+            rfc_endpoint(Ok(Response::empty(404))),
+        ])
+        .with_table_replies(
+            std::iter::once(Ok(common::read_table_reply(
+                &widths,
+                &[vec!["000", "110", "FC007X_ERRORAP005ZPROG"]],
+            )))
+            .chain((0..7).map(|_| {
+                Err(TransportError::PostSendUncertain(
+                    "RfcInvoke [FIELD_NOT_VALID]".to_owned(),
+                ))
+            }))
+            .collect(),
+        ),
+    ));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("SNAP", "TRANSP", None),
+        snap_refused(),
+    ]));
+    fake.rfc.push_back(rfc);
+
+    let exit = dump(&[OWN_DUMP, "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        table_of(&exit).starts_with("error: X_ERROR\nprogram: ZPROG"),
+        "{}",
+        exit.stdout
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert_eq!(api.borrow().api().table_calls().len(), 8);
+}
+
+#[test]
+fn the_rfc_backend_falls_back_to_rfc_read_table_when_sap_refuses_snap() {
+    let row = "FC019MESSAGE_TYPE_X_TEXTAP005ZPROGAI006ZINCL AL0023 ";
+    let widths = [
+        ("DATUM", 8),
+        ("UZEIT", 6),
+        ("AHOST", 32),
+        ("UNAME", 12),
+        ("MANDT", 3),
+        ("MODNO", 3),
+        ("SEQNO", 3),
+        ("FLIST", 200),
+    ];
+    let (api, rfc) = shared(RfcTransport::new(
+        FakeRfcApi::with_responses(vec![
+            rfc_endpoint(dd02l("SNAP", "TRANSP", None)),
+            rfc_endpoint(snap_refused()),
+        ])
+        .with_table_replies(vec![Ok(common::read_table_reply(
+            &widths,
+            &[vec![
+                "20261103", "053724", "apphost", "USER", "110", "21", "000", row,
+            ]],
+        ))]),
+    ));
+    let mut fake = Fake::default();
+
+    fake.rfc.push_back(rfc);
+
+    let exit = dumps(&["--backend", "rfc", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert_eq!(
+        table_of(&exit),
+        "20261103 053724 USER 110 error=MESSAGE_TYPE_X_TEXT program=ZPROG include=ZINCL line=3 id=20261103/053724/apphost/USER/21"
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 1));
+    assert_eq!(api.borrow().api().table_calls().len(), 1);
+    assert_eq!(api.borrow().api().counts().1, 1, "the session was closed");
+}
+
+#[test]
+fn an_unreachable_adt_falls_back_to_rfc_and_reads_snap_through_the_function_module() {
+    let widths = [("SEQNO", 3), ("MANDT", 3), ("FLIST", 200)];
+    let (api, rfc) = shared(RfcTransport::new(
+        FakeRfcApi::with_responses(vec![
+            rfc_endpoint(dd02l("SNAP", "TRANSP", None)),
+            rfc_endpoint(snap_refused()),
+            rfc_endpoint(dd02l("SNAPT", "TRANSP", None)),
+            rfc_endpoint(Ok(Response::empty(404))),
+        ])
+        .with_table_replies(
+            std::iter::once(Ok(common::read_table_reply(
+                &widths,
+                &[vec!["000", "110", "FC007X_ERRORAP005ZPROG"]],
+            )))
+            .chain((0..7).map(|_| {
+                Err(TransportError::PostSendUncertain(
+                    "RfcInvoke [FIELD_NOT_VALID]".to_owned(),
+                ))
+            }))
+            .collect(),
+        ),
+    ));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![pre_send()]));
+    fake.rfc.push_back(rfc);
+
+    let exit = dump(&[OWN_DUMP, "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(
+        table_of(&exit).starts_with(
+            "error: X_ERROR\nprogram: ZPROG\ninclude: -\nline: -\nuser: USER\nclient: 110"
+        ),
+        "{}",
+        exit.stdout
+    );
+    assert!(
+        exit.stderr.contains("falling back to RFC SADT"),
+        "{}",
+        exit.stderr
+    );
+    assert_eq!((fake.adt_opened, fake.rfc_opened), (1, 1));
+    assert_eq!(api.borrow().api().table_calls().len(), 8);
+}
+
+#[test]
+fn dump_prints_the_fields_and_scrubs_a_secret_of_the_source() {
+    let tags = "FC007X_ERRORAP005ZPROGAI007ZINCLUDAL0012";
+    let (calls, adt) = shared(ScriptedTransport::replies(vec![
+        dd02l("SNAP", "TRANSP", None),
+        source(&dump_preview(tags)),
+        dd02l("SNAPT", "TRANSP", None),
+        source(&common::preview(&[
+            ("SEQNO", &[Some("000")]),
+            ("TLINE", &[Some("It failed with secret-pw inside.")]),
+        ])),
+        source("first line\nsecond line has secret-pw in it\nthird"),
+    ]));
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(adt);
+
+    let exit = dump(&[OTHER_DUMP, "--all", "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 0, "{}", exit.stderr);
+    assert!(!exit.stdout.contains("secret-pw"), "{}", exit.stdout);
+    assert_eq!(
+        table_of(&exit),
+        "error: X_ERROR\nprogram: ZPROG\ninclude: ZINCLUD\nline: 2\nuser: TESTUSER\nclient: 110\n\
+         short text:\nIt failed with *** inside.\nsource ZINCLUD:\n\u{20}     1 first line\n\
+         >     2 second line has *** in it\n\u{20}     3 third"
+    );
+    assert_eq!(calls.borrow().closes, 1);
+}
+
+#[test]
+fn a_dump_that_is_not_there_is_a_rejection() {
+    let mut fake = Fake::default();
+
+    fake.adt.push_back(scripted(vec![
+        dd02l("SNAP", "TRANSP", None),
+        source(&common::preview(&[
+            ("SEQNO", &[]),
+            ("MANDT", &[]),
+            ("FLIST", &[]),
+        ])),
+    ]));
+
+    let exit = dump(&[OWN_DUMP, "--conn", "dev_100"], &mut fake);
+
+    assert_eq!(exit.code, 1, "{}", exit.stderr);
+    assert!(
+        exit.stderr.starts_with("REJECTED: dump not found"),
+        "{}",
+        exit.stderr
+    );
+}
+
+#[test]
+fn snap_on_the_deny_list_stops_dumps_and_dump_without_a_connection() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = concat!(
+        r#"{"policies":{"read_table_denied":["SNAP"]},"servers":[{"systemId":"DEV","host":"example.com","#,
+        r#""port":443,"clients":["100"],"rfc":{"ashost":"example.com","sysnr":"00"},"adt":{"insecure":true}}]}"#,
+    );
+
+    for args in [
+        vec!["abapreach", "dumps", "--conn", "dev_100"],
+        vec!["abapreach", "dump", OWN_DUMP, "--conn", "dev_100"],
+    ] {
+        let mut fake = Fake::default();
+        let exit = run(
+            args.iter().map(|arg| (*arg).to_owned()).collect(),
+            env_with(directory.path(), config),
+            &mut fake,
+        );
+
+        assert_eq!(exit.code, 2, "{}", exit.stderr);
+        assert!(exit.stderr.contains("read_table_denied"), "{}", exit.stderr);
+        assert_eq!((fake.adt_opened, fake.rfc_opened), (0, 0));
+    }
 }

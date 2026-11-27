@@ -108,6 +108,85 @@ A changed `FUNC` interface lists at most 50 callers, then `WHERE-USED ... <n> mo
 the 50-caller cap. The matrix (`func-signature-change`) checks on one caller that the list holds only
 caller kinds and that no `more` line appears.
 
+### 12. `where-used` goes through ADT first (0.18.0)
+
+The reference `where-used` reads the standard cross-reference tables (`WBCROSSGT`, `WBCROSSI`) through
+the internal data preview for every type. ABAPReach asks the ADT `usageReferences` search first and
+tags each line `via=ADT`. Only for a DDIC type whose collection the release does not list, or that
+answers HTTP 404 or 500, does it read the cross-reference tables (`WBCROSSGT`, plus `DD03L` for a data
+element and `DD04L` for a domain), tags the line with the table (`via=<table>`) and prints a `W:` line
+on stderr. A `TABL` takes the `tables` or the `structures` collection by its table class. The line
+format is the reference one (`USED-BY <TYPE> <NAME> package=<P>`, sorted, each once, then
+`WHERE-USED: <n>`) with the added `via=` field. It lists objects only, not lines of code. `MSAG`
+(planned for 0.19.0) and `TRAN` stop, and a reply over 64 MiB is refused. `delete --simulate` keeps its own where-used (difference 11).
+Matrix: `m8-where-used-func`, `m8-where-used-dtel` and `m8-where-used-struct` ran on `v0.18.0-rc.3` on the
+7.50 and 7.40 systems (macOS arm64, Linux x64, Linux arm64, Windows x64 native, Windows x64 emulated on
+arm64) and on the 758 system (macOS arm64, Linux x64), on ADT HTTP, RFC through the SAP GUI library and RFC
+through the NW RFC SDK: 97 PASS, 0 FAIL, 11 UNSUPPORTED. The cells assert the exit code, the `via=` tag and
+the fallback line, that the generated report is listed as a caller, and that the test objects are gone.
+UNSUPPORTED: `m8-where-used-dtel` over ADT HTTP on the 7.40 system (5 cells, one per host), because the case
+creates a temporary runner class and ADT HTTP is stateless there; and RFC through the SAP GUI library on
+Linux arm64 (6 cells, 3 scenarios on each of the 7.50 and 7.40 systems), because SAP GUI for Java for Linux is
+x86_64 only.
+
+### 13. `dumps` reads `FLIST` to `FLIST08` and lists one user by default (0.18.0)
+
+The reference reads the dump text from `FLIST` to `FLIST05` of table `SNAP`. ABAPReach reads
+`FLIST` to `FLIST08`, so a dump whose tag stream is longer than `FLIST05` is complete. `dump` prints only the decoded tags (error, program, include, line), the user and
+client, the short text from `SNAPT` and a source excerpt, never the raw stream. The reference lists
+the dumps of every user. `dumps` lists the logon user's dumps unless `--all` or `--user` is given,
+and `dump` of another user's dump needs `--all`. `--all` is a display filter: `SNAP` is not on the
+`read_table_denied` list, so `read-table` and `sql` can read it where the data preview allows. On the
+7.50 system the data preview refuses `SNAP`; the RFC paths then read it through `RFC_READ_TABLE`
+(needs an English logon), and ADT HTTP stops with the hint `--backend rfc`. Matrix: `m8-dumps-list` and
+`m8-dump-show` ran on `v0.18.0-rc.3` on the same systems, hosts and paths as the where-used cells: 57 PASS,
+1 FAIL, 14 UNSUPPORTED. The cells raise a dump with a temporary runner class and assert the list format
+(newest first, the logon user's entries, the row cap), the decoded fields of `dump`, that another user's
+dump stops and that an unknown id is not found. On the 7.50 system the ADT HTTP cells (10 PASS) assert the
+stop with the `--backend rfc` hint and the fallback of an unpinned backend. The RFC cells pass on the
+7.50 system (8 on the SAP GUI library, 9 on the NW RFC SDK), on the 7.40 system (8 and 10) and on the 758
+system (all three paths, 4 cells each). The one FAIL is `m8-dump-show` on the 7.50 system, RFC SDK, Windows
+x64 native: the cell was rerun alone, without `m8-dumps-list` in the same run, and stopped with
+`dump-id-missing`; the full run of the same cell passed. UNSUPPORTED: ADT HTTP on the 7.40 system (10
+cells), where the dump-raising runner class needs a stateful session, and RFC through the SAP GUI library
+on Linux arm64 (4 cells).
+
+### 14. `sql` is a closed grammar (0.18.0)
+
+There is no reference command: the earlier tooling reads one table at a time. The ADT freestyle data
+preview runs open SQL as written, so ABAPReach does not pass your text on. It accepts one `SELECT`
+(joins, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, five aggregates), parses it, and sends only its
+canonical single-line rendering; the freestyle request is refused at the transport boundary
+unless it equals the canonical rendering of its own parse. Subqueries, `UNION`, `EXISTS`, `WITH`,
+`INTO`, `UP TO`, host variables, path expressions, comments, `RIGHT` and `CROSS` joins and the client
+options are refused with `STOP` (exit 2). Every entity in `FROM` and `JOIN` passes the
+`read_table_denied` list and the dictionary check of difference 15. Matrix: `m8-sql-join-sap`,
+`m8-sql-join-ytest`, `m8-sql-denied-join` and `m8-sql-cds-view` ran on `v0.18.0-rc.3` on the 7.50, 7.40 and
+758 systems (hosts as for difference 12) on all three paths, so ADT HTTP, RFC through the SAP GUI library
+and RFC through the NW RFC SDK each send the canonical rendering: 136 PASS, 0 FAIL, 8 UNSUPPORTED. The cells
+assert a join of standard tables with the header, the rows and the row cap, a join that reads a
+test row created for the cell, the `STOP` for a join with a denied table and the `STOP` for a
+CDS entity. UNSUPPORTED: RFC through the SAP GUI library on Linux arm64 (8 cells, 4 scenarios on each of the
+7.50 and 7.40 systems), because SAP GUI for Java for Linux is x86_64 only.
+
+### 15. `read-table` fails closed on dictionary refusals (0.18.0)
+
+Before 0.18.0 `read-table` checked the deny list against the named table only, so a DDIC view over a
+denied table passed. Now the named entity goes through the dictionary: a table of class `TRANSP`,
+`CLUSTER` or `POOL` is read; a DDIC database view is read only when `DD26S` lists its base tables
+and each one passes in turn; a CDS entity, a generated CDS SQL view (`DDLDEPENDENCY`), a view without
+base tables, a structure and an unknown name are refused. A refusal is `STOP` with exit 2; it was
+`REJECTED` with exit 1. A dictionary lookup that fails stays `REJECTED` with exit 1. The check costs up
+to 24 dictionary lookups, so a view with more than about 21 base tables is refused. This is a
+behavior change from 0.17.x. Matrix: `read-table-view-denied`, `read-table-unknown`,
+`read-table-denied-case` and `read-table-denied-default` ran on `v0.18.0-rc.3` on the 7.50, 7.40 and 758
+systems (hosts as for difference 12) on all three paths: 116 PASS, 0 FAIL, 28 UNSUPPORTED. The cells assert
+the `STOP`, the exit code and that no rows are returned. The view cell (`read-table-view-denied`) ran on
+the 7.40 system only (14 PASS: five hosts, three paths, with the view `SBC_CLIENT` over the base table
+`T000`); on the 7.50 and 758 systems it is UNSUPPORTED (20 cells) because no database view over a harmless
+base table is known there. The other UNSUPPORTED cells (8) are RFC through the SAP GUI library on Linux
+arm64.
+
 ## `create PROG` grammar (0.15.0)
 
 The 0.15.0 grammar covers the create and delete cases of the reference test suite
@@ -432,6 +511,64 @@ The Ctrl-C cell ran from macOS arm64.
   library, and the OS trust store is already installed. SAP GUI for Java runs on x86_64 only, so Linux
   arm64 has no RFC SAP GUI library path.
 - The 7.40 system was not run for 0.17.1.
+
+### 0.18.0 release checks (0.18.0-rc.2 and rc.3)
+
+The runs are from 2026-11-26 and 2026-11-27. The 0.18.0 release binaries are the rc.3 binaries. rc.3 differs
+from rc.2 in two changes: `dump` stops on a single-byte RFC library, and server host values are not treated as
+secret fragments. rc.2 differs from rc.1 in the read of the `RFC_SYSTEM_INFO` character fields of `ping`
+(`RfcGetChars`). Cells that rc.3 does not change keep their rc.2 result: of the cells that carry a binary
+version, 4844 ran on rc.3 and 1380 on rc.2; the other 2073 cells are UNSUPPORTED or housekeeping cells and
+carry none. The three systems are the 7.50 system, the 7.40 system and the 758 system (S/4HANA), all on the
+three paths: ADT HTTP, RFC through the SAP GUI library and RFC through the NW RFC SDK. The merged result has
+290 scenarios (282 path scenarios and 8 housekeeping scenarios: sweeps, object setup and cleanup, runner
+prefix, credential permission) in 8297 cells; where a cell ran more than once, the last result counts.
+
+| System | Hosts | PASS | UNSUPPORTED | FAIL |
+| :--- | :--- | ---: | ---: | ---: |
+| 7.50 | macOS arm64, Linux x64, Linux arm64, Windows x64 native, Windows x64 emulated on arm64 | 2933 | 519 | 4 |
+| 7.40 | the same five hosts | 2015 | 1265 | 1 |
+| 758 | macOS arm64, Linux x64 | 1289 | 271 | 0 |
+| All | | 6237 | 2055 | 5 |
+
+The cells of the 0.18.0 features (group m8) are 648 of these cells: deploy by `edits` (5 scenarios,
+`m8-edit-*`) 145 PASS and 35 UNSUPPORTED; `ping` 34 and 2; `search` (3 scenarios) 102 and 6; `sql`
+(4 scenarios) 136 and 8; `where-used` (3 scenarios) 97 and 11; `dumps` and `dump` (2 scenarios) 57 PASS, 1 FAIL
+and 14 UNSUPPORTED. All of them ran on rc.3. The per-difference results are under differences 12 to 15.
+
+- Parallel lanes and the serial reruns. The first runs on rc.2 and rc.3 ran several lanes of one SAP user
+  in parallel and had cells that failed in setup, in the generated runner class or in cleanup. On
+  2026-11-27 those cells were rerun on rc.3, one lane at a time per system (7.40 and 7.50 systems): 34 cells,
+  all PASS. Nine of them were FAIL before the rerun
+  (a helper lock refused right after a create, a setup object that did not end active, an activation error of
+  the generated runner class, a read-back that was not the new object, or a live definition that was not the
+  deployed file). The two cleanup cells of the 7.40 system on Windows x64 emulated passed in the same
+  reruns. `m6-dtel-inactive` was rerun serially on the 7.40 system, RFC SDK, Linux arm64, and passed on
+  rc.3.
+- No product defect is open. The 5 FAIL cells that remain:
+  - `m6-dtel-inactive` on the 7.40 system, RFC SDK, macOS arm64, rc.2: the assertion `inactive-created`
+    failed with the runner activation error `LINE 10035 ... (RFC code 1)` and the runner cleanup proof
+    reported that the class still existed in a new session. It is the signature of the parallel-lane runner
+    errors above (several lanes of one SAP user). The same cell passed in the serial rerun on Linux arm64,
+    on RFC through the SAP GUI library on the macOS host (rc.3), on the 7.50 system and on the 758 system.
+    The cell was not rerun on macOS arm64, so the FAIL stays in the merged result.
+  - `object-cleanup`, `object-cleanup/transport` and `sweep-end` on the 7.50 system, macOS arm64 (3 harness
+    housekeeping cells of one run): the cleanup verification and the end sweep of that run failed. The later
+    7.50 runs on other hosts and the serial rerun pass these cells.
+  - `m8-dump-show` on the 7.50 system, RFC SDK, Windows x64 native: a harness artifact, described under
+    difference 13. The full run of the cell passed.
+- Main UNSUPPORTED reasons (counts are cells). 7.50 system (519): RFC through the SAP GUI library on Linux
+  arm64 (214; SAP GUI for Java for Linux is x86_64 only), fault injection (45; it drops RFC replies only, no
+  ADT HTTP fault), cells that need the 758 system (28), ADT HTTP cells for a check of the RFC library loader
+  (17), and cases that a live run cannot produce, which only an offline fake models (14 per case). 7.40 system
+  (1265): ADT HTTP has no stateful session (339 cells run in their pinned and fallback form only, and 214
+  more need the temporary runner class), RFC through the SAP GUI library on Linux arm64 (214), `$TMP` only so
+  no `--tr` cell can run (132), fault injection (38), no second developer user (34), the helper function
+  module of the reference tool is not installed (24), and cells that need the 758 system (24). 758 system
+  (271): `$TMP` only (60), no second developer user (24), no transportable package (24), the helper function
+  module of the reference tool is not installed (24), fault injection (18) and ADT HTTP cells for the RFC
+  library loader (7).
+- The 758 system ran on macOS arm64 and Linux x64 only; Linux arm64 and Windows x64 had no run on it.
 
 ## `create PROG` operation (0.15.0)
 

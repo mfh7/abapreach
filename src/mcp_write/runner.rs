@@ -13,7 +13,7 @@ use super::{
 use crate::app::Exit;
 use crate::cli::{DeleteKind, DeleteTarget, RUNNER_KINDS, Subc};
 use crate::config::Connection;
-use crate::domain::Status;
+use crate::domain::{Origin, Status};
 use crate::hash::source_hash;
 use crate::mcp::{Session, ToolResult};
 use crate::mcp_read::{SECRET_REJECTED, holds_secret, optional, required};
@@ -24,7 +24,7 @@ use crate::operation::payload::Kind;
 use crate::operation::read_ddic::{self, DdicRead};
 use crate::operation::runner_route::random_nonce;
 use crate::operation::runner_tran::{self, TranCreate, TranRead};
-use crate::operation::simulate_ddic::{self, DdicSimulate, Simulation};
+use crate::operation::simulate_ddic::{self, DdicSimulate, SECRET_STOP, Simulation};
 use crate::policy::McpWrite;
 use crate::runner_cli::{self, CreateOptions, SourceOptions};
 use serde_json::{Map, Value, json};
@@ -288,7 +288,15 @@ impl<G: WriteGate> McpTools<'_, G> {
         reject_options(
             arguments,
             kind,
-            &["lines", "include", "fugr", "main", "create_include"],
+            &[
+                "lines",
+                "include",
+                "fugr",
+                "main",
+                "create_include",
+                "edits",
+                "base",
+            ],
         )?;
         // A transaction has no deploy: this refuses it, and checks the name and the request.
         runner_cli::check_deploy(kind, name, tr, &SourceOptions::default())?;
@@ -300,7 +308,10 @@ impl<G: WriteGate> McpTools<'_, G> {
             name: &upper,
             xml,
             tr,
-            simulation: Simulation::Deploy { base: None },
+            simulation: Simulation::Deploy {
+                base: None,
+                origin: Origin::Mcp,
+            },
         };
 
         simulate_ddic::check(&request, &upper)?;
@@ -336,6 +347,7 @@ impl<G: WriteGate> McpTools<'_, G> {
                     xml,
                     tr,
                     base: stored.base.as_deref(),
+                    origin: Origin::Mcp,
                 };
                 let mut gate = |preview: &Preview<'_>| -> Result<(), String> {
                     if !confirm {
@@ -373,6 +385,12 @@ impl<G: WriteGate> McpTools<'_, G> {
 
         if let Some(message) = declined {
             return Err(message);
+        }
+
+        // The live definition holds a secret: nothing else of the run is shown, no hash, diff or
+        // token.
+        if exit.stderr.lines().any(|line| line == SECRET_STOP) {
+            return Ok(ToolResult::error(SECRET_REJECTED.to_owned()));
         }
 
         let status = runner_status(&exit);

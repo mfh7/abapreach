@@ -9,7 +9,8 @@ use abapreach::config::Connection;
 use abapreach::domain::Status;
 use abapreach::hash::source_hash;
 use abapreach::operation::deploy::{
-    CancelFlag, DeployInput, DeployProg, DeployResult, DeployScope, encode_lock_handle,
+    CancelFlag, DeployInput, DeployProg, DeployResult, DeployScope, DeploySource,
+    encode_lock_handle,
 };
 use abapreach::operation::include::{
     Located, ProgKind, ProgTarget, ResolveError, choose_main, includes_statement, locate,
@@ -272,7 +273,7 @@ fn unlock(uri: &str) -> String {
 fn deploy_input(text: &str, simulate: bool, tr: Option<&str>) -> DeployInput {
     DeployInput {
         name: "ZINCL_A".to_owned(),
-        source: lines(text),
+        source: DeploySource::Full(lines(text)),
         base: None,
         simulate,
         tr: tr.map(str::to_owned),

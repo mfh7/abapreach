@@ -291,6 +291,12 @@ fn abap_aunit_is_listed_only_for_a_server_that_allows_runs() {
             "abap_read_source",
             "abap_read_table",
             "abap_inactive",
+            "abap_sql",
+            "abap_search",
+            "abap_where_used",
+            "abap_dumps",
+            "abap_dump",
+            "abap_ping",
             "abap_run",
             "abap_aunit"
         ]

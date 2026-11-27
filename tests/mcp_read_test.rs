@@ -18,6 +18,18 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::rc::Rc;
 
+/// The tools that only read, by name: the hints are checked against this list, not against the
+/// list the server derives its own behavior from.
+const READ_ONLY_TOOLS: [&str; 8] = [
+    "abap_read_table",
+    "abap_inactive",
+    "abap_sql",
+    "abap_search",
+    "abap_where_used",
+    "abap_dumps",
+    "abap_dump",
+    "abap_ping",
+];
 const PASSWORD: &str = "secret-pw";
 const HOST: &str = "example.com";
 
@@ -184,7 +196,7 @@ fn a_source_read_carries_the_same_data_in_text_and_structured_fields() {
 }
 
 #[test]
-fn a_lines_read_is_a_partial_excerpt_without_hash_or_source() {
+fn a_lines_read_is_a_partial_excerpt_with_the_whole_source_hash_and_no_source() {
     let mut rig = rig();
 
     rig.adt(vec![source(PROGRAM)]);
@@ -198,10 +210,70 @@ fn a_lines_read_is_a_partial_excerpt_without_hash_or_source() {
     assert_eq!(result.structured["excerpt"], "WRITE 'a'.\nWRITE 'b'.");
     assert_eq!(result.structured["partial"], true);
     assert_eq!(result.structured["lines"], 2);
-    assert!(result.structured.get("hash").is_none());
     assert!(result.structured.get("source").is_none());
     assert!(result.text.contains("WRITE 'a'.\nWRITE 'b'."));
+
+    // The hash is the one of the whole source, not of the excerpt.
+    let whole = source_hash(&lines_of(PROGRAM));
+
+    assert_eq!(result.structured["hash"], whole);
+    assert_ne!(
+        result.structured["hash"],
+        source_hash(&lines_of("WRITE 'a'.\nWRITE 'b'."))
+    );
+    assert!(
+        result
+            .text
+            .ends_with(&format!("hash {whole} (whole source)")),
+        "{}",
+        result.text
+    );
+}
+
+#[test]
+fn the_partial_hash_equals_the_full_read_hash_for_every_range() {
+    for range in ["1-1", "2-3", "3-9"] {
+        let mut rig = rig();
+
+        // Each call opens its own connection.
+        rig.adt(vec![source(PROGRAM)]);
+        rig.adt(vec![source(PROGRAM)]);
+
+        let full = rig.call(
+            "abap_read_source",
+            json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST"}),
+        );
+        let partial = rig.call(
+            "abap_read_source",
+            json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST", "lines": range}),
+        );
+
+        assert_eq!(
+            partial.structured["hash"], full.structured["hash"],
+            "{range}"
+        );
+    }
+}
+
+#[test]
+fn a_partial_read_gives_no_hash_when_the_whole_source_holds_a_secret() {
+    let mut rig = rig();
+
+    // The secret is on line 3; the excerpt of lines 1-2 does not show it.
+    rig.adt(vec![source(&format!(
+        "REPORT y.\nWRITE 'a'.\n\" {PASSWORD}"
+    ))]);
+
+    let result = rig.call(
+        "abap_read_source",
+        json!({"conn": "DEV_100", "type": "PROG", "name": "YTEST", "lines": "1-2"}),
+    );
+
+    assert!(!result.is_error, "{}", result.text);
+    assert_eq!(result.structured["excerpt"], "REPORT y.\nWRITE 'a'.");
+    assert!(result.structured.get("hash").is_none());
     assert!(!result.text.contains("hash"), "{}", result.text);
+    assert!(!result.text.contains(PASSWORD));
 }
 
 #[test]
@@ -338,6 +410,57 @@ fn a_denied_table_stops_before_any_connection() {
 }
 
 #[test]
+fn a_dictionary_refusal_is_a_stop_result_without_rows() {
+    let mut rig = rig();
+    let ok = |xml: String| Ok(Response::text(200, xml));
+
+    rig.adt(vec![
+        ok(preview(&[
+            ("TABNAME", &[Some("ZV_USERS")]),
+            ("TABCLASS", &[Some("VIEW")]),
+            ("VIEWCLASS", &[Some("D")]),
+        ])),
+        ok(preview(&[
+            ("DDLNAME", &[]),
+            ("OBJECTNAME", &[]),
+            ("OBJECTTYPE", &[]),
+        ])),
+        ok(preview(&[
+            ("VIEWNAME", &[Some("ZV_USERS")]),
+            ("TABNAME", &[Some("USR02")]),
+            ("TABPOS", &[Some("0001")]),
+        ])),
+    ]);
+
+    let result = rig.call(
+        "abap_read_table",
+        json!({"conn": "DEV_100", "table": "ZV_USERS"}),
+    );
+
+    assert!(result.is_error);
+    assert!(result.text.starts_with("STOP: "), "{}", result.text);
+    assert!(
+        result.text.contains("USR02") && result.text.contains("nothing was read"),
+        "{}",
+        result.text
+    );
+    assert!(
+        result.structured.get("rows").is_none(),
+        "{}",
+        result.structured
+    );
+    // The three dictionary lookups were sent; the data read never was.
+    assert_eq!(rig.sent.borrow().len(), 3);
+    assert!(
+        rig.sent
+            .borrow()
+            .iter()
+            .all(|request| !request.uri.contains("ddicEntityName=ZV_USERS")),
+        "the view was read"
+    );
+}
+
+#[test]
 fn a_payload_with_a_configured_secret_is_rejected_unaltered_in_no_field() {
     let mut rig = rig();
 
@@ -423,7 +546,9 @@ fn the_read_tools_say_their_results_are_untrusted_and_are_read_only() {
         // `abap_read_source` creates a temporary class for a DDIC or transaction type (M6).
         assert_eq!(
             tool["annotations"]["readOnlyHint"],
-            tool["name"] == "abap_read_table" || tool["name"] == "abap_inactive"
+            tool["name"]
+                .as_str()
+                .is_some_and(|name| READ_ONLY_TOOLS.contains(&name))
         );
     }
 }

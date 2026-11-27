@@ -3,7 +3,7 @@ mod replay;
 
 use abapreach::domain::Status;
 use abapreach::operation::deploy::{
-    CancelFlag, DeployInput, DeployProg, INTERRUPT_EXIT_CODE, InterruptAction,
+    CancelFlag, DeployInput, DeployProg, DeploySource, INTERRUPT_EXIT_CODE, InterruptAction,
 };
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
 use replay::{Replay, fx, no_inactive, replay};
@@ -13,11 +13,11 @@ const FIXTURE: &str = "dev-750-rfc.json";
 fn changed() -> DeployInput {
     DeployInput {
         name: "YTEST_ABAPREACH01".to_owned(),
-        source: vec![
+        source: DeploySource::Full(vec![
             "REPORT ytest_abapreach01.".to_owned(),
             String::new(),
             "WRITE / 'v2'.".to_owned(),
-        ],
+        ]),
         base: None,
         simulate: true,
         tr: None,

@@ -5,6 +5,11 @@ Commands:
   deploy      
   create      
   read-table  Reads rows of one table through the ADT data preview
+  sql         Runs one read-only SELECT with joins through the ADT freestyle data preview
+  search      Finds objects by name pattern through the ADT object search
+  dumps       Lists the ST22 short dumps from table SNAP, newest first, one line each
+  dump        Shows one short dump: error, program, include, line, user, client, short text and source
+  where-used  Lists the objects that use one object, through ADT or the standard cross-reference tables
   delete      Deletes objects from a plan written by `--simulate`
   inactive    Lists the inactive objects of the logon user, one `<ADT type> <name> <user>` line each
   activate    Activates own inactive Z/Y objects, named as `inactive` prints them
@@ -12,6 +17,7 @@ Commands:
   run         Runs a class, a report or a snippet with the authorizations of the logon user
   mcp         Serves the MCP tools on stdio
   doctor      
+  ping        Shows the system, the application server instance that answered and the round trip time
   help        Print this message or the help of the given subcommand(s)
 
 Options:

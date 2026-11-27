@@ -1,0 +1,12 @@
+Shows one short dump: error, program, include, line, user, client, short text and source
+
+Usage: abapreach dump [OPTIONS] --conn <CONN> <ID>
+
+Arguments:
+  <ID>  The id `dumps` prints: DATUM/UZEIT/AHOST/UNAME/MODNO
+
+Options:
+      --all                Show the dump of another user
+      --backend <BACKEND>  Release 7.50 refuses SNAP in the data preview; there `rfc` reads it through RFC_READ_TABLE [possible values: adt, rfc]
+      --conn <CONN>        
+  -h, --help               Print help

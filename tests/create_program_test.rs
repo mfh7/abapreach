@@ -7,7 +7,7 @@
 use abapreach::backend::{BackendKind, Failure, Selection, SelectionReason};
 use abapreach::cli::{CreateKind, Subc};
 use abapreach::config::Connection;
-use abapreach::domain::Status;
+use abapreach::domain::{Origin, Status};
 use abapreach::operation::create::{CreateInput, CreateProg};
 use abapreach::operation::deploy::DeployResult;
 use abapreach::transport::{Request, Response, SadtTransport, TransportError};
@@ -148,6 +148,7 @@ fn input(subc: Subc, package: Option<&str>, tr: Option<&str>, simulate: bool) ->
         simulate,
         subc,
         source: None,
+        origin: Origin::Cli,
     }
 }
 
@@ -612,6 +613,23 @@ fn a_file_leads_to_a_simulate_deploy_and_no_source_write() {
     assert_eq!(fake.locks, 0, "{:?}", fake.uris());
     // The deploy ends the session; the create does not end it a second time.
     assert_eq!(fake.closes, 1);
+    fake.assert_finished();
+}
+
+#[test]
+fn an_mcp_create_with_a_file_runs_its_simulate_deploy_like_the_cli() {
+    let mut fake = simulate_deploy(clean(Subc::Program, "$TMP", None, 200), PROCESSED);
+    let mut mcp = with_file(input(Subc::Program, None, None, false), FILE);
+
+    // The origin reaches the simulate deploy of the file: same checks, same result, no write.
+    mcp.origin = Origin::Mcp;
+
+    let result = run(&mut fake, mcp);
+
+    assert_eq!(result.outcome.status, Some(Status::Active));
+    assert_eq!(result.outcome.exit, 0, "{:?}", result.outcome);
+    assert!(result.outcome.stdout.contains("SIMULATED_OK"));
+    assert!(fake.calls.iter().all(|call| call.method != "PUT"));
     fake.assert_finished();
 }
 

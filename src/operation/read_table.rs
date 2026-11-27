@@ -7,6 +7,8 @@
 
 use crate::backend::Failure;
 use crate::operation::deploy::leaf_texts;
+use crate::operation::dictionary::{PreviewError, TransportDictionary, check_entities};
+use crate::operation::sql::{FREESTYLE_URI, VerifiedQuery};
 use crate::policy::Policies;
 use crate::transport::{Request, SadtTransport, TransportError};
 use quick_xml::escape::resolve_predefined_entity;
@@ -25,14 +27,12 @@ pub const MAX_OUTPUT_BYTES: usize = 1 << 20;
 pub const WHERE_LINE_MAX: usize = 72;
 
 const PREVIEW_URI: &str = "/sap/bc/adt/datapreview/ddic";
-const CLASS_ROWS: u32 = 10;
-const BASE_ROWS: u32 = 500;
 const IDENTIFIER_MAX: usize = 30;
 const LITERAL_MAX: usize = 255;
 const WHERE_MAX: usize = 2000;
 const DEPTH_MAX: usize = 16;
 /// Words that are SQL syntax, never a field of a table.
-const RESERVED: [&str; 20] = [
+pub(super) const RESERVED: [&str; 20] = [
     "SELECT", "FROM", "JOIN", "EXISTS", "UNION", "WHERE", "AND", "OR", "NOT", "IN", "BETWEEN",
     "LIKE", "IS", "NULL", "INTO", "ON", "AS", "ORDER", "GROUP", "HAVING",
 ];
@@ -96,6 +96,13 @@ impl Query {
     pub fn rows(&self) -> u32 {
         self.rows
     }
+
+    /// The canonical condition of the body, without `WHERE`.
+    pub fn condition(&self) -> Option<&str> {
+        self.body
+            .split_once(" WHERE ")
+            .map(|(_, condition)| condition)
+    }
 }
 
 /// The row count of an MCP call: 100 when absent, 1 to 1000 otherwise.
@@ -108,7 +115,7 @@ pub fn mcp_rows(requested: Option<u32>) -> Result<u32, String> {
 }
 
 /// An upper-case DDIC identifier: `[A-Z0-9_]`, or `/NAMESPACE/NAME`.
-fn identifier(what: &str, text: &str) -> Result<String, String> {
+pub(crate) fn identifier(what: &str, text: &str) -> Result<String, String> {
     let name = text.to_ascii_uppercase();
     let plain = |part: &str| {
         !part.is_empty()
@@ -133,7 +140,7 @@ fn identifier(what: &str, text: &str) -> Result<String, String> {
     }
 }
 
-fn field_name(text: &str) -> Result<String, String> {
+pub(crate) fn field_name(text: &str) -> Result<String, String> {
     let name = identifier("field", text)?;
 
     if RESERVED.contains(&name.as_str()) {
@@ -177,7 +184,7 @@ fn render_body(table: &str, fields: &[String], condition: Option<&str>) -> Strin
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum Token {
+pub(super) enum Token {
     Word(String),
     Number(String),
     Literal(String),
@@ -187,7 +194,35 @@ enum Token {
     Comma,
 }
 
+/// What a tokenizer hook does with a character the shared tokenizer does not know.
+pub(super) enum Scan {
+    /// Ignore this many characters.
+    Skip(usize),
+    /// Produce a token from this many characters.
+    Emit(Token, usize),
+}
+
+/// Handles the character at the index, or refuses it with the full error text.
+pub(super) type Unknown = fn(&[char], usize) -> Result<Scan, String>;
+
+fn where_unknown(chars: &[char], index: usize) -> Result<Scan, String> {
+    Err(format!(
+        "--where: character {:?} is not allowed (only fields, comparison operators, AND/OR/NOT, parentheses and literals)",
+        chars[index]
+    ))
+}
+
 fn tokenize(text: &str) -> Result<Vec<Token>, String> {
+    tokenize_with(text, "--where", where_unknown)
+}
+
+/// The shared tokenizer: words, numbers, quoted literals, comparison operators, parentheses and
+/// commas. `unknown` decides on every other character; `label` prefixes literal errors.
+pub(super) fn tokenize_with(
+    text: &str,
+    label: &str,
+    unknown: Unknown,
+) -> Result<Vec<Token>, String> {
     let chars: Vec<char> = text.chars().collect();
     let mut tokens = Vec::new();
     let mut index = 0;
@@ -227,7 +262,7 @@ fn tokenize(text: &str) -> Result<Vec<Token>, String> {
                 index += width;
             }
             '\'' => {
-                let (value, next) = literal(&chars, index)?;
+                let (value, next) = literal(&chars, index, label)?;
 
                 tokens.push(Token::Literal(value));
                 index = next;
@@ -257,11 +292,13 @@ fn tokenize(text: &str) -> Result<Vec<Token>, String> {
                     index = end;
                 }
             }
-            other => {
-                return Err(format!(
-                    "--where: character {other:?} is not allowed (only fields, comparison operators, AND/OR/NOT, parentheses and literals)"
-                ));
-            }
+            _ => match unknown(&chars, index)? {
+                Scan::Skip(width) => index += width,
+                Scan::Emit(token, width) => {
+                    tokens.push(token);
+                    index += width;
+                }
+            },
         }
     }
 
@@ -288,7 +325,7 @@ fn number(chars: &[char], start: usize) -> (String, usize) {
 }
 
 /// The unescaped content of the string literal that opens at `start`, and the next index.
-fn literal(chars: &[char], start: usize) -> Result<(String, usize), String> {
+fn literal(chars: &[char], start: usize, label: &str) -> Result<(String, usize), String> {
     let mut value = String::new();
     let mut index = start + 1;
 
@@ -303,7 +340,7 @@ fn literal(chars: &[char], start: usize) -> Result<(String, usize), String> {
 
             if value.chars().count() > LITERAL_MAX {
                 return Err(format!(
-                    "--where: a literal is longer than {LITERAL_MAX} characters"
+                    "{label}: a literal is longer than {LITERAL_MAX} characters"
                 ));
             }
 
@@ -311,24 +348,81 @@ fn literal(chars: &[char], start: usize) -> Result<(String, usize), String> {
         }
 
         if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}') {
-            return Err("--where: a literal holds a control character".to_owned());
+            return Err(format!("{label}: a literal holds a control character"));
         }
 
         value.push(character);
         index += 1;
     }
 
-    Err("--where: unterminated quoted literal".to_owned())
+    Err(format!("{label}: unterminated quoted literal"))
 }
 
-struct Parser {
-    tokens: Vec<Token>,
-    position: usize,
+/// Parses the operand on the left of a predicate and returns its canonical text.
+pub(super) type Operand = fn(&mut Parser<'_>) -> Result<String, String>;
+
+pub(super) struct Parser<'a> {
+    pub(super) tokens: &'a [Token],
+    pub(super) position: usize,
     out: String,
+    /// Prefixes every error text.
+    pub(super) label: &'static str,
+    operand: Operand,
+    /// Whether a number may have a fraction (`1.5`); otherwise a quoted literal is required.
+    decimals: bool,
+    /// The table qualifiers (`alias~field`) the operands named.
+    pub(super) qualifiers: Vec<String>,
 }
 
-impl Parser {
-    fn peek(&self) -> Option<&Token> {
+/// A parsed condition: its canonical text, the index of the first token after it and the
+/// qualifiers it named.
+pub(super) struct Condition {
+    pub(super) text: String,
+    pub(super) next: usize,
+    pub(super) qualifiers: Vec<String>,
+}
+
+/// Parses the condition that starts at token `start`; it ends before the first token that no rule
+/// of the condition grammar takes. `decimals` allows numbers with a fraction.
+pub(super) fn parse_condition(
+    tokens: &[Token],
+    start: usize,
+    label: &'static str,
+    operand: Operand,
+    decimals: bool,
+) -> Result<Condition, String> {
+    let mut parser = Parser {
+        tokens,
+        position: start,
+        out: String::new(),
+        label,
+        operand,
+        decimals,
+        qualifiers: Vec::new(),
+    };
+
+    parser.expression(0)?;
+
+    Ok(Condition {
+        text: parser.out,
+        next: parser.position,
+        qualifiers: parser.qualifiers,
+    })
+}
+
+fn plain_operand(parser: &mut Parser<'_>) -> Result<String, String> {
+    let Some(Token::Word(word)) = parser.peek().cloned() else {
+        return Err(format!("{}: expected a field name", parser.label));
+    };
+    let field = field_name(&word).map_err(|error| format!("{}: {error}", parser.label))?;
+
+    parser.position += 1;
+
+    Ok(field)
+}
+
+impl Parser<'_> {
+    pub(super) fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.position)
     }
 
@@ -359,7 +453,7 @@ impl Parser {
         if self.take_keyword(word) {
             Ok(())
         } else {
-            Err(format!("--where: expected {word}"))
+            Err(format!("{}: expected {word}", self.label))
         }
     }
 
@@ -370,13 +464,13 @@ impl Parser {
 
             Ok(())
         } else {
-            Err(format!("--where: expected {text}"))
+            Err(format!("{}: expected {text}", self.label))
         }
     }
 
     fn expression(&mut self, depth: usize) -> Result<(), String> {
         if depth > DEPTH_MAX {
-            return Err("--where: nested too deeply".to_owned());
+            return Err(format!("{}: nested too deeply", self.label));
         }
 
         self.conjunction(depth)?;
@@ -400,7 +494,7 @@ impl Parser {
 
     fn negation(&mut self, depth: usize) -> Result<(), String> {
         if depth > DEPTH_MAX {
-            return Err("--where: nested too deeply".to_owned());
+            return Err(format!("{}: nested too deeply", self.label));
         }
 
         if self.take_keyword("NOT") {
@@ -419,16 +513,13 @@ impl Parser {
     }
 
     fn predicate(&mut self) -> Result<(), String> {
-        let Some(Token::Word(word)) = self.peek().cloned() else {
-            return Err("--where: expected a field name".to_owned());
-        };
-        let field = field_name(&word).map_err(|error| format!("--where: {error}"))?;
+        let operand = self.operand;
+        let field = operand(self)?;
 
-        self.position += 1;
         self.put(&field);
 
         match self.peek().cloned() {
-            Some(Token::Operator(operator)) => {
+            Some(Token::Operator(operator @ ("=" | "<>" | "<" | "<=" | ">" | ">="))) => {
                 self.position += 1;
                 self.put(operator);
                 self.value(false)
@@ -455,7 +546,10 @@ impl Parser {
                 self.take_keyword("NOT");
                 self.expect_keyword("NULL")
             }
-            _ => Err(format!("--where: expected an operator after {field}")),
+            _ => Err(format!(
+                "{}: expected an operator after {field}",
+                self.label
+            )),
         }
     }
 
@@ -468,6 +562,12 @@ impl Parser {
 
                 Ok(())
             }
+            Some(Token::Number(number)) if !text_only && !self.decimals && number.contains('.') => {
+                Err(format!(
+                    "{}: a decimal number must be a quoted literal (write '{number}')",
+                    self.label
+                ))
+            }
             Some(Token::Number(number)) if !text_only => {
                 self.position += 1;
                 self.put(&number);
@@ -475,9 +575,12 @@ impl Parser {
                 Ok(())
             }
             _ => Err(if text_only {
-                "--where: expected a quoted literal".to_owned()
+                format!("{}: expected a quoted literal", self.label)
             } else {
-                "--where: expected a literal (a quoted string or a number)".to_owned()
+                format!(
+                    "{}: expected a literal (a quoted string or a number)",
+                    self.label
+                )
             }),
         }
     }
@@ -495,19 +598,23 @@ fn canonical_where(text: &str) -> Result<String, String> {
         return Err("--where is empty".to_owned());
     }
 
-    let mut parser = Parser {
-        tokens,
-        position: 0,
-        out: String::new(),
-    };
+    let condition = parse_condition(&tokens, 0, "--where", plain_operand, true)?;
 
-    parser.expression(0)?;
-
-    if parser.position != parser.tokens.len() {
+    if condition.next != tokens.len() {
         return Err("--where: unexpected text after the condition".to_owned());
     }
 
-    Ok(parser.out)
+    Ok(condition.text)
+}
+
+/// Whether `text` is a condition in its canonical rendering: the one rule the `RFC_READ_TABLE`
+/// OPTIONS lines of the transport follow, so no line holds text this grammar would not build.
+pub fn validate_condition(text: &str) -> Result<(), String> {
+    match canonical_where(text) {
+        Ok(canonical) if canonical == text => Ok(()),
+        Ok(_) => Err("the condition is not in its canonical form".to_owned()),
+        Err(message) => Err(message),
+    }
 }
 
 /// Parse a data-preview body with the same grammar as `Query` and require its exact canonical
@@ -544,13 +651,18 @@ pub fn preview_request(entity: &str, body: &str, rows: u32) -> Result<Request, S
 
     validate_preview_body(entity, body)?;
 
-    let mut request = Request::post(
+    Ok(preview_post(
         format!(
             "{PREVIEW_URI}?rowNumber={rows}&ddicEntityName={}",
             entity.replace('/', "%2F")
         ),
-        body.as_bytes().to_vec(),
-    );
+        body,
+    ))
+}
+
+/// A data preview POST: the body as plain text, any `application/*` reply.
+fn preview_post(uri: String, body: &str) -> Request {
+    let mut request = Request::post(uri, body.as_bytes().to_vec());
 
     request
         .headers
@@ -559,7 +671,7 @@ pub fn preview_request(entity: &str, body: &str, rows: u32) -> Result<Request, S
         .headers
         .insert("Content-Type".to_owned(), "text/plain".to_owned());
 
-    Ok(request)
+    request
 }
 
 /// Splits a condition into lines of at most 72 characters for the `RFC_READ_TABLE` fallback;
@@ -675,7 +787,7 @@ impl TableData {
         (text, 0)
     }
 
-    fn column(&self, name: &str) -> Option<usize> {
+    pub(crate) fn column(&self, name: &str) -> Option<usize> {
         self.columns.iter().position(|column| column == name)
     }
 }
@@ -702,15 +814,21 @@ impl ReadTableError {
 pub struct ReadTable;
 
 impl ReadTable {
-    /// Resolves the table through DD02L (and DD26S for a view), applies the deny list to every
-    /// base table, then reads. At most three previews: a connection never nears the RFC limit of
-    /// 36 per connection.
+    /// Classifies the table through the dictionary (DD02L, DDLDEPENDENCY and DD26S for a view),
+    /// applies the deny list to it and to every base table, then reads. A refusal is
+    /// [`PreviewError::Refused`] (a STOP). A connection never nears the RFC limit of 36 requests:
+    /// the check is bounded by `dictionary::MAX_LOOKUPS`.
     pub fn run(
         transport: &mut dyn SadtTransport,
         query: &Query,
         policies: &Policies,
-    ) -> Result<TableData, ReadTableError> {
-        resolve(transport, query.table(), policies)?;
+    ) -> Result<TableData, PreviewError> {
+        check_entities(
+            &mut TransportDictionary::new(transport),
+            &[query.table().to_owned()],
+            policies,
+        )
+        .map_err(|error| PreviewError::from_check(error, "nothing was read"))?;
 
         let mut data = fetch(transport, query.table(), query.body(), query.rows())?;
 
@@ -721,106 +839,13 @@ impl ReadTable {
     }
 }
 
-fn resolve(
-    transport: &mut dyn SadtTransport,
-    table: &str,
-    policies: &Policies,
-) -> Result<(), ReadTableError> {
-    let body = format!(
-        "SELECT TABNAME, TABCLASS, VIEWCLASS FROM DD02L WHERE TABNAME = '{table}' AND AS4LOCAL = 'A'"
-    );
-    let class = lookup(transport, "DD02L", &body, CLASS_ROWS, table)?;
-    let cell = |data: &TableData, name: &str, row: usize| {
-        data.column(name)
-            .map(|index| data.rows[row][index].trim().to_owned())
-    };
-
-    match class.rows.len() {
-        0 => {
-            return Err(rejected(format!(
-                "{table} is not in the ABAP dictionary as an active table or view"
-            )));
-        }
-        1 => {}
-        _ => {
-            return Err(rejected(format!(
-                "{table} resolves to more than one dictionary entry"
-            )));
-        }
-    }
-
-    if cell(&class, "TABNAME", 0).as_deref() != Some(table) {
-        return Err(rejected(format!(
-            "the dictionary lookup did not return {table}"
-        )));
-    }
-
-    match cell(&class, "TABCLASS", 0).as_deref() {
-        Some("TRANSP" | "POOL" | "CLUSTER") => Ok(()),
-        Some("VIEW") => {
-            if cell(&class, "VIEWCLASS", 0).as_deref() != Some("D") {
-                return Err(rejected(format!(
-                    "{table} is not a database view (CDS/DDLS entities and other view types are not supported)"
-                )));
-            }
-
-            check_view(transport, table, policies)
-        }
-        other => Err(rejected(format!(
-            "{table} is neither a table nor a database view (table category {})",
-            other.unwrap_or("missing")
-        ))),
-    }
-}
-
-fn check_view(
-    transport: &mut dyn SadtTransport,
-    view: &str,
-    policies: &Policies,
-) -> Result<(), ReadTableError> {
-    let body = format!(
-        "SELECT VIEWNAME, TABNAME, TABPOS FROM DD26S WHERE VIEWNAME = '{view}' AND AS4LOCAL = 'A'"
-    );
-    let bases = lookup(transport, "DD26S", &body, BASE_ROWS, view)?;
-    let (Some(name), Some(base)) = (bases.column("VIEWNAME"), bases.column("TABNAME")) else {
-        return Err(rejected(format!(
-            "the base tables of {view} are unreadable"
-        )));
-    };
-
-    if bases.rows.is_empty() || bases.rows.len() >= BASE_ROWS as usize {
-        return Err(rejected(format!(
-            "the base tables of {view} are missing or too many to check"
-        )));
-    }
-
-    for row in &bases.rows {
-        let table = row[base].trim();
-
-        if row[name].trim() != view || table.is_empty() {
-            return Err(rejected(format!(
-                "the base tables of {view} are unreadable"
-            )));
-        }
-
-        if policies.is_read_table_denied(table) {
-            return Err(rejected(format!(
-                "view {view} reads table {} (read_table_denied)",
-                table.to_ascii_uppercase()
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-fn rejected(message: String) -> ReadTableError {
+pub(crate) fn rejected(message: String) -> ReadTableError {
     ReadTableError::Rejected(format!("{message}; nothing was read"))
 }
 
 /// A dictionary lookup: only a lost connection or a refused logon stay failures that routing
 /// understands; anything else the lookup cannot answer is a rejection (fail closed).
-fn lookup(
+pub(crate) fn lookup(
     transport: &mut dyn SadtTransport,
     entity: &str,
     body: &str,
@@ -847,6 +872,30 @@ pub(crate) fn fetch(
 ) -> Result<TableData, ReadTableError> {
     let request = preview_request(entity, body, rows)
         .map_err(|message| ReadTableError::failed(Failure::Validation, message))?;
+
+    send_preview(transport, Preview(request))
+}
+
+/// A data preview request that was built after its checks. The field is private, so only the
+/// constructors below can make one and a raw `Request` cannot go through [`send_preview`].
+pub(super) struct Preview(Request);
+
+impl Preview {
+    /// The freestyle POST of a verified statement: the only way to make a freestyle preview.
+    pub(super) fn freestyle(query: &VerifiedQuery) -> Self {
+        Self(preview_post(
+            format!("{FREESTYLE_URI}?rowNumber={}", query.rows()),
+            query.body(),
+        ))
+    }
+}
+
+/// Sends a checked data preview request and reads the reply as a table. `fetch` (DDIC preview)
+/// and `sql::run` (freestyle preview) share it.
+pub(super) fn send_preview(
+    transport: &mut dyn SadtTransport,
+    Preview(request): Preview,
+) -> Result<TableData, ReadTableError> {
     let response = transport
         .request(request)
         .map_err(|error| ReadTableError::from_transport(&error))?;

@@ -75,7 +75,16 @@ fn a_live_source_that_moved_on_since_the_simulation_stops_the_deploy_before_the_
     );
 
     assert!(result.is_error);
-    assert!(result.text.contains("live changed"), "{}", result.text);
+    // The MCP client sent no `--base` flag and never sees the live hash: the text is the one of
+    // the edits path.
+    assert!(
+        result
+            .text
+            .contains("STOP: live changed since your read: base does not match"),
+        "{}",
+        result.text
+    );
+    assert!(!result.text.contains("--base"), "{}", result.text);
     assert!(!any(&requests, "_action=LOCK"));
     assert!(!any(&requests, "PUT "));
 }

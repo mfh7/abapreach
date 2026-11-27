@@ -1,7 +1,12 @@
 use crate::extension::{ExtensionKind, ExtensionOptions, Registry, Verbs};
 use crate::operation::activate::ActivateTarget;
 use crate::operation::aunit::AunitKind;
+use crate::operation::dumps::{DEFAULT_ROWS as DUMPS_ROWS, ROWS as DUMPS_RANGE};
 use crate::operation::payload::Kind;
+use crate::operation::search::{DEFAULT_MAX, MAX_RESULTS};
+use crate::operation::where_used::{
+    DEFAULT_MAX as WHERE_USED_MAX, MAX_RESULTS as WHERE_USED_RESULTS,
+};
 use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -141,6 +146,98 @@ pub enum Command {
         #[arg(long)]
         conn: String,
     },
+    /// Runs one read-only SELECT with joins through the ADT freestyle data preview.
+    Sql {
+        /// The statement, as one argument; or use `--file`.
+        #[arg(required_unless_present = "file", conflicts_with = "file")]
+        query: Option<String>,
+
+        /// A file that holds the statement.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// 1 to 5000; the data preview of the 740 release stops there.
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=5000))]
+        rows: u32,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Finds objects by name pattern through the ADT object search
+    Search {
+        /// The name or a pattern: `*` is the only wildcard, and a pattern without one names exactly
+        /// one object
+        pattern: String,
+
+        /// One object type: PROG, FUNC, FUGR, CLAS, INTF, DTEL, DOMA, TABL (transparent tables),
+        /// TTYP, TRAN, DDLS or MSAG
+        #[arg(long = "type", value_name = "TYPE")]
+        object_type: Option<String>,
+
+        /// 1 to 1000 results
+        #[arg(long, default_value_t = DEFAULT_MAX, value_parser = clap::value_parser!(u32).range(i64::from(*MAX_RESULTS.start())..=i64::from(*MAX_RESULTS.end())))]
+        max: u32,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Lists the ST22 short dumps from table SNAP, newest first, one line each
+    Dumps {
+        /// List the dumps from this day on, written YYYYMMDD; without it the last 7 days and one more day for the time zone
+        #[arg(long)]
+        date: Option<String>,
+
+        /// List the dumps of this user; without it the dumps of the logon user
+        #[arg(long)]
+        user: Option<String>,
+
+        /// List the dumps of every user, as ST22 does; not with --user
+        #[arg(long)]
+        all: bool,
+
+        /// 1 to 1000
+        #[arg(long, default_value_t = DUMPS_ROWS, value_parser = clap::value_parser!(u32).range(i64::from(*DUMPS_RANGE.start())..=i64::from(*DUMPS_RANGE.end())))]
+        rows: u32,
+
+        /// Release 7.50 refuses SNAP in the data preview; there `rfc` reads it through RFC_READ_TABLE
+        #[arg(long)]
+        backend: Option<Backend>,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Shows one short dump: error, program, include, line, user, client, short text and source
+    Dump {
+        /// The id `dumps` prints: DATUM/UZEIT/AHOST/UNAME/MODNO
+        id: String,
+
+        /// Show the dump of another user
+        #[arg(long)]
+        all: bool,
+
+        /// Release 7.50 refuses SNAP in the data preview; there `rfc` reads it through RFC_READ_TABLE
+        #[arg(long)]
+        backend: Option<Backend>,
+
+        #[arg(long)]
+        conn: String,
+    },
+    /// Lists the objects that use one object, through ADT or the standard cross-reference tables
+    WhereUsed {
+        /// PROG, FUNC, FUGR, CLAS, INTF, DTEL, DOMA, TABL or TTYP
+        #[arg(value_name = "TYPE")]
+        object_type: String,
+
+        /// The object name
+        name: String,
+
+        /// 1 to 5000 objects
+        #[arg(long, default_value_t = WHERE_USED_MAX, value_parser = clap::value_parser!(u32).range(i64::from(*WHERE_USED_RESULTS.start())..=i64::from(*WHERE_USED_RESULTS.end())))]
+        max: u32,
+
+        #[arg(long)]
+        conn: String,
+    },
     /// Deletes objects from a plan written by `--simulate`.
     Delete {
         #[arg(required = true, value_name = "TYPE:NAME")]
@@ -275,6 +372,15 @@ pub enum Command {
     /// Serves the MCP tools on stdio.
     Mcp,
     Doctor {
+        #[arg(long)]
+        conn: String,
+    },
+    /// Shows the system, the application server instance that answered and the round trip time
+    Ping {
+        /// `adt` reads /system/information over ADT HTTP, `rfc` calls RFC_SYSTEM_INFO
+        #[arg(long)]
+        backend: Option<Backend>,
+
         #[arg(long)]
         conn: String,
     },

@@ -656,6 +656,74 @@ fn secrets_hide_the_password_the_route_and_only_its_host_and_password_fragments(
     );
 }
 
+/// `test_insecure` with distinct ADT and RFC hosts and a route through `router`.
+fn routed(route: &str) -> Connection {
+    let mut connection = Connection::test_insecure();
+
+    connection.password = "password-x".to_owned();
+    connection.adt.as_mut().unwrap().host = "adt.example.com".to_owned();
+    rfc_mut(&mut connection).ashost = "rfc.example.com".to_owned();
+    rfc_mut(&mut connection).saprouter = Some(route.to_owned());
+    connection
+}
+
+#[test]
+fn a_route_fragment_equal_to_the_adt_host_is_not_a_secret() {
+    let route = "/H/adt.example.com/S/3299/H/gateway.example.com/S/3299";
+    let connection = routed(route);
+
+    assert_eq!(
+        connection.secrets(),
+        [route, "gateway.example.com", "password-x"]
+    );
+}
+
+#[test]
+fn a_route_fragment_equal_to_the_ashost_is_not_a_secret() {
+    let route = "/H/rfc.example.com/S/3299/W/gateway.example.com";
+    let connection = routed(route);
+
+    assert_eq!(
+        connection.secrets(),
+        [route, "gateway.example.com", "password-x"]
+    );
+}
+
+#[test]
+fn the_host_match_of_a_route_fragment_ignores_ascii_case() {
+    let route = "/H/ADT.Example.COM/S/3299/H/RFC.EXAMPLE.com/S/3299";
+    let connection = routed(route);
+
+    assert_eq!(connection.secrets(), [route, "password-x"]);
+}
+
+#[test]
+fn the_full_route_stays_a_secret_when_every_fragment_is_a_server_host() {
+    let route = "/H/adt.example.com/S/3299";
+    let connection = routed(route);
+
+    assert_eq!(connection.secrets(), [route, "password-x"]);
+    assert!(connection.holds_secret(route));
+}
+
+#[test]
+fn a_text_that_quotes_the_adt_url_holds_no_secret_when_only_the_host_matches() {
+    let connection = routed("/H/adt.example.com/S/3299");
+    let error = "GET https://adt.example.com:443/sap/bc/adt/discovery failed: timed out";
+
+    assert!(!connection.holds_secret(error));
+    assert!(connection.holds_secret("/H/adt.example.com/S/3299"));
+    assert!(connection.holds_secret("password-x"));
+}
+
+#[test]
+fn a_router_host_that_is_no_server_host_is_still_guarded() {
+    let connection = routed("/H/adt.example.com/S/3299/H/gateway.example.com/S/3299");
+
+    assert!(connection.holds_secret("via gateway.example.com"));
+    assert!(!connection.holds_secret("to adt.example.com"));
+}
+
 /// The effective policies of `DEV_100` for a config with optional top-level and server policies.
 fn effective(top: &str, server: &str) -> Result<abapreach::policy::Policies, String> {
     let directory = tempfile::tempdir().unwrap();

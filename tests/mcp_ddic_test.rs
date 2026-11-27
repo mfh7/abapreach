@@ -26,6 +26,30 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// The tools that only read, by name: the hints are checked against this list, not against the
+/// list the server derives its own behavior from.
+const READ_ONLY_TOOLS: [&str; 8] = [
+    "abap_read_table",
+    "abap_inactive",
+    "abap_sql",
+    "abap_search",
+    "abap_where_used",
+    "abap_dumps",
+    "abap_dump",
+    "abap_ping",
+];
+/// The tools that write, by name. `abap_read_source` is neither: it can create a temporary class.
+const WRITE_TOOLS_LISTED: [&str; 8] = [
+    "abap_simulate",
+    "abap_deploy",
+    "abap_create_simulate",
+    "abap_create",
+    "abap_delete_simulate",
+    "abap_delete",
+    "abap_activate_simulate",
+    "abap_activate",
+];
+
 const TOKEN: &str = r#"{"mcp_write":"token"}"#;
 const CONFIRM: &str = r#"{"mcp_write":"confirm"}"#;
 const OFF: &str = r#"{"mcp_write":"off"}"#;
@@ -135,8 +159,12 @@ fn value(payload: &[(String, String)], key: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A live definition that holds a text far from the change: the text, and whether the runner
+/// reports the file as equal to it (`NO_CHANGES`).
+type LiveText = Rc<RefCell<Option<(String, bool)>>>;
+
 /// What the runner class answers to the payload it carries.
-fn answer(source: &str, secret: &Rc<RefCell<Option<String>>>) -> String {
+fn answer(source: &str, secret: &Rc<RefCell<Option<String>>>, live: &LiveText) -> String {
     let payload = payload_of(source);
     let nonce = value(&payload, "NONCE");
     let tran = value(&payload, "TYPE") == "TRAN";
@@ -164,18 +192,29 @@ fn answer(source: &str, secret: &Rc<RefCell<Option<String>>>) -> String {
         }
         "SIMULATE" => {
             let mut rows = rows_of(LIVE);
+            let held = live.borrow().clone();
 
             rows[2].push_str("  ");
+
+            if let Some((text, _)) = &held {
+                rows.push(format!("<!-- {text} -->"));
+            }
+
             rows.push(String::new());
 
-            let mut body = vec![fact("HASH", &file_hash(LIVE))];
+            let mut body = vec![fact("HASH", &file_hash(&rows.join("\n")))];
 
             body.extend(rows.iter().map(|text| row(text)));
             body.push(info(
                 "CONVERSION ZDTEL: action=ALT modeflag=F daction=ALT allowed=X rows=0",
             ));
 
-            run_output(&nonce, "SIMULATE", &body, "SIMULATED_OK")
+            let status = match held {
+                Some((_, true)) => "NO_CHANGES",
+                _ => "SIMULATED_OK",
+            };
+
+            run_output(&nonce, "SIMULATE", &body, status)
         }
         "DEPLOY" => {
             let body = vec![
@@ -301,6 +340,8 @@ struct Lab {
     sessions: Sessions,
     /// A text the fake class answers a create simulate with as a rejection.
     secret: Rc<RefCell<Option<String>>>,
+    /// A text the live definition of a simulate holds far from the change.
+    live: LiveText,
 }
 
 type Evolution = Box<dyn Fn(&Tick) -> World>;
@@ -342,8 +383,10 @@ fn lab(policies: &str, evolution: Evolution) -> Lab {
     let secret = Rc::new(RefCell::new(None));
     let sap = new_sap(true, &Rc::new(Cell::new(Duration::ZERO)), evolution);
     let reply = secret.clone();
+    let live = LiveText::default();
+    let held = live.clone();
 
-    sap.borrow_mut().reply_with = Some(Box::new(move |source| answer(source, &reply)));
+    sap.borrow_mut().reply_with = Some(Box::new(move |source| answer(source, &reply, &held)));
 
     Lab {
         rig: rig(policies),
@@ -355,6 +398,7 @@ fn lab(policies: &str, evolution: Evolution) -> Lab {
             package: "$TMP",
         },
         secret,
+        live,
     }
 }
 
@@ -493,12 +537,12 @@ fn the_schemas_name_the_new_types_the_arguments_and_the_footprint() {
 
         assert_eq!(
             tool["annotations"]["readOnlyHint"],
-            name == "abap_read_table" || name == "abap_inactive",
+            READ_ONLY_TOOLS.contains(&name),
             "{name}"
         );
         assert_eq!(
             tool["annotations"]["destructiveHint"],
-            name != "abap_read_source" && name != "abap_read_table" && name != "abap_inactive",
+            WRITE_TOOLS_LISTED.contains(&name),
             "{name}"
         );
     }
@@ -1051,6 +1095,100 @@ fn a_ddic_delete_is_always_asked_even_under_token() {
     assert_eq!(lab.classes(), 0);
 }
 
+// ---- the secret guard of a DDIC deploy -------------------------------------------------------------
+
+#[test]
+fn a_simulate_of_a_live_definition_that_holds_a_secret_is_refused_with_nothing_else() {
+    for text in [PASSWORD.to_owned(), format!("x{PASSWORD}y")] {
+        let mut lab = lab(TOKEN, present());
+
+        *lab.live.borrow_mut() = Some((text, false));
+
+        let result = lab.plain("abap_simulate", dtel(&changed()));
+
+        assert!(result.is_error, "{}", result.text);
+        assert_eq!(
+            result.text,
+            "REJECTED: payload contains a configured secret"
+        );
+        assert!(result.structured.get("plan_token").is_none());
+        assert!(result.structured.get("hash").is_none());
+        assert!(!result.text.contains("live hash"), "{}", result.text);
+        assert!(!result.text.contains("---"), "no diff: {}", result.text);
+        // Run 1 ran and its class is gone; no second run.
+        assert_eq!((lab.posts(), lab.classes()), (1, 0));
+    }
+}
+
+#[test]
+fn a_secret_in_the_live_definition_beats_no_changes() {
+    let mut lab = lab(TOKEN, present());
+
+    *lab.live.borrow_mut() = Some((PASSWORD.to_owned(), true));
+
+    let result = lab.plain("abap_simulate", dtel(LIVE));
+
+    assert!(result.is_error, "{}", result.text);
+    assert_eq!(
+        result.text,
+        "REJECTED: payload contains a configured secret"
+    );
+    assert!(!result.text.contains("no changes"), "{}", result.text);
+}
+
+#[test]
+fn an_execute_is_refused_before_a_second_run_when_the_live_definition_holds_a_secret() {
+    let mut lab = lab(TOKEN, present());
+    let file = changed();
+    let token = token_of(&lab.plain("abap_simulate", dtel(&file)));
+
+    assert_eq!(lab.posts(), 1);
+
+    // The live definition gained a secret after the simulation.
+    *lab.live.borrow_mut() = Some((PASSWORD.to_owned(), false));
+
+    let result = lab.plain("abap_deploy", with_token(dtel(&file), &token));
+
+    assert!(result.is_error, "{}", result.text);
+    assert_eq!(
+        result.text,
+        "REJECTED: payload contains a configured secret"
+    );
+    assert_eq!(
+        (lab.posts(), lab.classes()),
+        (2, 0),
+        "run 1 only, no write run"
+    );
+}
+
+#[test]
+fn a_secret_in_the_live_definition_does_not_stop_the_cli_deploy_simulate() {
+    use abapreach::domain::Origin;
+    use abapreach::operation::payload::Kind;
+    use abapreach::operation::simulate_ddic::{DdicSimulate, Simulation, simulate};
+
+    let mut lab = lab(TOKEN, present());
+    let connection = lab.rig.config().resolve("DEV_100", &lab.rig.env).unwrap();
+    let file = changed();
+
+    *lab.live.borrow_mut() = Some((PASSWORD.to_owned(), false));
+
+    let request = DdicSimulate {
+        kind: Kind::Dtel,
+        name: "ZDTEL",
+        xml: &file,
+        tr: None,
+        simulation: Simulation::Deploy {
+            base: None,
+            origin: Origin::Cli,
+        },
+    };
+    let exit = simulate(&connection, None, &request, &mut lab.sessions);
+
+    assert_eq!(exit.code, 0, "{}{}", exit.stdout, exit.stderr);
+    assert!(exit.stdout.contains("live hash "), "{}", exit.stdout);
+}
+
 // ---- scrub and leftover -------------------------------------------------------------------------------------
 
 #[test]
@@ -1270,6 +1408,12 @@ fn the_tools_name_no_new_write_tool() {
             "abap_read_source",
             "abap_read_table",
             "abap_inactive",
+            "abap_sql",
+            "abap_search",
+            "abap_where_used",
+            "abap_dumps",
+            "abap_dump",
+            "abap_ping",
             "abap_simulate",
             "abap_deploy",
             "abap_create_simulate",

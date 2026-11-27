@@ -454,7 +454,7 @@ fn write_tools_are_listed_with_the_connections_that_may_write() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
 
-    assert_eq!(names.len(), 11);
+    assert_eq!(names.len(), 17);
 
     for tool in &tools {
         let description = tool["description"].as_str().unwrap();
@@ -477,7 +477,7 @@ fn an_all_off_configuration_lists_reads_only_and_a_write_tool_is_unknown() {
     let writable = rig.config().mcp_writable();
 
     assert!(writable.is_empty());
-    assert_eq!(tool_list_for(&writable).len(), 3);
+    assert_eq!(tool_list_for(&writable).len(), 9);
 
     let mut server = Server::new(
         McpTools::new(
