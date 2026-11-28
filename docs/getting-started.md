@@ -882,12 +882,19 @@ abapreach create TRAN ZEXAMPLE --prog ZEXAMPLE_REPORT --text 'Example transactio
 abapreach delete --simulate TRAN:ZEXAMPLE --plan delete.plan --conn A4H_001
 ```
 
-Every operation on these types, `read` included, creates and removes a temporary class in `$TMP`, so
-the system must allow repository changes and the user needs developer authorization for that class.
+Every operation on these types, including `read`, uses a runner. This is a temporary helper class
+ABAPReach creates in SAP in `$TMP` to run one step, then removes. The system must allow repository
+changes and the user needs developer authorization for that class.
 `TRAN` has no deploy; use `create` and `delete`. The `DDIC` conversion rules, the footprint and the
 authorizations are in [Deploy safety: DDIC and TRAN](deploy-safety.md#ddic-and-tran). The path each
 type takes on the 7.50 and 7.40 systems is in
 [Behavior differences: Access path comparison](behavior-differences.md#access-path-comparison-0160-rc6).
+
+On SAP 7.40 with ABAPReach 0.18.1, concurrent commands for the same SAP user can report
+`runner create failed: protocol error: RfcInvoke: An exception has occurred that was not caught. (RFC code 3)`.
+The prefix [depends on the command](behavior-differences.md#sap-740-runner-creation). The requested
+operation never ran. Run DDIC, `TRAN`, `run PROG` and `run SNIPPET` operations for that SAP user one at
+a time, or rerun the rejected command.
 
 ## Run a class, a report or a snippet
 

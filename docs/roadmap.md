@@ -22,6 +22,8 @@ release (0.12.0, 0.13.0, ...); 1.0.0 follows when every feature below is release
 | 0.17.0 | `inactive`, `activate`, `aunit` (ABAP Unit) and `run` (class, report with ALV capture, code snippet), with MCP tools; defaults: `run: plan`, `mcp_run: off`, `mcp_run_snippet: off`; tested on the 7.50, 7.40 and S/4HANA 758 systems (released) |
 | 0.17.1 | Test and fault-build follow-ups of 0.17.0: a live cell for Ctrl-C twice during `run`, and a `FAULT: classrun POST sending` marker in the fault-injection build; the ordinary build is unchanged (released) |
 | 0.18.0 | MCP deploy by `edits` and `base`, with the whole-source hash on a partial read; `sql` (read-only SELECT with joins), `search`, `where-used`, `dumps` and `dump`, `ping` and the instance line in `doctor`; `read-table` checks views and refuses with exit 2 |
+| 0.18.1 | Inactive source check and one retry for certain write or activation failures of the temporary SAP helper class (runner); see the [7.40 limitation](behavior-differences.md#sap-740-runner-creation) (released) |
+| 0.18.2 | On SAP 7.40, treat an RFC code 3 exception during runner creation as a disturbance and retry once with a fresh class name (planned) |
 | later | The remaining features below, one milestone at a time |
 
 Platforms come before new features, so every feature after 0.12.0 is built and tested on

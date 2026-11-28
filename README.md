@@ -177,9 +177,10 @@ in ABAPReach; installing and licensing it is up to you. Pick a backend with `--b
 first, and a connection without `host` and `port` runs on RFC only. `FUNC`, `CLAS` and `INTF`
 use the same two paths; the result of each path is in
 [Getting started: Tested environment](docs/getting-started.md#tested-environment).
-The DDIC types and `TRAN` run as a temporary class in `$TMP`, over ADT HTTP on the 7.50 system and
-over RFC on both systems; the 7.40 system keeps no stateful ADT HTTP session. Nothing is installed on
-the SAP system, but the user needs developer authorization for that class. See
+The DDIC types and `TRAN` use a runner, a temporary helper class ABAPReach creates in SAP in `$TMP`
+to run one step, then removes. They work over ADT HTTP on the 7.50 system and over RFC on both systems;
+the 7.40 system keeps no stateful ADT HTTP session. Nothing is installed on the SAP system, but the
+user needs developer authorization for that class. See
 [Deploy safety: DDIC and TRAN](docs/deploy-safety.md#ddic-and-tran).
 
 ## Platforms
@@ -188,6 +189,7 @@ Release 0.18.0 targets macOS arm64, Windows x64, Linux x64 and Linux arm64. The 
 library lookup per OS, the release file checks, the Linux glibc baseline, the credential
 file permission rules and the test matrix are in
 [Getting started: Platforms and release binaries](docs/getting-started.md#platforms-and-release-binaries).
+A cell is one test scenario on one access path. A lane is one test process for one access path on one host.
 The 0.16.0 release matrix ran on `v0.16.0-rc.6`, the release binaries; its final runs have no FAIL
 cell, and every UNSUPPORTED cell has its reason listed. The interactive group (prompts and Ctrl-C),
 including the interrupt-while-locked cells, is from the 0.13.0 matrix and was not rerun. See
@@ -229,6 +231,15 @@ system, and one dump cell that was rerun without its list cell. 11 other cells t
 runs passed on serial reruns. The cells of the new features (group m8) ran on rc.3: 571 PASS, 76 UNSUPPORTED
 and 1 FAIL (the dump cell). See
 [Behavior differences: 0.18.0 release checks](docs/behavior-differences.md#0180-release-checks-0180-rc2-and-rc3).
+
+For 0.18.1, the full matrix ran on rc.1: 1046 `PASS`, 92 `UNSUPPORTED`, 3 `FAIL` on the 7.50 system;
+925 `PASS`, 196 `UNSUPPORTED`, 22 `FAIL` on the 758 system; and 623 `PASS`, 522 `UNSUPPORTED`,
+1 `FAIL` on the 7.40 system. The scoped checks on the 7.40 system recorded 570 `PASS`, 86 `UNSUPPORTED`,
+27 `FAIL`, 1 `PENDING` on rc.2 and 466 `PASS`, 212 `UNSUPPORTED`, 7 `FAIL` on rc.3. On the 7.40
+system, a [runner creation error](docs/behavior-differences.md#sap-740-runner-creation) stopped one
+transaction-code read on rc.2 and two of six RFC runs of two DDIC cells on rc.3. Every failed rc.3 cell
+passed when rerun one lane at a time (20 `PASS`, 0 `FAIL`, including setup and cleanup).
+See [Behavior differences: 0.18.1 release checks](docs/behavior-differences.md#0181-release-checks-rc1-to-rc3).
 
 An explicit `ABAPREACH_RFC_LIBRARY` that cannot be loaded stops the command with an
 error. ABAPReach does not fall back to another library in that case.

@@ -14,11 +14,12 @@ internal repository where that implementation was developed. See the
 
 ## [Unreleased]
 
-## [0.18.1] - 2026-11-27
+## [0.18.1] - 2026-11-28
 
 ### Fixed
-- Temporary runner class: the inactive source is checked before activation, and a write or
-  activation that a parallel session of the same user disturbed (`Implementation missing for
+- A runner is a temporary helper class ABAPReach creates in SAP to run one step, then removes.
+  ABAPReach checks its inactive source before activation. A write or activation that a parallel
+  session of the same user disturbed (`Implementation missing for
   method ...`, `Class ... does not exist`, where the class may be another one of the same user's
   activation, or `Method "..." is not declared or inherited in class "<runner class>"`, for the
   runner's own class only) is retried once under the same class name after a
@@ -36,6 +37,33 @@ internal repository where that implementation was developed. See the
   no longer reports `needs ADT classrun; not available`. That STOP now names its stage
   (`(activate)` or `(POST 404)`), and an activation error that only mentions
   `IF_OO_ADT_CLASSRUN` is no longer taken for a missing interface.
+
+### Known limitation
+
+The 0.18.1 live acceptance check for runners under parallel load was not fully met. On the 7.40
+system, four lanes ran at once on rc.3 as one SAP user with the test harness's runner lock off.
+Each lane was one test process for one access path on one host. The two DDIC scenarios,
+`m6-dtel-base-mismatch` and `m6-stru-text-mismatch`, each ran on three RFC lanes. A cell is one
+scenario on one access path. The ADT lane does not run these scenarios on this release.
+
+Two of the six RFC runs ended `REJECTED` during runner creation with
+`runner create failed: protocol error: RfcInvoke: An exception has occurred that was not caught. (RFC code 3)`.
+The SAP short-dump log (`ST22`) showed `UNCAUGHT_EXCEPTION` in the SAP standard class
+`CL_OO_CLIF_SOURCE`. Version 0.18.1 does not retry this error. The other four RFC runs passed, and both
+failed cells passed when rerun one lane at a time, with a clean sweep. The same error stopped a `TRAN`
+read in the rc.2 `m6-tran-lifecycle` cell on macos-arm64 `rfc-sdk` with parallel lanes.
+
+On SAP 7.40, several ABAPReach processes for the same SAP user can hit this error if they create
+runner classes at the same time. The checks saw `CREATE: REJECTED` and the error text on separate
+lines for DDIC create, `REJECTED: runner create failed: ...` for DDIC deploy, and
+`ERROR: runner create failed: ...` for the `TRAN` read. DDIC create and deploy also print a
+`W: runner create failed: ...` warning. The code uses `ERROR: runner create failed: ...` for
+`run PROG` and `run SNIPPET` too; the release checks did not see this error on those commands.
+
+The requested operation never ran. The failed creation can leave a temporary class behind;
+ABAPReach runs its usual runner cleanup. Run DDIC, `TRAN`, `run PROG` and `run SNIPPET` operations
+for one SAP user one at a time on 7.40, or rerun the rejected command. A retry is planned for 0.18.2.
+See the [0.18.1 release checks](docs/behavior-differences.md#0181-release-checks-rc1-to-rc3).
 
 ## [0.18.0] - 2026-11-25
 
