@@ -938,7 +938,7 @@ fn a_refused_post_is_rejected_and_a_missing_handler_is_a_stop() {
     assert_eq!(missing.exit.code, 2);
     assert_eq!(
         missing.exit.stderr,
-        "STOP: read DTEL needs ADT classrun; not available on DEV"
+        "STOP: read DTEL needs ADT classrun; not available on DEV (POST 404)"
     );
 
     for done in [refused, missing] {

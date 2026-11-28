@@ -4,9 +4,10 @@ The Rust CLI is a port of an earlier internal tool. This page lists known
 intentional behavior differences for operations available in the Rust CLI. It is not a feature-parity claim. See the [roadmap](roadmap.md)
 for current scope.
 
-Each entry names the live matrix scenario that exercises it, where one exists. An entry
-marked "not exercised" describes implemented behavior that the release-candidate
-matrix does not test.
+Each entry names the live matrix scenario that exercises it, where one exists. A cell is one test
+scenario on one access path. A lane is one test process for one access path on one host. A runner
+is a temporary helper class ABAPReach creates in SAP to run one step, then removes. An entry marked
+"not exercised" describes implemented behavior that the release-candidate matrix does not test.
 
 The reference for the comparisons on this page is an earlier, unpublished internal tool. The
 tool is not distributed with ABAPReach and no link to it is given. The table of differences
@@ -569,6 +570,81 @@ and 14 UNSUPPORTED. All of them ran on rc.3. The per-difference results are unde
   module of the reference tool is not installed (24), fault injection (18) and ADT HTTP cells for the RFC
   library loader (7).
 - The 758 system ran on macOS arm64 and Linux x64 only; Linux arm64 and Windows x64 had no run on it.
+
+### 0.18.1 release checks (rc.1 to rc.3)
+
+The access paths are ADT HTTP (`adt`), RFC through the SAP GUI library (`rfc-gui`), and RFC through
+the NW RFC SDK (`rfc-sdk`).
+
+| System | Release candidate and scope | Hosts and access paths | `PASS` | `UNSUPPORTED` | `FAIL` | `PENDING` |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: |
+| 7.50 | rc.1, full matrix | windows-x64 native: all three paths; windows-x64 emulated on arm64: `rfc-sdk` | 1046 | 92 | 3 | 0 |
+| 758 | rc.1, full matrix | linux-x64: all three paths; macos-arm64: `rfc-sdk` | 925 | 196 | 22 | 0 |
+| 7.40 | rc.1, full matrix | linux-arm64: `adt` and `rfc-sdk`; linux-x64: `adt`; macos-arm64: `rfc-gui` | 623 | 522 | 1 | 0 |
+| 7.40 | rc.2, scoped to `v0.18.1-rc.1..rc.2` | linux-arm64 and linux-x64: `rfc-sdk`; macos-arm64: `rfc-gui` and `rfc-sdk` | 570 | 86 | 27 | 1 |
+| 7.40 | rc.3, scoped to `v0.18.1-rc.2..rc.3` | linux-arm64: `adt` and `rfc-sdk`; macos-arm64: `rfc-gui` and `rfc-sdk` | 466 | 212 | 7 | 0 |
+
+The rc.3 scoped check ran four lanes at once for one SAP user with the test harness's runner lock
+turned off. Afterward, the failed cells were rerun one lane at a time.
+
+- On the 7.50 system, the test harness recorded three findings on rc.1. On emulated windows-x64
+  `rfc-sdk`, `m6-parallel-deploy` hit the harness's 300 s time limit (a test bound, not a product
+  deadline), and `sweep-end` found and deleted 1 leftover. On native windows-x64, `m6-tabl-deploy`
+  reported `write file failed on the Windows host (rc 125)`.
+- On the 758 system, all 22 rc.1 failures were on linux-x64. In 20 cells, SSH exited with code 255 and
+  no status, or the harness reported `the process closed its stdout`. `policy-doctor` printed no
+  warning for a narrowed `read_table_denied` list, and `sweep-end` had to delete leftovers. The run
+  notes attribute the failures to the harness transport, with three lanes sharing one SSH connection;
+  the cause was not verified for each cell. The macos-arm64 `rfc-sdk` lane ran the same cells and
+  recorded 241 `PASS`, 0 `FAIL`.
+- On the 7.40 system, the sole rc.1 failure was `Class ... does not exist` during runner activation
+  with parallel lanes. rc.2 added one retry when activation reports that another class does not exist.
+- On rc.2, activation failed with `Method "ACTION_ALLOWED" is not declared or inherited` for the
+  runner's own class. rc.3 added a retry for that case. A `TRAN` read in `m6-tran-lifecycle` on
+  macos-arm64 `rfc-sdk` hit the runner creation error below; the harness then reported a missing
+  `.read` output file. The other failures were harness findings: a lane name collision, test data for
+  `m8-dump-show`, and an early lane stop.
+- On rc.3, the test harness selected `m8-dump-show` without `m8-dumps-list`, which supplies the dump
+  ID. That accounts for three failures. Two `object-cleanup` cells found one orphan interface pool
+  per `rfc-sdk` lane. Both pools were removed after the run. They likely came from tests that
+  deliberately interrupt interface operations, though the run did not establish which cells left
+  them. The other two failures were rejections during runner creation.
+
+In the first serial rerun, the linux-arm64 and macos-arm64 `rfc-sdk` lanes reran the two runner cells,
+`m8-dumps-list` with `m8-dump-show`, and `object-cleanup`: 14 `PASS`, 0 `FAIL`, with a clean sweep.
+The second rerun paired `m8-dumps-list` and `m8-dump-show` on macos-arm64 `rfc-gui`: 6 `PASS`,
+0 `FAIL`, with a clean sweep. Together, the reruns covered every failed rc.3 cell and recorded
+20 `PASS`, 0 `FAIL`.
+
+#### SAP 7.40 runner creation
+
+The 0.18.1 live acceptance check for runners under parallel load was not fully met. On the 7.40
+system, four rc.3 lanes ran as one SAP user with the runner lock off. Two of the six RFC runs of
+`m6-dtel-base-mismatch` and `m6-stru-text-mismatch` ended `REJECTED` during runner creation. Each
+scenario ran on three RFC lanes; the ADT lane does not run them on this release.
+
+Both failures reported `runner create failed: protocol error: RfcInvoke: An exception has occurred that was not caught. (RFC code 3)`.
+The SAP short-dump log (`ST22`) showed `UNCAUGHT_EXCEPTION` in the SAP standard class
+`CL_OO_CLIF_SOURCE`. Version 0.18.1 does not retry this error. The other four RFC runs passed, and both
+failed cells passed in the serial rerun with a clean sweep. The same error had already stopped a
+`TRAN` read in the rc.2 `m6-tran-lifecycle` cell on macos-arm64 `rfc-sdk` with parallel lanes.
+
+On SAP 7.40, the error can occur when several ABAPReach processes for the same SAP user create
+runner classes at the same time. The prefix depends on the command:
+
+- DDIC create (observed on rc.3): `CREATE: REJECTED` and `runner create failed: ...` on separate
+  lines (`CREATE: REJECTED | runner create failed: ...` in the test record), followed by a
+  `W: runner create failed: ...` warning.
+- DDIC deploy (observed on rc.3): `REJECTED: runner create failed: ...`, followed by a
+  `W: runner create failed: ...` warning.
+- `TRAN` read (observed on rc.2): `ERROR: runner create failed: ...`.
+- `run PROG` and `run SNIPPET`: the code prints `ERROR: runner create failed: ...` for this rejection;
+  the release checks did not observe it on those commands.
+
+The requested DDIC write, `TRAN` operation or program run never ran. The failed creation can leave a
+temporary class behind; ABAPReach runs its usual runner cleanup. On 7.40, run DDIC, `TRAN`,
+`run PROG` and `run SNIPPET` operations for one SAP user one at a time, or rerun the rejected command.
+A retry is planned for [0.18.2](roadmap.md#milestones).
 
 ## `create PROG` operation (0.15.0)
 

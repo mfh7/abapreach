@@ -455,6 +455,7 @@ impl RunnerRunOp<'_> {
                 .then(|| Duration::from_secs(u64::from(self.timeout))),
             wait_text: Some(RUNNER_WAIT_TEXT),
             snippet: snippet_at,
+            pause: None,
         };
         let mode = match self.args.kind {
             RunKind::Prog => RunMode::RunProg,

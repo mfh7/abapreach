@@ -32,6 +32,9 @@ pub struct World {
     pub broken: bool,
 }
 
+/// A discovery document that lists collections but not classrun.
+const DISCOVERY_WITHOUT_CLASSRUN: &str = r#"<app:service xmlns:app="x"><app:workspace><app:collection href="/sap/bc/adt/oo/classes"/></app:workspace></app:service>"#;
+
 /// What a classrun POST answers.
 #[derive(Clone, Debug)]
 pub enum PostReply {
@@ -156,7 +159,9 @@ impl Sap {
 
         Ok(match (method, path) {
             ("GET", LOGOFF) => Response::text(200, ""),
-            ("GET", "/sap/bc/adt/discovery") => self.reply(Response::text(200, "<intf/>")),
+            ("GET", "/sap/bc/adt/discovery") => {
+                self.reply(Response::text(200, DISCOVERY_WITHOUT_CLASSRUN))
+            }
             ("POST", "/sap/bc/adt/datapreview/ddic") => {
                 let body = String::from_utf8_lossy(&request.body).into_owned();
 
