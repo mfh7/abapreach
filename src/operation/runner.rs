@@ -1183,11 +1183,12 @@ impl Cycle<'_> {
     }
 
     /// Whether a SAP text says that a parallel session disturbed the class: a method without
-    /// its implementation, or a class not known to the work process. `any_class` accepts a
-    /// class of any name: a standard SAP activation work area that a parallel activation of
-    /// the same user disturbs reports its own class, not the runner's. Only the failure of the
-    /// activation call itself passes it; the compile messages of the activation result do not,
-    /// because a class missing there is a defect of the template.
+    /// its implementation, one of the runner's own methods that the class does not declare, or
+    /// a class not known to the work process. Only the missing-class rule takes `any_class`: a
+    /// standard SAP activation work area that a parallel activation of the same user disturbs
+    /// reports its own class, not the runner's. Only the failure of the activation call itself
+    /// passes `any_class`; the compile messages of the activation result do not, because a
+    /// class missing there is a defect of the template.
     fn is_disturbed(&self, any_class: bool, text: &str) -> bool {
         let text = text.to_ascii_lowercase();
 
@@ -1196,6 +1197,20 @@ impl Cycle<'_> {
         }
 
         let own = self.name().to_ascii_lowercase();
+
+        // FED 7.40 reports a method the disturbed class lost as `Method "X" is not declared or
+        // inherited in class "NAME"`; only the runner's own class counts here.
+        let marker = " is not declared or inherited in class \"";
+        let own_method_missing = text.match_indices(marker).any(|(at, word)| {
+            standalone(&text[..at], "method ")
+                && text[at + word.len()..]
+                    .split_once('"')
+                    .is_some_and(|(name, _)| name == own)
+        });
+
+        if own_method_missing {
+            return true;
+        }
 
         text.match_indices("class ")
             .filter(|(at, _)| {
@@ -1673,6 +1688,17 @@ fn pause_millis(draw: u16) -> u64 {
 
 fn ok(response: &Response) -> bool {
     (200..300).contains(&response.status)
+}
+
+/// Whether a text holds `word`, trailing space included, as its own token: `method ` does not
+/// match inside `submethod `.
+fn standalone(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(at, _)| {
+        !text[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|before| before.is_ascii_alphanumeric() || before == '_')
+    })
 }
 
 /// Whether a lower-cased token is the name of a class: letters, digits, `_`, namespace `/` and the

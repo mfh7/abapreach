@@ -53,6 +53,15 @@ const CLASS_MISSING_KERNEL: &str =
     "RfcInvoke: Internal error: Class <N> does not exist\nLINE 10026\nCOUNTER 7 (RFC code 3)";
 const CLASS_MISSING_CODE_4: &str = "RfcInvoke: Class <N> does not exist (RFC code 4)";
 const MESSAGES_FOREIGN_CLASS_MISSING: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="9"><shortText><txt>Class ZOTHER does not exist</txt></shortText></msg></chkl:messages>"#;
+/// The FED 7.40 failure of the live matrix: the activation says the class lost one of the
+/// runner's own methods after a parallel activation disturbed it.
+const MESSAGES_OWN_METHOD_NOT_DECLARED: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="2205"><shortText><txt>Method "." is not declared or inherited in class "<N>".</txt></shortText></msg></chkl:messages>"#;
+/// The same sentence for a foreign class: no disturbance of this run.
+const MESSAGES_FOREIGN_METHOD_NOT_DECLARED: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="2205"><shortText><txt>Method "ACTION_ALLOWED" is not declared or inherited in class "ZOTHER".</txt></shortText></msg></chkl:messages>"#;
+/// A longer token that ends in `method`: not the Method sentence.
+const MESSAGES_SUBMETHOD_NOT_DECLARED: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="2205"><shortText><txt>Submethod "ACTION_ALLOWED" is not declared or inherited in class "<N>".</txt></shortText></msg></chkl:messages>"#;
+const METHOD_NOT_DECLARED: &str = "RfcInvoke: Internal error: Method \"ACTION_ALLOWED\" is not declared or inherited in class \"<N>\" (RFC code 3)";
+const METHOD_NOT_DECLARED_FOREIGN: &str = "RfcInvoke: Internal error: Method \"ACTION_ALLOWED\" is not declared or inherited in class \"ZOTHER\" (RFC code 3)";
 /// The FED 7.40 failure of the live matrix: the class of the standard activation work area, or a
 /// parallel runner's class, not the cell's own.
 const CLASS_MISSING_FOREIGN: &str = "protocol error: RfcInvoke: Internal error: Class YTEST_ABAPREACH_RUN6F_G3LX9PRM does not exist (RFC code 3)";
@@ -1588,6 +1597,141 @@ fn a_foreign_class_missing_in_an_activation_message_is_a_template_defect_and_not
         "{:?}",
         run.notes
     );
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn an_own_method_that_is_not_declared_in_an_activation_message_is_retried_on_the_same_session() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(true);
+
+    fault(
+        &sap,
+        Step::Activate,
+        1,
+        Fault::Status(200, MESSAGES_OWN_METHOD_NOT_DECLARED),
+    );
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+    assert_eq!(sap.borrow().on_session(1, Step::Activate), 2);
+    assert_eq!(sap.borrow().on_session(2, Step::Activate), 0);
+    assert_eq!(sap.borrow().on_session(1, Step::GetSource), 1);
+    assert_eq!(pauses(), 1);
+    assert_eq!(
+        run.notes
+            .iter()
+            .filter(|note| note.starts_with("W: runner activate retried once"))
+            .count(),
+        1,
+        "{:?}",
+        run.notes
+    );
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn a_foreign_class_in_the_not_declared_activation_message_is_a_template_defect_and_not_retried() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(true);
+
+    sap.borrow_mut().activation = Some(MESSAGES_FOREIGN_METHOD_NOT_DECLARED);
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(
+        rejected(&run).starts_with("runner activate failed: "),
+        "{:?}",
+        run.end
+    );
+    assert_eq!(sap.borrow().count(Step::Activate), 1);
+    assert_eq!(pauses(), 0);
+    assert!(
+        run.notes
+            .iter()
+            .any(|note| note.contains("please report this as a bug")),
+        "{:?}",
+        run.notes
+    );
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn a_method_keyword_inside_a_longer_token_is_not_the_disturbance_sentence() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(true);
+
+    fault(
+        &sap,
+        Step::Activate,
+        1,
+        Fault::Status(200, MESSAGES_SUBMETHOD_NOT_DECLARED),
+    );
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(
+        rejected(&run).starts_with("runner activate failed: "),
+        "{:?}",
+        run.end
+    );
+    assert_eq!(sap.borrow().count(Step::Activate), 1);
+    assert_eq!(pauses(), 0);
+    assert!(
+        run.notes
+            .iter()
+            .any(|note| note.contains("please report this as a bug")),
+        "{:?}",
+        run.notes
+    );
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn an_own_method_that_is_not_declared_in_an_rfc_activation_failure_is_retried_on_a_new_session() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(false);
+
+    fault(&sap, Step::Activate, 1, Fault::Rfc(METHOD_NOT_DECLARED));
+
+    let run = rfc_row(&sap, &CancelFlag::new());
+    let state = sap.borrow();
+
+    assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+    assert_eq!(state.on_session(1, Step::Activate), 1);
+    assert_eq!(state.on_session(2, Step::Activate), 1);
+    drop(state);
+    assert_eq!(pauses(), 1);
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn a_foreign_class_in_the_not_declared_rfc_activation_failure_is_not_retried() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(false);
+
+    fault(
+        &sap,
+        Step::Activate,
+        1,
+        Fault::Rfc(METHOD_NOT_DECLARED_FOREIGN),
+    );
+
+    let run = rfc_row(&sap, &CancelFlag::new());
+
+    assert!(
+        rejected(&run).starts_with("runner activate failed: "),
+        "{:?}",
+        run.end
+    );
+    assert_eq!(sap.borrow().count(Step::Activate), 1);
+    assert_eq!(pauses(), 0);
     assert_clean(&sap, &run);
 }
 
