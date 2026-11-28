@@ -19,7 +19,8 @@ internal repository where that implementation was developed. See the
 ### Fixed
 - Temporary runner class: the inactive source is checked before activation, and a write or
   activation that a parallel session of the same user disturbed (`Implementation missing for
-  method ...`, `Class ... does not exist`) is retried once under the same class name after a
+  method ...`, `Class ... does not exist`, where the class may be another one of the same user's
+  activation) is retried once under the same class name after a
   random pause of 1 to 3 seconds. The retry is shown as one `W: runner <stage> retried once:
   <reason>` line. The one retry is shared by all stages; a second failure ends the row with
   `REJECTED: runner activate failed after one retry: ...` or, for the inactive-source check,

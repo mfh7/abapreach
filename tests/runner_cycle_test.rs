@@ -52,6 +52,10 @@ const CLASS_MISSING: &str = "RfcInvoke: Internal error: Class <N> does not exist
 const CLASS_MISSING_KERNEL: &str =
     "RfcInvoke: Internal error: Class <N> does not exist\nLINE 10026\nCOUNTER 7 (RFC code 3)";
 const CLASS_MISSING_CODE_4: &str = "RfcInvoke: Class <N> does not exist (RFC code 4)";
+const MESSAGES_FOREIGN_CLASS_MISSING: &str = r#"<chkl:messages xmlns:chkl="x"><msg type="E" line="9"><shortText><txt>Class ZOTHER does not exist</txt></shortText></msg></chkl:messages>"#;
+/// The FED 7.40 failure of the live matrix: the class of the standard activation work area, or a
+/// parallel runner's class, not the cell's own.
+const CLASS_MISSING_FOREIGN: &str = "protocol error: RfcInvoke: Internal error: Class YTEST_ABAPREACH_RUN6F_G3LX9PRM does not exist (RFC code 3)";
 const MESSAGES_OK: &str = r#"<chkl:messages xmlns:chkl="x"></chkl:messages>"#;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1466,7 +1470,40 @@ fn a_class_that_does_not_exist_in_an_http_reply_is_retried() {
     );
     assert_clean(&sap, &run);
 
-    // Another class that does not exist is no disturbance of this runner.
+    // A foreign class that does not exist at activation is the standard activation work area
+    // of a parallel session: retried once with one `W:` line and ends active.
+    let sap = new_sap(true);
+
+    fault(
+        &sap,
+        Step::Activate,
+        1,
+        Fault::Status(
+            500,
+            "<exc:exception xmlns:exc=\"x\"><message>Class CL_WB_ACTIVATION_WORK_AREA====CP does not exist</message></exc:exception>",
+        ),
+    );
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+    assert_eq!(sap.borrow().count(Step::Activate), 2);
+    assert_eq!(
+        run.notes
+            .iter()
+            .filter(|note| note.starts_with("W: runner activate retried once: "))
+            .count(),
+        1,
+        "{:?}",
+        run.notes
+    );
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn a_foreign_class_that_does_not_exist_twice_at_activation_is_rejected_after_one_retry() {
+    PAUSES.with(|pauses| pauses.set(0));
+
     let sap = new_sap(true);
 
     fault(
@@ -1478,11 +1515,79 @@ fn a_class_that_does_not_exist_in_an_http_reply_is_retried() {
             "<exc:exception xmlns:exc=\"x\"><message>Class ZOTHER does not exist</message></exc:exception>",
         ),
     );
+    fault(
+        &sap,
+        Step::Activate,
+        2,
+        Fault::Status(
+            500,
+            "<exc:exception xmlns:exc=\"x\"><message>Class ZOTHER does not exist</message></exc:exception>",
+        ),
+    );
 
     let run = http_row(&sap, &CancelFlag::new());
 
-    assert!(rejected(&run).starts_with("runner activate failed: HTTP 500"));
+    assert!(
+        rejected(&run).starts_with("runner activate failed after one retry: "),
+        "{:?}",
+        run.end
+    );
+    assert_eq!(sap.borrow().count(Step::Activate), 2);
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn a_foreign_class_missing_in_an_rfc_activation_failure_is_retried_on_a_new_session() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(false);
+
+    fault(&sap, Step::Activate, 1, Fault::Rfc(CLASS_MISSING_FOREIGN));
+
+    let run = rfc_row(&sap, &CancelFlag::new());
+    let state = sap.borrow();
+
+    assert!(matches!(&run.end, RunnerEnd::Posted(_)), "{:?}", run.end);
+    assert_eq!(state.on_session(1, Step::Activate), 1);
+    assert_eq!(state.on_session(2, Step::Activate), 1);
+    assert_eq!(pauses(), 1);
+    assert_eq!(
+        run.notes
+            .iter()
+            .filter(|note| note.starts_with("W: runner activate retried once: "))
+            .count(),
+        1,
+        "{:?}",
+        run.notes
+    );
+    drop(state);
+    assert_clean(&sap, &run);
+}
+
+#[test]
+fn a_foreign_class_missing_in_an_activation_message_is_a_template_defect_and_not_retried() {
+    PAUSES.with(|pauses| pauses.set(0));
+
+    let sap = new_sap(true);
+
+    sap.borrow_mut().activation = Some(MESSAGES_FOREIGN_CLASS_MISSING);
+
+    let run = http_row(&sap, &CancelFlag::new());
+
+    assert!(
+        rejected(&run).starts_with("runner activate failed: "),
+        "{:?}",
+        run.end
+    );
     assert_eq!(sap.borrow().count(Step::Activate), 1);
+    assert_eq!(pauses(), 0);
+    assert!(
+        run.notes
+            .iter()
+            .any(|note| note.starts_with("W: ") && note.contains("report")),
+        "{:?}",
+        run.notes
+    );
     assert_clean(&sap, &run);
 }
 

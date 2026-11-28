@@ -1098,7 +1098,7 @@ impl Cycle<'_> {
         if !snippet_error
             && let Some(disturbed) = messages
                 .iter()
-                .find(|message| message.is_error() && self.is_disturbed(&message.text))
+                .find(|message| message.is_error() && self.is_disturbed(false, &message.text))
         {
             return Err(Fail::Retry(Retry {
                 stage: "activate",
@@ -1183,15 +1183,29 @@ impl Cycle<'_> {
     }
 
     /// Whether a SAP text says that a parallel session disturbed the class: a method without
-    /// its implementation, or the class itself not known to the work process.
-    fn is_disturbed(&self, text: &str) -> bool {
+    /// its implementation, or a class not known to the work process. `any_class` accepts a
+    /// class of any name: a standard SAP activation work area that a parallel activation of
+    /// the same user disturbs reports its own class, not the runner's. Only the failure of the
+    /// activation call itself passes it; the compile messages of the activation result do not,
+    /// because a class missing there is a defect of the template.
+    fn is_disturbed(&self, any_class: bool, text: &str) -> bool {
         let text = text.to_ascii_lowercase();
 
-        text.contains("implementation missing")
-            || text.contains(&format!(
-                "class {} does not exist",
-                self.name().to_ascii_lowercase()
-            ))
+        if text.contains("implementation missing") {
+            return true;
+        }
+
+        let own = self.name().to_ascii_lowercase();
+
+        text.match_indices("class ")
+            .filter(|(at, _)| {
+                !text[..*at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|before| before.is_ascii_alphanumeric() || before == '_')
+            })
+            .filter_map(|(at, word)| text[at + word.len()..].split_once(" does not exist"))
+            .any(|(name, _)| name == own || (any_class && is_class_name(name)))
     }
 
     /// A failed reply of a stage: retryable when it says the class was disturbed, else the
@@ -1200,7 +1214,7 @@ impl Cycle<'_> {
         let message = self.message_of(response);
         let refused = response.status == 403 || response.authorization_failure().is_some();
 
-        if !refused && self.is_disturbed(&message) {
+        if !refused && self.is_disturbed(stage == "activate", &message) {
             return Fail::Retry(Retry {
                 stage,
                 reason: message,
@@ -1215,7 +1229,9 @@ impl Cycle<'_> {
     fn error_failure(&self, stage: &'static str, error: &TransportError) -> Fail {
         let text = self.detail(error);
 
-        if Failure::from(error) != Failure::Authorization && self.is_disturbed(&text) {
+        if Failure::from(error) != Failure::Authorization
+            && self.is_disturbed(stage == "activate", &text)
+        {
             return Fail::Retry(Retry {
                 stage,
                 reason: self.one_line(&text),
@@ -1657,6 +1673,15 @@ fn pause_millis(draw: u16) -> u64 {
 
 fn ok(response: &Response) -> bool {
     (200..300).contains(&response.status)
+}
+
+/// Whether a lower-cased token is the name of a class: letters, digits, `_`, namespace `/` and the
+/// `=` padding of a class pool include such as `CL_X====CP`.
+fn is_class_name(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '='))
 }
 
 fn cut(text: &str) -> String {
